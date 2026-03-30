@@ -1,4 +1,4 @@
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument } from 'pdf-lib';
 import { PecoDocument } from '../types';
 
 export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoDocument): Promise<Uint8Array> {
@@ -11,7 +11,7 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
     if (!pageData.isDirty) continue;
 
     const page = pages[pageIndex];
-    const { width, height } = page.getSize();
+    const { height } = page.getSize();
 
     // Since we can't easily edit the existing content stream flawlessly while preserving images
     // without deep parsing in pure JS, a standard approach for this kind of "OCR fix" is to 

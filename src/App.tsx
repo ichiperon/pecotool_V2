@@ -1,18 +1,16 @@
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FileOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye } from "lucide-react";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
-import { loadPDF, loadPage } from "./utils/pdfLoader";
+import { loadPDF, loadPage, openPDF, generateThumbnail } from "./utils/pdfLoader";
 import { savePDF } from "./utils/pdfSaver";
-import * as pdfjsLib from 'pdfjs-dist';
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 
 function App() {
-  const { document, setDocument, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode } = usePecoStore();
-  const [isLoadingPage, setIsLoadingPage] = useState(false);
+  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isDirty, thumbnails } = usePecoStore();
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -37,17 +35,14 @@ function App() {
   }, [document, currentPageIndex]);
 
   const loadCurrentPage = async () => {
-    if (!document) return;
-    setIsLoadingPage(true);
+    if (!document || !originalBytes) return;
     try {
-      const loadingTask = pdfjsLib.getDocument({ data: originalBytes! });
-      const pdf = await loadingTask.promise;
+      // Use openPDF (which calls .slice() internally) to avoid transferring the shared buffer
+      const pdf = await openPDF(originalBytes);
       const pageData = await loadPage(pdf, currentPageIndex);
       updatePageData(currentPageIndex, pageData);
     } catch (err) {
       console.error("Failed to load page data:", err);
-    } finally {
-      setIsLoadingPage(false);
     }
   };
 
@@ -62,10 +57,16 @@ function App() {
         const content = await readFile(selected);
         const blob = new Blob([content], { type: 'application/pdf' });
         const file = new File([blob], selected.split(/[\\/]/).pop() || 'document.pdf');
-        
+
         const doc = await loadPDF(file);
         doc.filePath = selected;
         setDocument(doc, content);
+
+        // Generate thumbnails for all pages in background
+        const pdf = await openPDF(content);
+        for (let i = 0; i < doc.totalPages; i++) {
+          generateThumbnail(pdf, i).then(dataUrl => setThumbnail(i, dataUrl));
+        }
       }
     } catch (err) {
       console.error("Failed to open file:", err);
@@ -152,11 +153,11 @@ function App() {
       {/* Toolbar */}
       <header className="toolbar">
         <div className="toolbar-group">
-          <button onClick={handleOpen} title="開く"><FileOpen size={18} /><span>開く</span></button>
+          <button onClick={handleOpen} title="開く"><FolderOpen size={18} /><span>開く</span></button>
           <button 
             onClick={handleSave} 
             title="保存" 
-            disabled={!document || (!document.isDirty && !currentPage?.isDirty)}
+            disabled={!document || (!isDirty && !currentPage?.isDirty)}
           >
             <Save size={18} />
             <span>保存</span>
@@ -220,7 +221,12 @@ function App() {
                   className={`thumbnail-item ${i === currentPageIndex ? 'active' : ''}`}
                   onClick={() => setCurrentPage(i)}
                 >
-                  <div className="thumbnail-box">{i + 1}</div>
+                  <div className="thumbnail-box">
+                    {thumbnails.get(i)
+                      ? <img src={thumbnails.get(i)} alt={`Page ${i + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                      : <span style={{ color: '#d1d5db', fontSize: 24 }}>{i + 1}</span>
+                    }
+                  </div>
                   <div className="thumbnail-label">{i + 1} ページ {document.pages.get(i)?.isDirty && "●"}</div>
                 </div>
               ))
@@ -251,7 +257,7 @@ function App() {
         <div className="status-item">ズーム: {zoom}%</div>
         <div className="status-item">BB数: {currentPage?.textBlocks?.length || 0}</div>
         <div className="status-item flex-grow" />
-        {(document?.isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
+        {(isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
       </footer>
     </div>
   );

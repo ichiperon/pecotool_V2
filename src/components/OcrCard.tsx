@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useRef, useEffect } from "react";
 import { TextBlock } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 
@@ -9,9 +9,16 @@ interface OcrCardProps {
 
 export function OcrCard({ block, pageIndex }: OcrCardProps) {
   const { updatePageData, document, selectedIds, toggleSelection } = usePecoStore();
-  const [text, setText] = useState(block.text);
   const contentRef = useRef<HTMLDivElement>(null);
   const isSelected = selectedIds.has(block.id);
+
+  // contentEditable の内容は React children ではなく DOM API で同期する
+  // React は contentEditable の子要素を正しく更新できない既知の問題がある
+  useEffect(() => {
+    if (contentRef.current && contentRef.current.textContent !== block.text) {
+      contentRef.current.textContent = block.text;
+    }
+  }, [block.text]);
 
   const handleBlur = () => {
     const newText = contentRef.current?.innerText || "";
@@ -52,15 +59,14 @@ export function OcrCard({ block, pageIndex }: OcrCardProps) {
         <span className="mode-badge">{block.writingMode === 'vertical' ? '縦書き' : '横書き'}</span>
         {block.isDirty && <span className="dirty-dot">●</span>}
       </div>
-      <div 
+      <div
         ref={contentRef}
         className="ocr-card-content"
         contentEditable
         onBlur={handleBlur}
         suppressContentEditableWarning
-      >
-        {block.text}
-      </div>
+      />
+
     </div>
   );
 }

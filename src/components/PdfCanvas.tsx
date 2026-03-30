@@ -9,9 +9,9 @@ interface PdfCanvasProps {
 
 export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { document, zoom, showOcr, selectedIds, isDrawingMode, updatePageData, toggleDrawingMode, toggleSelection } = usePecoStore();
+  const { document, originalBytes, zoom, showOcr, selectedIds, isDrawingMode, updatePageData, toggleDrawingMode, toggleSelection } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
-  
+
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
@@ -24,11 +24,11 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
-    if (!document) return;
+    if (!originalBytes) return;
 
     const loadPage = async () => {
       try {
-        const loadingTask = pdfjsLib.getDocument({ data: (usePecoStore.getState().originalBytes!) });
+        const loadingTask = pdfjsLib.getDocument({ data: originalBytes.slice() });
         const pdf = await loadingTask.promise;
         const page = await pdf.getPage(pageIndex + 1);
         setPdfPage(page);
@@ -38,7 +38,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
     };
 
     loadPage();
-  }, [document, pageIndex]);
+  }, [originalBytes, pageIndex]);
 
   const getMousePos = (e: React.MouseEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -63,6 +63,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
       const renderContext = {
         canvasContext: context,
         viewport: viewport,
+        canvas: canvas,
       };
 
       await pdfPage.render(renderContext).promise;
@@ -72,8 +73,6 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
       if (showOcr && pageData && pageData.textBlocks) {
         pageData.textBlocks.forEach(block => {
           const isSelected = selectedIds.has(block.id);
-          const isDragged = draggedId === block.id;
-          
           context.strokeStyle = isSelected ? "rgba(0, 120, 255, 0.8)" : "rgba(255, 0, 0, 0.3)";
           context.lineWidth = isSelected ? 2 : 1;
           

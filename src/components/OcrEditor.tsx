@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -21,7 +21,6 @@ import { Search } from 'lucide-react';
 export function OcrEditor() {
   const { document, currentPageIndex, updatePageData } = usePecoStore();
   const currentPage = document?.pages.get(currentPageIndex);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchTerm, setSearchTerm] = useState("");
 
   const sensors = useSensors(

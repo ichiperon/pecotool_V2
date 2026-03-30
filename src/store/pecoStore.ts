@@ -4,6 +4,7 @@ import { PecoDocument, PageData, Action } from '../types';
 interface PecoState {
   document: PecoDocument | null;
   originalBytes: Uint8Array | null;
+  thumbnails: Map<number, string>;
   currentPageIndex: number;
   zoom: number;
   isDirty: boolean;
@@ -15,6 +16,7 @@ interface PecoState {
 
   // Actions
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
+  setThumbnail: (pageIndex: number, dataUrl: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
   toggleShowOcr: () => void;
@@ -31,6 +33,7 @@ interface PecoState {
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
   originalBytes: null,
+  thumbnails: new Map(),
   currentPageIndex: 0,
   zoom: 100,
   isDirty: false,
@@ -40,16 +43,23 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   undoStack: [],
   redoStack: [],
 
-  setDocument: (doc, bytes) => set({ 
-    document: doc, 
+  setDocument: (doc, bytes) => set({
+    document: doc,
     originalBytes: bytes || null,
-    currentPageIndex: 0, 
+    thumbnails: new Map(),
+    currentPageIndex: 0,
     isDirty: false,
     showOcr: true,
     isDrawingMode: false,
     selectedIds: new Set(),
     undoStack: [],
     redoStack: []
+  }),
+
+  setThumbnail: (pageIndex, dataUrl) => set((state) => {
+    const newThumbnails = new Map(state.thumbnails);
+    newThumbnails.set(pageIndex, dataUrl);
+    return { thumbnails: newThumbnails };
   }),
 
   setCurrentPage: (index) => set({ currentPageIndex: index, selectedIds: new Set() }),
@@ -63,9 +73,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   updatePageData: (pageIndex, data, undoable = true) => set((state) => {
     if (!state.document) return state;
     const oldPage = state.document.pages.get(pageIndex);
-    if (!oldPage) return state;
-
-    const newPage = { ...oldPage, ...data };
+    const newPage = oldPage ? { ...oldPage, ...data } : (data as PageData);
     const newPages = new Map(state.document.pages);
     newPages.set(pageIndex, newPage);
 
@@ -74,7 +82,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       isDirty: true
     };
 
-    if (undoable) {
+    if (undoable && oldPage) {
       const action: Action = {
         type: 'update_page',
         pageIndex,
