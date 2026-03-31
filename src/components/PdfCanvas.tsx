@@ -144,13 +144,16 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           let w = block.bbox.width * (zoom / 100);
           let h = block.bbox.height * (zoom / 100);
 
+          // 隣接BBを視覚的に分離するための表示用インセット（bboxデータは変更しない）
+          const inset = isSelected ? 0 : 1;
+
           // AcrobatのCtrl+Aっぽい視認性を確保するための背景ハイライト（薄い青）
           context.fillStyle = isSelected ? "rgba(0, 100, 255, 0.25)" : "rgba(0, 150, 255, 0.1)";
-          context.fillRect(x, y, w, h);
+          context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
           context.strokeStyle = isSelected ? "rgba(0, 100, 255, 0.9)" : "rgba(255, 0, 0, 0.4)";
           context.lineWidth = isSelected ? 2 : 1;
-          context.strokeRect(x, y, w, h);
+          context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
           if (isSelected) {
             // Draw resize handles for selected block
@@ -165,18 +168,31 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
           // Draw OCR text preview
           if (block.text) {
-            const fontSize = Math.max(10, h * 0.8);
-            context.font = `bold ${fontSize}px sans-serif`;
-            context.textBaseline = "top";
-            
-            // Outline for readability
-            context.lineWidth = 3;
-            context.strokeStyle = "rgba(255, 255, 255, 0.9)";
-            context.strokeText(block.text, x, y + 2, w);
-            
-            // Fill
-            context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
-            context.fillText(block.text, x, y + 2, w);
+            if (block.writingMode === 'vertical') {
+              // Rotate context clockwise 90° so text flows top-to-bottom within the BB.
+              // Anchor at top-right corner; after rotation +x=down, +y=left (into BB).
+              const fontSize = Math.max(10, w * 0.8);
+              context.save();
+              context.font = `bold ${fontSize}px sans-serif`;
+              context.textBaseline = "top";
+              context.translate(x + w, y + 2);
+              context.rotate(Math.PI / 2);
+              context.lineWidth = 3;
+              context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+              context.strokeText(block.text, 0, 0, h);
+              context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
+              context.fillText(block.text, 0, 0, h);
+              context.restore();
+            } else {
+              const fontSize = Math.max(10, h * 0.8);
+              context.font = `bold ${fontSize}px sans-serif`;
+              context.textBaseline = "top";
+              context.lineWidth = 3;
+              context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+              context.strokeText(block.text, x, y + 2, w);
+              context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
+              context.fillText(block.text, x, y + 2, w);
+            }
           }
         });
       }

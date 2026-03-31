@@ -1,4 +1,4 @@
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument } from '../types';
@@ -62,14 +62,26 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
 
     // Overlay ONLY the newly edited text as selectable transparent text
     for (const block of sortedBlocks) {
-      const y_bottom_left = viewport1x.height - block.bbox.y - block.bbox.height;
+      let drawOptions: any;
 
-      const drawOptions: any = {
-        x: block.bbox.x,
-        y: y_bottom_left,
-        size: block.bbox.height,
-        opacity: 0,
-      };
+      if (block.writingMode === 'vertical') {
+        // Vertical text: rotate -90° (clockwise) so text flows top-to-bottom.
+        // Anchor at top-left of BB; font size = column width.
+        drawOptions = {
+          x: block.bbox.x,
+          y: viewport1x.height - block.bbox.y,
+          size: Math.max(1, block.bbox.width),
+          rotate: degrees(-90),
+          opacity: 0,
+        };
+      } else {
+        drawOptions = {
+          x: block.bbox.x,
+          y: viewport1x.height - block.bbox.y - block.bbox.height * 0.85,
+          size: block.bbox.height,
+          opacity: 0,
+        };
+      }
 
       if (customFont) {
         drawOptions.font = customFont;
