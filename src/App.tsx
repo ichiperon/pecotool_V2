@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
 import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser } from "lucide-react";
@@ -6,6 +6,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, openPDF, generateThumbnail } from "./utils/pdfLoader";
 import { savePDF } from "./utils/pdfSaver";
+import { TextBlock } from "./types";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -23,6 +24,20 @@ function App() {
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0, scrollX: 0, scrollY: 0 });
+  const [notification, setNotification] = useState<{ message: string; isError: boolean } | null>(null);
+
+  // Ref bag so the stable one-time event listener can always call the latest function versions
+  const actionRefs = useRef<{ handleSave: () => void; handleSaveAs: () => void; handleDelete: () => void }>({
+    handleSave: () => {},
+    handleSaveAs: () => {},
+    handleDelete: () => {},
+  });
+
+  const showToast = useCallback((message: string, isError = false) => {
+    setNotification({ message, isError });
+    setTimeout(() => setNotification(null), 3000);
+  }, []);
+
 
   const openPreviewWindow = async () => {
     try {
@@ -296,6 +311,30 @@ function App() {
     };
   }, [undo, redo, zoom, setZoom]);
 
+  // Keyboard shortcuts that need stable registration (Ctrl+S, Delete, Ctrl+F)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      const isEditing =
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        (e.target as HTMLElement).isContentEditable;
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (e.shiftKey) actionRefs.current.handleSaveAs();
+        else actionRefs.current.handleSave();
+      } else if (e.key === 'Delete' && !isEditing) {
+        actionRefs.current.handleDelete();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (document && !document.pages.has(currentPageIndex)) {
       loadCurrentPage();
@@ -358,10 +397,10 @@ function App() {
       const savedBytes = await savePDF(originalBytes, document);
       await writeFile(document.filePath, savedBytes);
       resetDirty();
-      alert("保存しました。");
+      showToast("保存しました。");
     } catch (err) {
       console.error("Failed to save:", err);
-      alert("保存に失敗しました。");
+      showToast("保存に失敗しました。", true);
     }
   };
 
@@ -376,7 +415,7 @@ function App() {
         const savedBytes = await savePDF(originalBytes, document);
         await writeFile(path, savedBytes);
         resetDirty();
-        alert("名前を付けて保存しました。");
+        showToast("名前を付けて保存しました。");
       }
     } catch (err) {
       console.error("Failed to save as:", err);
@@ -473,7 +512,7 @@ function App() {
   const handleDeduplicate = () => {
     if (!currentPage) return;
     let hasChanges = false;
-    const blocksToKeep: any[] = [];
+    const blocksToKeep: TextBlock[] = [];
     
     // Sort so we process in deterministic order
     const sortedBlocks = [...currentPage.textBlocks].sort((a, b) => a.order - b.order);
@@ -512,6 +551,11 @@ function App() {
       updatePageData(currentPageIndex, { textBlocks: finalBlocks, isDirty: true });
     }
   };
+
+  // Keep action refs fresh every render so the stable event listener calls the latest closures
+  actionRefs.current.handleSave = handleSave;
+  actionRefs.current.handleSaveAs = handleSaveAs;
+  actionRefs.current.handleDelete = handleDelete;
 
   return (
     <div className="app-container">
@@ -670,6 +714,12 @@ function App() {
         <div className="status-item flex-grow" />
         {(isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
       </footer>
+
+      {notification && (
+        <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>
+          {notification.message}
+        </div>
+      )}
     </div>
   );
 }

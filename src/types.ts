@@ -46,8 +46,8 @@ export interface PecoDocument {
 }
 
 export interface Action {
-  type: string;
+  type: 'update_page';
   pageIndex: number;
-  before: any;
-  after: any;
+  before: PageData;
+  after: PageData;
 }

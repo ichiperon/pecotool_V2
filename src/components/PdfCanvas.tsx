@@ -169,29 +169,43 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           // Draw OCR text preview
           if (block.text) {
             if (block.writingMode === 'vertical') {
-              // Rotate context clockwise 90° so text flows top-to-bottom within the BB.
-              // Anchor at top-right corner; after rotation +x=down, +y=left (into BB).
               const fontSize = Math.max(10, w * 0.8);
               context.save();
               context.font = `bold ${fontSize}px sans-serif`;
               context.textBaseline = "top";
+              
+              // 縦書きの場合、元のCanvas APIのfillTextはmaxWidthしかなく、横に伸びないため
+              // measureTextで得た高さをBBの高さに強制的にストレッチします。
+              const textLen = block.text.length;
+              const naturalHeight = textLen * fontSize; // 簡易的な縦高さの推測
+              const sy = h / naturalHeight;
+              
               context.translate(x + w, y + 2);
+              context.scale(1, sy); // 高さをBB枠いっぱいにストレッチ
               context.rotate(Math.PI / 2);
-              context.lineWidth = 3;
+              context.lineWidth = 3 / sy; // スケール後の線幅補正
               context.strokeStyle = "rgba(255, 255, 255, 0.9)";
-              context.strokeText(block.text, 0, 0, h);
+              context.strokeText(block.text, 0, 0);
               context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
-              context.fillText(block.text, 0, 0, h);
+              context.fillText(block.text, 0, 0);
               context.restore();
             } else {
               const fontSize = Math.max(10, h * 0.8);
+              context.save();
               context.font = `bold ${fontSize}px sans-serif`;
               context.textBaseline = "top";
-              context.lineWidth = 3;
+              
+              const textWidth = context.measureText(block.text).width || 1;
+              const sx = w / textWidth;
+              
+              context.translate(x, y + 2);
+              context.scale(sx, 1); // 枠いっぱいに横幅をストレッチ
+              context.lineWidth = 3 / sx; // スケール後の線幅補正
               context.strokeStyle = "rgba(255, 255, 255, 0.9)";
-              context.strokeText(block.text, x, y + 2, w);
+              context.strokeText(block.text, 0, 0);
               context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
-              context.fillText(block.text, x, y + 2, w);
+              context.fillText(block.text, 0, 0);
+              context.restore();
             }
           }
         });
