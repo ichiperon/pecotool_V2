@@ -1,19 +1,87 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList } from "lucide-react";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, openPDF, generateThumbnail } from "./utils/pdfLoader";
 import { savePDF } from "./utils/pdfSaver";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
+import { TextPreviewWindow } from "./components/TextPreviewWindow";
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { getAllWindows } from '@tauri-apps/api/window';
+import { emit, listen } from '@tauri-apps/api/event';
 
 function App() {
+  if (window.location.hash === '#preview') {
+    return <TextPreviewWindow />;
+  }
+
   const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails } = usePecoStore();
 
   const [leftWidth, setLeftWidth] = useState(200);
   const [rightWidth, setRightWidth] = useState(350);
+
+  const openPreviewWindow = async () => {
+    try {
+      const windows = await getAllWindows();
+      const previewWin = windows.find(w => w.label === 'preview-window');
+      
+      if (previewWin) {
+        await previewWin.show();
+        await previewWin.setFocus();
+      } else {
+        const webview = new WebviewWindow('preview-window', {
+          url: 'index.html#preview',
+          title: 'テキストコピー プレビュー',
+          width: 500,
+          height: 600,
+          center: true
+        });
+        webview.once('tauri://error', (e) => {
+          console.error('Error creating preview window:', e);
+        });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const page = document?.pages.get(currentPageIndex);
+  let previewText = "";
+  if (page && page.textBlocks) {
+    const sorted = [...page.textBlocks].sort((a, b) => a.order - b.order);
+    for (let i = 0; i < sorted.length; i++) {
+       const curr = sorted[i];
+       if (i > 0) {
+          const prev = sorted[i - 1];
+          const isVertical = prev.writingMode === 'vertical';
+          if (!isVertical) {
+            if (Math.abs(curr.bbox.y - prev.bbox.y) > prev.bbox.height * 0.5) previewText += "\n";
+            else if (curr.bbox.x - (prev.bbox.x + prev.bbox.width) > prev.bbox.height) previewText += " ";
+          } else {
+            if (Math.abs(prev.bbox.x - curr.bbox.x) > prev.bbox.width * 0.5) previewText += "\n";
+            else if (Math.abs(curr.bbox.y - (prev.bbox.y + prev.bbox.height)) > prev.bbox.width) previewText += " ";
+          }
+       }
+       previewText += curr.text;
+    }
+  }
+
+  useEffect(() => {
+    emit('preview-update', previewText).catch(e => console.error(e));
+    const setupListener = async () => {
+      return await listen('request-preview', () => {
+        emit('preview-update', previewText).catch(e => console.error(e));
+      });
+    };
+    let unlistenFn: (() => void) | undefined;
+    setupListener().then(fn => unlistenFn = fn);
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
+  }, [previewText]);
 
   const startResizeLeft = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -180,16 +248,57 @@ function App() {
     if (!currentPage || selectedIds.size < 2) return;
 
     const selectedBlocks = currentPage.textBlocks.filter(b => selectedIds.has(b.id));
-    const sortedSelected = [...selectedBlocks].sort((a, b) => a.order - b.order);
+    const isVertical = selectedBlocks[0].writingMode === 'vertical';
     
-    const combinedText = sortedSelected.map(b => b.text).join("");
+    const sortedSelected = [...selectedBlocks].sort((a, b) => {
+      if (!isVertical) {
+        if (Math.abs(a.bbox.y - b.bbox.y) > a.bbox.height) return a.bbox.y - b.bbox.y;
+        return a.bbox.x - b.bbox.x;
+      } else {
+        if (Math.abs(a.bbox.x - b.bbox.x) > a.bbox.width) return b.bbox.x - a.bbox.x;
+        return a.bbox.y - b.bbox.y;
+      }
+    });
+
+    let combinedText = sortedSelected[0].text;
+    
+    for (let i = 1; i < sortedSelected.length; i++) {
+        const prev = sortedSelected[i - 1];
+        const curr = sortedSelected[i];
+        
+        if (!isVertical) {
+            const prevEndX = prev.bbox.x + prev.bbox.width;
+            const gap = curr.bbox.x - prevEndX;
+            if (gap > 0 && Math.abs(curr.bbox.y - prev.bbox.y) < prev.bbox.height) {
+                const fontSize = prev.bbox.height;
+                const ems = gap / fontSize;
+                const numFull = Math.min(50, Math.floor(ems));
+                const numHalf = Math.max(0, Math.round((ems - numFull) * 2));
+                combinedText += "　".repeat(numFull) + " ".repeat(numHalf);
+            } else if (Math.abs(curr.bbox.y - prev.bbox.y) >= prev.bbox.height) {
+                combinedText += " "; 
+            }
+        } else {
+            const prevEndY = prev.bbox.y + prev.bbox.height;
+            const gap = curr.bbox.y - prevEndY;
+            if (gap > 0 && Math.abs(curr.bbox.x - prev.bbox.x) < prev.bbox.width) {
+                const fontSize = prev.bbox.width; 
+                const ems = gap / fontSize;
+                const numFull = Math.min(50, Math.floor(ems));
+                combinedText += "　".repeat(numFull);
+            } else if (Math.abs(curr.bbox.x - prev.bbox.x) >= prev.bbox.width) {
+                combinedText += " ";
+            }
+        }
+        combinedText += curr.text;
+    }
     
     const minX = Math.min(...sortedSelected.map(b => b.bbox.x));
     const minY = Math.min(...sortedSelected.map(b => b.bbox.y));
     const maxX = Math.max(...sortedSelected.map(b => b.bbox.x + b.bbox.width));
     const maxY = Math.max(...sortedSelected.map(b => b.bbox.y + b.bbox.height));
 
-    const insertIndex = sortedSelected[0].order;
+    const insertIndex = Math.min(...sortedSelected.map(b => b.order));
 
     const newBlock = {
       id: crypto.randomUUID(),
@@ -286,6 +395,15 @@ function App() {
           >
             <Eye size={18} />
             <span>OCR表示</span>
+          </button>
+          <button 
+            onClick={openPreviewWindow} 
+            title="コピペプレビューを別ウィンドウで開く"
+            className="feature-btn"
+            disabled={!document}
+          >
+            <ClipboardList size={18} />
+            <span>別ウインドウで確認</span>
           </button>
         </div>
       </header>

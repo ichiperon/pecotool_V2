@@ -9,6 +9,7 @@ interface PecoState {
   zoom: number;
   isDirty: boolean;
   showOcr: boolean;
+  showTextPreview: boolean;
   isDrawingMode: boolean;
   isSplitMode: boolean;
   selectedIds: Set<string>;
@@ -21,6 +22,7 @@ interface PecoState {
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
   toggleShowOcr: () => void;
+  toggleTextPreview: () => void;
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
@@ -40,6 +42,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   zoom: 100,
   isDirty: false,
   showOcr: true,
+  showTextPreview: false,
   isDrawingMode: false,
   isSplitMode: false,
   selectedIds: new Set(),
@@ -53,6 +56,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     currentPageIndex: 0,
     isDirty: false,
     showOcr: true,
+    showTextPreview: false,
     isDrawingMode: false,
     isSplitMode: false,
     selectedIds: new Set(),
@@ -71,6 +75,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   setZoom: (zoom) => set({ zoom }),
 
   toggleShowOcr: () => set((state) => ({ showOcr: !state.showOcr })),
+
+  toggleTextPreview: () => set((state) => ({ showTextPreview: !state.showTextPreview })),
 
   toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode, isSplitMode: false })),
   

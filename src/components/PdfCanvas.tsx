@@ -112,24 +112,27 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
           
           const x = block.bbox.x * (zoom / 100);
           const y = block.bbox.y * (zoom / 100);
-          const w = block.bbox.width * (zoom / 100);
-          const h = block.bbox.height * (zoom / 100);
+          let w = block.bbox.width * (zoom / 100);
+          let h = block.bbox.height * (zoom / 100);
+
+          // AcrobatのCtrl+Aっぽい視認性を確保するための背景ハイライト（薄い青）
+          context.fillStyle = isSelected ? "rgba(0, 100, 255, 0.25)" : "rgba(0, 150, 255, 0.1)";
+          context.fillRect(x, y, w, h);
+
+          context.strokeStyle = isSelected ? "rgba(0, 100, 255, 0.9)" : "rgba(255, 0, 0, 0.4)";
+          context.lineWidth = isSelected ? 2 : 1;
+          context.strokeRect(x, y, w, h);
 
           if (isSelected) {
-            context.fillStyle = "rgba(0, 120, 255, 0.1)";
-            context.fillRect(x, y, w, h);
-            
             // Draw resize handles for selected block
             context.fillStyle = "white";
-            context.strokeStyle = "rgba(0, 120, 255, 1)";
+            context.strokeStyle = "rgba(0, 100, 255, 1)";
             const handleSize = 6;
             [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].forEach(([hx, hy]) => {
               context.fillRect(hx - handleSize/2, hy - handleSize/2, handleSize, handleSize);
               context.strokeRect(hx - handleSize/2, hy - handleSize/2, handleSize, handleSize);
             });
           }
-
-          context.strokeRect(x, y, w, h);
 
           // Draw OCR text preview
           if (block.text) {
@@ -139,12 +142,12 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
             
             // Outline for readability
             context.lineWidth = 3;
-            context.strokeStyle = "rgba(255, 255, 255, 0.8)";
-            context.strokeText(block.text, x, y + 2);
+            context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+            context.strokeText(block.text, x, y + 2, w);
             
             // Fill
-            context.fillStyle = isSelected ? "rgba(0, 50, 255, 1)" : "rgba(255, 0, 0, 0.8)";
-            context.fillText(block.text, x, y + 2);
+            context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
+            context.fillText(block.text, x, y + 2, w);
           }
         });
       }
@@ -192,26 +195,50 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
              let b1 = { ...block, id: crypto.randomUUID(), isDirty: true };
              let b2 = { ...block, id: crypto.randomUUID(), isDirty: true };
              
+             const getSplitIndex = (text: string, ratio: number) => {
+               if (text.length <= 1) return 1;
+               let totalW = 0;
+               const weights = [];
+               for (let j = 0; j < text.length; j++) {
+                 const code = text.charCodeAt(j);
+                 const w = (code <= 0xFF || (code >= 0xFF61 && code <= 0xFF9F) || code === 0x20) ? 1 : 2;
+                 weights.push(w);
+                 totalW += w;
+               }
+               const targetW = totalW * ratio;
+               let currentW = 0;
+               for (let j = 0; j < text.length; j++) {
+                 currentW += weights[j];
+                 if (currentW >= targetW) {
+                   if (currentW - targetW < weights[j] / 2) return Math.min(text.length - 1, Math.max(1, j + 1));
+                   return Math.min(text.length - 1, Math.max(1, j));
+                 }
+               }
+               return Math.max(1, text.length - 1);
+             };
+
              if (!isVertical) { // Horizontal (split width)
-               const ratio = (pos.x - x) / w;
-               const splitIdx = Math.max(1, Math.min(block.text.length - 1, Math.round(block.text.length * ratio)));
+               const safeDx = Math.max(1, Math.min(w - 1, pos.x - x));
+               const ratio = safeDx / w;
+               const splitIdx = getSplitIndex(block.text, ratio);
                b1.text = block.text.substring(0, splitIdx);
                b1.originalText = b1.text;
                b2.text = block.text.substring(splitIdx);
                b2.originalText = b2.text;
 
-               const dx = pos.x / scale - block.bbox.x;
+               const dx = safeDx / scale;
                b1.bbox = { ...block.bbox, width: dx };
                b2.bbox = { ...block.bbox, x: block.bbox.x + dx, width: block.bbox.width - dx };
              } else { // Vertical (split height)
-               const ratio = (pos.y - y) / h;
-               const splitIdx = Math.max(1, Math.min(block.text.length - 1, Math.round(block.text.length * ratio)));
+               const safeDy = Math.max(1, Math.min(h - 1, pos.y - y));
+               const ratio = safeDy / h;
+               const splitIdx = getSplitIndex(block.text, ratio);
                b1.text = block.text.substring(0, splitIdx);
                b1.originalText = b1.text;
                b2.text = block.text.substring(splitIdx);
                b2.originalText = b2.text;
 
-               const dy = pos.y / scale - block.bbox.y;
+               const dy = safeDy / scale;
                b1.bbox = { ...block.bbox, height: dy };
                b2.bbox = { ...block.bbox, y: block.bbox.y + dy, height: block.bbox.height - dy };
              }
