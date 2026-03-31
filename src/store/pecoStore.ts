@@ -9,7 +9,9 @@ interface PecoState {
   zoom: number;
   isDirty: boolean;
   showOcr: boolean;
+  showTextPreview: boolean;
   isDrawingMode: boolean;
+  isSplitMode: boolean;
   selectedIds: Set<string>;
   undoStack: Action[];
   redoStack: Action[];
@@ -20,8 +22,11 @@ interface PecoState {
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
   toggleShowOcr: () => void;
+  toggleTextPreview: () => void;
   toggleDrawingMode: () => void;
+  toggleSplitMode: () => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
+  resetDirty: () => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
   clearSelection: () => void;
@@ -38,7 +43,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   zoom: 100,
   isDirty: false,
   showOcr: true,
+  showTextPreview: false,
   isDrawingMode: false,
+  isSplitMode: false,
   selectedIds: new Set(),
   undoStack: [],
   redoStack: [],
@@ -50,7 +57,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     currentPageIndex: 0,
     isDirty: false,
     showOcr: true,
+    showTextPreview: false,
     isDrawingMode: false,
+    isSplitMode: false,
     selectedIds: new Set(),
     undoStack: [],
     redoStack: []
@@ -68,7 +77,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   toggleShowOcr: () => set((state) => ({ showOcr: !state.showOcr })),
 
-  toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode })),
+  toggleTextPreview: () => set((state) => ({ showTextPreview: !state.showTextPreview })),
+
+  toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode, isSplitMode: false })),
+  
+  toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false })),
 
   updatePageData: (pageIndex, data, undoable = true) => set((state) => {
     if (!state.document) return state;
@@ -96,6 +109,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     }
 
     return newState;
+  }),
+
+  resetDirty: () => set((state) => {
+    if (!state.document) return state;
+    const newPages = new Map(state.document.pages);
+    for (const [idx, page] of newPages.entries()) {
+      if (page.isDirty) {
+        newPages.set(idx, { ...page, isDirty: false });
+      }
+    }
+    return {
+      document: { ...state.document, pages: newPages },
+      isDirty: false
+    };
   }),
 
   toggleSelection: (id, multi) => set((state) => {

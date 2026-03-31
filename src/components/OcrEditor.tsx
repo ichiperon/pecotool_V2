@@ -18,16 +18,20 @@ import { usePecoStore } from '../store/pecoStore';
 import { SortableOcrCard } from './SortableOcrCard';
 import { Search } from 'lucide-react';
 
-export function OcrEditor() {
+interface OcrEditorProps {
+  width: number;
+}
+
+export function OcrEditor({ width }: OcrEditorProps) {
   const { document, currentPageIndex, updatePageData } = usePecoStore();
   const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 8, // Avoid triggering drag on click/edit
-      },
+      activationConstraint: searchTerm
+        ? { distance: Infinity } // Disable drag while search filter is active
+        : { distance: 8 },
     }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
@@ -55,7 +59,7 @@ export function OcrEditor() {
   ) || [];
 
   return (
-    <aside className="editor-panel">
+    <aside className="editor-panel" style={{ width: `${width}px` }}>
       <div className="panel-header">
         <span>OCRテキスト</span>
         <div className="search-container">

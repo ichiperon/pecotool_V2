@@ -1,50 +1,136 @@
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, degrees, pushGraphicsState, popGraphicsState, translate, scale } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
+import * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument } from '../types';
 
 export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoDocument): Promise<Uint8Array> {
-  // Load the original document
   const pdfDoc = await PDFDocument.load(originalPdfBytes);
-  const pages = pdfDoc.getPages();
+  pdfDoc.registerFontkit(fontkit);
+  
+  // Load Japanese font
+  let customFont = undefined;
+  try {
+    const fontBytes = await fetch('/fonts/NotoSansJP-Regular.otf').then(res => res.arrayBuffer());
+    customFont = await pdfDoc.embedFont(fontBytes);
+  } catch (err) {
+    console.error("Failed to load custom Japanese font:", err);
+  }
 
-  // Iterate over edited pages and apply changes
+  // We use pdfjsLib to rasterize the original pages so we can completely wipe original OCR text
+  const pdfjsDoc = await pdfjsLib.getDocument({ data: originalPdfBytes.slice() }).promise;
+
   for (const [pageIndex, pageData] of documentState.pages.entries()) {
     if (!pageData.isDirty) continue;
 
-    const page = pages[pageIndex];
-    const { height } = page.getSize();
+    const pdfjsPage = await pdfjsDoc.getPage(pageIndex + 1);
+    const viewport1x = pdfjsPage.getViewport({ scale: 1.0 });
+    const viewport2x = pdfjsPage.getViewport({ scale: 2.0 }); // 2x scale for better print quality
 
-    // Since we can't easily edit the existing content stream flawlessly while preserving images
-    // without deep parsing in pure JS, a standard approach for this kind of "OCR fix" is to 
-    // clear existing text (or hide it) and draw the new text on top as transparent.
-    // However, hiding existing text perfectly without removing images is complex in pdf-lib.
-    // Given the constraints and pdf-lib capabilities, we will overlay the new text as transparent
-    // text. For a robust professional tool, a lower-level library like mupdf is usually needed to 
-    // strip *only* text operators. Here, we add our edited text layer over the page.
+    // Render the page to a canvas (this ignores invisible text like opacity=0 OCR data)
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport2x.width;
+    canvas.height = viewport2x.height;
+    const context = canvas.getContext('2d')!;
 
-    // A simple, reliable approach for pure text replacement:
-    // We add transparent text at the exact bounding boxes based on the current state.
-    // If the original PDF had transparent text (OCR), it might still be there. 
-    // To truly remove old text, we'd need to parse the content stream and filter out text operators (Tj, TJ, etc.).
-    // For this prototype, we'll embed the new text which will be selectable.
+    // Fill white background for JPEG
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Sort blocks by order to ensure logical reading order in the content stream
+    await pdfjsPage.render({ canvasContext: context, viewport: viewport2x, canvas: canvas }).promise;
+
+    // Convert to JPEG blob for much smaller file size compared to PNG
+    const jpgBlob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    if (!jpgBlob) continue;
+    
+    const jpgBytes = new Uint8Array(await jpgBlob.arrayBuffer());
+    const embeddedImage = await pdfDoc.embedJpg(jpgBytes);
+
+    // Completely replace the old page (with the old OCR text) with a fresh new page
+    pdfDoc.removePage(pageIndex);
+    const newPage = pdfDoc.insertPage(pageIndex, [viewport1x.width, viewport1x.height]);
+
+    // Draw the rasterized background
+    newPage.drawImage(embeddedImage, {
+      x: 0,
+      y: 0,
+      width: viewport1x.width,
+      height: viewport1x.height,
+    });
+
+    // Sort blocks by logical order to ensure copy-paste order is correct
     const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
 
+    // Overlay ONLY the newly edited text as selectable transparent text
     for (const block of sortedBlocks) {
-      // Add text with opacity 0 to make it invisible but selectable
-      // pdf-lib uses bottom-left origin. Our bbox.y is top-left origin.
-      // So y_bottom_left = page_height - y_top_left - height
-      const y_bottom_left = height - block.bbox.y - block.bbox.height;
-
-      page.drawText(block.text, {
-        x: block.bbox.x,
-        y: y_bottom_left,
-        size: block.bbox.height, // Approximate font size by block height
-        opacity: 0, 
-      });
+      if (block.writingMode === 'vertical') {
+        const textLen = block.text.length;
+        const textWidth = customFont ? customFont.widthOfTextAtSize(block.text, 1) : textLen;
+        
+        // 縦書きの場合、元のフォントのY軸(ascent/descent)がX方向の「Thickness（太さ）」になり、
+        // フォントのX軸(文字送り)がY方向の「高さ」になります。
+        const sx = block.bbox.width / 1.448; // NotoSansJPの縦方向BBox(約1.448em)をBB幅にフィット
+        const sy = block.bbox.height / textWidth; // 文字エンティティの純粋な長さをBB高さにフィット
+        
+        // -90度回転させるため、ディセント分の左オフセットがX、上の起点がYになります
+        const baselineX = block.bbox.x + 0.288 * sx;
+        const baselineY = viewport1x.height - block.bbox.y;
+        
+        newPage.pushOperators(
+          pushGraphicsState(),
+          translate(baselineX, baselineY),
+          scale(sx, sy)
+        );
+        
+        const drawOptions: any = {
+          x: 0,
+          y: 0,
+          size: 1,
+          rotate: degrees(-90),
+          opacity: 0,
+        };
+        if (customFont) drawOptions.font = customFont;
+        
+        try {
+          newPage.drawText(block.text, drawOptions);
+        } catch (err) {
+          console.warn("Skipping text block due to encoding error:", block.text, err);
+        }
+        
+        newPage.pushOperators(popGraphicsState());
+      } else {
+        const textLen = block.text.length;
+        const textWidth = customFont ? customFont.widthOfTextAtSize(block.text, 1) : textLen;
+        
+        // 横書きの場合、フォントのX軸が文字列幅、Y軸が高さに対応します
+        const sx = block.bbox.width / textWidth;
+        const sy = block.bbox.height / 1.448;
+        
+        const baselineY = viewport1x.height - block.bbox.y - 1.16 * sy;
+        
+        newPage.pushOperators(
+          pushGraphicsState(),
+          translate(block.bbox.x, baselineY),
+          scale(sx, sy)
+        );
+        
+        const drawOptions: any = {
+          x: 0,
+          y: 0,
+          size: 1,
+          opacity: 0,
+        };
+        if (customFont) drawOptions.font = customFont;
+        
+        try {
+          newPage.drawText(block.text, drawOptions);
+        } catch (err) {
+          console.warn("Skipping text block due to encoding error:", block.text, err);
+        }
+        
+        newPage.pushOperators(popGraphicsState());
+      }
     }
   }
 
-  // Serialize the PDFDocument to bytes (a Uint8Array)
   return await pdfDoc.save();
 }

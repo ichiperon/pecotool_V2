@@ -89,21 +89,40 @@ export async function loadPage(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number
     .filter((item: any) => item.str.trim() !== '')
     .map((item: any) => {
       const isVertical = Math.abs(item.transform[0]) < Math.abs(item.transform[1]);
-      const height = item.height > 0 ? item.height : Math.abs(item.transform[3]) || 12;
-      const width = item.width || height * item.str.length * 0.6;
-
-      // Convert two corners from PDF space to viewport (screen) space
-      const pdfX = item.transform[4];
-      const pdfY = item.transform[5];
-      const [x1, y1] = toViewport(pdfX, pdfY);
-      const [x2, y2] = toViewport(pdfX + width, pdfY + height);
-
-      const bbox: BoundingBox = {
-        x: Math.min(x1, x2),
-        y: Math.min(y1, y2),
-        width: Math.abs(x2 - x1) || width,
-        height: Math.abs(y2 - y1) || height,
-      };
+      
+      let bbox: BoundingBox;
+      
+      if (isVertical) {
+        // 縦書きの場合:
+        // transform[2], [3] のベクトルが横方向（太さ=BBの横幅）になります
+        const thickness = Math.sqrt(item.transform[2] * item.transform[2] + item.transform[3] * item.transform[3]) || 12;
+        // item.width はテキストの「進行方向の距離（文字送り）」なので、これがBBの「高さ」になります
+        const runLength = item.width || Math.abs(item.transform[1]) * item.str.length || thickness * item.str.length;
+        
+        // セーブ時に起点（baselineX, baselineY）を求めた逆算を行います
+        // baselineX = bbox.x + 0.288 * sx -> bbox.x = baselineX - 0.288 * sx
+        // baselineY = viewport.height - bbox.y -> bbox.y = viewport.height - baselineY
+        bbox = {
+          x: item.transform[4] - thickness * 0.288,
+          y: viewport.height - item.transform[5],
+          width: thickness,
+          height: runLength,
+        };
+      } else {
+        // 横書きの場合:
+        // transform[0], [1] のベクトルが進行方向、[2], [3] が高さ（太さ）
+        const thickness = item.height > 0 ? item.height : Math.abs(item.transform[3]) || 12;
+        const runLength = item.width || thickness * item.str.length * 0.6;
+        
+        // セーブ時の逆算
+        // baselineY = viewport.height - bbox.y - 1.16 * sy -> bbox.y = viewport.height - baselineY - 1.16 * sy
+        bbox = {
+          x: item.transform[4],
+          y: viewport.height - item.transform[5] - thickness * 1.16,
+          width: runLength,
+          height: thickness,
+        };
+      }
 
       return {
         id: crypto.randomUUID(),

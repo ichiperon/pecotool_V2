@@ -13,8 +13,16 @@
     "windows": [
       {
         "title": "PecoTool V2",
-        "width": 1024,
-        "height": 768
+        "width": 1280,
+        "height": 800
+      },
+      {
+        "label": "preview-window",
+        "title": "テキストコピー プレビュー",
+        "url": "/#preview",
+        "width": 600,
+        "height": 800,
+        "visible": false
       }
     ],
     "security": {
