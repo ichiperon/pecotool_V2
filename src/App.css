@@ -102,13 +102,24 @@ body, #root {
 }
 
 .thumbnails-panel {
-  width: 200px;
+  flex-shrink: 0;
 }
 
 .editor-panel {
-  width: 350px;
   border-right: none;
   border-left: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.resizer {
+  width: 4px;
+  background-color: var(--border-color);
+  cursor: col-resize;
+  transition: background-color 0.2s;
+  z-index: 5;
+}
+.resizer:hover, .resizer:active {
+  background-color: var(--accent-color);
 }
 
 .pdf-viewer-panel {

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
 import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors } from "lucide-react";
@@ -11,6 +11,41 @@ import { OcrEditor } from "./components/OcrEditor";
 
 function App() {
   const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails } = usePecoStore();
+
+  const [leftWidth, setLeftWidth] = useState(200);
+  const [rightWidth, setRightWidth] = useState(350);
+
+  const startResizeLeft = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = leftWidth;
+    
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      setLeftWidth(Math.max(100, Math.min(500, startWidth + (moveEvent.clientX - startX))));
+    };
+    const onMouseUp = () => {
+      window.document.removeEventListener('mousemove', onMouseMove);
+      window.document.removeEventListener('mouseup', onMouseUp);
+    };
+    window.document.addEventListener('mousemove', onMouseMove);
+    window.document.addEventListener('mouseup', onMouseUp);
+  };
+
+  const startResizeRight = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = rightWidth;
+    
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      setRightWidth(Math.max(200, Math.min(800, startWidth - (moveEvent.clientX - startX))));
+    };
+    const onMouseUp = () => {
+      window.document.removeEventListener('mousemove', onMouseMove);
+      window.document.removeEventListener('mouseup', onMouseUp);
+    };
+    window.document.addEventListener('mousemove', onMouseMove);
+    window.document.addEventListener('mouseup', onMouseUp);
+  };
 
   const fitToScreen = () => {
     const container = window.document.querySelector('.pdf-canvas-container');
@@ -257,7 +292,7 @@ function App() {
 
       {/* Main Content */}
       <main className="main-content">
-        <aside className="thumbnails-panel">
+        <aside className="thumbnails-panel" style={{ width: `${leftWidth}px` }}>
           <div className="panel-header">サムネイル</div>
           <div className="scroll-content">
             {document ? (
@@ -282,6 +317,8 @@ function App() {
           </div>
         </aside>
 
+        <div className="resizer" onMouseDown={startResizeLeft} />
+
         <section className="pdf-viewer-panel">
           <div className="pdf-canvas-container">
             {document ? (
@@ -294,7 +331,9 @@ function App() {
           </div>
         </section>
 
-        <OcrEditor />
+        <div className="resizer" onMouseDown={startResizeRight} />
+
+        <OcrEditor width={rightWidth} />
       </main>
 
       {/* Status Bar */}
