@@ -1,6 +1,6 @@
 import React, { useRef, useEffect } from "react";
 import { GripVertical } from "lucide-react";
-import { TextBlock } from "../types";
+import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 
 interface OcrCardProps {
@@ -51,10 +51,20 @@ export function OcrCard({ block, pageIndex, dragListeners }: OcrCardProps) {
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    // Implementation of context menu could be a simple state or a library
-    // For now, we'll just ensure selection and we can add a custom menu later
     if (!isSelected) {
       toggleSelection(block.id, false);
+    }
+  };
+
+  const toggleWritingMode = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newMode: WritingMode = block.writingMode === 'vertical' ? 'horizontal' : 'vertical';
+    const page = document?.pages.get(pageIndex);
+    if (page) {
+      const newBlocks = page.textBlocks.map(b => 
+        b.id === block.id ? { ...b, writingMode: newMode, isDirty: true } : b
+      );
+      updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true });
     }
   };
 
@@ -70,7 +80,13 @@ export function OcrCard({ block, pageIndex, dragListeners }: OcrCardProps) {
           <GripVertical size={14} />
         </div>
         <span>#{block.order + 1}</span>
-        <span className="mode-badge">{block.writingMode === 'vertical' ? '縦書き' : '横書き'}</span>
+        <button 
+          className="mode-badge" 
+          onClick={toggleWritingMode}
+          title="クリックで縦書き/横書きを切り替え"
+        >
+          {block.writingMode === 'vertical' ? '縦書き' : '横書き'}
+        </button>
         {block.isDirty && <span className="dirty-dot">●</span>}
       </div>
       <div

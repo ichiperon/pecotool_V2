@@ -424,7 +424,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
             text: "",
             originalText: "",
             bbox: { x, y, width, height },
-            writingMode: "horizontal",
+            writingMode: height > width * 1.5 ? "vertical" : "horizontal",
             order: pageData.textBlocks.length,
             isNew: true,
             isDirty: true

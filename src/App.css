@@ -41,12 +41,18 @@ body, #root {
   padding: 0 12px;
   gap: 8px;
   z-index: 10;
+  overflow-x: auto;
+}
+
+.toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .toolbar-group {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .toolbar button {
@@ -61,6 +67,7 @@ body, #root {
   font-size: 13px;
   color: #4b5563;
   transition: all 0.2s;
+  white-space: nowrap;
 }
 
 .toolbar button:hover {
@@ -83,6 +90,7 @@ body, #root {
   height: 24px;
   background-color: var(--border-color);
   margin: 0 4px;
+  flex-shrink: 0;
 }
 
 /* Main Content */
@@ -141,6 +149,14 @@ body, #root {
   font-size: 12px;
   font-weight: 600;
   color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  gap: 8px;
+}
+
+.panel-header > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .search-container {
@@ -150,6 +166,7 @@ body, #root {
   border: 1px solid var(--border-color);
   border-radius: 4px;
   padding: 0 6px;
+  flex-shrink: 0;
 }
 
 .search-icon {
@@ -245,6 +262,15 @@ body, #root {
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 9px;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  font-family: inherit;
+  transition: background-color 0.2s;
+}
+
+.mode-badge:hover {
+  background-color: #d1d5db;
 }
 
 .dirty-dot {
@@ -301,7 +327,6 @@ body, #root {
   justify-content: center;
 }
 
-/* Status Bar */
 .status-bar {
   height: var(--status-bar-height);
   background-color: var(--panel-bg);
@@ -312,11 +337,18 @@ body, #root {
   font-size: 11px;
   color: #6b7280;
   gap: 16px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.status-bar::-webkit-scrollbar {
+  display: none;
 }
 
 .status-item {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .flex-grow {

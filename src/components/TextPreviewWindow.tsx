@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Copy } from "lucide-react";
 
 export function TextPreviewWindow() {
@@ -9,19 +10,28 @@ export function TextPreviewWindow() {
   useEffect(() => {
     // Listen for updates from Main Window
     const setupListener = async () => {
-      const unlisten = await listen<string>('preview-update', (event) => {
+      const waitUnlisten = await listen<string>('preview-update', (event) => {
         setText(event.payload);
+      });
+      // バツボタンを押したときにウインドウを破壊せず非表示にする
+      const win = getCurrentWindow();
+      const closeUnlisten = await win.onCloseRequested((event) => {
+        event.preventDefault();
+        win.hide();
       });
       // Request initial text from main window
       await emit('request-preview');
-      return unlisten;
+      return () => {
+        waitUnlisten();
+        closeUnlisten();
+      };
     };
     
-    let unlistenFn: (() => void) | undefined;
-    setupListener().then(fn => unlistenFn = fn);
+    let cleanup: (() => void) | undefined;
+    setupListener().then(fn => cleanup = fn);
 
     return () => {
-      if (unlistenFn) unlistenFn();
+      if (cleanup) cleanup();
     };
   }, []);
 

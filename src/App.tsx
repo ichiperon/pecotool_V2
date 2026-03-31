@@ -10,7 +10,8 @@ import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { TextPreviewWindow } from "./components/TextPreviewWindow";
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { getAllWindows } from '@tauri-apps/api/window';
+import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
+import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen } from '@tauri-apps/api/event';
 
 function App() {
@@ -29,6 +30,17 @@ function App() {
       const previewWin = windows.find(w => w.label === 'preview-window');
       
       if (previewWin) {
+        // メイン画面のサイズ・位置を取得して、右隣に同じ高さでくっつける
+        const mainWin = getCurrentWindow();
+        const mainSize = await mainWin.outerSize();
+        const mainPos = await mainWin.outerPosition();
+        const currentPreviewSize = await previewWin.outerSize();
+
+        const newWidth = currentPreviewSize.width || Math.floor(500 * await mainWin.scaleFactor()); 
+        
+        await previewWin.setSize(new PhysicalSize(newWidth, mainSize.height));
+        await previewWin.setPosition(new PhysicalPosition(mainPos.x + mainSize.width, mainPos.y));
+
         await previewWin.show();
         await previewWin.setFocus();
       } else {
