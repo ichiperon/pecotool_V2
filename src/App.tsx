@@ -36,7 +36,7 @@ function App() {
         const mainPos = await mainWin.outerPosition();
         const currentPreviewSize = await previewWin.outerSize();
 
-        const newWidth = currentPreviewSize.width || Math.floor(500 * await mainWin.scaleFactor()); 
+        const newWidth = currentPreviewSize.width || Math.floor(600 * await mainWin.scaleFactor()); 
         
         await previewWin.setSize(new PhysicalSize(newWidth, mainSize.height));
         await previewWin.setPosition(new PhysicalPosition(mainPos.x + mainSize.width, mainPos.y));
@@ -47,8 +47,8 @@ function App() {
         const webview = new WebviewWindow('preview-window', {
           url: 'index.html#preview',
           title: 'テキストコピー プレビュー',
-          width: 500,
-          height: 600,
+          width: 600,
+          height: 800,
           center: true
         });
         webview.once('tauri://error', (e) => {
