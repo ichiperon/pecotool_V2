@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser } from "lucide-react";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, openPDF, generateThumbnail } from "./utils/pdfLoader";
@@ -23,6 +23,7 @@ function App() {
 
   const [leftWidth, setLeftWidth] = useState(200);
   const [rightWidth, setRightWidth] = useState(350);
+  const [isAutoFit, setIsAutoFit] = useState(true);
 
   const openPreviewWindow = async () => {
     try {
@@ -100,6 +101,22 @@ function App() {
     };
   }, [previewText]);
 
+  useEffect(() => {
+    if (window.location.hash !== '#preview') {
+      const handleUnload = () => {
+        getAllWindows().then(windows => {
+          windows.forEach(w => {
+            if (w.label !== 'main') {
+               w.close().catch(console.error);
+            }
+          });
+        });
+      };
+      window.addEventListener('unload', handleUnload);
+      return () => window.removeEventListener('unload', handleUnload);
+    }
+  }, []);
+
   const startResizeLeft = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -132,21 +149,37 @@ function App() {
     window.document.addEventListener('mouseup', onMouseUp);
   };
 
-  const fitToScreen = () => {
-    const container = window.document.querySelector('.pdf-canvas-container');
-    const canvas = window.document.querySelector('.canvas-wrapper canvas');
-    if (container && canvas) {
-      const canvasH = (canvas as HTMLCanvasElement).height;
-      const canvasW = (canvas as HTMLCanvasElement).width;
-      if (canvasH > 0 && canvasW > 0) {
-        const baseH = canvasH / (zoom / 100);
-        const baseW = canvasW / (zoom / 100);
-        const ratioH = (container.clientHeight - 40) / baseH;
-        const ratioW = (container.clientWidth - 40) / baseW;
-        setZoom(Math.floor(Math.min(ratioH, ratioW) * 100));
-      }
+  const fitToScreen = (keepAutoFitState = false) => {
+    if (!keepAutoFitState) setIsAutoFit(true);
+    const container = window.document.querySelector('.pdf-viewer-panel');
+    const pageData = document?.pages.get(currentPageIndex);
+    if (container && pageData) {
+      const ratioH = (container.clientHeight - 40) / pageData.height;
+      const ratioW = (container.clientWidth - 40) / pageData.width;
+      const newZoom = Math.floor(Math.min(ratioH, ratioW) * 100);
+      setZoom(Math.max(25, newZoom));
     }
   };
+
+  useEffect(() => {
+    if (!isAutoFit || !document) return;
+    const container = window.document.querySelector('.pdf-viewer-panel');
+    if (!container) return;
+
+    let timeoutId: any;
+    const observer = new ResizeObserver(() => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        if (isAutoFit) fitToScreen(true);
+      }, 50);
+    });
+    
+    observer.observe(container);
+    return () => {
+      observer.disconnect();
+      clearTimeout(timeoutId);
+    };
+  }, [document, currentPageIndex, isAutoFit]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -160,13 +193,14 @@ function App() {
         redo();
       } else if ((e.ctrlKey || e.metaKey) && e.key === '0') {
         e.preventDefault();
-        fitToScreen();
+        fitToScreen(false);
       }
     };
 
     const handleWheel = (e: WheelEvent) => {
       if (e.altKey || e.ctrlKey) {
         e.preventDefault();
+        setIsAutoFit(false);
         // e.deltaYが正なら下にスクロール（縮小）、負なら上にスクロール（拡大）
         const zoomStep = 10;
         const delta = e.deltaY > 0 ? -zoomStep : zoomStep;
@@ -219,11 +253,22 @@ function App() {
         doc.filePath = selected;
         setDocument(doc, content);
 
-        // Generate thumbnails for all pages in background
+        // Generate thumbnails sequentially to prevent canvas OOM (black thumbnails)
         const pdf = await openPDF(content);
-        for (let i = 0; i < doc.totalPages; i++) {
-          generateThumbnail(pdf, i).then(dataUrl => setThumbnail(i, dataUrl));
-        }
+        (async () => {
+          for (let i = 0; i < doc.totalPages; i++) {
+            // Add a small delay every 10 pages to let React UI thread breathe
+            if (i > 0 && i % 10 === 0) {
+              await new Promise(resolve => setTimeout(resolve, 10));
+            }
+            try {
+              const dataUrl = await generateThumbnail(pdf, i);
+              setThumbnail(i, dataUrl);
+            } catch (err) {
+              console.error("Thumbnail error:", err);
+            }
+          }
+        })();
       }
     } catch (err) {
       console.error("Failed to open file:", err);
@@ -346,6 +391,49 @@ function App() {
     clearSelection();
   };
 
+  const handleDeduplicate = () => {
+    if (!currentPage) return;
+    let hasChanges = false;
+    const blocksToKeep: any[] = [];
+    
+    // Sort so we process in deterministic order
+    const sortedBlocks = [...currentPage.textBlocks].sort((a, b) => a.order - b.order);
+
+    for (const block of sortedBlocks) {
+      if (selectedIds.size > 0 && !selectedIds.has(block.id)) {
+        blocksToKeep.push(block);
+        continue;
+      }
+      
+      const isDuplicate = blocksToKeep.some(existing => {
+        // Ignore if we process only selected and 'existing' isn't selected
+        if (selectedIds.size > 0 && !selectedIds.has(existing.id)) return false;
+
+        // Check text exact match
+        if (existing.text.trim() !== block.text.trim()) return false;
+        
+        // Check BoundingBox heavy overlap (e.g. within 5 pixels)
+        const dx = Math.abs(existing.bbox.x - block.bbox.x);
+        const dy = Math.abs(existing.bbox.y - block.bbox.y);
+        const dw = Math.abs(existing.bbox.width - block.bbox.width);
+        const dh = Math.abs(existing.bbox.height - block.bbox.height);
+        
+        return dx < 5 && dy < 5 && dw < 5 && dh < 5;
+      });
+      
+      if (isDuplicate) {
+        hasChanges = true;
+      } else {
+        blocksToKeep.push(block);
+      }
+    }
+
+    if (hasChanges) {
+      const finalBlocks = blocksToKeep.map((b, i) => ({ ...b, order: i }));
+      updatePageData(currentPageIndex, { textBlocks: finalBlocks, isDirty: true });
+    }
+  };
+
   return (
     <div className="app-container">
       {/* Toolbar */}
@@ -376,9 +464,9 @@ function App() {
         </div>
         <div className="divider" />
         <div className="toolbar-group">
-          <button onClick={() => setZoom(Math.max(25, zoom + 10))} title="拡大"><ZoomIn size={18} /></button>
-          <button onClick={() => setZoom(Math.max(25, zoom - 10))} title="縮小"><ZoomOut size={18} /></button>
-          <button onClick={fitToScreen} title="フィット (Ctrl+0)"><Maximize size={18} /></button>
+          <button onClick={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }} title="拡大"><ZoomIn size={18} /></button>
+          <button onClick={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom - 10)); }} title="縮小"><ZoomOut size={18} /></button>
+          <button onClick={() => fitToScreen(false)} title="フィット (Ctrl+0)" className={isAutoFit ? "active" : ""}><Maximize size={18} /></button>
         </div>
         <div className="divider" />
         <div className="toolbar-group">
@@ -401,6 +489,7 @@ function App() {
             <span>分割</span>
           </button>
           <button onClick={handleGroup} title="グループ化" disabled={selectedIds.size < 2}><Group size={18} /><span>グループ化</span></button>
+          <button onClick={handleDeduplicate} title="重なっている重複レイヤーを削除"><Eraser size={18} /><span>重複削除</span></button>
           <button onClick={handleDelete} title="削除" className="danger" disabled={selectedIds.size === 0}><Trash2 size={18} /></button>
         </div>
         <div className="divider" />
@@ -429,7 +518,24 @@ function App() {
       <main className="main-content">
         <aside className="thumbnails-panel" style={{ width: `${leftWidth}px` }}>
           <div className="panel-header">サムネイル</div>
-          <div className="scroll-content">
+          <div 
+            className="scroll-content"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (!document) return;
+              if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                if (currentPageIndex < document.totalPages - 1) {
+                  setCurrentPage(currentPageIndex + 1);
+                }
+              } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+                e.preventDefault();
+                if (currentPageIndex > 0) {
+                  setCurrentPage(currentPageIndex - 1);
+                }
+              }
+            }}
+          >
             {document ? (
               Array.from({ length: document.totalPages }).map((_, i) => (
                 <div 

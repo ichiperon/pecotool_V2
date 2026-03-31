@@ -296,6 +296,10 @@ body, #root {
   padding: 12px;
 }
 
+.scroll-content:focus {
+  outline: none;
+}
+
 .placeholder {
   text-align: center;
   color: #9ca3af;
