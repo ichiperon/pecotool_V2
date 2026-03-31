@@ -12,7 +12,15 @@ interface OcrCardProps {
 export function OcrCard({ block, pageIndex, dragListeners }: OcrCardProps) {
   const { updatePageData, document, selectedIds, toggleSelection } = usePecoStore();
   const contentRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const isSelected = selectedIds.has(block.id);
+
+  // 選択されたら自動スクロール
+  useEffect(() => {
+    if (isSelected && cardRef.current) {
+      cardRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [isSelected]);
 
   // contentEditable の内容は React children ではなく DOM API で同期する
   // React は contentEditable の子要素を正しく更新できない既知の問題がある
@@ -52,6 +60,7 @@ export function OcrCard({ block, pageIndex, dragListeners }: OcrCardProps) {
 
   return (
     <div 
+      ref={cardRef}
       className={`ocr-card ${block.isDirty ? 'dirty' : ''} ${isSelected ? 'selected' : ''}`}
       onClick={handleClick}
       onContextMenu={handleContextMenu}

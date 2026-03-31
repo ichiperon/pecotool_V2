@@ -70,6 +70,11 @@ function App() {
   }
 
   useEffect(() => {
+    // 初回マウント時に自動でプレビューウインドウを開く
+    openPreviewWindow();
+  }, []);
+
+  useEffect(() => {
     emit('preview-update', previewText).catch(e => console.error(e));
     const setupListener = async () => {
       return await listen('request-preview', () => {
