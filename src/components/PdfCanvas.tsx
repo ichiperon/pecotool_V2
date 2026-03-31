@@ -5,9 +5,10 @@ import { TextBlock } from "../types";
 
 interface PdfCanvasProps {
   pageIndex: number;
+  disableDrawing?: boolean;
 }
 
-export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
+export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
@@ -170,6 +171,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   }, [zoom, document, pageIndex, showOcr, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (disableDrawing) return;
     const pos = getMousePos(e);
     const scale = zoom / 100;
     const pageData = document?.pages.get(pageIndex);
@@ -311,6 +313,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (disableDrawing) return;
     const pos = getMousePos(e);
     const scale = zoom / 100;
 
@@ -409,6 +412,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   };
 
   const handleMouseUp = () => {
+    if (disableDrawing) return;
     if (isDrawing) {
       setIsDrawing(false);
       const x = Math.min(startPos.x, currentPos.x) / (zoom / 100);

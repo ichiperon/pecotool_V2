@@ -138,6 +138,19 @@ body, #root {
   overflow: auto;
 }
 
+.pdf-viewer-panel.grab {
+  cursor: grab !important;
+}
+
+.pdf-viewer-panel.grabbing {
+  cursor: grabbing !important;
+}
+
+.pdf-viewer-panel.grab .canvas-wrapper,
+.pdf-viewer-panel.grabbing .canvas-wrapper {
+  pointer-events: none;
+}
+
 .panel-header {
   height: 36px;
   background-color: var(--header-bg);

@@ -24,6 +24,10 @@ function App() {
   const [leftWidth, setLeftWidth] = useState(200);
   const [rightWidth, setRightWidth] = useState(350);
   const [isAutoFit, setIsAutoFit] = useState(true);
+  
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0, scrollX: 0, scrollY: 0 });
 
   const openPreviewWindow = async () => {
     try {
@@ -103,18 +107,54 @@ function App() {
 
   useEffect(() => {
     if (window.location.hash !== '#preview') {
-      const handleUnload = () => {
-        getAllWindows().then(windows => {
-          windows.forEach(w => {
-            if (w.label !== 'main') {
-               w.close().catch(console.error);
+      const currentWindow = getCurrentWindow();
+      let unlistenFn: (() => void) | undefined;
+      
+      const setupCloseListener = async () => {
+        return await currentWindow.onCloseRequested(async (event) => {
+          event.preventDefault(); // 必ず横取りする
+          try {
+            const windows = await getAllWindows();
+            for (const w of windows) {
+              if (w.label !== currentWindow.label) {
+                await w.destroy(); // 問答無用で子ウィンドウをキル
+              }
             }
-          });
+            await currentWindow.destroy(); // メインもキル
+          } catch (e) {
+            console.error(e);
+          }
         });
       };
-      window.addEventListener('unload', handleUnload);
-      return () => window.removeEventListener('unload', handleUnload);
+
+      setupCloseListener().then(fn => unlistenFn = fn);
+      
+      return () => {
+        if (unlistenFn) unlistenFn();
+      };
     }
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDownGlob = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (e.code === 'Space' && tag !== 'INPUT' && tag !== 'TEXTAREA') {
+        e.preventDefault();
+        setIsSpacePressed(true);
+      }
+    };
+    const handleKeyUpGlob = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+        setIsPanning(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDownGlob);
+    window.addEventListener('keyup', handleKeyUpGlob);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDownGlob);
+      window.removeEventListener('keyup', handleKeyUpGlob);
+    };
   }, []);
 
   const startResizeLeft = (e: React.MouseEvent) => {
@@ -147,6 +187,40 @@ function App() {
     };
     window.document.addEventListener('mousemove', onMouseMove);
     window.document.addEventListener('mouseup', onMouseUp);
+  };
+
+  const handleViewerMouseDown = (e: React.MouseEvent) => {
+    if (isSpacePressed) {
+      e.stopPropagation();
+      e.preventDefault();
+      setIsPanning(true);
+      const container = window.document.querySelector('.pdf-viewer-panel');
+      if (container) {
+        setPanStart({
+          x: e.clientX,
+          y: e.clientY,
+          scrollX: container.scrollLeft,
+          scrollY: container.scrollTop
+        });
+      }
+    }
+  };
+
+  const handleViewerMouseMove = (e: React.MouseEvent) => {
+    if (isPanning && isSpacePressed) {
+      e.preventDefault();
+      const container = window.document.querySelector('.pdf-viewer-panel');
+      if (container) {
+        const dx = e.clientX - panStart.x;
+        const dy = e.clientY - panStart.y;
+        container.scrollLeft = panStart.scrollX - dx;
+        container.scrollTop = panStart.scrollY - dy;
+      }
+    }
+  };
+
+  const handleViewerMouseUp = () => {
+    if (isPanning) setIsPanning(false);
   };
 
   const fitToScreen = (keepAutoFitState = false) => {
@@ -560,10 +634,16 @@ function App() {
 
         <div className="resizer" onMouseDown={startResizeLeft} />
 
-        <section className="pdf-viewer-panel">
+        <section 
+          className={`pdf-viewer-panel ${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : ''}`}
+          onMouseDown={handleViewerMouseDown}
+          onMouseMove={handleViewerMouseMove}
+          onMouseUp={handleViewerMouseUp}
+          onMouseLeave={handleViewerMouseUp}
+        >
           <div className="pdf-canvas-container">
             {document ? (
-              <PdfCanvas pageIndex={currentPageIndex} />
+              <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} />
             ) : (
               <div className="empty-state">
                 <p>PDFファイルを [開く] から読み込んでください</p>
