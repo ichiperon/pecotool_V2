@@ -105,28 +105,34 @@ function App() {
   useEffect(() => {
     if (window.location.hash !== '#preview') {
       const currentWindow = getCurrentWindow();
+      let isUnmounted = false;
       let unlistenFn: (() => void) | undefined;
       
       const setupCloseListener = async () => {
-        return await currentWindow.onCloseRequested(async (event) => {
-          event.preventDefault(); // 必ず横取りする
+        const fn = await currentWindow.onCloseRequested(async () => {
           try {
             const windows = await getAllWindows();
             for (const w of windows) {
               if (w.label !== currentWindow.label) {
-                await w.destroy(); // 問答無用で子ウィンドウをキル
+                await w.close();
               }
             }
-            await currentWindow.destroy(); // メインもキル
           } catch (e) {
             console.error(e);
           }
         });
+        
+        if (isUnmounted) {
+          fn();
+        } else {
+          unlistenFn = fn;
+        }
       };
 
-      setupCloseListener().then(fn => unlistenFn = fn);
+      setupCloseListener();
       
       return () => {
+        isUnmounted = true;
         if (unlistenFn) unlistenFn();
       };
     }

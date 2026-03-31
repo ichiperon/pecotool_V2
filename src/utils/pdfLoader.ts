@@ -64,11 +64,10 @@ export async function loadPage(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number
       const height = item.height > 0 ? item.height : Math.abs(item.transform[3]) || 12;
       
       // Y座標の計算を微調整 (PDFのYは下から上、CanvasのYは上から下)
-      // 一般的な日本語フォントのベースライン(Ascent)比率である約85%をオフセットとして引くことで、
-      // 枠線が文字の上に浮いてしまう現象を修正し、テキストにピッタリ貼り付くようにする
+      // 下方向へのズレを補正するため、より多くオフセットを引く（フォントによるが概ね height * 0.95 〜 1.0 が標準的）
       const bbox: BoundingBox = {
         x: item.transform[4],
-        y: viewport.height - item.transform[5] - (height * 0.85),
+        y: viewport.height - item.transform[5] - (height * 1.0),
         width: item.width || height * item.str.length * 0.6,
         height,
       };
