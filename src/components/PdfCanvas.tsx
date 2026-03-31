@@ -7,6 +7,11 @@ interface PdfCanvasProps {
   pageIndex: number;
 }
 
+// Use shared configuration for CMaps and fonts
+const CMAP_URL = 'https://unpkg.com/pdfjs-dist@5.5.207/cmaps/';
+const CMAP_PACKED = true;
+const STANDARD_FONT_DATA_URL = 'https://unpkg.com/pdfjs-dist@5.5.207/standard_fonts/';
+
 export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { document, originalBytes, zoom, showOcr, selectedIds, isDrawingMode, updatePageData, toggleDrawingMode, toggleSelection } = usePecoStore();
@@ -25,19 +30,28 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
 
   useEffect(() => {
     if (!originalBytes) return;
+    let cancelled = false;
 
     const loadPage = async () => {
       try {
-        const loadingTask = pdfjsLib.getDocument({ data: originalBytes.slice() });
+        const loadingTask = pdfjsLib.getDocument({ 
+          data: originalBytes.slice(),
+          cMapUrl: CMAP_URL,
+          cMapPacked: CMAP_PACKED,
+          standardFontDataUrl: STANDARD_FONT_DATA_URL,
+        });
         const pdf = await loadingTask.promise;
+        if (cancelled) return;
         const page = await pdf.getPage(pageIndex + 1);
+        if (cancelled) return;
         setPdfPage(page);
       } catch (err) {
-        console.error("Error loading PDF page:", err);
+        if (!cancelled) console.error("Error loading PDF page:", err);
       }
     };
 
     loadPage();
+    return () => { cancelled = true; };
   }, [originalBytes, pageIndex]);
 
   const getMousePos = (e: React.MouseEvent) => {
@@ -51,11 +65,13 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
 
   useEffect(() => {
     if (!pdfPage || !canvasRef.current) return;
+    let renderTask: any = null;
+    let cancelled = false;
 
     const render = async () => {
       const canvas = canvasRef.current!;
       const context = canvas.getContext('2d')!;
-      
+
       const viewport = pdfPage.getViewport({ scale: zoom / 100 });
       canvas.width = viewport.width;
       canvas.height = viewport.height;
@@ -66,7 +82,14 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
         canvas: canvas,
       };
 
-      await pdfPage.render(renderContext).promise;
+      renderTask = pdfPage.render(renderContext);
+      try {
+        await renderTask.promise;
+      } catch (err: any) {
+        if (err?.name === 'RenderingCancelledException' || cancelled) return;
+        throw err;
+      }
+      if (cancelled) return;
 
       // Draw OCR Overlays
       const pageData = document?.pages.get(pageIndex);
@@ -114,6 +137,12 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
     };
 
     render();
+    return () => {
+      cancelled = true;
+      if (renderTask) {
+        try { renderTask.cancel(); } catch (_) { /* already done */ }
+      }
+    };
   }, [pdfPage, zoom, document, pageIndex, showOcr, selectedIds, isDrawing, startPos, currentPos, draggedId]);
 
   const handleMouseDown = (e: React.MouseEvent) => {

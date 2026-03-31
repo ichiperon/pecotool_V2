@@ -30,19 +30,25 @@ function App() {
 
   useEffect(() => {
     if (document && !document.pages.has(currentPageIndex)) {
-      loadCurrentPage();
+      loadCurrentPage(currentPageIndex);
     }
   }, [document, currentPageIndex]);
 
-  const loadCurrentPage = async () => {
-    if (!document || !originalBytes) return;
+  const loadCurrentPage = async (pageIdx: number) => {
+    const { originalBytes } = usePecoStore.getState();
+    if (!originalBytes) {
+      console.error("[loadCurrentPage] originalBytes is null");
+      return;
+    }
     try {
-      // Use openPDF (which calls .slice() internally) to avoid transferring the shared buffer
+      console.log(`[loadCurrentPage] loading page ${pageIdx}, bytes length=${originalBytes.length}`);
       const pdf = await openPDF(originalBytes);
-      const pageData = await loadPage(pdf, currentPageIndex);
-      updatePageData(currentPageIndex, pageData);
+      const pageData = await loadPage(pdf, pageIdx);
+      console.log(`[loadCurrentPage] page ${pageIdx} loaded: ${pageData.textBlocks.length} blocks`);
+      updatePageData(pageIdx, pageData, false);
     } catch (err) {
-      console.error("Failed to load page data:", err);
+      console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
+      alert(`ページ ${pageIdx + 1} のテキスト読み込みに失敗しました:\n${err}`);
     }
   };
 
@@ -62,8 +68,21 @@ function App() {
         doc.filePath = selected;
         setDocument(doc, content);
 
-        // Generate thumbnails for all pages in background
+        // Open PDF once for thumbnails and text extraction
         const pdf = await openPDF(content);
+
+        // Load page 0 text immediately (don't rely on useEffect timing)
+        try {
+          console.log('[handleOpen] loading page 0 text...');
+          const pageData = await loadPage(pdf, 0);
+          console.log(`[handleOpen] page 0: ${pageData.textBlocks.length} text blocks`);
+          updatePageData(0, pageData, false);
+        } catch (err) {
+          console.error('[handleOpen] page 0 text extraction failed:', err);
+          alert(`テキスト抽出に失敗しました:\n${err}`);
+        }
+
+        // Generate thumbnails for all pages in background
         for (let i = 0; i < doc.totalPages; i++) {
           generateThumbnail(pdf, i).then(dataUrl => setThumbnail(i, dataUrl));
         }
