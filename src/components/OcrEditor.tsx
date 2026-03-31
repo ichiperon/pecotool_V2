@@ -29,9 +29,9 @@ export function OcrEditor({ width }: OcrEditorProps) {
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 8, // Avoid triggering drag on click/edit
-      },
+      activationConstraint: searchTerm
+        ? { distance: Infinity } // Disable drag while search filter is active
+        : { distance: 8 },
     }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,

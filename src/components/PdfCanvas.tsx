@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from 'pdfjs-dist';
 import { usePecoStore } from "../store/pecoStore";
-import { TextBlock } from "../types";
+import { Action, PageData, TextBlock } from "../types";
 
 interface PdfCanvasProps {
   pageIndex: number;
@@ -12,7 +12,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
-  const { document, originalBytes, zoom, showOcr, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection } = usePecoStore();
+  const { document, originalBytes, zoom, showOcr, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
 
   // Drawing state
@@ -25,23 +25,51 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragStartBbox, setDragStartBbox] = useState<any>(null);
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
+  const preDragPageRef = useRef<PageData | null>(null);
+  const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
+  // Open PDF document only when bytes change (expensive)
   useEffect(() => {
     if (!originalBytes) return;
+    let cancelled = false;
 
-    const loadPage = async () => {
+    (async () => {
       try {
-        const loadingTask = pdfjsLib.getDocument({ data: originalBytes.slice() });
-        const pdf = await loadingTask.promise;
-        const page = await pdf.getPage(pageIndex + 1);
+        const doc = await pdfjsLib.getDocument({ data: originalBytes.slice() }).promise;
+        if (cancelled) { doc.destroy(); return; }
+        pdfDocRef.current = doc;
+        const page = await doc.getPage(pageIndex + 1);
+        if (cancelled) return;
         setPdfPage(page);
       } catch (err) {
-        console.error("Error loading PDF page:", err);
+        if (!cancelled) console.error("Error loading PDF page:", err);
       }
-    };
+    })();
 
-    loadPage();
-  }, [originalBytes, pageIndex]);
+    return () => {
+      cancelled = true;
+      pdfDocRef.current = null;
+    };
+  }, [originalBytes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load specific page using cached doc (cheap)
+  useEffect(() => {
+    const doc = pdfDocRef.current;
+    if (!doc) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const page = await doc.getPage(pageIndex + 1);
+        if (cancelled) return;
+        setPdfPage(page);
+      } catch (err) {
+        if (!cancelled) console.error("Error loading PDF page:", err);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [pageIndex]);
 
   const getMousePos = (e: React.MouseEvent) => {
     const rect = overlayCanvasRef.current?.getBoundingClientRect();
@@ -279,6 +307,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         else if (Math.abs(pos.x - (x + w)) < hs && Math.abs(pos.y - (y + h)) < hs) detectedDragMode = 'resize-se';
         
         if (detectedDragMode !== 'none') {
+          const pg = pageData && document?.pages.get(pageIndex);
+          preDragPageRef.current = pg ? { ...pg, textBlocks: [...pg.textBlocks] } : null;
           setDraggedId(id);
           setDragMode(detectedDragMode);
           setDragStartBbox({ ...block.bbox });
@@ -299,6 +329,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           if (!selectedIds.has(block.id)) {
             toggleSelection(block.id, e.ctrlKey || e.shiftKey);
           }
+          const pg = document?.pages.get(pageIndex);
+          preDragPageRef.current = pg ? { ...pg, textBlocks: [...pg.textBlocks] } : null;
           setDraggedId(block.id);
           setDragMode('move');
           setDragStartBbox({ ...block.bbox });
@@ -444,11 +476,18 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     }
 
     if (draggedId && dragMode !== 'none') {
-      // Finalize the drag and push to undoStack
+      // Push undo with the snapshot captured at drag start (correct before state)
       const pageData = document?.pages.get(pageIndex);
-      if (pageData) {
-        updatePageData(pageIndex, { textBlocks: pageData.textBlocks, isDirty: true }, true);
+      if (pageData && preDragPageRef.current) {
+        const action: Action = {
+          type: 'update_page',
+          pageIndex,
+          before: preDragPageRef.current,
+          after: { ...pageData },
+        };
+        pushAction(action);
       }
+      preDragPageRef.current = null;
       setDraggedId(null);
       setDragMode('none');
     }

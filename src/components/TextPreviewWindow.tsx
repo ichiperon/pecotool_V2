@@ -8,6 +8,9 @@ export function TextPreviewWindow() {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
+    let cleanup: (() => void) | undefined;
+
     // Listen for updates from Main Window
     const setupListener = async () => {
       const waitUnlisten = await listen<string>('preview-update', (event) => {
@@ -26,11 +29,18 @@ export function TextPreviewWindow() {
         closeUnlisten();
       };
     };
-    
-    let cleanup: (() => void) | undefined;
-    setupListener().then(fn => cleanup = fn);
+
+    setupListener().then(fn => {
+      if (mounted) {
+        cleanup = fn;
+      } else {
+        // Already unmounted before async setup completed
+        fn?.();
+      }
+    });
 
     return () => {
+      mounted = false;
       if (cleanup) cleanup();
     };
   }, []);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
 import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser } from "lucide-react";
@@ -8,18 +8,13 @@ import { loadPDF, loadPage, openPDF, generateThumbnail } from "./utils/pdfLoader
 import { savePDF } from "./utils/pdfSaver";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
-import { TextPreviewWindow } from "./components/TextPreviewWindow";
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
 import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen } from '@tauri-apps/api/event';
 
 function App() {
-  if (window.location.hash === '#preview') {
-    return <TextPreviewWindow />;
-  }
-
-  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails } = usePecoStore();
+  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails, resetDirty } = usePecoStore();
 
   const [leftWidth, setLeftWidth] = useState(200);
   const [rightWidth, setRightWidth] = useState(350);
@@ -66,25 +61,27 @@ function App() {
   };
 
   const page = document?.pages.get(currentPageIndex);
-  let previewText = "";
-  if (page && page.textBlocks) {
+  const previewText = useMemo(() => {
+    if (!page?.textBlocks) return "";
     const sorted = [...page.textBlocks].sort((a, b) => a.order - b.order);
+    let text = "";
     for (let i = 0; i < sorted.length; i++) {
-       const curr = sorted[i];
-       if (i > 0) {
-          const prev = sorted[i - 1];
-          const isVertical = prev.writingMode === 'vertical';
-          if (!isVertical) {
-            if (Math.abs(curr.bbox.y - prev.bbox.y) > prev.bbox.height * 0.5) previewText += "\n";
-            else if (curr.bbox.x - (prev.bbox.x + prev.bbox.width) > prev.bbox.height) previewText += " ";
-          } else {
-            if (Math.abs(prev.bbox.x - curr.bbox.x) > prev.bbox.width * 0.5) previewText += "\n";
-            else if (Math.abs(curr.bbox.y - (prev.bbox.y + prev.bbox.height)) > prev.bbox.width) previewText += " ";
-          }
-       }
-       previewText += curr.text;
+      const curr = sorted[i];
+      if (i > 0) {
+        const prev = sorted[i - 1];
+        const isVertical = prev.writingMode === 'vertical';
+        if (!isVertical) {
+          if (Math.abs(curr.bbox.y - prev.bbox.y) > prev.bbox.height * 0.5) text += "\n";
+          else if (curr.bbox.x - (prev.bbox.x + prev.bbox.width) > prev.bbox.height) text += " ";
+        } else {
+          if (Math.abs(prev.bbox.x - curr.bbox.x) > prev.bbox.width * 0.5) text += "\n";
+          else if (Math.abs(curr.bbox.y - (prev.bbox.y + prev.bbox.height)) > prev.bbox.width) text += " ";
+        }
+      }
+      text += curr.text;
     }
-  }
+    return text;
+  }, [page]);
 
   useEffect(() => {
     // 初回マウント時に自動でプレビューウインドウを開く
@@ -240,7 +237,7 @@ function App() {
     const container = window.document.querySelector('.pdf-viewer-panel');
     if (!container) return;
 
-    let timeoutId: any;
+    let timeoutId: ReturnType<typeof setTimeout>;
     const observer = new ResizeObserver(() => {
       clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {
@@ -354,6 +351,7 @@ function App() {
     try {
       const savedBytes = await savePDF(originalBytes, document);
       await writeFile(document.filePath, savedBytes);
+      resetDirty();
       alert("保存しました。");
     } catch (err) {
       console.error("Failed to save:", err);
@@ -371,6 +369,7 @@ function App() {
       if (path) {
         const savedBytes = await savePDF(originalBytes, document);
         await writeFile(path, savedBytes);
+        resetDirty();
         alert("名前を付けて保存しました。");
       }
     } catch (err) {

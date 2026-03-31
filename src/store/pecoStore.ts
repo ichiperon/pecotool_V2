@@ -26,6 +26,7 @@ interface PecoState {
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
+  resetDirty: () => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
   clearSelection: () => void;
@@ -108,6 +109,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     }
 
     return newState;
+  }),
+
+  resetDirty: () => set((state) => {
+    if (!state.document) return state;
+    const newPages = new Map(state.document.pages);
+    for (const [idx, page] of newPages.entries()) {
+      if (page.isDirty) {
+        newPages.set(idx, { ...page, isDirty: false });
+      }
+    }
+    return {
+      document: { ...state.document, pages: newPages },
+      isDirty: false
+    };
   }),
 
   toggleSelection: (id, multi) => set((state) => {
