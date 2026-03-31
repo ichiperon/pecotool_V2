@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors } from "lucide-react";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, openPDF, generateThumbnail } from "./utils/pdfLoader";
@@ -10,7 +10,23 @@ import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 
 function App() {
-  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isDirty, thumbnails } = usePecoStore();
+  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails } = usePecoStore();
+
+  const fitToScreen = () => {
+    const container = window.document.querySelector('.pdf-canvas-container');
+    const canvas = window.document.querySelector('.canvas-wrapper canvas');
+    if (container && canvas) {
+      const canvasH = (canvas as HTMLCanvasElement).height;
+      const canvasW = (canvas as HTMLCanvasElement).width;
+      if (canvasH > 0 && canvasW > 0) {
+        const baseH = canvasH / (zoom / 100);
+        const baseW = canvasW / (zoom / 100);
+        const ratioH = (container.clientHeight - 40) / baseH;
+        const ratioW = (container.clientWidth - 40) / baseW;
+        setZoom(Math.floor(Math.min(ratioH, ratioW) * 100));
+      }
+    }
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -22,11 +38,32 @@ function App() {
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
         redo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+        e.preventDefault();
+        fitToScreen();
       }
     };
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.altKey || e.ctrlKey) {
+        e.preventDefault();
+        // e.deltaYが正なら下にスクロール（縮小）、負なら上にスクロール（拡大）
+        const zoomStep = 10;
+        const delta = e.deltaY > 0 ? -zoomStep : zoomStep;
+        const newZoom = Math.max(25, Math.min(500, zoom + delta));
+        setZoom(newZoom);
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo]);
+    // passive: false is required to allow e.preventDefault() for wheel events
+    window.addEventListener('wheel', handleWheel, { passive: false });
+    
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('wheel', handleWheel);
+    };
+  }, [undo, redo, zoom, setZoom]);
 
   useEffect(() => {
     if (document && !document.pages.has(currentPageIndex)) {
@@ -180,7 +217,7 @@ function App() {
         <div className="toolbar-group">
           <button onClick={() => setZoom(Math.max(25, zoom + 10))} title="拡大"><ZoomIn size={18} /></button>
           <button onClick={() => setZoom(Math.max(25, zoom - 10))} title="縮小"><ZoomOut size={18} /></button>
-          <button onClick={() => setZoom(100)} title="フィット"><Maximize size={18} /></button>
+          <button onClick={fitToScreen} title="フィット (Ctrl+0)"><Maximize size={18} /></button>
         </div>
         <div className="divider" />
         <div className="toolbar-group">
@@ -192,6 +229,15 @@ function App() {
           >
             <Plus size={18} />
             <span>追加</span>
+          </button>
+          <button 
+            onClick={toggleSplitMode} 
+            title="BB分割 (枠内のクリックした位置で分割)" 
+            className={isSplitMode ? "active" : ""}
+            disabled={!document}
+          >
+            <Scissors size={18} />
+            <span>分割</span>
           </button>
           <button onClick={handleGroup} title="グループ化" disabled={selectedIds.size < 2}><Group size={18} /><span>グループ化</span></button>
           <button onClick={handleDelete} title="削除" className="danger" disabled={selectedIds.size === 0}><Trash2 size={18} /></button>

@@ -1,13 +1,15 @@
 import React, { useRef, useEffect } from "react";
+import { GripVertical } from "lucide-react";
 import { TextBlock } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 
 interface OcrCardProps {
   block: TextBlock;
   pageIndex: number;
+  dragListeners?: any;
 }
 
-export function OcrCard({ block, pageIndex }: OcrCardProps) {
+export function OcrCard({ block, pageIndex, dragListeners }: OcrCardProps) {
   const { updatePageData, document, selectedIds, toggleSelection } = usePecoStore();
   const contentRef = useRef<HTMLDivElement>(null);
   const isSelected = selectedIds.has(block.id);
@@ -55,6 +57,9 @@ export function OcrCard({ block, pageIndex }: OcrCardProps) {
       onContextMenu={handleContextMenu}
     >
       <div className="ocr-card-header">
+        <div {...dragListeners} style={{ cursor: 'grab', opacity: 0.5, display: 'flex', alignItems: 'center' }} title="ドラッグして並び替え">
+          <GripVertical size={14} />
+        </div>
         <span>#{block.order + 1}</span>
         <span className="mode-badge">{block.writingMode === 'vertical' ? '縦書き' : '横書き'}</span>
         {block.isDirty && <span className="dirty-dot">●</span>}

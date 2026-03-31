@@ -8,8 +8,10 @@ interface PdfCanvasProps {
 }
 
 export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { document, originalBytes, zoom, showOcr, selectedIds, isDrawingMode, updatePageData, toggleDrawingMode, toggleSelection } = usePecoStore();
+  const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
+  const { document, originalBytes, zoom, showOcr, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
 
   // Drawing state
@@ -41,7 +43,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   }, [originalBytes, pageIndex]);
 
   const getMousePos = (e: React.MouseEvent) => {
-    const rect = canvasRef.current?.getBoundingClientRect();
+    const rect = overlayCanvasRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
     return {
       x: e.clientX - rect.left,
@@ -49,16 +51,23 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
     };
   };
 
+  // PDF Layer Rendering
   useEffect(() => {
-    if (!pdfPage || !canvasRef.current) return;
+    if (!pdfPage || !pdfCanvasRef.current) return;
 
-    const render = async () => {
-      const canvas = canvasRef.current!;
+    const renderPdf = async () => {
+      const canvas = pdfCanvasRef.current!;
       const context = canvas.getContext('2d')!;
       
       const viewport = pdfPage.getViewport({ scale: zoom / 100 });
       canvas.width = viewport.width;
       canvas.height = viewport.height;
+      
+      // Update overlay dimensions to match
+      if (overlayCanvasRef.current) {
+        overlayCanvasRef.current.width = viewport.width;
+        overlayCanvasRef.current.height = viewport.height;
+      }
 
       const renderContext = {
         canvasContext: context,
@@ -66,7 +75,32 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
         canvas: canvas,
       };
 
-      await pdfPage.render(renderContext).promise;
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel();
+      }
+      renderTaskRef.current = pdfPage.render(renderContext);
+
+      try {
+        await renderTaskRef.current.promise;
+      } catch (err: any) {
+        if (err.name === 'RenderingCancelledException') return;
+        console.error("PDF render error:", err);
+      }
+    };
+
+    renderPdf();
+  }, [pdfPage, zoom]);
+
+  // Overlay Layer Rendering
+  useEffect(() => {
+    if (!overlayCanvasRef.current || !pdfPage) return;
+
+    const renderOverlays = () => {
+      const canvas = overlayCanvasRef.current!;
+      const context = canvas.getContext('2d')!;
+      
+      // Clear previous overlays
+      context.clearRect(0, 0, canvas.width, canvas.height);
 
       // Draw OCR Overlays
       const pageData = document?.pages.get(pageIndex);
@@ -96,6 +130,22 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
           }
 
           context.strokeRect(x, y, w, h);
+
+          // Draw OCR text preview
+          if (block.text) {
+            const fontSize = Math.max(10, h * 0.8);
+            context.font = `bold ${fontSize}px sans-serif`;
+            context.textBaseline = "top";
+            
+            // Outline for readability
+            context.lineWidth = 3;
+            context.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            context.strokeText(block.text, x, y + 2);
+            
+            // Fill
+            context.fillStyle = isSelected ? "rgba(0, 50, 255, 1)" : "rgba(255, 0, 0, 0.8)";
+            context.fillText(block.text, x, y + 2);
+          }
         });
       }
 
@@ -113,8 +163,8 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
       }
     };
 
-    render();
-  }, [pdfPage, zoom, document, pageIndex, showOcr, selectedIds, isDrawing, startPos, currentPos, draggedId]);
+    renderOverlays();
+  }, [zoom, document, pageIndex, showOcr, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     const pos = getMousePos(e);
@@ -125,6 +175,58 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
       setIsDrawing(true);
       setStartPos(pos);
       setCurrentPos(pos);
+      return;
+    }
+
+    if (isSplitMode) {
+      if (pageData) {
+        for (let i = pageData.textBlocks.length - 1; i >= 0; i--) {
+          const block = pageData.textBlocks[i];
+          const x = block.bbox.x * scale;
+          const y = block.bbox.y * scale;
+          const w = block.bbox.width * scale;
+          const h = block.bbox.height * scale;
+          
+          if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
+             const isVertical = block.writingMode === 'vertical';
+             let b1 = { ...block, id: crypto.randomUUID(), isDirty: true };
+             let b2 = { ...block, id: crypto.randomUUID(), isDirty: true };
+             
+             if (!isVertical) { // Horizontal (split width)
+               const ratio = (pos.x - x) / w;
+               const splitIdx = Math.max(1, Math.min(block.text.length - 1, Math.round(block.text.length * ratio)));
+               b1.text = block.text.substring(0, splitIdx);
+               b1.originalText = b1.text;
+               b2.text = block.text.substring(splitIdx);
+               b2.originalText = b2.text;
+
+               const dx = pos.x / scale - block.bbox.x;
+               b1.bbox = { ...block.bbox, width: dx };
+               b2.bbox = { ...block.bbox, x: block.bbox.x + dx, width: block.bbox.width - dx };
+             } else { // Vertical (split height)
+               const ratio = (pos.y - y) / h;
+               const splitIdx = Math.max(1, Math.min(block.text.length - 1, Math.round(block.text.length * ratio)));
+               b1.text = block.text.substring(0, splitIdx);
+               b1.originalText = b1.text;
+               b2.text = block.text.substring(splitIdx);
+               b2.originalText = b2.text;
+
+               const dy = pos.y / scale - block.bbox.y;
+               b1.bbox = { ...block.bbox, height: dy };
+               b2.bbox = { ...block.bbox, y: block.bbox.y + dy, height: block.bbox.height - dy };
+             }
+             
+             const newBlocks = pageData.textBlocks.filter(b => b.id !== block.id);
+             newBlocks.splice(i, 0, b1, b2);
+             const finalBlocks = newBlocks.map((b, idx) => ({ ...b, order: idx }));
+             
+             updatePageData(pageIndex, { textBlocks: finalBlocks, isDirty: true });
+             toggleSplitMode();
+             return;
+          }
+        }
+      }
+      toggleSplitMode();
       return;
     }
 
@@ -230,6 +332,21 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
       
       if (isDrawingMode) {
         hoverCursor = 'crosshair';
+      } else if (isSplitMode) {
+        hoverCursor = 'crosshair';
+        if (pageData) {
+          for (let i = pageData.textBlocks.length - 1; i >= 0; i--) {
+            const block = pageData.textBlocks[i];
+            const x = block.bbox.x * scale;
+            const y = block.bbox.y * scale;
+            const w = block.bbox.width * scale;
+            const h = block.bbox.height * scale;
+            if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
+              hoverCursor = block.writingMode === 'vertical' ? 'row-resize' : 'col-resize';
+              break;
+            }
+          }
+        }
       } else if (pageData) {
         // Check handles
         for (const id of selectedIds) {
@@ -260,7 +377,7 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
           }
         }
       }
-      if (canvasRef.current) canvasRef.current.style.cursor = hoverCursor;
+      if (overlayCanvasRef.current) overlayCanvasRef.current.style.cursor = hoverCursor;
     }
   };
 
@@ -307,14 +424,18 @@ export function PdfCanvas({ pageIndex }: PdfCanvasProps) {
   };
 
   return (
-    <div className={`canvas-wrapper ${isDrawingMode ? 'drawing-mode' : ''}`} style={{ transform: `scale(1)`, transformOrigin: 'top left' }}>
+    <div className={`canvas-wrapper ${isDrawingMode ? 'drawing-mode' : ''}`} style={{ position: 'relative', display: 'inline-block', transform: `scale(1)`, transformOrigin: 'top left' }}>
       <canvas 
-        ref={canvasRef} 
+        ref={pdfCanvasRef} 
+        style={{ display: 'block' }}
+      />
+      <canvas 
+        ref={overlayCanvasRef} 
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        style={{ cursor: isDrawingMode ? 'crosshair' : draggedId ? (dragMode === 'move' ? 'move' : 'crosshair') : 'default' }}
+        style={{ position: 'absolute', top: 0, left: 0, zIndex: 2, cursor: isDrawingMode || isSplitMode ? 'crosshair' : draggedId ? (dragMode === 'move' ? 'move' : 'crosshair') : 'default' }}
       />
     </div>
   );

@@ -27,8 +27,8 @@ export function SortableOcrCard({ block, pageIndex }: SortableOcrCardProps) {
   };
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <OcrCard block={block} pageIndex={pageIndex} />
+    <div ref={setNodeRef} style={style} {...attributes}>
+      <OcrCard block={block} pageIndex={pageIndex} dragListeners={listeners} />
     </div>
   );
 }
