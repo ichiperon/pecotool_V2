@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { PecoDocument, PageData, TextBlock, WritingMode } from '../types'
+import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
 // ── hoisted mocks ──────────────────────────────────────────────
 const m = vi.hoisted(() => ({

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, History, ChevronDown } from "lucide-react";
-import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, ChevronDown } from "lucide-react";
+import { open, save, ask } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, generateThumbnail } from "./utils/pdfLoader";
 import { savePDF } from "./utils/pdfSaver";
@@ -386,7 +386,6 @@ function App() {
               return;
             }
           }
-          if (state.document) removeLock(state.document.filePath);
           try {
             const windows = await getAllWindows();
             for (const w of windows) {

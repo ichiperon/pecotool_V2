@@ -129,11 +129,11 @@ beforeEach(() => {
   mockListen.mockResolvedValue(() => {})
 
   // ResizeObserver スタブ（jsdom が実装していないため）
-  global.ResizeObserver = class {
+  vi.stubGlobal('ResizeObserver', class {
     observe() {}
     unobserve() {}
     disconnect() {}
-  }
+  });
 
   usePecoStore.setState({
     document: null,

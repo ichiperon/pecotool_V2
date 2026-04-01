@@ -54,7 +54,7 @@ describe('pecoStore', () => {
 
   describe('U-ST-01: Undo スタック追加', () => {
     it('pushAction で undoStack に action が積まれる', () => {
-      const action: Action = { type: 'update_page', pageIndex: 0, before: {}, after: {} }
+      const action: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
       usePecoStore.getState().pushAction(action)
 
       const { undoStack } = usePecoStore.getState()
@@ -63,8 +63,8 @@ describe('pecoStore', () => {
     })
 
     it('pushAction すると redoStack がクリアされる', () => {
-      usePecoStore.setState({ redoStack: [{ type: 'update_page', pageIndex: 0, before: {}, after: {} }] })
-      usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: {}, after: {} })
+      usePecoStore.setState({ redoStack: [{ type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }] })
+      usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() })
 
       expect(usePecoStore.getState().redoStack).toHaveLength(0)
     })
@@ -88,7 +88,7 @@ describe('pecoStore', () => {
     })
 
     it('document が null のとき undo() は何もしない', () => {
-      usePecoStore.setState({ document: null, undoStack: [{ type: 'update_page', pageIndex: 0, before: {}, after: {} }] })
+      usePecoStore.setState({ document: null, undoStack: [{ type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }] })
       usePecoStore.getState().undo()
 
       expect(usePecoStore.getState().undoStack).toHaveLength(1)
@@ -130,21 +130,21 @@ describe('pecoStore', () => {
   describe('U-ST-04: Undo スタック上限 (100件)', () => {
     it('101 回 pushAction しても undoStack.length は 100 を超えない', () => {
       for (let i = 0; i < 101; i++) {
-        usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: { i }, after: { i } })
+        usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() })
       }
       expect(usePecoStore.getState().undoStack).toHaveLength(100)
     })
 
     it('上限超過時は先頭 (最古) の action が削除される', () => {
       // 最初に order=0 を push してから 100 件追加
-      usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: { order: 0 }, after: {} })
+      usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: makePage({ pageIndex: 0 }), after: makePage() })
       for (let i = 1; i <= 100; i++) {
-        usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: { order: i }, after: {} })
+        usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: makePage({ pageIndex: i }), after: makePage() })
       }
       const stack = usePecoStore.getState().undoStack
       expect(stack).toHaveLength(100)
-      // order=0 の action は消えているはず
-      expect(stack[0].before).toEqual({ order: 1 })
+      // i=0 の action は消えているはず、先頭は i=1 になっているはず
+      expect(stack[0].before.pageIndex).toBe(1)
     })
   })
 

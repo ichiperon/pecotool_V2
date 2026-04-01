@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { PecoDocument, PageData, Action } from '../types';
+import { PecoDocument, PageData, Action, TextBlock } from '../types';
 
 interface PecoState {
   document: PecoDocument | null;
@@ -134,7 +134,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       }
     }
 
-    const newState: any = {
+    const newState: Partial<PecoState> = {
       document: { ...state.document, pages: newPages },
       pageAccessOrder: newOrder,
     };
@@ -203,7 +203,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const newBlocks = [...page.textBlocks];
     const pastedIds = new Set<string>();
 
-    clipboard.forEach((b, i) => {
+    clipboard.forEach((b) => {
       const newId = crypto.randomUUID();
       const newBlock: TextBlock = {
         ...b,
