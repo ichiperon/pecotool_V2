@@ -9,6 +9,7 @@ interface PecoState {
   zoom: number;
   isDirty: boolean;
   showOcr: boolean;
+  ocrOpacity: number;
   showTextPreview: boolean;
   isDrawingMode: boolean;
   isSplitMode: boolean;
@@ -22,6 +23,7 @@ interface PecoState {
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
   toggleShowOcr: () => void;
+  setOcrOpacity: (opacity: number) => void;
   toggleTextPreview: () => void;
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
@@ -43,6 +45,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   zoom: 100,
   isDirty: false,
   showOcr: true,
+  ocrOpacity: 0.4,
   showTextPreview: false,
   isDrawingMode: false,
   isSplitMode: false,
@@ -76,6 +79,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   setZoom: (zoom) => set({ zoom }),
 
   toggleShowOcr: () => set((state) => ({ showOcr: !state.showOcr })),
+
+  setOcrOpacity: (opacity) => set({ ocrOpacity: opacity }),
 
   toggleTextPreview: () => set((state) => ({ showTextPreview: !state.showTextPreview })),
 

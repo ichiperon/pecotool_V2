@@ -17,8 +17,11 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
-  const { document, originalBytes, zoom, showOcr, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
+  const { document, originalBytes, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
+
+  // Canvas size state (CSS display size, synced to viewport)
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
 
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
@@ -108,6 +111,9 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         overlayCanvasRef.current.height = viewport.height;
       }
 
+      // Sync CSS display size so overlay canvas covers the full rendered area
+      setCanvasSize({ width: viewport.width, height: viewport.height });
+
       const renderContext = {
         canvasContext: context,
         viewport: viewport,
@@ -157,11 +163,14 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           // 隣接BBを視覚的に分離するための表示用インセット（bboxデータは変更しない）
           const inset = isSelected ? 0 : 1;
 
-          // AcrobatのCtrl+Aっぽい視認性を確保するための背景ハイライト（薄い青）
-          context.fillStyle = isSelected ? "rgba(0, 100, 255, 0.25)" : "rgba(0, 150, 255, 0.1)";
+          // opacity を ocrOpacity で制御（選択時は常に鮮明に）
+          const baseAlpha = isSelected ? 0.8 : ocrOpacity;
+          const fillAlpha = isSelected ? 0.25 : ocrOpacity * 0.25;
+
+          context.fillStyle = isSelected ? `rgba(0, 100, 255, 0.25)` : `rgba(0, 150, 255, ${fillAlpha})`;
           context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
-          context.strokeStyle = isSelected ? "rgba(0, 100, 255, 0.9)" : "rgba(255, 0, 0, 0.4)";
+          context.strokeStyle = isSelected ? `rgba(0, 100, 255, 0.9)` : `rgba(255, 0, 0, ${baseAlpha})`;
           context.lineWidth = isSelected ? 2 : 1;
           context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
@@ -194,7 +203,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
               context.lineWidth = 3 / sy;
               context.strokeStyle = "rgba(255, 255, 255, 0.9)";
               context.strokeText(block.text, 0, 0);
-              context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
+              context.fillStyle = isSelected ? `rgba(0, 50, 255, ${baseAlpha})` : `rgba(255, 0, 0, ${baseAlpha})`;
               context.fillText(block.text, 0, 0);
               context.restore();
             } else {
@@ -211,7 +220,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
               context.lineWidth = 3 / sx;
               context.strokeStyle = "rgba(255, 255, 255, 0.9)";
               context.strokeText(block.text, 0, 0);
-              context.fillStyle = isSelected ? "rgba(0, 50, 255, 0.9)" : "rgba(255, 0, 0, 0.7)";
+              context.fillStyle = isSelected ? `rgba(0, 50, 255, ${baseAlpha})` : `rgba(255, 0, 0, ${baseAlpha})`;
               context.fillText(block.text, 0, 0);
               context.restore();
             }
@@ -234,7 +243,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     };
 
     renderOverlays();
-  }, [zoom, document, pageIndex, showOcr, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage]);
+  }, [zoom, document, pageIndex, showOcr, ocrOpacity, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (disableDrawing) return;
@@ -532,18 +541,34 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   };
 
   return (
-    <div className={`canvas-wrapper ${isDrawingMode ? 'drawing-mode' : ''}`} style={{ position: 'relative', display: 'inline-block', transform: `scale(1)`, transformOrigin: 'top left' }}>
-      <canvas 
-        ref={pdfCanvasRef} 
-        style={{ display: 'block' }}
+    <div
+      className={`canvas-wrapper ${isDrawingMode ? 'drawing-mode' : ''}`}
+      style={{
+        position: 'relative',
+        display: 'inline-block',
+        width: canvasSize.width > 0 ? canvasSize.width : undefined,
+        height: canvasSize.height > 0 ? canvasSize.height : undefined,
+      }}
+    >
+      <canvas
+        ref={pdfCanvasRef}
+        style={{ display: 'block', width: canvasSize.width > 0 ? canvasSize.width : undefined, height: canvasSize.height > 0 ? canvasSize.height : undefined }}
       />
-      <canvas 
-        ref={overlayCanvasRef} 
+      <canvas
+        ref={overlayCanvasRef}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        style={{ position: 'absolute', top: 0, left: 0, zIndex: 2, cursor: isDrawingMode || isSplitMode ? 'crosshair' : draggedId ? (dragMode === 'move' ? 'move' : 'crosshair') : 'default' }}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          zIndex: 2,
+          width: canvasSize.width > 0 ? canvasSize.width : undefined,
+          height: canvasSize.height > 0 ? canvasSize.height : undefined,
+          cursor: isDrawingMode || isSplitMode ? 'crosshair' : draggedId ? (dragMode === 'move' ? 'move' : 'crosshair') : 'default',
+        }}
       />
     </div>
   );

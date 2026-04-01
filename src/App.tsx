@@ -15,7 +15,7 @@ import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen } from '@tauri-apps/api/event';
 
 function App() {
-  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails, resetDirty } = usePecoStore();
+  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails, resetDirty } = usePecoStore();
 
   const [leftWidth, setLeftWidth] = useState(200);
   const [rightWidth, setRightWidth] = useState(350);
@@ -644,6 +644,21 @@ function App() {
             <Eye size={18} />
             <span>OCR表示</span>
           </button>
+          {showOcr && (
+            <label className="ocr-opacity-label" title="OCR表示の濃さ">
+              <span>濃さ</span>
+              <input
+                type="range"
+                className="ocr-opacity-slider"
+                min="0.05"
+                max="1"
+                step="0.05"
+                value={ocrOpacity}
+                onChange={(e) => setOcrOpacity(parseFloat(e.target.value))}
+              />
+              <span>{Math.round(ocrOpacity * 100)}%</span>
+            </label>
+          )}
           <button 
             onClick={openPreviewWindow} 
             title="コピペプレビューを別ウィンドウで開く"

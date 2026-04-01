@@ -1,14 +1,17 @@
+import { forwardRef } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { OcrCard } from './OcrCard';
+import { OcrCard, OcrCardHandle } from './OcrCard';
 import { TextBlock } from '../types';
 
 interface SortableOcrCardProps {
   block: TextBlock;
   pageIndex: number;
+  onNavigate?: (direction: 'up' | 'down') => void;
 }
 
-export function SortableOcrCard({ block, pageIndex }: SortableOcrCardProps) {
+export const SortableOcrCard = forwardRef<OcrCardHandle, SortableOcrCardProps>(
+  function SortableOcrCard({ block, pageIndex, onNavigate }, ref) {
   const {
     attributes,
     listeners,
@@ -28,7 +31,13 @@ export function SortableOcrCard({ block, pageIndex }: SortableOcrCardProps) {
 
   return (
     <div ref={setNodeRef} style={style} {...attributes}>
-      <OcrCard block={block} pageIndex={pageIndex} dragListeners={listeners} />
+      <OcrCard
+        ref={ref}
+        block={block}
+        pageIndex={pageIndex}
+        dragListeners={listeners}
+        onNavigate={onNavigate}
+      />
     </div>
   );
-}
+});

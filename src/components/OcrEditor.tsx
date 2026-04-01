@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -14,8 +14,10 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
+import { useState } from 'react';
 import { usePecoStore } from '../store/pecoStore';
 import { SortableOcrCard } from './SortableOcrCard';
+import { OcrCardHandle } from './OcrCard';
 import { Search } from 'lucide-react';
 
 interface OcrEditorProps {
@@ -23,14 +25,17 @@ interface OcrEditorProps {
 }
 
 export function OcrEditor({ width }: OcrEditorProps) {
-  const { document, currentPageIndex, updatePageData } = usePecoStore();
+  const { document, currentPageIndex, updatePageData, toggleSelection } = usePecoStore();
   const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
+
+  // 各カードへの ref 配列
+  const cardRefs = useRef<(OcrCardHandle | null)[]>([]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: searchTerm
-        ? { distance: Infinity } // Disable drag while search filter is active
+        ? { distance: Infinity }
         : { distance: 8 },
     }),
     useSensor(KeyboardSensor, {
@@ -54,9 +59,26 @@ export function OcrEditor({ width }: OcrEditorProps) {
     }
   };
 
-  const filteredBlocks = currentPage?.textBlocks.filter(b => 
+  const filteredBlocks = currentPage?.textBlocks.filter(b =>
     b.text.toLowerCase().includes(searchTerm.toLowerCase())
   ) || [];
+
+  // ↑↓キーナビゲーション：選択 + フォーカス移動
+  const handleNavigate = (currentBlockId: string, direction: 'up' | 'down') => {
+    const currentIndex = filteredBlocks.findIndex(b => b.id === currentBlockId);
+    if (currentIndex === -1) return;
+
+    const nextIndex = direction === 'down' ? currentIndex + 1 : currentIndex - 1;
+    if (nextIndex < 0 || nextIndex >= filteredBlocks.length) return;
+
+    const nextBlock = filteredBlocks[nextIndex];
+    toggleSelection(nextBlock.id, false);
+
+    // 少し待ってからフォーカスを移動（scrollIntoView と競合しないように）
+    setTimeout(() => {
+      cardRefs.current[nextIndex]?.focusContent();
+    }, 50);
+  };
 
   return (
     <aside className="editor-panel" style={{ width: `${width}px` }}>
@@ -64,10 +86,10 @@ export function OcrEditor({ width }: OcrEditorProps) {
         <span>OCRテキスト</span>
         <div className="search-container">
           <Search size={14} className="search-icon" />
-          <input 
-            type="text" 
-            placeholder="検索..." 
-            className="search-box" 
+          <input
+            type="text"
+            placeholder="検索..."
+            className="search-box"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
@@ -79,21 +101,23 @@ export function OcrEditor({ width }: OcrEditorProps) {
         ) : !currentPage ? (
           <div className="placeholder">読み込み中...</div>
         ) : (
-          <DndContext 
+          <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
             onDragEnd={handleDragEnd}
           >
-            <SortableContext 
+            <SortableContext
               items={filteredBlocks.map(b => b.id)}
               strategy={verticalListSortingStrategy}
             >
               <div className="ocr-card-list">
-                {filteredBlocks.map(block => (
-                  <SortableOcrCard 
-                    key={block.id} 
-                    block={block} 
-                    pageIndex={currentPageIndex} 
+                {filteredBlocks.map((block, index) => (
+                  <SortableOcrCard
+                    key={block.id}
+                    ref={(el) => { cardRefs.current[index] = el; }}
+                    block={block}
+                    pageIndex={currentPageIndex}
+                    onNavigate={(dir) => handleNavigate(block.id, dir)}
                   />
                 ))}
               </div>
