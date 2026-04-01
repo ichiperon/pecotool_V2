@@ -51,18 +51,6 @@ function App() {
     });
   };
 
-  const createLock = async (pdfPath: string) => {
-    try {
-      const lockPath = `${pdfPath}.peco-lock`;
-      await writeFile(lockPath, new TextEncoder().encode(`locked by PecoTool v2 at ${new Date().toISOString()}`));
-    } catch (e) { console.warn("Failed to create lock file", e); }
-  };
-
-  const removeLock = async (pdfPath: string) => {
-    // Note: Deleting files in Tauri 2.0 fs requires additional configuration usually.
-    // For simplicity in this version, we treat the lock as an advisory presence.
-  };
-
   // --- Handlers ---
 
   const handleOpen = async (explicitPath?: string) => {
@@ -76,15 +64,6 @@ function App() {
       }
 
       if (selected && typeof selected === 'string') {
-        // Simple Lock Check
-        try {
-          const lockContent = await readFile(`${selected}.peco-lock`);
-          if (lockContent) {
-            const confirmed = await ask('このファイルは別のウィンドウで開かれている可能性があります。続行しますか？', { title: 'ファイルロックの警告', kind: 'warning' });
-            if (!confirmed) return;
-          }
-        } catch (e) {}
-
         const content = await readFile(selected);
         const bytesForStore = new Uint8Array(content); 
         
@@ -95,7 +74,6 @@ function App() {
         doc.filePath = selected;
         setDocument(doc, bytesForStore);
         addToRecent(selected);
-        createLock(selected);
         setShowRecentDropdown(false);
 
         const pdf = await openPDF(bytesForStore.slice());
@@ -157,13 +135,10 @@ function App() {
         console.log('[handleSaveAs] savePDF complete', { savedLen: savedBytes.length });
 
         await writeFile(path, savedBytes);
-        const oldPath = document.filePath;
         document.filePath = path;
         resetDirty();
         showToast("名前を付けて保存しました。");
         addToRecent(path);
-        removeLock(oldPath);
-        createLock(path);
       }
     } catch (err) {
       console.error("Failed to save as:", err);
@@ -178,7 +153,6 @@ function App() {
       });
       if (!confirmed) return;
     }
-    if (document) removeLock(document.filePath);
     setDocument(null);
   }, [isDirty, document, setDocument]);
 

@@ -13,7 +13,7 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
 
   if (!cachedFontBytes) {
     try {
-      const res = await fetch('/fonts/NotoSansJP-Regular.otf');
+      const res = await fetch('/fonts/IPAexGothic.ttf');
       if (res.ok) cachedFontBytes = await res.arrayBuffer();
     } catch(e) {
       console.warn('Failed to load font bytes', e);
@@ -31,12 +31,11 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
 
   if (infoDict) {
     try {
-      const existingHex = infoDict.lookup(PDFName.of('PecoToolBBoxes'), PDFHexString);
-      const existingStr = infoDict.lookup(PDFName.of('PecoToolBBoxes'), PDFString);
-      if (existingHex) {
-        existingBBoxMeta = JSON.parse(existingHex.decodeText());
-      } else if (existingStr) {
-        existingBBoxMeta = JSON.parse(existingStr.decodeText());
+      const value = infoDict.get(PDFName.of('PecoToolBBoxes'));
+      if (value instanceof PDFHexString) {
+        existingBBoxMeta = JSON.parse(value.decodeText());
+      } else if (value instanceof PDFString) {
+        existingBBoxMeta = JSON.parse(value.decodeText());
       }
     } catch(e) {
       console.warn('Failed to parse existing PecoToolBBoxes in savePDF', e);
