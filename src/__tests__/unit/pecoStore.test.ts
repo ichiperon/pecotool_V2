@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { usePecoStore } from '../store/pecoStore'
-import type { PecoDocument, PageData, Action } from '../types'
+import { usePecoStore } from '../../store/pecoStore'
+import type { PecoDocument, PageData, Action } from '../../types'
 
 // ── ヘルパー ──────────────────────────────────────────────────
 

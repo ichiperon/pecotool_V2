@@ -24,7 +24,9 @@ vi.mock('pdf-lib', () => ({
   PDFDocument:      { load: m.pdfLoad },
   degrees:          (n: number) => ({ type: 'degrees', angle: n }),
   PDFName:          { of: vi.fn((s: string) => s) },
-  PDFString:        { of: vi.fn((s: string) => s) },
+  PDFString:        { of: vi.fn((s: string) => s), fromText: vi.fn((s: string) => s) },
+  PDFHexString:     { of: vi.fn((s: string) => s), fromText: vi.fn((s: string) => s) },
+  StandardFonts:    { Helvetica: 'Helvetica' },
   pushGraphicsState: m.pushGsFn,
   popGraphicsState:  m.popGsFn,
   translate:         m.translateFn,
@@ -38,7 +40,7 @@ vi.mock('pdfjs-dist', () => ({
   getDocument: m.pdfjsGetDocument,
 }))
 
-import { savePDF } from '../utils/pdfSaver'
+import { savePDF } from '../../utils/pdfSaver'
 
 // ── ヘルパー ──────────────────────────────────────────────────
 
@@ -89,6 +91,7 @@ beforeEach(() => {
     node: { normalizedEntries: () => ({ Contents: undefined }) },
     getWidth: () => 595,
     getHeight: () => 842,
+    getSize: () => ({ width: 595, height: 842 }),
   }
   m.insertPage.mockReturnValue(mockPage)
   m.embedJpg.mockResolvedValue({ width: 1, height: 1 })
@@ -105,6 +108,7 @@ beforeEach(() => {
     embedJpg:        m.embedJpg,
     save:            m.save,
     context: { lookup: vi.fn() },
+    getInfoDict:     vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
   })
 
   // pdfjs mock: getPage returns viewport + render stub
@@ -255,8 +259,7 @@ describe('pdfSaver / savePDF', () => {
       expect(result).toBeInstanceOf(Uint8Array)
       // console.warn が呼ばれる
       expect(warnSpy).toHaveBeenCalledWith(
-        'Skipping text block due to encoding error:',
-        '壊れたテキスト',
+        'Skipping block due to render error:',
         expect.any(Error),
       )
       // 2件ともdrawText が呼ばれる（1件目は例外で落ちた後もループ継続）

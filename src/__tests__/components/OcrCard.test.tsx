@@ -1,8 +1,8 @@
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { OcrCard } from '../components/OcrCard'
-import { usePecoStore } from '../store/pecoStore'
-import type { TextBlock, PageData, PecoDocument } from '../types'
+import { OcrCard } from '../../components/OcrCard'
+import { usePecoStore } from '../../store/pecoStore'
+import type { TextBlock, PageData, PecoDocument } from '../../types'
 
 vi.mock('lucide-react', () => ({
   GripVertical: () => null,

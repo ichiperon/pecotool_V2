@@ -1,8 +1,8 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import App from '../App'
-import { usePecoStore } from '../store/pecoStore'
-import type { TextBlock, PageData, PecoDocument } from '../types'
+import App from '../../App'
+import { usePecoStore } from '../../store/pecoStore'
+import type { TextBlock, PageData, PecoDocument } from '../../types'
 
 // ── Tauri / プラグインのモック ────────────────────────────────
 
@@ -43,7 +43,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
   writeFile: vi.fn(),
 }))
 
-vi.mock('../utils/pdfLoader', () => ({
+vi.mock('../../utils/pdfLoader', () => ({
   loadPDF: vi.fn(),
   loadPage: vi.fn(),
   loadPecoToolBBoxMeta: vi.fn(),
@@ -51,15 +51,15 @@ vi.mock('../utils/pdfLoader', () => ({
   generateThumbnail: vi.fn(),
 }))
 
-vi.mock('../utils/pdfSaver', () => ({
+vi.mock('../../utils/pdfSaver', () => ({
   savePDF: vi.fn(),
 }))
 
-vi.mock('../components/PdfCanvas', () => ({
+vi.mock('../../components/PdfCanvas', () => ({
   PdfCanvas: () => <div data-testid="pdf-canvas" />,
 }))
 
-vi.mock('../components/OcrEditor', () => ({
+vi.mock('../../components/OcrEditor', () => ({
   OcrEditor: () => <div data-testid="ocr-editor" />,
 }))
 

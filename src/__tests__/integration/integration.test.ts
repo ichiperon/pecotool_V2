@@ -30,7 +30,9 @@ vi.mock('pdf-lib', () => ({
   PDFDocument:       { load: m.pdfLoad },
   degrees:           (n: number) => ({ type: 'degrees', angle: n }),
   PDFName:           { of: vi.fn((s: string) => s) },
-  PDFString:         { of: vi.fn((s: string) => s) },
+  PDFString:         { of: vi.fn((s: string) => s), fromText: vi.fn((s: string) => s) },
+  PDFHexString:      { of: vi.fn((s: string) => s), fromText: vi.fn((s: string) => s) },
+  StandardFonts:     { Helvetica: 'Helvetica' },
   pushGraphicsState: m.pushGsFn,
   popGraphicsState:  m.popGsFn,
   translate:         m.translateFn,
@@ -39,10 +41,10 @@ vi.mock('pdf-lib', () => ({
 
 vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
 
-import { loadPage } from '../utils/pdfLoader'
-import { savePDF } from '../utils/pdfSaver'
-import { usePecoStore } from '../store/pecoStore'
-import type { PecoDocument, PageData, TextBlock, WritingMode } from '../types'
+import { loadPage } from '../../utils/pdfLoader'
+import { savePDF } from '../../utils/pdfSaver'
+import { usePecoStore } from '../../store/pecoStore'
+import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
 // ── ヘルパー ──────────────────────────────────────────────────
 
@@ -264,6 +266,7 @@ describe('I-06: 縦書きPDFの保存', () => {
       node: { normalizedEntries: () => ({ Contents: undefined }) },
       getWidth: () => 595,
       getHeight: () => 842,
+      getSize: () => ({ width: 595, height: 842 }),
     }
     const mockPdfDoc = {
       registerFontkit: m.registerFontkit,
@@ -274,6 +277,7 @@ describe('I-06: 縦書きPDFの保存', () => {
       embedJpg:    m.embedJpg,
       save:        m.save,
       context: { lookup: vi.fn() },
+      getInfoDict: vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
     }
     m.embedFont.mockResolvedValue({
       widthOfTextAtSize: vi.fn().mockReturnValue(10),

@@ -9,7 +9,7 @@ vi.mock('pdfjs-dist', () => ({
 // ?url インポートを空文字に差し替え
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 
-import { loadPage } from '../utils/pdfLoader'
+import { loadPage } from '../../utils/pdfLoader'
 
 // ── ヘルパー ──────────────────────────────────────────────────
 

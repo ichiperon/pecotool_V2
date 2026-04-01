@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { TextPreviewWindow } from '../components/TextPreviewWindow'
+import { TextPreviewWindow } from '../../components/TextPreviewWindow'
 
 // ── Tauri API モック ───────────────────────────────────────────
 

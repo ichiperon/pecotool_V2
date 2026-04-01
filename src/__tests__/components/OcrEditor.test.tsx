@@ -1,9 +1,9 @@
 import { render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { OcrEditor } from '../components/OcrEditor'
-import { usePecoStore } from '../store/pecoStore'
-import type { TextBlock, PageData, PecoDocument } from '../types'
+import { OcrEditor } from '../../components/OcrEditor'
+import { usePecoStore } from '../../store/pecoStore'
+import type { TextBlock, PageData, PecoDocument } from '../../types'
 
 // DnD kit をスタブ化（検索フィルターテストに不要）
 vi.mock('@dnd-kit/core', () => ({

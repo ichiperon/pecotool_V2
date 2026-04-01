@@ -91,6 +91,36 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     };
   };
 
+  // 選択されたブロックへの自動スクロール
+  useEffect(() => {
+    // ドラッグ中（移動・サイズ調整中）は自動スクロールさせない
+    if (selectedIds.size !== 1 || draggedId) return;
+    const selectedId = Array.from(selectedIds)[0];
+    const pageData = document?.pages.get(pageIndex);
+    const block = pageData?.textBlocks.find(b => b.id === selectedId);
+    if (!block) return;
+
+    const container = window.document.querySelector('.pdf-viewer-panel');
+    if (!container) return;
+
+    const scale = zoom / 100;
+    const x = block.bbox.x * scale;
+    const y = block.bbox.y * scale;
+    const w = block.bbox.width * scale;
+    const h = block.bbox.height * scale;
+
+    // コンテナ内での相対位置を計算して中央に持ってくる
+    const containerRect = container.getBoundingClientRect();
+    const targetX = x - containerRect.width / 2 + w / 2;
+    const targetY = y - containerRect.height / 2 + h / 2;
+
+    container.scrollTo({
+      left: Math.max(0, targetX),
+      top: Math.max(0, targetY),
+      behavior: 'smooth'
+    });
+  }, [selectedIds, zoom, document, pageIndex]);
+
   // PDF Layer Rendering
   useEffect(() => {
     if (!pdfPage || !pdfCanvasRef.current) return;

@@ -22,7 +22,7 @@ function safeGetDocument(bytes: Uint8Array) {
 export async function loadPDF(file: File): Promise<PecoDocument> {
   const arrayBuffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({ 
-    data: new Uint8Array(arrayBuffer),
+    data: new Uint8Array(arrayBuffer).slice(), // コピーを渡して元のバッファを保護
     cMapUrl: CMAP_URL,
     cMapPacked: CMAP_PACKED,
     standardFontDataUrl: STANDARD_FONT_DATA_URL,
@@ -83,7 +83,7 @@ export async function loadPecoToolBBoxMeta(pdf: pdfjsLib.PDFDocumentProxy): Prom
 }>> | null> {
   try {
     const metadata = await pdf.getMetadata();
-    const raw = (metadata.info as any)?.PecoToolBBoxes;
+    const raw = (metadata.info as any)?.Custom?.PecoToolBBoxes || (metadata.info as any)?.PecoToolBBoxes;
     if (typeof raw === 'string' && raw.length > 0) {
       return JSON.parse(raw);
     }

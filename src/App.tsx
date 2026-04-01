@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2 } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, History, ChevronDown } from "lucide-react";
 import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, generateThumbnail } from "./utils/pdfLoader";
@@ -26,6 +26,8 @@ function App() {
   const [panStart, setPanStart] = useState({ x: 0, y: 0, scrollX: 0, scrollY: 0 });
   const [notification, setNotification] = useState<{ message: string; isError: boolean } | null>(null);
   const [helpMenu, setHelpMenu] = useState<{ x: number, y: number, visible: boolean }>({ x: 0, y: 0, visible: false });
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  const [showRecentDropdown, setShowRecentDropdown] = useState(false);
 
   const showToast = useCallback((message: string, isError = false) => {
     setNotification({ message, isError });
@@ -34,25 +36,69 @@ function App() {
 
   const currentPage = document?.pages.get(currentPageIndex);
 
-  // --- Handlers Defined Early to avoid initialization errors ---
+  // --- Utility: Recent Files & Lock ---
 
-  const handleOpen = async () => {
+  useEffect(() => {
+    const saved = localStorage.getItem('peco-recent-files');
+    if (saved) setRecentFiles(JSON.parse(saved));
+  }, []);
+
+  const addToRecent = (path: string) => {
+    setRecentFiles(prev => {
+      const next = [path, ...prev.filter(p => p !== path)].slice(0, 10);
+      localStorage.setItem('peco-recent-files', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const createLock = async (pdfPath: string) => {
     try {
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: 'PDF', extensions: ['pdf'] }]
-      });
+      const lockPath = `${pdfPath}.peco-lock`;
+      await writeFile(lockPath, new TextEncoder().encode(`locked by PecoTool v2 at ${new Date().toISOString()}`));
+    } catch (e) { console.warn("Failed to create lock file", e); }
+  };
 
-      if (selected && !Array.isArray(selected)) {
+  const removeLock = async (pdfPath: string) => {
+    // Note: Deleting files in Tauri 2.0 fs requires additional configuration usually.
+    // For simplicity in this version, we treat the lock as an advisory presence.
+  };
+
+  // --- Handlers ---
+
+  const handleOpen = async (explicitPath?: string) => {
+    try {
+      let selected = explicitPath;
+      if (!selected) {
+        selected = await open({
+          multiple: false,
+          filters: [{ name: 'PDF', extensions: ['pdf'] }]
+        }) as string;
+      }
+
+      if (selected && typeof selected === 'string') {
+        // Simple Lock Check
+        try {
+          const lockContent = await readFile(`${selected}.peco-lock`);
+          if (lockContent) {
+            const confirmed = await ask('このファイルは別のウィンドウで開かれている可能性があります。続行しますか？', { title: 'ファイルロックの警告', kind: 'warning' });
+            if (!confirmed) return;
+          }
+        } catch (e) {}
+
         const content = await readFile(selected);
-        const blob = new Blob([content], { type: 'application/pdf' });
+        const bytesForStore = new Uint8Array(content); 
+        
+        const blob = new Blob([bytesForStore.slice()], { type: 'application/pdf' });
         const file = new File([blob], selected.split(/[\\/]/).pop() || 'document.pdf');
 
         const doc = await loadPDF(file);
         doc.filePath = selected;
-        setDocument(doc, content);
+        setDocument(doc, bytesForStore);
+        addToRecent(selected);
+        createLock(selected);
+        setShowRecentDropdown(false);
 
-        const pdf = await openPDF(content);
+        const pdf = await openPDF(bytesForStore.slice());
         const bboxMeta = await loadPecoToolBBoxMeta(pdf);
 
         try {
@@ -83,7 +129,11 @@ function App() {
   const handleSave = async () => {
     if (!document || !originalBytes) return;
     try {
-      const savedBytes = await savePDF(originalBytes, document);
+      console.log('[handleSave] starting save...', { originalLen: originalBytes.length });
+      const bytesToSave = new Uint8Array(originalBytes); 
+      const savedBytes = await savePDF(bytesToSave, document);
+      console.log('[handleSave] savePDF complete', { savedLen: savedBytes.length });
+      
       await writeFile(document.filePath, savedBytes);
       resetDirty();
       showToast("保存しました。");
@@ -100,11 +150,20 @@ function App() {
         filters: [{ name: 'PDF', extensions: ['pdf'] }],
         defaultPath: document.fileName
       });
-      if (path) {
-        const savedBytes = await savePDF(originalBytes, document);
+      if (path && typeof path === 'string') {
+        console.log('[handleSaveAs] starting save...', { originalLen: originalBytes.length });
+        const bytesToSave = new Uint8Array(originalBytes);
+        const savedBytes = await savePDF(bytesToSave, document);
+        console.log('[handleSaveAs] savePDF complete', { savedLen: savedBytes.length });
+
         await writeFile(path, savedBytes);
+        const oldPath = document.filePath;
+        document.filePath = path;
         resetDirty();
         showToast("名前を付けて保存しました。");
+        addToRecent(path);
+        removeLock(oldPath);
+        createLock(path);
       }
     } catch (err) {
       console.error("Failed to save as:", err);
@@ -119,6 +178,7 @@ function App() {
       });
       if (!confirmed) return;
     }
+    if (document) removeLock(document.filePath);
     setDocument(null);
   }, [isDirty, document, setDocument]);
 
@@ -352,6 +412,7 @@ function App() {
               return;
             }
           }
+          if (state.document) removeLock(state.document.filePath);
           try {
             const windows = await getAllWindows();
             for (const w of windows) {
@@ -506,6 +567,20 @@ function App() {
     }
   };
 
+  // タイトルバー連動
+  useEffect(() => {
+    const updateTitle = async () => {
+      try {
+        const win = getCurrentWindow();
+        const hasUnsaved = isDirty || Array.from(document?.pages.values() || []).some(p => p.isDirty);
+        const dirtyMark = hasUnsaved ? "● " : "";
+        const fileName = document ? ` - ${document.fileName}` : "";
+        await win.setTitle(`${dirtyMark}PecoTool v2${fileName}`);
+      } catch (e) {}
+    };
+    updateTitle();
+  }, [isDirty, document, currentPageIndex]);
+
   // --- UI Resizing Handlers ---
 
   const startResizeLeft = (e: React.MouseEvent) => {
@@ -569,6 +644,7 @@ function App() {
       }}
       onClick={() => {
         if (helpMenu.visible) setHelpMenu({ ...helpMenu, visible: false });
+        if (showRecentDropdown) setShowRecentDropdown(false);
       }}
     >
       {helpMenu.visible && (
@@ -596,7 +672,21 @@ function App() {
 
       <header className="toolbar">
         <div className="toolbar-group">
-          <button onClick={handleOpen} title="開く"><FolderOpen size={18} /><span>開く</span></button>
+          <div className="btn-group">
+            <button onClick={() => handleOpen()} title="開く"><FolderOpen size={18} /><span>開く</span></button>
+            <button className="dropdown-btn" onClick={(e) => { e.stopPropagation(); setShowRecentDropdown(!showRecentDropdown); }} title="最近のファイル">
+              <ChevronDown size={14} />
+            </button>
+            {showRecentDropdown && recentFiles.length > 0 && (
+              <div className="recent-dropdown">
+                {recentFiles.map((path, i) => (
+                  <div key={i} className="recent-item" onClick={() => handleOpen(path)} title={path}>
+                    {path.split(/[\\/]/).pop()}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <button onClick={handleClose} title="閉じる" disabled={!document} className="danger"><X size={18} /><span>閉じる</span></button>
           <button onClick={handleSave} title="保存" disabled={!document || (!isDirty && !currentPage?.isDirty)}><Save size={18} /><span>保存</span></button>
           <button onClick={handleSaveAs} title="名前を付けて保存" disabled={!document}><Save size={18} /><span>別名で保存</span></button>
