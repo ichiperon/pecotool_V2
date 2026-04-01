@@ -4,6 +4,9 @@
  */
 import { vi } from 'vitest'
 
+// scrollIntoView は jsdom で未実装のため no-op に差し替え
+Element.prototype.scrollIntoView = vi.fn()
+
 Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
   value: () => ({
     fillStyle: '',

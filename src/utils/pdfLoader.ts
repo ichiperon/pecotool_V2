@@ -61,13 +61,43 @@ export async function generateThumbnail(pdf: pdfjsLib.PDFDocumentProxy, pageInde
   return canvas.toDataURL('image/jpeg', 0.7);
 }
 
-export async function loadPage(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number): Promise<PageData> {
+/**
+ * Read PecoTool bbox metadata from the PDF if it was saved by this tool.
+ * Returns null if no metadata found.
+ */
+export async function loadPecoToolBBoxMeta(pdf: pdfjsLib.PDFDocumentProxy): Promise<Record<string, Array<{
+  bbox: BoundingBox;
+  writingMode: string;
+  order: number;
+  text: string;
+}>> | null> {
+  try {
+    const metadata = await pdf.getMetadata();
+    const raw = (metadata.info as any)?.PecoToolBBoxes;
+    if (typeof raw === 'string' && raw.length > 0) {
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.warn('[loadPecoToolBBoxMeta] Failed to parse metadata:', err);
+  }
+  return null;
+}
+
+export async function loadPage(
+  pdf: pdfjsLib.PDFDocumentProxy,
+  pageIndex: number,
+  bboxMeta?: Record<string, Array<{
+    bbox: BoundingBox;
+    writingMode: string;
+    order: number;
+    text: string;
+  }>> | null
+): Promise<PageData> {
   const page = await pdf.getPage(pageIndex + 1);
   const viewport = page.getViewport({ scale: 1.0 });
   const textContent = await page.getTextContent();
 
   // pdfjs v5 mixes TextItem and TextMarkedContent in items array.
-  // Filter to only TextItem (those with a 'str' property).
   const allItems = textContent.items;
   const textItems = allItems.filter((item: any) => typeof item.str === 'string');
   const nonEmpty = textItems.filter((item: any) => item.str.trim() !== '');
@@ -76,13 +106,39 @@ export async function loadPage(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number
     console.log('[loadPage] sample item:', JSON.stringify(textItems[0]));
   }
 
-  // Use viewport.transform for proper coordinate conversion.
-  // This handles page rotation, mirrored coordinate systems, etc.
-  const vt = viewport.transform; // [a, b, c, d, e, f]
-  const toViewport = (px: number, py: number): [number, number] => [
-    px * vt[0] + py * vt[2] + vt[4],
-    px * vt[1] + py * vt[3] + vt[5],
-  ];
+  // If PecoTool-saved bbox metadata is available for this page, use it directly.
+  // This ensures BB sizes don't change after save→re-open cycles.
+  const savedMeta = bboxMeta?.[String(pageIndex)];
+  if (savedMeta && savedMeta.length > 0) {
+    const textByOrder = new Map(
+      textItems
+        .filter((item: any) => item.str.trim() !== '')
+        .map((item: any, idx: number) => [idx, item.str as string])
+    );
+
+    const textBlocks: TextBlock[] = savedMeta.map((meta, idx) => ({
+      id: crypto.randomUUID(),
+      text: textByOrder.get(idx) ?? meta.text,
+      originalText: textByOrder.get(idx) ?? meta.text,
+      bbox: meta.bbox,
+      writingMode: meta.writingMode as 'horizontal' | 'vertical',
+      order: meta.order,
+      isNew: false,
+      isDirty: false,
+    }));
+
+    console.log(`[loadPage] page ${pageIndex}: using PecoTool saved bboxes (${textBlocks.length} blocks)`);
+    return {
+      pageIndex,
+      width: viewport.width,
+      height: viewport.height,
+      textBlocks,
+      isDirty: false,
+      thumbnail: null,
+    };
+  }
+
+  // Fallback: compute bboxes from pdfjs transform (original OCR text)
 
   let order = 0;
   const textBlocks: TextBlock[] = textItems
@@ -93,15 +149,9 @@ export async function loadPage(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number
       let bbox: BoundingBox;
       
       if (isVertical) {
-        // 縦書きの場合:
-        // transform[2], [3] のベクトルが横方向（太さ=BBの横幅）になります
         const thickness = Math.sqrt(item.transform[2] * item.transform[2] + item.transform[3] * item.transform[3]) || 12;
-        // item.width はテキストの「進行方向の距離（文字送り）」なので、これがBBの「高さ」になります
         const runLength = item.width || Math.abs(item.transform[1]) * item.str.length || thickness * item.str.length;
         
-        // セーブ時に起点（baselineX, baselineY）を求めた逆算を行います
-        // baselineX = bbox.x + 0.288 * sx -> bbox.x = baselineX - 0.288 * sx
-        // baselineY = viewport.height - bbox.y -> bbox.y = viewport.height - baselineY
         bbox = {
           x: item.transform[4] - thickness * 0.288,
           y: viewport.height - item.transform[5],
@@ -109,13 +159,9 @@ export async function loadPage(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number
           height: runLength,
         };
       } else {
-        // 横書きの場合:
-        // transform[0], [1] のベクトルが進行方向、[2], [3] が高さ（太さ）
         const thickness = item.height > 0 ? item.height : Math.abs(item.transform[3]) || 12;
         const runLength = item.width || thickness * item.str.length * 0.6;
         
-        // セーブ時の逆算
-        // baselineY = viewport.height - bbox.y - 1.16 * sy -> bbox.y = viewport.height - baselineY - 1.16 * sy
         bbox = {
           x: item.transform[4],
           y: viewport.height - item.transform[5] - thickness * 1.16,

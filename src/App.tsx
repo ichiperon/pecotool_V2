@@ -4,7 +4,7 @@ import { usePecoStore } from "./store/pecoStore";
 import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser } from "lucide-react";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
-import { loadPDF, loadPage, openPDF, generateThumbnail } from "./utils/pdfLoader";
+import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, generateThumbnail } from "./utils/pdfLoader";
 import { savePDF } from "./utils/pdfSaver";
 import { TextBlock } from "./types";
 import { PdfCanvas } from "./components/PdfCanvas";
@@ -350,7 +350,8 @@ function App() {
     try {
       console.log(`[loadCurrentPage] loading page ${pageIdx}, bytes length=${originalBytes.length}`);
       const pdf = await openPDF(originalBytes);
-      const pageData = await loadPage(pdf, pageIdx);
+      const bboxMeta = await loadPecoToolBBoxMeta(pdf);
+      const pageData = await loadPage(pdf, pageIdx, bboxMeta);
       console.log(`[loadCurrentPage] page ${pageIdx} loaded: ${pageData.textBlocks.length} blocks`);
       updatePageData(pageIdx, pageData, false);
     } catch (err) {
@@ -378,10 +379,13 @@ function App() {
         // Open PDF for thumbnails and text extraction
         const pdf = await openPDF(content);
 
+        // Check for PecoTool-saved bbox metadata (enables lossless re-open)
+        const bboxMeta = await loadPecoToolBBoxMeta(pdf);
+
         // Load page 0 text immediately (don't rely on useEffect timing)
         try {
           console.log('[handleOpen] loading page 0 text...');
-          const pageData = await loadPage(pdf, 0);
+          const pageData = await loadPage(pdf, 0, bboxMeta);
           console.log(`[handleOpen] page 0: ${pageData.textBlocks.length} text blocks`);
           updatePageData(0, pageData, false);
         } catch (err) {

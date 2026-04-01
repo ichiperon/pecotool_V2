@@ -58,16 +58,16 @@ describe('pdfLoader / loadPage', () => {
   })
 
   describe('U-L-03: Y座標変換', () => {
-    it('bbox.y = viewportHeight - transform[5] - height * 0.85', async () => {
+    it('bbox.y = viewportHeight - transform[5] - thickness * 1.16', async () => {
       // viewport.height=800, transform[5]=700, height=20
-      // 期待値: 800 - 700 - 20*0.85 = 83
+      // 期待値: 800 - 700 - 20*1.16 = 76.8
       const pdf = makeMockPdf(
         [{ str: 'X', transform: [1, 0, 0, 20, 50, 700], width: 10, height: 20 }],
         595,
         800,
       )
       const page = await loadPage(pdf, 0)
-      expect(page.textBlocks[0].bbox.y).toBeCloseTo(83, 5)
+      expect(page.textBlocks[0].bbox.y).toBeCloseTo(76.8, 1)
     })
   })
 

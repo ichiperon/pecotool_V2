@@ -3,7 +3,9 @@
     "allow": [
       "Bash(node -e \"const lucide = require\\(''''lucide-react''''\\); console.log\\(''''FileOpen:'''', !!lucide.FileOpen\\); console.log\\(''''Group:'''', !!lucide.Group\\);\")",
       "Bash(cargo check:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npm test:*)",
+      "Bash(npx vitest:*)"
     ]
   }
 }

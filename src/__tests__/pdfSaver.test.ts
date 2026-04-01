@@ -3,21 +3,32 @@ import type { PecoDocument, PageData, TextBlock, WritingMode } from '../types'
 
 // ── hoisted mocks ──────────────────────────────────────────────
 const m = vi.hoisted(() => ({
-  drawText:        vi.fn(),
-  drawImage:       vi.fn(),
-  removePage:      vi.fn(),
-  insertPage:      vi.fn(),
-  embedJpg:        vi.fn(),
-  save:            vi.fn(),
-  embedFont:       vi.fn(),
-  registerFontkit: vi.fn(),
-  pdfLoad:         vi.fn(),
-  pdfjsGetDocument: vi.fn(),
+  drawText:            vi.fn(),
+  drawImage:           vi.fn(),
+  removePage:          vi.fn(),
+  insertPage:          vi.fn(),
+  pushOperators:       vi.fn(),
+  embedJpg:            vi.fn(),
+  save:                vi.fn(),
+  embedFont:           vi.fn(),
+  registerFontkit:     vi.fn(),
+  pdfLoad:             vi.fn(),
+  pdfjsGetDocument:    vi.fn(),
+  translateFn:         vi.fn((...args: any[]) => ({ type: 'translate', args })),
+  scaleFn:             vi.fn((...args: any[]) => ({ type: 'scale', args })),
+  pushGsFn:            vi.fn(() => ({ type: 'pushGs' })),
+  popGsFn:             vi.fn(() => ({ type: 'popGs' })),
 }))
 
 vi.mock('pdf-lib', () => ({
-  PDFDocument: { load: m.pdfLoad },
-  degrees: (n: number) => ({ type: 'degrees', angle: n }),
+  PDFDocument:      { load: m.pdfLoad },
+  degrees:          (n: number) => ({ type: 'degrees', angle: n }),
+  PDFName:          { of: vi.fn((s: string) => s) },
+  PDFString:        { of: vi.fn((s: string) => s) },
+  pushGraphicsState: m.pushGsFn,
+  popGraphicsState:  m.popGsFn,
+  translate:         m.translateFn,
+  scale:             m.scaleFn,
 }))
 
 vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
@@ -62,7 +73,7 @@ function makeDoc(
   }
 }
 
-// viewport1x: scale=1.0 → height=842*1=842
+// viewport1x: scale=1.0 → height=842
 const PAGE_HEIGHT = 842
 
 // ── setup ──────────────────────────────────────────────────────
@@ -71,11 +82,17 @@ beforeEach(() => {
   vi.clearAllMocks()
 
   // pdf-lib mock chain
-  const mockPage = { drawImage: m.drawImage, drawText: m.drawText }
+  const mockPage = {
+    drawImage:    m.drawImage,
+    drawText:     m.drawText,
+    pushOperators: m.pushOperators,
+  }
   m.insertPage.mockReturnValue(mockPage)
-  m.embedJpg.mockResolvedValue({})
+  m.embedJpg.mockResolvedValue({ width: 1, height: 1 })
   m.save.mockResolvedValue(new Uint8Array([1, 2, 3]))
-  m.embedFont.mockResolvedValue({ type: 'mock-font' })
+  m.embedFont.mockResolvedValue({
+    widthOfTextAtSize: vi.fn().mockReturnValue(10),
+  })
   m.pdfLoad.mockResolvedValue({
     registerFontkit: m.registerFontkit,
     embedFont:       m.embedFont,
@@ -102,6 +119,12 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(100)),
   }))
+
+  // translate/scale fns を毎回リセット（vi.clearAllMocks では fn 実装がリセットされない）
+  m.translateFn.mockImplementation((...args: any[]) => ({ type: 'translate', args }))
+  m.scaleFn.mockImplementation((...args: any[]) => ({ type: 'scale', args }))
+  m.pushGsFn.mockImplementation(() => ({ type: 'pushGs' }))
+  m.popGsFn.mockImplementation(() => ({ type: 'popGs' }))
 })
 
 // ── テスト ────────────────────────────────────────────────────
@@ -109,29 +132,35 @@ beforeEach(() => {
 describe('pdfSaver / savePDF', () => {
 
   describe('U-S-01: 横書きブロックの Y 座標', () => {
-    it('y = viewport.height - bbox.y - bbox.height * 0.85（ベースライン補正あり）', async () => {
+    it('translate の y 引数 ≈ viewport.height - bbox.y - ベースライン補正', async () => {
       const doc = makeDoc([{
         writingMode: 'horizontal',
         bbox: { x: 10, y: 100, width: 200, height: 20 },
       }])
       await savePDF(new Uint8Array(), doc)
 
-      const opts = m.drawText.mock.calls[0][1]
-      // 842 - 100 - 20 * 0.85 = 842 - 100 - 17 = 725
-      expect(opts.y).toBeCloseTo(PAGE_HEIGHT - 100 - 20 * 0.85, 5)
+      // 新コード: translate(bboxX, baselineY) が pushOperators 経由で呼ばれる
+      // baselineY = 842 - 100 - 1.16 * (20/1.448) ≈ 725.98 ≈ 726
+      expect(m.translateFn).toHaveBeenCalled()
+      const [, y] = m.translateFn.mock.calls[0]
+      const sy = 20 / 1.448
+      const expectedY = PAGE_HEIGHT - 100 - 1.16 * sy
+      expect(y).toBeCloseTo(expectedY, 0) // ≈ 726（旧設計の ≈ 725 に対応）
     })
   })
 
   describe('U-S-02: 縦書きブロックの Y 座標', () => {
-    it('y = viewport.height - bbox.y', async () => {
+    it('translate の y 引数 = viewport.height - bbox.y', async () => {
       const doc = makeDoc([{
         writingMode: 'vertical',
         bbox: { x: 10, y: 100, width: 15, height: 200 },
       }])
       await savePDF(new Uint8Array(), doc)
 
-      const opts = m.drawText.mock.calls[0][1]
-      expect(opts.y).toBe(PAGE_HEIGHT - 100) // 742
+      // baselineY = 842 - 100 = 742
+      expect(m.translateFn).toHaveBeenCalled()
+      const [, y] = m.translateFn.mock.calls[0]
+      expect(y).toBe(PAGE_HEIGHT - 100) // 742
     })
   })
 
@@ -160,26 +189,39 @@ describe('pdfSaver / savePDF', () => {
   })
 
   describe('U-S-04: 縦書きブロックのフォントサイズ', () => {
-    it('size = bbox.width', async () => {
+    it('drawText は size=1 で呼ばれ、scale で bbox.width に応じたスケールが設定される', async () => {
       const doc = makeDoc([{
         writingMode: 'vertical',
         bbox: { x: 10, y: 100, width: 15, height: 200 },
       }])
       await savePDF(new Uint8Array(), doc)
 
-      expect(m.drawText.mock.calls[0][1].size).toBe(15)
+      // size は常に 1（スケールは translate+scale マトリクスで設定）
+      expect(m.drawText.mock.calls[0][1].size).toBe(1)
+      // scale が呼ばれる（bbox.width に応じた sx）
+      expect(m.scaleFn).toHaveBeenCalled()
+      const [sx] = m.scaleFn.mock.calls[0]
+      // sx = bbox.width / 1.448 ≈ 10.36
+      expect(sx).toBeCloseTo(15 / 1.448, 1)
     })
   })
 
   describe('U-S-05: 横書きブロックのフォントサイズ', () => {
-    it('size = bbox.height', async () => {
+    it('drawText は size=1 で呼ばれ、scale で bbox に応じたスケールが設定される', async () => {
       const doc = makeDoc([{
         writingMode: 'horizontal',
         bbox: { x: 10, y: 100, width: 200, height: 20 },
       }])
       await savePDF(new Uint8Array(), doc)
 
-      expect(m.drawText.mock.calls[0][1].size).toBe(20)
+      // size は常に 1
+      expect(m.drawText.mock.calls[0][1].size).toBe(1)
+      // scale が呼ばれる（bbox.height に応じた sy）
+      expect(m.scaleFn).toHaveBeenCalled()
+      const [sx, sy] = m.scaleFn.mock.calls[0]
+      expect(sy).toBeCloseTo(20 / 1.448, 1)
+      // sx = bbox.width / textWidth（textWidth = widthOfTextAtSize が返す 10）
+      expect(sx).toBeCloseTo(200 / 10, 1) // = 20
     })
   })
 

@@ -201,7 +201,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
               context.scale(1, sy);
               context.rotate(Math.PI / 2);
               context.lineWidth = 3 / sy;
-              context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+              context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
               context.strokeText(block.text, 0, 0);
               context.fillStyle = isSelected ? `rgba(0, 50, 255, ${baseAlpha})` : `rgba(255, 0, 0, ${baseAlpha})`;
               context.fillText(block.text, 0, 0);
@@ -218,7 +218,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
               context.translate(x, y + 2);
               context.scale(sx, 1);
               context.lineWidth = 3 / sx;
-              context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+              context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
               context.strokeText(block.text, 0, 0);
               context.fillStyle = isSelected ? `rgba(0, 50, 255, ${baseAlpha})` : `rgba(255, 0, 0, ${baseAlpha})`;
               context.fillText(block.text, 0, 0);

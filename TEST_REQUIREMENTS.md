@@ -51,35 +51,35 @@ npm install -D vitest @vitest/coverage-v8 @testing-library/react @testing-librar
 
 ### OcrCard
 
-- [ ] **C-OC-01** テキスト編集が store に反映：contentEditable で blur → `block.text` 更新、`isDirty=true`
-- [ ] **C-OC-02** 縦書きバッジ表示：`writingMode='vertical'` → "縦書き" ラベルが表示
-- [ ] **C-OC-03** writingMode トグル：バッジをクリック → `writingMode` が反転、`isDirty=true`
-- [ ] **C-OC-04** dirty インジケーター：`isDirty=true` → "●" が表示
-- [ ] **C-OC-05** 選択時のスタイル：`isSelected=true` → `selected` クラスが付く
-- [ ] **C-OC-06** クリックで選択：カードをクリック → `setSelectedIds` が呼ばれる
+- [x] **C-OC-01** テキスト編集が store に反映：contentEditable で blur → `block.text` 更新、`isDirty=true`
+- [x] **C-OC-02** 縦書きバッジ表示：`writingMode='vertical'` → "縦書き" ラベルが表示
+- [x] **C-OC-03** writingMode トグル：バッジをクリック → `writingMode` が反転、`isDirty=true`
+- [x] **C-OC-04** dirty インジケーター：`isDirty=true` → "●" が表示
+- [x] **C-OC-05** 選択時のスタイル：`isSelected=true` → `selected` クラスが付く
+- [x] **C-OC-06** クリックで選択：カードをクリック → `setSelectedIds` が呼ばれる
 
 ### OcrEditor
 
-- [ ] **C-OE-01** 検索フィルター：検索ボックスに "abc" 入力 → "abc" を含む block のカードのみ表示
-- [ ] **C-OE-02** 検索フィルター（大文字小文字無視）："ABC" 入力、`block.text="abc"` → カードが表示される
-- [ ] **C-OE-03** 検索クリアで全件表示：入力欄を空にする → 全カード表示
+- [x] **C-OE-01** 検索フィルター：検索ボックスに "abc" 入力 → "abc" を含む block のカードのみ表示
+- [x] **C-OE-02** 検索フィルター（大文字小文字無視）："ABC" 入力、`block.text="abc"` → カードが表示される
+- [x] **C-OE-03** 検索クリアで全件表示：入力欄を空にする → 全カード表示
 
 ### TextPreviewWindow
 
-- [ ] **C-PW-01** preview-update イベントで描画更新：Tauri イベントを発火 → 受け取ったテキストが表示
-- [ ] **C-PW-02** 全てコピーボタン：クリック → `navigator.clipboard.writeText` が呼ばれる
-- [ ] **C-PW-03** 閉じるボタン：クリック → ウィンドウが非表示（hide 呼び出し）
+- [x] **C-PW-01** preview-update イベントで描画更新：Tauri イベントを発火 → 受け取ったテキストが表示
+- [x] **C-PW-02** 全てコピーボタン：クリック → `navigator.clipboard.writeText` が呼ばれる
+- [x] **C-PW-03** 閉じるボタン：クリック → ウィンドウが非表示（hide 呼び出し）
 
 ### 統合テスト
 
-- [ ] **I-01** テキスト抽出パイプライン（横書き）：横書きPDFを `loadPage` → `writingMode='horizontal'`、bbox が正値
-- [ ] **I-02** テキスト抽出パイプライン（縦書き）：縦書きOCR入りPDFを `loadPage` → `writingMode='vertical'`、bbox が縦長
-- [ ] **I-03** ブロックマージ：複数ブロックを選択して merge → 結合テキストが正しい順序、bbox が全体を包む
-- [ ] **I-04** Undo/Redo サイクル：テキスト編集 → undo → redo → 編集前→後→後の状態が一致
-- [ ] **I-05** 保存→再読み込み：`savePDF` → `loadPage` → テキストブロックが保存内容と一致
-- [ ] **I-06** 縦書きPDFの保存：縦書きブロックを含む状態で `savePDF` → 出力PDFのテキストオブジェクトに `rotate=-90°`
-- [ ] **I-07** 重複削除：同一テキスト・同一bbox の2ブロック → 1ブロックに削減
-- [ ] **I-08** テキストプレビューの順序：縦書き＋横書き混在ページ → order 順に連結、縦書きは改行区切り
+- [x] **I-01** テキスト抽出パイプライン（横書き）：横書きPDFを `loadPage` → `writingMode='horizontal'`、bbox が正値
+- [x] **I-02** テキスト抽出パイプライン（縦書き）：縦書きOCR入りPDFを `loadPage` → `writingMode='vertical'`、bbox が縦長
+- [x] **I-03** ブロックマージ：複数ブロックを選択して merge → 結合テキストが正しい順序、bbox が全体を包む
+- [x] **I-04** Undo/Redo サイクル：テキスト編集 → undo → redo → 編集前→後→後の状態が一致
+- [ ] **I-05** 保存→再読み込み：`savePDF` → `loadPage` → テキストブロックが保存内容と一致（実PDF処理が必要なためE2E対象）
+- [x] **I-06** 縦書きPDFの保存：縦書きブロックを含む状態で `savePDF` → 出力PDFのテキストオブジェクトに `rotate=-90°`
+- [x] **I-07** 重複削除：同一テキスト・同一bbox の2ブロック → 1ブロックに削減
+- [x] **I-08** テキストプレビューの順序：縦書き＋横書き混在ページ → order 順に連結、縦書きは改行区切り
 
 ---
 

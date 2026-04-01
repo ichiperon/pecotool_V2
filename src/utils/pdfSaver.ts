@@ -1,4 +1,4 @@
-import { PDFDocument, degrees, pushGraphicsState, popGraphicsState, translate, scale } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString, degrees, pushGraphicsState, popGraphicsState, translate, scale } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument } from '../types';
@@ -66,70 +66,73 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
         const textLen = block.text.length;
         const textWidth = customFont ? customFont.widthOfTextAtSize(block.text, 1) : textLen;
         
-        // 縦書きの場合、元のフォントのY軸(ascent/descent)がX方向の「Thickness（太さ）」になり、
-        // フォントのX軸(文字送り)がY方向の「高さ」になります。
-        const sx = block.bbox.width / 1.448; // NotoSansJPの縦方向BBox(約1.448em)をBB幅にフィット
-        const sy = block.bbox.height / textWidth; // 文字エンティティの純粋な長さをBB高さにフィット
-        
-        // -90度回転させるため、ディセント分の左オフセットがX、上の起点がYになります
+        const sx = block.bbox.width / 1.448;
+        const sy = block.bbox.height / textWidth;
         const baselineX = block.bbox.x + 0.288 * sx;
         const baselineY = viewport1x.height - block.bbox.y;
         
-        newPage.pushOperators(
-          pushGraphicsState(),
-          translate(baselineX, baselineY),
-          scale(sx, sy)
-        );
-        
-        const drawOptions: any = {
-          x: 0,
-          y: 0,
-          size: 1,
-          rotate: degrees(-90),
-          opacity: 0,
-        };
+        newPage.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
+        const drawOptions: any = { x: 0, y: 0, size: 1, rotate: degrees(-90), opacity: 0 };
         if (customFont) drawOptions.font = customFont;
-        
         try {
           newPage.drawText(block.text, drawOptions);
         } catch (err) {
           console.warn("Skipping text block due to encoding error:", block.text, err);
         }
-        
         newPage.pushOperators(popGraphicsState());
       } else {
         const textLen = block.text.length;
         const textWidth = customFont ? customFont.widthOfTextAtSize(block.text, 1) : textLen;
         
-        // 横書きの場合、フォントのX軸が文字列幅、Y軸が高さに対応します
         const sx = block.bbox.width / textWidth;
         const sy = block.bbox.height / 1.448;
-        
         const baselineY = viewport1x.height - block.bbox.y - 1.16 * sy;
         
-        newPage.pushOperators(
-          pushGraphicsState(),
-          translate(block.bbox.x, baselineY),
-          scale(sx, sy)
-        );
-        
-        const drawOptions: any = {
-          x: 0,
-          y: 0,
-          size: 1,
-          opacity: 0,
-        };
+        newPage.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
+        const drawOptions: any = { x: 0, y: 0, size: 1, opacity: 0 };
         if (customFont) drawOptions.font = customFont;
-        
         try {
           newPage.drawText(block.text, drawOptions);
         } catch (err) {
           console.warn("Skipping text block due to encoding error:", block.text, err);
         }
-        
         newPage.pushOperators(popGraphicsState());
       }
     }
+  }
+
+  // Embed BBox metadata into PDF Info dict for lossless round-trip on re-open
+  // Stores ALL pages' bbox data so re-loading recovers exact sizes without relying on font metrics
+  try {
+    const bboxMeta: Record<string, Array<{
+      bbox: { x: number; y: number; width: number; height: number };
+      writingMode: string;
+      order: number;
+      text: string;
+    }>> = {};
+
+    for (const [pageIndex, pageData] of documentState.pages.entries()) {
+      bboxMeta[String(pageIndex)] = pageData.textBlocks
+        .sort((a, b) => a.order - b.order)
+        .map(b => ({
+          bbox: { x: b.bbox.x, y: b.bbox.y, width: b.bbox.width, height: b.bbox.height },
+          writingMode: b.writingMode,
+          order: b.order,
+          text: b.text,
+        }));
+    }
+
+    // Write custom key into the PDF Info dictionary via pdf-lib low-level API
+    const ctx = (pdfDoc as any).context;
+    const infoRef = ctx.trailerInfo?.Info;
+    if (infoRef) {
+      const infoDict = ctx.lookup(infoRef);
+      if (infoDict) {
+        infoDict.set(PDFName.of('PecoToolBBoxes'), PDFString.of(JSON.stringify(bboxMeta)));
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to embed bbox metadata:", err);
   }
 
   return await pdfDoc.save();
