@@ -137,8 +137,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const newState: any = {
       document: { ...state.document, pages: newPages },
       pageAccessOrder: newOrder,
-      isDirty: true
     };
+
+    if (data.isDirty !== false) {
+      newState.isDirty = true;
+    }
 
     if (undoable && oldPage) {
       const action: Action = {

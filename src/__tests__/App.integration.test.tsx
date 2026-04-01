@@ -70,7 +70,7 @@ vi.mock('lucide-react', () => {
     FolderOpen: icon, Save: icon, RotateCcw: icon, RotateCw: icon,
     ZoomIn: icon, ZoomOut: icon, Maximize: icon, Plus: icon,
     Group: icon, Trash2: icon, Eye: icon, Scissors: icon,
-    ClipboardList: icon, Eraser: icon,
+    ClipboardList: icon, Eraser: icon, X: icon, MousePointer2: icon,
   }
 })
 
@@ -203,7 +203,7 @@ describe('I-07: 重複削除', () => {
 
     render(<App />)
 
-    fireEvent.click(screen.getByTitle('重なっている重複レイヤーを削除'))
+    fireEvent.click(screen.getByTitle('重複削除'))
 
     const page = usePecoStore.getState().document?.pages.get(0)
     expect(page?.textBlocks.length).toBe(1)
@@ -218,7 +218,7 @@ describe('I-07: 重複削除', () => {
 
     render(<App />)
 
-    fireEvent.click(screen.getByTitle('重なっている重複レイヤーを削除'))
+    fireEvent.click(screen.getByTitle('重複削除'))
 
     const page = usePecoStore.getState().document?.pages.get(0)
     expect(page?.textBlocks.length).toBe(2)
