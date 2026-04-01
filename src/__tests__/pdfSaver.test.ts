@@ -86,6 +86,9 @@ beforeEach(() => {
     drawImage:    m.drawImage,
     drawText:     m.drawText,
     pushOperators: m.pushOperators,
+    node: { normalizedEntries: () => ({ Contents: undefined }) },
+    getWidth: () => 595,
+    getHeight: () => 842,
   }
   m.insertPage.mockReturnValue(mockPage)
   m.embedJpg.mockResolvedValue({ width: 1, height: 1 })
@@ -98,8 +101,10 @@ beforeEach(() => {
     embedFont:       m.embedFont,
     removePage:      m.removePage,
     insertPage:      m.insertPage,
+    getPage:         vi.fn().mockReturnValue(mockPage),
     embedJpg:        m.embedJpg,
     save:            m.save,
+    context: { lookup: vi.fn() },
   })
 
   // pdfjs mock: getPage returns viewport + render stub

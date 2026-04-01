@@ -58,7 +58,17 @@ export async function generateThumbnail(pdf: pdfjsLib.PDFDocumentProxy, pageInde
   canvas.height = viewport.height;
   const ctx = canvas.getContext('2d')!;
   await page.render({ canvasContext: ctx, viewport, canvas }).promise;
-  return canvas.toDataURL('image/jpeg', 0.7);
+  
+  // Convert to Blob instead of Base64 to save memory
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(URL.createObjectURL(blob));
+      } else {
+        resolve("");
+      }
+    }, 'image/jpeg', 0.7);
+  });
 }
 
 /**

@@ -344,6 +344,9 @@ body, #root {
   justify-content: center;
   padding: 24px;
   min-height: 100%;
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
 }
 
 .empty-state {
@@ -359,6 +362,7 @@ body, #root {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .status-bar {

@@ -4,7 +4,8 @@ import { PecoDocument, PageData, Action } from '../types';
 interface PecoState {
   document: PecoDocument | null;
   originalBytes: Uint8Array | null;
-  thumbnails: Map<number, string>;
+  thumbnails: Map<number, string>; // Blob URL
+  pageAccessOrder: number[]; // For LRU
   currentPageIndex: number;
   zoom: number;
   isDirty: boolean;
@@ -19,7 +20,7 @@ interface PecoState {
 
   // Actions
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
-  setThumbnail: (pageIndex: number, dataUrl: string) => void;
+  setThumbnail: (pageIndex: number, blobUrl: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
   toggleShowOcr: () => void;
@@ -37,10 +38,13 @@ interface PecoState {
   redo: () => void;
 }
 
+const MAX_CACHED_PAGES = 30;
+
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
   originalBytes: null,
   thumbnails: new Map(),
+  pageAccessOrder: [],
   currentPageIndex: 0,
   zoom: 100,
   isDirty: false,
@@ -53,28 +57,41 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   undoStack: [],
   redoStack: [],
 
-  setDocument: (doc, bytes) => set({
-    document: doc,
-    originalBytes: bytes || null,
-    thumbnails: new Map(),
-    currentPageIndex: 0,
-    isDirty: false,
-    showOcr: true,
-    showTextPreview: false,
-    isDrawingMode: false,
-    isSplitMode: false,
-    selectedIds: new Set(),
-    undoStack: [],
-    redoStack: []
+  setDocument: (doc, bytes) => set((state) => {
+    // Revoke all existing thumbnail URLs to free memory
+    state.thumbnails.forEach(url => URL.revokeObjectURL(url));
+
+    return {
+      document: doc,
+      originalBytes: bytes || null, // No slice to avoid duplication in memory
+      thumbnails: new Map(),
+      pageAccessOrder: [],
+      currentPageIndex: 0,
+      isDirty: false,
+      showOcr: true,
+      showTextPreview: false,
+      isDrawingMode: false,
+      isSplitMode: false,
+      selectedIds: new Set(),
+      undoStack: [],
+      redoStack: []
+    };
   }),
 
-  setThumbnail: (pageIndex, dataUrl) => set((state) => {
+  setThumbnail: (pageIndex, blobUrl) => set((state) => {
     const newThumbnails = new Map(state.thumbnails);
-    newThumbnails.set(pageIndex, dataUrl);
+    // If we already have a thumbnail for this page, revoke the old one
+    const oldUrl = newThumbnails.get(pageIndex);
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
+    
+    newThumbnails.set(pageIndex, blobUrl);
     return { thumbnails: newThumbnails };
   }),
 
-  setCurrentPage: (index) => set({ currentPageIndex: index, selectedIds: new Set() }),
+  setCurrentPage: (index) => set((state) => {
+    const newOrder = [index, ...state.pageAccessOrder.filter(i => i !== index)];
+    return { currentPageIndex: index, selectedIds: new Set(), pageAccessOrder: newOrder };
+  }),
 
   setZoom: (zoom) => set({ zoom }),
 
@@ -95,8 +112,26 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const newPages = new Map(state.document.pages);
     newPages.set(pageIndex, newPage);
 
+    // Update access order
+    const newOrder = [pageIndex, ...state.pageAccessOrder.filter(i => i !== pageIndex)];
+
+    // LRU Purge: If we exceed MAX_CACHED_PAGES, remove the oldest non-dirty page
+    if (newPages.size > MAX_CACHED_PAGES) {
+      for (let i = newOrder.length - 1; i >= 0; i--) {
+        const idxToRemove = newOrder[i];
+        const pageToRemove = newPages.get(idxToRemove);
+        // Never purge the current page, and never purge dirty pages (unsaved changes)
+        if (idxToRemove !== state.currentPageIndex && pageToRemove && !pageToRemove.isDirty) {
+          newPages.delete(idxToRemove);
+          newOrder.splice(i, 1);
+          if (newPages.size <= MAX_CACHED_PAGES) break;
+        }
+      }
+    }
+
     const newState: any = {
       document: { ...state.document, pages: newPages },
+      pageAccessOrder: newOrder,
       isDirty: true
     };
 

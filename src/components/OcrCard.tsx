@@ -89,7 +89,7 @@ export const OcrCard = forwardRef<OcrCardHandle, OcrCardProps>(
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (!onNavigate) return;
+    if (!onNavigate || !e.ctrlKey) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       onNavigate('down');

@@ -1,6 +1,5 @@
-import { PDFDocument, PDFName, PDFString, degrees, pushGraphicsState, popGraphicsState, translate, scale } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString, degrees, pushGraphicsState, popGraphicsState, translate, scale, decodePDFRawStream } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument } from '../types';
 
 export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoDocument): Promise<Uint8Array> {
@@ -16,51 +15,47 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
     console.error("Failed to load custom Japanese font:", err);
   }
 
-  // We use pdfjsLib to rasterize the original pages so we can completely wipe original OCR text
-  const pdfjsDoc = await pdfjsLib.getDocument({ data: originalPdfBytes.slice() }).promise;
-
   for (const [pageIndex, pageData] of documentState.pages.entries()) {
     if (!pageData.isDirty) continue;
 
-    const pdfjsPage = await pdfjsDoc.getPage(pageIndex + 1);
-    const viewport1x = pdfjsPage.getViewport({ scale: 1.0 });
-    const viewport2x = pdfjsPage.getViewport({ scale: 2.0 }); // 2x scale for better print quality
+    const page = pdfDoc.getPage(pageIndex);
 
-    // Render the page to a canvas (this ignores invisible text like opacity=0 OCR data)
-    const canvas = document.createElement('canvas');
-    canvas.width = viewport2x.width;
-    canvas.height = viewport2x.height;
-    const context = canvas.getContext('2d')!;
+    // 1. Strip the old OCR text directly from the PDF's content streams (Lossless image preservation)
+    const { Contents } = page.node.normalizedEntries();
+    if (Contents) {
+      // PDF handles Contents as either a single stream or an array of streams
+      const refs = typeof Contents.asArray === 'function' ? Contents.asArray() : [Contents];
+      for (const ref of refs) {
+        const stream = pdfDoc.context.lookup(ref);
+        if (stream && stream.constructor.name === 'PDFRawStream') {
+          try {
+            // Decode the raw stream into bytes
+            const decoded = decodePDFRawStream(stream as any).decode();
+            // Convert to string (latin1 preserves bytes safely for PDF operators)
+            const str = Array.from(decoded).map(b => String.fromCharCode(b)).join('');
+            
+            // Purge all Text Objects (BT ... ET)
+            // This safely removes the old invisible OCR text without touching image XObjects
+            const stripped = str.replace(/(?:^|[\s])BT[\s\S]*?ET(?:[\s]|$)/g, '\n');
+            
+            // Re-encode and overwrite the stream
+            const newBytes = new Uint8Array(stripped.length);
+            for (let i = 0; i < stripped.length; i++) {
+              newBytes[i] = stripped.charCodeAt(i);
+            }
+            const newStream = pdfDoc.context.flateStream(newBytes);
+            pdfDoc.context.assign(ref, newStream);
+          } catch (err) {
+            console.warn(`Failed to strip text from stream on page ${pageIndex}:`, err);
+          }
+        }
+      }
+    }
 
-    // Fill white background for JPEG
-    context.fillStyle = '#ffffff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    await pdfjsPage.render({ canvasContext: context, viewport: viewport2x, canvas: canvas }).promise;
-
-    // Convert to JPEG blob for much smaller file size compared to PNG
-    const jpgBlob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
-    if (!jpgBlob) continue;
-    
-    const jpgBytes = new Uint8Array(await jpgBlob.arrayBuffer());
-    const embeddedImage = await pdfDoc.embedJpg(jpgBytes);
-
-    // Completely replace the old page (with the old OCR text) with a fresh new page
-    pdfDoc.removePage(pageIndex);
-    const newPage = pdfDoc.insertPage(pageIndex, [viewport1x.width, viewport1x.height]);
-
-    // Draw the rasterized background
-    newPage.drawImage(embeddedImage, {
-      x: 0,
-      y: 0,
-      width: viewport1x.width,
-      height: viewport1x.height,
-    });
-
-    // Sort blocks by logical order to ensure copy-paste order is correct
+    // 2. Draw the new edited text blocks
+    const viewport1x = { width: page.getWidth(), height: page.getHeight() };
     const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
 
-    // Overlay ONLY the newly edited text as selectable transparent text
     for (const block of sortedBlocks) {
       if (block.writingMode === 'vertical') {
         const textLen = block.text.length;
@@ -71,15 +66,15 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
         const baselineX = block.bbox.x + 0.288 * sx;
         const baselineY = viewport1x.height - block.bbox.y;
         
-        newPage.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
+        page.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
         const drawOptions: any = { x: 0, y: 0, size: 1, rotate: degrees(-90), opacity: 0 };
         if (customFont) drawOptions.font = customFont;
         try {
-          newPage.drawText(block.text, drawOptions);
+          page.drawText(block.text, drawOptions);
         } catch (err) {
           console.warn("Skipping text block due to encoding error:", block.text, err);
         }
-        newPage.pushOperators(popGraphicsState());
+        page.pushOperators(popGraphicsState());
       } else {
         const textLen = block.text.length;
         const textWidth = customFont ? customFont.widthOfTextAtSize(block.text, 1) : textLen;
@@ -88,21 +83,20 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
         const sy = block.bbox.height / 1.448;
         const baselineY = viewport1x.height - block.bbox.y - 1.16 * sy;
         
-        newPage.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
+        page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
         const drawOptions: any = { x: 0, y: 0, size: 1, opacity: 0 };
         if (customFont) drawOptions.font = customFont;
         try {
-          newPage.drawText(block.text, drawOptions);
+          page.drawText(block.text, drawOptions);
         } catch (err) {
           console.warn("Skipping text block due to encoding error:", block.text, err);
         }
-        newPage.pushOperators(popGraphicsState());
+        page.pushOperators(popGraphicsState());
       }
     }
   }
 
   // Embed BBox metadata into PDF Info dict for lossless round-trip on re-open
-  // Stores ALL pages' bbox data so re-loading recovers exact sizes without relying on font metrics
   try {
     const bboxMeta: Record<string, Array<{
       bbox: { x: number; y: number; width: number; height: number };
@@ -122,7 +116,6 @@ export async function savePDF(originalPdfBytes: Uint8Array, documentState: PecoD
         }));
     }
 
-    // Write custom key into the PDF Info dictionary via pdf-lib low-level API
     const ctx = (pdfDoc as any).context;
     const infoRef = ctx.trailerInfo?.Info;
     if (infoRef) {

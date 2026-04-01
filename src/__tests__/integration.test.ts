@@ -261,14 +261,19 @@ describe('I-06: 縦書きPDFの保存', () => {
       drawText:     m.drawText,
       drawImage:    m.drawImage,
       pushOperators: m.pushOperators,
+      node: { normalizedEntries: () => ({ Contents: undefined }) },
+      getWidth: () => 595,
+      getHeight: () => 842,
     }
     const mockPdfDoc = {
       registerFontkit: m.registerFontkit,
       embedFont:   m.embedFont,
       removePage:  m.removePage,
       insertPage:  m.insertPage,
+      getPage:     vi.fn().mockReturnValue(mockPage),
       embedJpg:    m.embedJpg,
       save:        m.save,
+      context: { lookup: vi.fn() },
     }
     m.embedFont.mockResolvedValue({
       widthOfTextAtSize: vi.fn().mockReturnValue(10),

@@ -19,9 +19,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
   const { document, originalBytes, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
-
-  // Canvas size state (CSS display size, synced to viewport)
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
@@ -44,7 +42,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     (async () => {
       try {
         const doc = await pdfjsLib.getDocument({ 
-          data: originalBytes.slice(),
+          data: originalBytes, // Removed .slice() to avoid memory duplication
           cMapUrl: CMAP_URL,
           cMapPacked: CMAP_PACKED,
           standardFontDataUrl: STANDARD_FONT_DATA_URL,
@@ -111,8 +109,20 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         overlayCanvasRef.current.height = viewport.height;
       }
 
-      // Sync CSS display size so overlay canvas covers the full rendered area
-      setCanvasSize({ width: viewport.width, height: viewport.height });
+      // Sync CSS display size directly via DOM to avoid React async timing issues
+      const w = viewport.width;
+      const h = viewport.height;
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+      canvas.style.display = 'block';
+      if (overlayCanvasRef.current) {
+        overlayCanvasRef.current.style.width = `${w}px`;
+        overlayCanvasRef.current.style.height = `${h}px`;
+      }
+      if (wrapperRef.current) {
+        wrapperRef.current.style.width = `${w}px`;
+        wrapperRef.current.style.height = `${h}px`;
+      }
 
       const renderContext = {
         canvasContext: context,
@@ -542,17 +552,15 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
   return (
     <div
+      ref={wrapperRef}
       className={`canvas-wrapper ${isDrawingMode ? 'drawing-mode' : ''}`}
       style={{
         position: 'relative',
         display: 'inline-block',
-        width: canvasSize.width > 0 ? canvasSize.width : undefined,
-        height: canvasSize.height > 0 ? canvasSize.height : undefined,
       }}
     >
       <canvas
         ref={pdfCanvasRef}
-        style={{ display: 'block', width: canvasSize.width > 0 ? canvasSize.width : undefined, height: canvasSize.height > 0 ? canvasSize.height : undefined }}
       />
       <canvas
         ref={overlayCanvasRef}
@@ -565,8 +573,6 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           top: 0,
           left: 0,
           zIndex: 2,
-          width: canvasSize.width > 0 ? canvasSize.width : undefined,
-          height: canvasSize.height > 0 ? canvasSize.height : undefined,
           cursor: isDrawingMode || isSplitMode ? 'crosshair' : draggedId ? (dragMode === 'move' ? 'move' : 'crosshair') : 'default',
         }}
       />
