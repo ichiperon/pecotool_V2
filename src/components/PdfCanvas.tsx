@@ -42,7 +42,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     (async () => {
       try {
         const doc = await pdfjsLib.getDocument({ 
-          data: originalBytes, // Removed .slice() to avoid memory duplication
+          data: originalBytes.slice(), // Restore .slice() to prevent detachment
           cMapUrl: CMAP_URL,
           cMapPacked: CMAP_PACKED,
           standardFontDataUrl: STANDARD_FONT_DATA_URL,

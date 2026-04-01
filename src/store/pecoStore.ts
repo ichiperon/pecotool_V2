@@ -15,6 +15,7 @@ interface PecoState {
   isDrawingMode: boolean;
   isSplitMode: boolean;
   selectedIds: Set<string>;
+  clipboard: TextBlock[];
   undoStack: Action[];
   redoStack: Action[];
 
@@ -33,6 +34,8 @@ interface PecoState {
 
   toggleSelection: (id: string, multi: boolean) => void;
   clearSelection: () => void;
+  copySelected: () => void;
+  pasteClipboard: () => void;
   pushAction: (action: Action) => void;
   undo: () => void;
   redo: () => void;
@@ -54,6 +57,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   isDrawingMode: false,
   isSplitMode: false,
   selectedIds: new Set(),
+  clipboard: [],
   undoStack: [],
   redoStack: [],
 
@@ -73,6 +77,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       isDrawingMode: false,
       isSplitMode: false,
       selectedIds: new Set(),
+      clipboard: [],
       undoStack: [],
       redoStack: []
     };
@@ -176,6 +181,43 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   }),
 
   clearSelection: () => set({ selectedIds: new Set() }),
+
+  copySelected: () => {
+    const { document, currentPageIndex, selectedIds } = get();
+    if (!document || selectedIds.size === 0) return;
+    const page = document.pages.get(currentPageIndex);
+    if (!page) return;
+    const selected = page.textBlocks.filter(b => selectedIds.has(b.id));
+    set({ clipboard: selected.map(b => ({ ...b })) });
+  },
+
+  pasteClipboard: () => {
+    const { document, currentPageIndex, clipboard, updatePageData } = get();
+    if (!document || clipboard.length === 0) return;
+    const page = document.pages.get(currentPageIndex);
+    if (!page) return;
+
+    const newBlocks = [...page.textBlocks];
+    const pastedIds = new Set<string>();
+
+    clipboard.forEach((b, i) => {
+      const newId = crypto.randomUUID();
+      const newBlock: TextBlock = {
+        ...b,
+        id: newId,
+        // Slightly offset pasted blocks
+        bbox: { ...b.bbox, x: b.bbox.x + 10, y: b.bbox.y + 10 },
+        order: newBlocks.length,
+        isNew: true,
+        isDirty: true
+      };
+      newBlocks.push(newBlock);
+      pastedIds.add(newId);
+    });
+
+    updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
+    set({ selectedIds: pastedIds });
+  },
 
   pushAction: (action) => set((state) => {
     const newUndo = [...state.undoStack, action];

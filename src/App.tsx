@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser } from "lucide-react";
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2 } from "lucide-react";
+import { open, save, message, ask } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, generateThumbnail } from "./utils/pdfLoader";
 import { savePDF } from "./utils/pdfSaver";
@@ -15,7 +15,7 @@ import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen } from '@tauri-apps/api/event';
 
 function App() {
-  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails, resetDirty } = usePecoStore();
+  const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails, resetDirty, copySelected, pasteClipboard } = usePecoStore();
 
   const [leftWidth, setLeftWidth] = useState(200);
   const [rightWidth, setRightWidth] = useState(350);
@@ -25,12 +25,18 @@ function App() {
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0, scrollX: 0, scrollY: 0 });
   const [notification, setNotification] = useState<{ message: string; isError: boolean } | null>(null);
+  const [helpMenu, setHelpMenu] = useState<{ x: number, y: number, visible: boolean }>({ x: 0, y: 0, visible: false });
 
   // Ref bag so the stable one-time event listener can always call the latest function versions
-  const actionRefs = useRef<{ handleSave: () => void; handleSaveAs: () => void; handleDelete: () => void }>({
+  const actionRefs = useRef<{ handleSave: () => void; handleSaveAs: () => void; handleDelete: () => void; handleGroup: () => void; toggleDrawingMode: () => void; toggleSplitMode: () => void; copySelected: () => void; pasteClipboard: () => void }>({
     handleSave: () => {},
     handleSaveAs: () => {},
     handleDelete: () => {},
+    handleGroup: () => {},
+    toggleDrawingMode: () => {},
+    toggleSplitMode: () => {},
+    copySelected: () => {},
+    pasteClipboard: () => {},
   });
 
   const showToast = useCallback((message: string, isError = false) => {
@@ -124,7 +130,22 @@ function App() {
       let unlistenFn: (() => void) | undefined;
       
       const setupCloseListener = async () => {
-        const fn = await currentWindow.onCloseRequested(async () => {
+        const unlisten = await currentWindow.onCloseRequested(async (event) => {
+          const state = usePecoStore.getState();
+          const hasDirtyPages = Array.from(state.document?.pages.values() || []).some(p => p.isDirty);
+          
+          if (state.isDirty || hasDirtyPages) {
+            const confirmed = await ask('未保存の変更があります。終了してもよろしいですか？', {
+              title: '終了の確認',
+              kind: 'warning'
+            });
+            
+            if (!confirmed) {
+              event.preventDefault();
+              return;
+            }
+          }
+
           try {
             const windows = await getAllWindows();
             for (const w of windows) {
@@ -138,9 +159,9 @@ function App() {
         });
         
         if (isUnmounted) {
-          fn();
+          unlisten();
         } else {
-          unlistenFn = fn;
+          unlistenFn = unlisten;
         }
       };
 
@@ -311,7 +332,22 @@ function App() {
     };
   }, [undo, redo, zoom, setZoom]);
 
-  // Keyboard shortcuts that need stable registration (Ctrl+S, Delete, Ctrl+F)
+  const handleClose = useCallback(async () => {
+    if (isDirty || Array.from(document?.pages.values() || []).some(p => p.isDirty)) {
+      const confirmed = await ask('未保存の変更があります。閉じてもよろしいですか？', {
+        title: '確認',
+        kind: 'warning'
+      });
+      if (!confirmed) return;
+    }
+    setDocument(null);
+  }, [isDirty, document, setDocument]);
+
+  const handleGroupAction = useCallback(() => {
+    handleGroup();
+  }, [handleGroup]);
+
+  // Keyboard shortcuts that need stable registration (Ctrl+S, Delete, Ctrl+F, F10-F12)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
@@ -329,6 +365,15 @@ function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
+      } else if (e.key === 'F10' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        actionRefs.current.toggleDrawingMode();
+      } else if (e.key === 'F11' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        actionRefs.current.toggleSplitMode();
+      } else if (e.key === 'F12' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        actionRefs.current.handleGroup();
       }
     };
     window.addEventListener('keydown', handler);
@@ -579,13 +624,59 @@ function App() {
   actionRefs.current.handleSave = handleSave;
   actionRefs.current.handleSaveAs = handleSaveAs;
   actionRefs.current.handleDelete = handleDelete;
+  actionRefs.current.handleGroup = handleGroup;
+  actionRefs.current.toggleDrawingMode = toggleDrawingMode;
+  actionRefs.current.toggleSplitMode = toggleSplitMode;
+  actionRefs.current.copySelected = copySelected;
+  actionRefs.current.pasteClipboard = pasteClipboard;
 
   return (
-    <div className="app-container">
+    <div 
+      className="app-container"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
+      }}
+      onClick={() => {
+        if (helpMenu.visible) setHelpMenu({ ...helpMenu, visible: false });
+      }}
+    >
+      {/* Shortcut Help Menu */}
+      {helpMenu.visible && (
+        <div 
+          className="help-context-menu" 
+          style={{ top: helpMenu.y, left: helpMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="help-header">
+            <MousePointer2 size={14} />
+            ショートカットヘルプ
+          </div>
+          <div className="help-grid">
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F10</kbd><span>追加</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F11</kbd><span>分割</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F12</kbd><span>グループ化</span></div>
+            <div className="help-divider" />
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>C</kbd><span>コピー</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>V</kbd><span>貼り付け</span></div>
+            <div className="help-divider" />
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>S</kbd><span>保存</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd><span>別名保存</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd><span>元に戻す</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd><span>やり直し</span></div>
+            <div className="help-item"><kbd>Delete</kbd><span>削除</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>フィット</span></div>
+            <div className="help-item"><kbd>Space</kbd>+<span>ドラッグで移動</span></div>
+            <div className="help-item"><kbd>Alt</kbd>+<span>ホイールでズーム</span></div>
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
       <header className="toolbar">
         <div className="toolbar-group">
           <button onClick={handleOpen} title="開く"><FolderOpen size={18} /><span>開く</span></button>
+          <button onClick={handleClose} title="閉じる" disabled={!document} className="danger"><X size={18} /><span>閉じる</span></button>
           <button 
             onClick={handleSave} 
             title="保存" 
