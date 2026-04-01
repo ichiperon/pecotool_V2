@@ -5,7 +5,8 @@
       "Bash(cargo check:*)",
       "Bash(npx tsc:*)",
       "Bash(npm test:*)",
-      "Bash(npx vitest:*)"
+      "Bash(npx vitest:*)",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as pdfjsLib from 'pdfjs-dist';
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, ChevronDown } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, ChevronDown, Settings } from "lucide-react";
 import { open, save, ask } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, generateThumbnail } from "./utils/pdfLoader";
-import { savePDF } from "./utils/pdfSaver";
+import { savePDF, estimateSizes } from "./utils/pdfSaver";
 import { TextBlock } from "./types";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
+import { SaveDialog, formatFileSize } from "./components/SaveDialog";
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
 import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
@@ -28,6 +30,16 @@ function App() {
   const [helpMenu, setHelpMenu] = useState<{ x: number, y: number, visible: boolean }>({ x: 0, y: 0, visible: false });
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [showRecentDropdown, setShowRecentDropdown] = useState(false);
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [isEstimating, setIsEstimating] = useState(false);
+  const [estimatedSizes, setEstimatedSizes] = useState<{ uncompressed: number; compressed: number } | null>(null);
+
+  const [reorderThreshold, setReorderThreshold] = useState(() => {
+    const stored = localStorage.getItem('peco-reorder-threshold');
+    return stored ? parseInt(stored, 10) : 50;
+  });
 
   const showToast = useCallback((message: string, isError = false) => {
     setNotification({ message, isError });
@@ -88,13 +100,21 @@ function App() {
         }
 
         (async () => {
-          for (let i = 0; i < doc.totalPages; i++) {
-            if (i > 0 && i % 10 === 0) await new Promise(resolve => setTimeout(resolve, 10));
+          try {
+            for (let i = 0; i < doc.totalPages; i++) {
+              if (i > 0 && i % 10 === 0) await new Promise(resolve => setTimeout(resolve, 10));
+              try {
+                const dataUrl = await generateThumbnail(pdf, i);
+                setThumbnail(i, dataUrl);
+              } catch (err) {
+                console.error("Thumbnail error:", err);
+              }
+            }
+          } finally {
             try {
-              const dataUrl = await generateThumbnail(pdf, i);
-              setThumbnail(i, dataUrl);
-            } catch (err) {
-              console.error("Thumbnail error:", err);
+              pdf.destroy();
+            } catch (e) {
+              console.error(e);
             }
           }
         })();
@@ -107,14 +127,17 @@ function App() {
   const handleSave = async () => {
     if (!document || !originalBytes) return;
     try {
-      console.log('[handleSave] starting save...', { originalLen: originalBytes.length });
+      console.log('[handleSave] starting save... 1');
       const bytesToSave = new Uint8Array(originalBytes); 
-      const savedBytes = await savePDF(bytesToSave, document);
-      console.log('[handleSave] savePDF complete', { savedLen: savedBytes.length });
+      const compressionPref = (localStorage.getItem('peco-save-compression') as 'none' | 'compressed' | 'rasterized') || 'none';
+      const storedQuality = localStorage.getItem('peco-rasterize-quality');
+      const qNum = storedQuality ? parseInt(storedQuality, 10) / 100 : 0.6;
+      const savedBytes = await savePDF(bytesToSave, document, compressionPref, qNum);
+      console.log('[handleSave] savePDF complete');
       
       await writeFile(document.filePath, savedBytes);
       resetDirty();
-      showToast("保存しました。");
+      showToast(`保存しました。(${formatFileSize(savedBytes.length)})`);
     } catch (err) {
       console.error("Failed to save:", err);
       showToast("保存に失敗しました。", true);
@@ -123,21 +146,46 @@ function App() {
 
   const handleSaveAs = async () => {
     if (!document || !originalBytes) return;
+    setShowSaveDialog(true);
+    setIsEstimating(true);
+    setEstimatedSizes(null);
+    try {
+      const sizes = await estimateSizes(new Uint8Array(originalBytes), document);
+      setEstimatedSizes(sizes);
+    } catch (err) {
+      console.error("Failed to estimate sizes:", err);
+    } finally {
+      setIsEstimating(false);
+    }
+  };
+
+  const executeSaveAs = async (compression: 'none' | 'compressed' | 'rasterized', quality?: number) => {
+    setShowSaveDialog(false);
+    if (!document || !originalBytes) return;
     try {
       const path = await save({
         filters: [{ name: 'PDF', extensions: ['pdf'] }],
         defaultPath: document.fileName
       });
       if (path && typeof path === 'string') {
-        console.log('[handleSaveAs] starting save...', { originalLen: originalBytes.length });
+        localStorage.setItem('peco-save-compression', compression);
+        if (compression === 'rasterized' && typeof quality === 'number') {
+          localStorage.setItem('peco-rasterize-quality', quality.toString());
+        }
+
         const bytesToSave = new Uint8Array(originalBytes);
-        const savedBytes = await savePDF(bytesToSave, document);
-        console.log('[handleSaveAs] savePDF complete', { savedLen: savedBytes.length });
+        
+        // ラスタライズ時は重いのでToastでお知らせを出す
+        if (compression === 'rasterized') {
+          showToast(`高圧縮処理中です(画質${quality}%)...しばらくお待ち下さい`, false);
+        }
+        
+        const savedBytes = await savePDF(bytesToSave, document, compression, quality ? quality / 100 : 0.6);
 
         await writeFile(path, savedBytes);
         document.filePath = path;
         resetDirty();
-        showToast("名前を付けて保存しました。");
+        showToast(`名前を付けて保存しました。(${formatFileSize(savedBytes.length)}・${compression === 'rasterized' ? '高圧縮' : compression === 'compressed' ? '標準圧縮' : '非圧縮'})`);
         addToRecent(path);
       }
     } catch (err) {
@@ -520,6 +568,8 @@ function App() {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  const latestLoadRef = useRef<number>(-1);
+
   useEffect(() => {
     if (document && !document.pages.has(currentPageIndex)) {
       loadCurrentPage(currentPageIndex);
@@ -527,16 +577,37 @@ function App() {
   }, [document, currentPageIndex]);
 
   const loadCurrentPage = async (pageIdx: number) => {
+    latestLoadRef.current = pageIdx;
+    
+    // 短期間での連続呼び出し（高速スクロール等）をマージするためのデバウンス処理
+    await new Promise(resolve => setTimeout(resolve, 50));
+    if (latestLoadRef.current !== pageIdx) return;
+
     const { originalBytes } = usePecoStore.getState();
     if (!originalBytes) return;
+    
+    let pdf: pdfjsLib.PDFDocumentProxy | null = null;
     try {
-      const pdf = await openPDF(originalBytes);
+      pdf = await openPDF(originalBytes);
+      if (latestLoadRef.current !== pageIdx) return;
+
       const bboxMeta = await loadPecoToolBBoxMeta(pdf);
       const pageData = await loadPage(pdf, pageIdx, bboxMeta);
-      updatePageData(pageIdx, pageData, false);
+      
+      if (latestLoadRef.current === pageIdx) {
+        updatePageData(pageIdx, pageData, false);
+      }
     } catch (err) {
-      console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
-      alert(`ページ ${pageIdx + 1} のテキスト読み込みに失敗しました:\n${err}`);
+      if (latestLoadRef.current === pageIdx) {
+        console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
+        showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
+      }
+    } finally {
+      if (pdf) {
+        try {
+          pdf.destroy();
+        } catch (e) { console.error(e); }
+      }
     }
   };
 
@@ -618,6 +689,7 @@ function App() {
       onClick={() => {
         if (helpMenu.visible) setHelpMenu({ ...helpMenu, visible: false });
         if (showRecentDropdown) setShowRecentDropdown(false);
+        if (showSettingsDropdown) setShowSettingsDropdown(false);
       }}
     >
       {helpMenu.visible && (
@@ -638,6 +710,7 @@ function App() {
             <div className="help-item"><kbd>Delete</kbd><span>削除</span></div>
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>フィット</span></div>
             <div className="help-item"><kbd>Space</kbd>+<span>ドラッグで移動</span></div>
+            <div className="help-item"><kbd>Alt</kbd>+<span>ドラッグで一括序列</span></div>
             <div className="help-item"><kbd>Alt</kbd>+<span>ホイールでズーム</span></div>
           </div>
         </div>
@@ -686,14 +759,37 @@ function App() {
         <div className="divider" />
         <div className="toolbar-group">
           <button onClick={toggleShowOcr} title="OCR表示" className={showOcr ? "active" : ""}><Eye size={18} /><span>OCR表示</span></button>
-          {showOcr && (
-            <label className="ocr-opacity-label">
-              <span>濃さ</span>
-              <input type="range" className="ocr-opacity-slider" min="0.05" max="1" step="0.05" value={ocrOpacity} onChange={(e) => setOcrOpacity(parseFloat(e.target.value))} />
-              <span>{Math.round(ocrOpacity * 100)}%</span>
-            </label>
-          )}
-          <button onClick={openPreviewWindow} title="プレビュー" className="feature-btn" disabled={!document}><ClipboardList size={18} /><span>別ウインドウで確認</span></button>
+          
+          <div className="btn-group">
+            <button className={`dropdown-btn ${showSettingsDropdown ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); setShowRecentDropdown(false); }} title="表示設定" style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}>
+              <Settings size={14} style={{ marginRight: '4px' }}/><span>設定</span><ChevronDown size={14} style={{ marginLeft: '2px' }}/>
+            </button>
+            {showSettingsDropdown && (
+              <div className="recent-dropdown settings-dropdown" onClick={(e) => e.stopPropagation()}>
+                <div className="settings-item">
+                  <div className="settings-item-header">OCRオーバーレイの濃さ</div>
+                  <label className="settings-slider-row">
+                    <input type="range" className="ocr-opacity-slider" min="0.05" max="1" step="0.05" value={ocrOpacity} onChange={(e) => setOcrOpacity(parseFloat(e.target.value))} />
+                    <span>{Math.round(ocrOpacity * 100)}%</span>
+                  </label>
+                </div>
+                <div className="help-divider" />
+                <div className="settings-item">
+                  <div className="settings-item-header">序列修正の閾値 <span style={{fontSize: '10px', color: '#9ca3af'}}>(Alt+ドラッグ)</span></div>
+                  <label className="settings-slider-row">
+                    <input type="range" className="ocr-opacity-slider" min="0" max="100" step="5" value={reorderThreshold} onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      setReorderThreshold(val);
+                      localStorage.setItem('peco-reorder-threshold', val.toString());
+                    }} />
+                    <span>{reorderThreshold}%</span>
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+          
+          <button onClick={openPreviewWindow} title="プレビュー" className="feature-btn" disabled={!document}><ClipboardList size={18} /><span>テキスト確認</span></button>
         </div>
       </header>
 
@@ -729,6 +825,17 @@ function App() {
         {(isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
       </footer>
       {notification && <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>{notification.message}</div>}
+
+      {showSaveDialog && (
+        <SaveDialog 
+          isEstimating={isEstimating}
+          estimatedSizes={estimatedSizes}
+          onConfirm={executeSaveAs}
+          onCancel={() => setShowSaveDialog(false)}
+          defaultCompression={(localStorage.getItem('peco-save-compression') as 'none' | 'compressed' | 'rasterized') || 'none'}
+          defaultRasterizeQuality={localStorage.getItem('peco-rasterize-quality') ? parseInt(localStorage.getItem('peco-rasterize-quality')!, 10) : 60}
+        />
+      )}
     </div>
   );
 }

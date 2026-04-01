@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from 'pdfjs-dist';
 import { usePecoStore } from "../store/pecoStore";
 import { Action, PageData, TextBlock } from "../types";
+import { classifyDirection, getDirectionLabel, reorderBlocks } from "../utils/bulkReorder";
 
 interface PdfCanvasProps {
   pageIndex: number;
@@ -25,6 +26,11 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
   const [currentPos, setCurrentPos] = useState({ x: 0, y: 0 });
+
+  // Alt Drag state
+  const [isAltDragging, setIsAltDragging] = useState(false);
+  const [altDragStart, setAltDragStart] = useState({ x: 0, y: 0 });
+  const [altDragEnd, setAltDragEnd] = useState({ x: 0, y: 0 });
 
   // Moving/Resizing state
   const [dragMode, setDragMode] = useState<'none' | 'move' | 'resize-nw' | 'resize-ne' | 'resize-sw' | 'resize-se'>('none');
@@ -280,10 +286,45 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         );
         context.setLineDash([]);
       }
+
+      // Draw Alt+Drag overlay
+      if (isAltDragging) {
+        context.strokeStyle = "rgba(255, 165, 0, 0.9)";
+        context.lineWidth = 2;
+        context.setLineDash([5, 5]);
+        context.beginPath();
+        context.moveTo(altDragStart.x, altDragStart.y);
+        context.lineTo(altDragEnd.x, altDragEnd.y);
+        context.stroke();
+        context.setLineDash([]);
+        
+        const angle = Math.atan2(altDragEnd.y - altDragStart.y, altDragEnd.x - altDragStart.x);
+        context.beginPath();
+        context.moveTo(altDragEnd.x, altDragEnd.y);
+        context.lineTo(altDragEnd.x - 12 * Math.cos(angle - Math.PI / 6), altDragEnd.y - 12 * Math.sin(angle - Math.PI / 6));
+        context.lineTo(altDragEnd.x - 12 * Math.cos(angle + Math.PI / 6), altDragEnd.y - 12 * Math.sin(angle + Math.PI / 6));
+        context.closePath();
+        context.fillStyle = "rgba(255, 165, 0, 0.9)";
+        context.fill();
+
+        const dx = altDragEnd.x - altDragStart.x;
+        const dy = altDragEnd.y - altDragStart.y;
+        const dir = classifyDirection(dx, dy);
+        if (dir) {
+          const label = getDirectionLabel(dir);
+          context.font = "bold 16px sans-serif";
+          context.textBaseline = "middle";
+          context.fillStyle = "white";
+          context.strokeStyle = "rgba(0,0,0,0.8)";
+          context.lineWidth = 4;
+          context.strokeText(label, altDragEnd.x + 15, altDragEnd.y);
+          context.fillText(label, altDragEnd.x + 15, altDragEnd.y);
+        }
+      }
     };
 
     renderOverlays();
-  }, [zoom, document, pageIndex, showOcr, ocrOpacity, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage]);
+  }, [zoom, document, pageIndex, showOcr, ocrOpacity, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage, isAltDragging, altDragStart, altDragEnd]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (disableDrawing) return;
@@ -291,6 +332,13 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     const scale = zoom / 100;
     const pageData = document?.pages.get(pageIndex);
     
+    if (e.altKey && !isDrawingMode && !isSplitMode) {
+      setIsAltDragging(true);
+      setAltDragStart(pos);
+      setAltDragEnd(pos);
+      return;
+    }
+
     if (isDrawingMode) {
       setIsDrawing(true);
       setStartPos(pos);
@@ -436,6 +484,11 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     const pos = getMousePos(e);
     const scale = zoom / 100;
 
+    if (isAltDragging) {
+      setAltDragEnd(pos);
+      return;
+    }
+
     if (isDrawing) {
       setCurrentPos(pos);
       return;
@@ -532,6 +585,24 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
   const handleMouseUp = () => {
     if (disableDrawing) return;
+
+    if (isAltDragging) {
+      setIsAltDragging(false);
+      const dx = altDragEnd.x - altDragStart.x;
+      const dy = altDragEnd.y - altDragStart.y;
+      const dir = classifyDirection(dx, dy);
+      if (dir) {
+        const pageData = document?.pages.get(pageIndex);
+        if (pageData && pageData.textBlocks.length > 0) {
+          const stored = localStorage.getItem('peco-reorder-threshold');
+          const percent = stored ? parseInt(stored, 10) : 50;
+          const newBlocks = reorderBlocks([...pageData.textBlocks], dir, percent);
+          updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
+        }
+      }
+      return;
+    }
+
     if (isDrawing) {
       setIsDrawing(false);
       const x = Math.min(startPos.x, currentPos.x) / (zoom / 100);
