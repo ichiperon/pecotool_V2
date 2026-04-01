@@ -512,19 +512,66 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
       if (width > 2 && height > 2) {
         const pageData = document?.pages.get(pageIndex);
         if (pageData) {
+          const writingMode = height > width * 1.5 ? "vertical" : "horizontal";
+
+          // Compute the spatial insert index among existing blocks
+          const cx = x + width / 2;
+          const cy = y + height / 2;
+
+          const sorted = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
+
+          // Determine insert index by comparing center positions
+          let insertIndex = sorted.length; // default: end
+          for (let i = 0; i < sorted.length; i++) {
+            const b = sorted[i];
+            const bCx = b.bbox.x + b.bbox.width / 2;
+            const bCy = b.bbox.y + b.bbox.height / 2;
+
+            let newComesFirst: boolean;
+            if (writingMode === 'vertical' || b.writingMode === 'vertical') {
+              // Vertical: right column first (larger x = earlier), then top-to-bottom
+              const sameCol = Math.abs(cx - bCx) < Math.max(width, b.bbox.width) * 0.6;
+              if (sameCol) {
+                newComesFirst = cy < bCy;
+              } else {
+                newComesFirst = cx > bCx; // right column = earlier in vertical doc
+              }
+            } else {
+              // Horizontal: top-to-bottom first, then left-to-right
+              const sameRow = Math.abs(cy - bCy) < Math.max(height, b.bbox.height) * 0.6;
+              if (sameRow) {
+                newComesFirst = cx < bCx;
+              } else {
+                newComesFirst = cy < bCy;
+              }
+            }
+
+            if (newComesFirst) {
+              insertIndex = i;
+              break;
+            }
+          }
+
           const newBlock: TextBlock = {
             id: crypto.randomUUID(),
             text: "",
             originalText: "",
             bbox: { x, y, width, height },
-            writingMode: height > width * 1.5 ? "vertical" : "horizontal",
-            order: pageData.textBlocks.length,
+            writingMode,
+            order: insertIndex,
             isNew: true,
             isDirty: true
           };
-          updatePageData(pageIndex, { 
-            textBlocks: [...pageData.textBlocks, newBlock],
-            isDirty: true 
+
+          // Re-number order for all blocks after insert point
+          const updatedBlocks = sorted.map((b, i) => {
+            const originalOrder = i >= insertIndex ? b.order + 1 : b.order;
+            return originalOrder !== b.order ? { ...b, order: originalOrder } : b;
+          });
+
+          updatePageData(pageIndex, {
+            textBlocks: [...updatedBlocks, newBlock],
+            isDirty: true
           });
         }
       }
