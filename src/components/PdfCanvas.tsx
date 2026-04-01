@@ -209,14 +209,14 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           // 隣接BBを視覚的に分離するための表示用インセット（bboxデータは変更しない）
           const inset = isSelected ? 0 : 1;
 
-          // opacity を ocrOpacity で制御（選択時は常に鮮明に）
-          const baseAlpha = isSelected ? 0.8 : ocrOpacity;
-          const fillAlpha = isSelected ? 0.25 : ocrOpacity * 0.25;
+          // opacity を ocrOpacity で制御（選択時は2倍明るく、上限1.0）
+          const baseAlpha = isSelected ? Math.min(1.0, ocrOpacity * 2) : ocrOpacity;
+          const fillAlpha = isSelected ? Math.min(0.4, ocrOpacity * 0.625) : ocrOpacity * 0.25;
 
-          context.fillStyle = isSelected ? `rgba(0, 100, 255, 0.25)` : `rgba(0, 150, 255, ${fillAlpha})`;
+          context.fillStyle = `rgba(${isSelected ? '0, 100, 255' : '0, 150, 255'}, ${fillAlpha})`;
           context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
-          context.strokeStyle = isSelected ? `rgba(0, 100, 255, 0.9)` : `rgba(255, 0, 0, ${baseAlpha})`;
+          context.strokeStyle = `rgba(${isSelected ? '0, 100, 255' : '255, 0, 0'}, ${isSelected ? Math.min(1.0, baseAlpha * 1.125) : baseAlpha})`;
           context.lineWidth = isSelected ? 2 : 1;
           context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 

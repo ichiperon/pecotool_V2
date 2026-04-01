@@ -50,6 +50,10 @@ export async function openPDF(bytes: Uint8Array): Promise<pdfjsLib.PDFDocumentPr
   return safeGetDocument(bytes).promise;
 }
 
+export function openPDFTask(bytes: Uint8Array) {
+  return safeGetDocument(bytes);
+}
+
 export async function generateThumbnail(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number, scale = 0.3): Promise<string> {
   const page = await pdf.getPage(pageIndex + 1);
   const viewport = page.getViewport({ scale });

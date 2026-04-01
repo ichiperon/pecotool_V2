@@ -5,7 +5,7 @@ import { usePecoStore } from "./store/pecoStore";
 import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, ChevronDown, Settings } from "lucide-react";
 import { open, save, ask } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
-import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, generateThumbnail } from "./utils/pdfLoader";
+import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, openPDFTask, generateThumbnail } from "./utils/pdfLoader";
 import { savePDF, estimateSizes } from "./utils/pdfSaver";
 import { TextBlock } from "./types";
 import { PdfCanvas } from "./components/PdfCanvas";
@@ -421,18 +421,17 @@ function App() {
       
       const setupCloseListener = async () => {
         const unlisten = await currentWindow.onCloseRequested(async (event) => {
+          event.preventDefault();
+
           const state = usePecoStore.getState();
           const hasDirtyPages = Array.from(state.document?.pages.values() || []).some(p => p.isDirty);
-          
+
           if (state.isDirty || hasDirtyPages) {
             const confirmed = await ask('未保存の変更があります。終了してもよろしいですか？', {
               title: '終了の確認',
               kind: 'warning'
             });
-            if (!confirmed) {
-              event.preventDefault();
-              return;
-            }
+            if (!confirmed) return;
           }
           try {
             const windows = await getAllWindows();
@@ -442,6 +441,7 @@ function App() {
           } catch (e) {
             console.error(e);
           }
+          await currentWindow.destroy();
         });
         if (isUnmounted) unlisten();
         else unlistenFn = unlisten;
@@ -457,7 +457,8 @@ function App() {
   useEffect(() => {
     const handleKeyDownGlob = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
-      if (e.code === 'Space' && tag !== 'INPUT' && tag !== 'TEXTAREA') {
+      const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+      if (e.code === 'Space' && !isEditing) {
         e.preventDefault();
         setIsSpacePressed(true);
       }
@@ -569,6 +570,7 @@ function App() {
   }, []);
 
   const latestLoadRef = useRef<number>(-1);
+  const loadingTaskRef = useRef<ReturnType<typeof openPDFTask> | null>(null);
 
   useEffect(() => {
     if (document && !document.pages.has(currentPageIndex)) {
@@ -578,31 +580,42 @@ function App() {
 
   const loadCurrentPage = async (pageIdx: number) => {
     latestLoadRef.current = pageIdx;
-    
+
     // 短期間での連続呼び出し（高速スクロール等）をマージするためのデバウンス処理
     await new Promise(resolve => setTimeout(resolve, 50));
     if (latestLoadRef.current !== pageIdx) return;
 
+    // 前の openPDF タスクが進行中ならキャンセル（並列ワーカー過多によるエラーを防ぐ）
+    if (loadingTaskRef.current) {
+      loadingTaskRef.current.cancel();
+      loadingTaskRef.current = null;
+    }
+
     const { originalBytes } = usePecoStore.getState();
     if (!originalBytes) return;
-    
+
     let pdf: pdfjsLib.PDFDocumentProxy | null = null;
+    const task = openPDFTask(originalBytes);
+    loadingTaskRef.current = task;
     try {
-      pdf = await openPDF(originalBytes);
+      pdf = await task.promise;
+      if (loadingTaskRef.current === task) loadingTaskRef.current = null;
+
       if (latestLoadRef.current !== pageIdx) return;
 
       const bboxMeta = await loadPecoToolBBoxMeta(pdf);
       const pageData = await loadPage(pdf, pageIdx, bboxMeta);
-      
+
       if (latestLoadRef.current === pageIdx) {
         updatePageData(pageIdx, pageData, false);
       }
-    } catch (err) {
-      if (latestLoadRef.current === pageIdx) {
-        console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
-        showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
-      }
+    } catch (err: any) {
+      // キャンセルによる例外は無視
+      if (latestLoadRef.current !== pageIdx) return;
+      console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
+      showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
     } finally {
+      if (loadingTaskRef.current === task) loadingTaskRef.current = null;
       if (pdf) {
         try {
           pdf.destroy();
