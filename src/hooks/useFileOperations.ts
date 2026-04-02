@@ -29,25 +29,18 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
       }
 
       if (selected && typeof selected === 'string') {
-        const content = await readFile(selected);
-        const bytes = new Uint8Array(content); 
+        // No longer reading the whole file here! 
+        // We pass the path to loadPDF which uses convertFileSrc.
+        const doc = await loadPDF(selected);
         
-        const blob = new Blob([bytes.slice()], { type: 'application/pdf' });
-        const file = new File([blob], selected.split(/[\\/]/).pop() || 'document.pdf');
-
-        const doc = await loadPDF(file);
-        doc.filePath = selected;
-        
-        // Always store as null in the store to save JS heap memory.
-        // We will read from disk when needed using doc.filePath.
         setDocument(doc, undefined);
         addToRecent(selected);
 
-        const pdf = await openPDF(bytes);
+        const pdf = await openPDF(selected);
         const bboxMeta = await loadPecoToolBBoxMeta(pdf);
 
         try {
-          const pageData = await loadPage(pdf, 0, bboxMeta);
+          const pageData = await loadPage(pdf, 0, selected, bboxMeta);
           updatePageData(0, pageData, false);
         } catch (err) {
           console.error('[handleOpen] page 0 text extraction failed:', err);

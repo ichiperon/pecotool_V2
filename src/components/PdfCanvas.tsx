@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from 'pdfjs-dist';
-import { readFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from "../store/pecoStore";
 import { Action, PageData, TextBlock } from "../types";
 import { classifyDirection, getDirectionLabel, reorderBlocks } from "../utils/bulkReorder";
+import { getCachedPageProxy, getSharedPdfProxy } from "../utils/pdfLoader";
 
 interface PdfCanvasProps {
   pageIndex: number;
@@ -11,9 +11,6 @@ interface PdfCanvasProps {
 }
 
 // Use shared configuration for CMaps and fonts
-const CMAP_URL = 'https://unpkg.com/pdfjs-dist@5.5.207/cmaps/';
-const CMAP_PACKED = true;
-const STANDARD_FONT_DATA_URL = 'https://unpkg.com/pdfjs-dist@5.5.207/standard_fonts/';
 
 export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -42,25 +39,22 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const preDragPageRef = useRef<PageData | null>(null);
   const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
-  // Open PDF document only when filePath changes (expensive)
+  // Combined effect to load PDF document and page (optimized)
   useEffect(() => {
-    if (!document?.filePath) return;
+    if (!document?.filePath) {
+      setPdfPage(null);
+      return;
+    }
+    
     let cancelled = false;
+    // console.log(`[PdfCanvas] Loading page ${pageIndex} for ${document.filePath}`);
 
     (async () => {
       try {
-        const content = await readFile(document.filePath);
-        const bytes = new Uint8Array(content);
-        const doc = await pdfjsLib.getDocument({ 
-          data: bytes,
-          cMapUrl: CMAP_URL,
-          cMapPacked: CMAP_PACKED,
-          standardFontDataUrl: STANDARD_FONT_DATA_URL,
-        }).promise;
-        if (cancelled) { doc.destroy(); return; }
-        pdfDocRef.current = doc;
-        const page = await doc.getPage(pageIndex + 1);
+        // 使用 getCachedPageProxy (Memory Cache)
+        const page = await getCachedPageProxy(document.filePath, pageIndex);
         if (cancelled) return;
+        
         setPdfPage(page);
       } catch (err) {
         if (!cancelled) console.error("Error loading PDF page:", err);
@@ -69,31 +63,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
     return () => {
       cancelled = true;
-      if (pdfDocRef.current) {
-        pdfDocRef.current.destroy().catch(() => {});
-        pdfDocRef.current = null;
-      }
     };
-  }, [document?.filePath]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Load specific page using cached doc (cheap)
-  useEffect(() => {
-    const doc = pdfDocRef.current;
-    if (!doc) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const page = await doc.getPage(pageIndex + 1);
-        if (cancelled) return;
-        setPdfPage(page);
-      } catch (err) {
-        if (!cancelled) console.error("Error loading PDF page:", err);
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [pageIndex]);
+  }, [document?.filePath, pageIndex]); // Combined dependency array
 
   const getMousePos = (e: React.MouseEvent) => {
     const rect = overlayCanvasRef.current?.getBoundingClientRect();
@@ -136,15 +107,20 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
   // PDF Layer Rendering
   useEffect(() => {
+    console.log('[PdfCanvas] pdfPage:', pdfPage, 'canvasRef:', pdfCanvasRef.current);
     if (!pdfPage || !pdfCanvasRef.current) return;
 
     const renderPdf = async () => {
       const canvas = pdfCanvasRef.current!;
-      const context = canvas.getContext('2d')!;
+      const context = canvas.getContext('2d', { alpha: false, willReadFrequently: false })!;
 
       const viewport = pdfPage.getViewport({ scale: zoom / 100 });
       canvas.width = viewport.width;
       canvas.height = viewport.height;
+      
+      // PDFの白背景化（描画高速化）
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
       
       // Update overlay dimensions to match
       if (overlayCanvasRef.current) {
@@ -180,6 +156,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
       try {
         await renderTaskRef.current.promise;
+        console.log('[PdfCanvas] render completed, canvas size:', canvas.width, canvas.height);
       } catch (err: any) {
         if (err.name === 'RenderingCancelledException') return;
         console.error("PDF render error:", err);

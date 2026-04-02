@@ -26,7 +26,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: blob: data: http://asset.localhost; connect-src 'self' asset: blob: data: http://asset.localhost https://unpkg.com; worker-src 'self' blob:; object-src 'none';",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     }
   },
   "bundle": {

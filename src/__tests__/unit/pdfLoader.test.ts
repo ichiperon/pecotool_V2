@@ -1,13 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
 
-// pdfjs-dist をモック（module-level の GlobalWorkerOptions 代入をスタブ化）
+// pdfjs-dist をモック
 vi.mock('pdfjs-dist', () => ({
-  GlobalWorkerOptions: { workerSrc: '' },
+  GlobalWorkerOptions: { workerPort: null },
   getDocument: vi.fn(),
 }))
-
-// ?url インポートを空文字に差し替え
-vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 
 import { loadPage } from '../../utils/pdfLoader'
 
@@ -42,7 +39,7 @@ describe('pdfLoader / loadPage', () => {
       const pdf = makeMockPdf([
         { str: 'あ', transform: [0, 1, -1, 0, 100, 700], width: 12, height: 12 },
       ])
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks[0].writingMode).toBe('vertical')
     })
   })
@@ -52,7 +49,7 @@ describe('pdfLoader / loadPage', () => {
       const pdf = makeMockPdf([
         { str: 'A', transform: [1, 0, 0, 12, 100, 700], width: 10, height: 12 },
       ])
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks[0].writingMode).toBe('horizontal')
     })
   })
@@ -66,7 +63,7 @@ describe('pdfLoader / loadPage', () => {
         595,
         800,
       )
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks[0].bbox.y).toBeCloseTo(76.8, 1)
     })
   })
@@ -77,7 +74,7 @@ describe('pdfLoader / loadPage', () => {
       const pdf = makeMockPdf([
         { str: 'ABC', transform: [1, 0, 0, 12, 100, 700], width: 0, height: 12 },
       ])
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks[0].bbox.width).toBeCloseTo(21.6, 5)
     })
   })
@@ -88,7 +85,7 @@ describe('pdfLoader / loadPage', () => {
         { str: '   ', transform: [1, 0, 0, 12, 100, 700], width: 10, height: 12 },
         { str: 'Hello', transform: [1, 0, 0, 12, 200, 700], width: 30, height: 12 },
       ])
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks).toHaveLength(1)
       expect(page.textBlocks[0].text).toBe('Hello')
     })
@@ -97,7 +94,7 @@ describe('pdfLoader / loadPage', () => {
       const pdf = makeMockPdf([
         { str: '\t', transform: [1, 0, 0, 12, 100, 700], width: 10, height: 12 },
       ])
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks).toHaveLength(0)
     })
   })
@@ -107,7 +104,7 @@ describe('pdfLoader / loadPage', () => {
       const pdf = makeMockPdf([
         { str: 'X', transform: [1, 0, 0, 14, 100, 700], width: 10, height: 0 },
       ])
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks[0].bbox.height).toBe(14)
     })
 
@@ -115,7 +112,7 @@ describe('pdfLoader / loadPage', () => {
       const pdf = makeMockPdf([
         { str: 'X', transform: [1, 0, 0, 0, 100, 700], width: 10, height: 0 },
       ])
-      const page = await loadPage(pdf, 0)
+      const page = await loadPage(pdf, 0, 'test.pdf')
       expect(page.textBlocks[0].bbox.height).toBe(12)
     })
   })

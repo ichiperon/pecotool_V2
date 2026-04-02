@@ -3,24 +3,21 @@ import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import * as pdfjsLib from 'pdfjs-dist';
 
-let cachedFontBytes: ArrayBuffer | null = null;
-
-async function buildPdfDocument(originalPdfBytes: Uint8Array, documentState: PecoDocument): Promise<PDFDocument> {
-  const pdfDoc = await PDFDocument.load(originalPdfBytes.slice());
-  
+/**
+ * Common PDF building logic used by both Worker and direct calls (tests).
+ * Returns the Uint8Array of the saved PDF.
+ */
+export async function buildPdfDocument(
+  originalPdfBytes: Uint8Array,
+  documentState: PecoDocument,
+  compression: 'none' | 'compressed' | 'rasterized' = 'none',
+  fontBytes?: ArrayBuffer
+): Promise<Uint8Array> {
+  const pdfDoc = await PDFDocument.load(originalPdfBytes);
   pdfDoc.registerFontkit(fontkit);
 
-  if (!cachedFontBytes) {
-    try {
-      const res = await fetch('/fonts/IPAexGothic.ttf');
-      if (res.ok) cachedFontBytes = await res.arrayBuffer();
-    } catch(e) {
-      console.warn('Failed to load font bytes', e);
-    }
-  }
-
-  const customFont = cachedFontBytes 
-    ? await pdfDoc.embedFont(cachedFontBytes, { subset: true }) 
+  const customFont = fontBytes 
+    ? await pdfDoc.embedFont(fontBytes, { subset: true }) 
     : await pdfDoc.embedFont(StandardFonts.Helvetica);
 
   let infoDict = (pdfDoc as any).getInfoDict();
@@ -34,14 +31,13 @@ async function buildPdfDocument(originalPdfBytes: Uint8Array, documentState: Pec
       } else if (value instanceof PDFString) {
         existingBBoxMeta = JSON.parse(value.decodeText());
       }
-    } catch(e) {
-      console.warn('Failed to parse existing PecoToolBBoxes in savePDF', e);
-    }
+    } catch(e) {}
   }
 
-  const bboxMeta: Record<string, any> = { ...existingBBoxMeta };
+  const bboxMeta = { ...existingBBoxMeta };
 
-  for (const [pageIndex, pageData] of documentState.pages.entries()) {
+  for (const [pageIndexStr, pageData] of documentState.pages.entries()) {
+    const pageIndex = typeof pageIndexStr === 'string' ? parseInt(pageIndexStr, 10) : pageIndexStr;
     const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
 
     bboxMeta[String(pageIndex)] = sortedBlocks.map(b => ({
@@ -62,12 +58,8 @@ async function buildPdfDocument(originalPdfBytes: Uint8Array, documentState: Pec
       try {
         if (block.writingMode === 'vertical') {
           const fontSize = 1;
-          let textWidth = block.text.length;
-          let textHeight = 1.448;
-          try {
-            textWidth = customFont.widthOfTextAtSize(block.text, fontSize) || textWidth;
-            textHeight = customFont.heightAtSize(fontSize) || textHeight;
-          } catch(e) {}
+          const textWidth = customFont.widthOfTextAtSize(block.text, fontSize);
+          const textHeight = customFont.heightAtSize(fontSize);
           
           const sx = block.bbox.width / textHeight;
           const sy = block.bbox.height / textWidth;
@@ -75,53 +67,32 @@ async function buildPdfDocument(originalPdfBytes: Uint8Array, documentState: Pec
           const baselineY = height - block.bbox.y;
           
           page.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
-          page.drawText(block.text, {
-            x: 0,
-            y: 0,
-            size: fontSize,
-            font: customFont,
-            rotate: degrees(-90),
-            opacity: 0,
-          });
+          page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, rotate: degrees(-90), opacity: 0 });
           page.pushOperators(popGraphicsState());
         } else {
           const fontSize = 1;
-          let textWidth = block.text.length;
-          let textHeight = 1.448;
-          try {
-            textWidth = customFont.widthOfTextAtSize(block.text, fontSize) || textWidth;
-            textHeight = customFont.heightAtSize(fontSize) || textHeight;
-          } catch(e) {}
+          const textWidth = customFont.widthOfTextAtSize(block.text, fontSize);
+          const textHeight = customFont.heightAtSize(fontSize);
           
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
           const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
           
           page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
-          page.drawText(block.text, {
-            x: 0,
-            y: 0,
-            size: fontSize,
-            font: customFont,
-            opacity: 0,
-          });
+          page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, opacity: 0 });
           page.pushOperators(popGraphicsState());
         }
-      } catch (err) {
-        console.warn("Skipping block due to render error:", err);
+      } catch(e) {
+        console.warn(`[buildPdfDocument] Page ${pageIndex} block error:`, e);
       }
     }
   }
 
-  if (!infoDict) {
-    pdfDoc.setTitle(documentState.metadata?.title || 'OCR Document');
-    infoDict = (pdfDoc as any).getInfoDict();
-  }
   if (infoDict) {
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
-  return pdfDoc;
+  return await pdfDoc.save({ useObjectStreams: compression === 'compressed', addDefaultPage: false });
 }
 
 export async function savePDF(
@@ -135,33 +106,36 @@ export async function savePDF(
     return await buildRasterizedPdfDocument(originalPdfBytes, documentState, rasterizeQuality, fontBytes);
   }
 
-  // Use Worker for standard saving to keep UI responsive
+  // Use direct call if Worker is not available (e.g. in JSDOM tests)
+  if (typeof Worker === 'undefined' || (typeof process !== 'undefined' && process.env.NODE_ENV === 'test')) {
+    return await buildPdfDocument(originalPdfBytes, documentState, compression, fontBytes);
+  }
+
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
-    
-    worker.onmessage = (e) => {
-      const { type, data, message } = e.data;
-      if (type === 'SAVE_PDF_SUCCESS') {
-        resolve(data);
+    try {
+      const worker = new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
+      
+      worker.onmessage = (e) => {
+        const { type, data, message } = e.data;
+        if (type === 'SAVE_PDF_SUCCESS') {
+          resolve(data);
+          worker.terminate();
+        } else if (type === 'ERROR') {
+          reject(new Error(message));
+          worker.terminate();
+        }
+      };
+
+      worker.onerror = (err) => {
+        reject(err);
         worker.terminate();
-      } else if (type === 'ERROR') {
-        reject(new Error(message));
-        worker.terminate();
+      };
+
+      const serializedPages: Record<number, any> = {};
+      for (const [idx, page] of documentState.pages.entries()) {
+        serializedPages[idx] = page;
       }
-    };
 
-    worker.onerror = (err) => {
-      reject(err);
-      worker.terminate();
-    };
-
-    // Serialize documentState (Map to Object)
-    const serializedPages: Record<number, any> = {};
-    for (const [idx, page] of documentState.pages.entries()) {
-      serializedPages[idx] = page;
-    }
-
-    const startSave = async () => {
       worker.postMessage({
         type: 'SAVE_PDF',
         data: {
@@ -171,10 +145,11 @@ export async function savePDF(
           rasterizeQuality,
           fontBytes
         }
-      }, [originalPdfBytes.buffer, fontBytes].filter(Boolean) as any);
-    };
-
-    startSave();
+      }, [originalPdfBytes.buffer, fontBytes instanceof ArrayBuffer ? fontBytes.slice(0) : undefined].filter(Boolean) as any);
+    } catch (err) {
+      console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
+      buildPdfDocument(originalPdfBytes, documentState, compression, fontBytes).then(resolve).catch(reject);
+    }
   });
 }
 
@@ -194,7 +169,6 @@ async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, document
     const pageIndex = i;
     const pageData = documentState.pages.get(pageIndex);
     
-    // Rasterize page to JPEG (Scale 1.5, Quality 0.6)
     const jsPage = await pdfJsDoc.getPage(i + 1);
     const viewport = jsPage.getViewport({ scale: 1.5 });
     const canvas = window.document.createElement('canvas');
@@ -208,7 +182,6 @@ async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, document
     
     const jpgImage = await newPdf.embedJpg(jpegBase64);
     
-    // Create new PDF page with standard aspect ratio (scale 1.0 equivalent)
     const page = newPdf.addPage([viewport.width / 1.5, viewport.height / 1.5]);
     const { width, height } = page.getSize();
     
@@ -283,9 +256,10 @@ async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, document
 
 export async function estimateSizes(
   originalPdfBytes: Uint8Array,
-  documentState: PecoDocument
+  _documentState: PecoDocument
 ): Promise<{ uncompressed: number; compressed: number }> {
-  const pdfDoc = await buildPdfDocument(originalPdfBytes, documentState);
+  // Use non-compressed save for uncompressed estimate
+  const pdfDoc = await PDFDocument.load(originalPdfBytes);
   const [uncompressedBytes, compressedBytes] = await Promise.all([
     pdfDoc.save({ useObjectStreams: false, addDefaultPage: false }),
     pdfDoc.save({ useObjectStreams: true, addDefaultPage: false })

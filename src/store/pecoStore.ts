@@ -103,6 +103,28 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (oldUrl) URL.revokeObjectURL(oldUrl);
     
     newThumbnails.set(pageIndex, blobUrl);
+
+    // LRU for thumbnails: Keep only 100 most recent thumbnails
+    // (A bit more than page cache because thumbnails are small but frequent)
+    const MAX_THUMBNAILS = 100;
+    if (newThumbnails.size > MAX_THUMBNAILS) {
+      // Find oldest thumbnail that is not the current page
+      const accessOrder = state.pageAccessOrder;
+      const pagesWithThumbnails = Array.from(newThumbnails.keys());
+      
+      // Remove the ones that are NOT in the recent access order
+      let removedCount = 0;
+      for (const idx of pagesWithThumbnails) {
+        if (idx !== state.currentPageIndex && !accessOrder.slice(0, MAX_THUMBNAILS).includes(idx)) {
+          const urlToRevoke = newThumbnails.get(idx);
+          if (urlToRevoke) URL.revokeObjectURL(urlToRevoke);
+          newThumbnails.delete(idx);
+          removedCount++;
+          if (newThumbnails.size <= MAX_THUMBNAILS) break;
+        }
+      }
+    }
+
     return { thumbnails: newThumbnails };
   }),
 

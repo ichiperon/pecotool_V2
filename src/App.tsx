@@ -5,7 +5,7 @@ import { usePecoStore } from "./store/pecoStore";
 import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
-import { openPDFTask, generateThumbnail, loadPecoToolBBoxMeta, loadPage } from "./utils/pdfLoader";
+import { generateThumbnail, loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
 import { estimateSizes } from "./utils/pdfSaver";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
@@ -96,6 +96,7 @@ function App() {
       });
       if (!confirmed) return;
     }
+    destroySharedPdfProxy();
     usePecoStore.getState().setDocument(null);
   }, [document, isDirty]);
 
@@ -179,53 +180,70 @@ function App() {
     searchInputRef
   });
 
-  // --- Page Loading Logic ---
   const latestLoadRef = useRef<number>(-1);
-  const loadingTaskRef = useRef<ReturnType<typeof openPDFTask> | null>(null);
 
-  const requestThumbnail = useCallback(async (pageIndex: number) => {
-    const state = usePecoStore.getState();
-    if (state.thumbnails.has(pageIndex) || !document) return;
-    
-    let pdfProxy: pdfjsLib.PDFDocumentProxy | null = null;
+  const thumbnailQueueRef = useRef<number[]>([]);
+  const isThumbnailProcessingRef = useRef<boolean>(false);
+
+  const processThumbnailQueue = useCallback(async () => {
+    if (isThumbnailProcessingRef.current || !document) return;
+    isThumbnailProcessingRef.current = true;
+
     try {
-      const content = await readFile(document.filePath);
-      const bytes = new Uint8Array(content);
-      pdfProxy = await openPDFTask(bytes).promise;
-      const dataUrl = await generateThumbnail(pdfProxy, pageIndex);
-      state.setThumbnail(pageIndex, dataUrl);
+      let pdfProxy: pdfjsLib.PDFDocumentProxy | null = null;
+
+      while (thumbnailQueueRef.current.length > 0) {
+        const pageIdx = thumbnailQueueRef.current.shift()!;
+        const state = usePecoStore.getState();
+        if (state.thumbnails.has(pageIdx)) continue;
+
+        // Uses URL-based shared proxy (much faster, no readFile needed)
+        pdfProxy = await getSharedPdfProxy(document.filePath);
+
+        const dataUrl = await generateThumbnail(pdfProxy, pageIdx);
+        usePecoStore.getState().setThumbnail(pageIdx, dataUrl);
+      }
     } catch (err) {
       console.error("Thumbnail error:", err);
     } finally {
-      if (pdfProxy) try { pdfProxy.destroy(); } catch (e) {}
+      isThumbnailProcessingRef.current = false;
+      if (thumbnailQueueRef.current.length > 0) {
+        setTimeout(processThumbnailQueue, 0); // Next tick
+      }
     }
   }, [document]);
 
-  const loadCurrentPage = useCallback(async (pageIdx: number) => {
+  const thumbnailTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const requestThumbnail = useCallback((pageIndex: number) => {
+    const state = usePecoStore.getState();
+    if (state.thumbnails.has(pageIndex) || !document) return;
+    
+    if (!thumbnailQueueRef.current.includes(pageIndex)) {
+      thumbnailQueueRef.current.push(pageIndex);
+    }
+
+    if (thumbnailTimerRef.current) clearTimeout(thumbnailTimerRef.current);
+    thumbnailTimerRef.current = setTimeout(() => {
+      processThumbnailQueue();
+    }, 300); // メイン画像のレンダリングを優先させるため300ms遅延
+  }, [processThumbnailQueue, document]);
+
+    const loadCurrentPage = useCallback(async (pageIdx: number) => {
     latestLoadRef.current = pageIdx;
     await new Promise(resolve => setTimeout(resolve, 50));
     if (latestLoadRef.current !== pageIdx) return;
 
-    if (loadingTaskRef.current) {
-      loadingTaskRef.current.destroy();
-      loadingTaskRef.current = null;
-    }
-
     if (!document) return;
 
-    let pdf: pdfjsLib.PDFDocumentProxy | null = null;
     try {
-      const content = await readFile(document.filePath);
-      const bytes = new Uint8Array(content);
-      const task = openPDFTask(bytes);
-      loadingTaskRef.current = task;
-      pdf = await task.promise;
-      if (loadingTaskRef.current === task) loadingTaskRef.current = null;
+      // Uses URL-based shared proxy (much faster, no readFile needed)
+      const pdf = await getSharedPdfProxy(document.filePath);
 
       if (latestLoadRef.current !== pageIdx) return;
 
       const bboxMeta = await loadPecoToolBBoxMeta(pdf);
-      const pageData = await loadPage(pdf, pageIdx, bboxMeta);
+      const pageData = await loadPage(pdf, pageIdx, document.filePath, bboxMeta);
 
       if (latestLoadRef.current === pageIdx) {
         updatePageData(pageIdx, pageData, false);
@@ -234,8 +252,6 @@ function App() {
       if (latestLoadRef.current !== pageIdx) return;
       console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
       showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
-    } finally {
-      if (pdf) try { pdf.destroy(); } catch (e) {}
     }
   }, [document, updatePageData, showToast]);
 

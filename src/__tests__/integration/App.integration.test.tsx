@@ -63,17 +63,6 @@ vi.mock('../../components/OcrEditor', () => ({
   OcrEditor: () => <div data-testid="ocr-editor" />,
 }))
 
-// lucide-react のアイコンをすべてスタブ化
-vi.mock('lucide-react', () => {
-  const icon = () => null
-  return {
-    FolderOpen: icon, Save: icon, RotateCcw: icon, RotateCw: icon,
-    ZoomIn: icon, ZoomOut: icon, Maximize: icon, Plus: icon,
-    Group: icon, Trash2: icon, Eye: icon, Scissors: icon,
-    ClipboardList: icon, Eraser: icon, X: icon, MousePointer2: icon,
-  }
-})
-
 // ── ヘルパー ──────────────────────────────────────────────────
 
 function makeBlock(id: string, text: string, order: number, overrides: Partial<TextBlock> = {}): TextBlock {

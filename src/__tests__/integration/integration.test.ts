@@ -110,7 +110,7 @@ describe('I-01: テキスト抽出パイプライン（横書き）', () => {
     ]
     const mockPdf = makeMockPdf(items, 595, 842)
 
-    const pageData = await loadPage(mockPdf as any, 0, null)
+    const pageData = await loadPage(mockPdf as any, 0, "")
 
     expect(pageData.textBlocks.length).toBe(3)
 
@@ -133,7 +133,7 @@ describe('I-01: テキスト抽出パイプライン（横書き）', () => {
     ]
     const mockPdf = makeMockPdf(items)
 
-    const pageData = await loadPage(mockPdf as any, 0, null)
+    const pageData = await loadPage(mockPdf as any, 0, "")
 
     expect(pageData.textBlocks.length).toBe(2)
     expect(pageData.textBlocks.map(b => b.text)).toEqual(['Hello', 'World'])
@@ -151,7 +151,7 @@ describe('I-02: テキスト抽出パイプライン（縦書き）', () => {
     ]
     const mockPdf = makeMockPdf(items)
 
-    const pageData = await loadPage(mockPdf as any, 0, null)
+    const pageData = await loadPage(mockPdf as any, 0, "")
 
     expect(pageData.textBlocks.length).toBe(2)
 
@@ -169,7 +169,7 @@ describe('I-02: テキスト抽出パイプライン（縦書き）', () => {
     ]
     const mockPdf = makeMockPdf(items)
 
-    const pageData = await loadPage(mockPdf as any, 0, null)
+    const pageData = await loadPage(mockPdf as any, 0, "")
 
     expect(pageData.textBlocks[0].order).toBe(0)
     expect(pageData.textBlocks[1].order).toBe(1)
