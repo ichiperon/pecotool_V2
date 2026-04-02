@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from 'pdfjs-dist';
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
-import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, ChevronDown, Settings } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, ChevronDown, Settings, Terminal } from "lucide-react";
 import { open, save, ask } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF, openPDFTask, generateThumbnail } from "./utils/pdfLoader";
@@ -32,6 +32,10 @@ function App() {
   const [showRecentDropdown, setShowRecentDropdown] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
 
+  const [consoleLogs, setConsoleLogs] = useState<Array<{ level: 'error' | 'warn' | 'log'; message: string; time: string }>>([]);
+  const [showConsole, setShowConsole] = useState(false);
+  const consoleEndRef = useRef<HTMLDivElement>(null);
+
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [isEstimating, setIsEstimating] = useState(false);
   const [estimatedSizes, setEstimatedSizes] = useState<{ uncompressed: number; compressed: number } | null>(null);
@@ -47,6 +51,46 @@ function App() {
   }, []);
 
   const currentPage = document?.pages.get(currentPageIndex);
+
+  // --- Console log capture ---
+
+  useEffect(() => {
+    const addLog = (level: 'error' | 'warn' | 'log', args: unknown[]) => {
+      const message = args.map(a => {
+        if (a instanceof Error) return `${a.message}${a.stack ? '\n' + a.stack : ''}`;
+        if (typeof a === 'object' && a !== null) { try { return JSON.stringify(a); } catch { return String(a); } }
+        return String(a);
+      }).join(' ');
+      const time = new Date().toLocaleTimeString('ja-JP');
+      setConsoleLogs(prev => [...prev.slice(-299), { level, message, time }]);
+    };
+
+    const origError = console.error.bind(console);
+    const origWarn = console.warn.bind(console);
+    const origLog = console.log.bind(console);
+
+    console.error = (...args: unknown[]) => { origError(...args); addLog('error', args); };
+    console.warn = (...args: unknown[]) => { origWarn(...args); addLog('warn', args); };
+    console.log = (...args: unknown[]) => { origLog(...args); addLog('log', args); };
+
+    const handleError = (e: ErrorEvent) => addLog('error', [`[UncaughtError] ${e.message}`, e.error].filter(Boolean));
+    const handleRejection = (e: PromiseRejectionEvent) => addLog('error', [`[UnhandledRejection]`, e.reason].filter(Boolean));
+
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleRejection);
+
+    return () => {
+      console.error = origError;
+      console.warn = origWarn;
+      console.log = origLog;
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (showConsole) consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [consoleLogs, showConsole]);
 
   // --- Utility: Recent Files & Lock ---
 
@@ -587,7 +631,7 @@ function App() {
 
     // 前の openPDF タスクが進行中ならキャンセル（並列ワーカー過多によるエラーを防ぐ）
     if (loadingTaskRef.current) {
-      loadingTaskRef.current.cancel();
+      loadingTaskRef.current.destroy();
       loadingTaskRef.current = null;
     }
 
@@ -830,12 +874,48 @@ function App() {
         <OcrEditor width={rightWidth} />
       </main>
 
+      {showConsole && (
+        <div className="console-panel">
+          <div className="console-panel-header">
+            <span className="console-panel-title">コンソール</span>
+            <div className="console-panel-actions">
+              <button className="console-panel-btn" onClick={() => setConsoleLogs([])}>クリア</button>
+              <button className="console-panel-btn" onClick={() => setShowConsole(false)}>✕</button>
+            </div>
+          </div>
+          <div className="console-log-list">
+            {consoleLogs.length === 0
+              ? <div style={{ padding: '8px 10px', color: '#6a9955', fontSize: 11 }}>ログなし</div>
+              : consoleLogs.map((log, i) => (
+                <div key={i} className={`console-log-entry ${log.level}`}>
+                  <span className="console-log-time">{log.time}</span>
+                  <span className="console-log-level">{log.level.toUpperCase()}</span>
+                  <span className="console-log-message">{log.message}</span>
+                </div>
+              ))
+            }
+            <div ref={consoleEndRef} />
+          </div>
+        </div>
+      )}
+
       <footer className="status-bar">
         <div className="status-item">ページ: {document ? `${currentPageIndex + 1} / ${document.totalPages}` : "0 / 0"}</div>
         <div className="status-item">ズーム: {zoom}%</div>
         <div className="status-item">BB数: {currentPage?.textBlocks?.length || 0}</div>
         <div className="status-item flex-grow" />
         {(isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
+        <div
+          className={`status-item console-toggle-btn${consoleLogs.filter(l => l.level === 'error').length > 0 ? ' has-errors' : ''}`}
+          onClick={() => setShowConsole(v => !v)}
+          title="コンソールを開く"
+        >
+          <Terminal size={12} />
+          <span>コンソール</span>
+          {consoleLogs.filter(l => l.level === 'error').length > 0 && (
+            <span className="console-error-badge">{consoleLogs.filter(l => l.level === 'error').length}</span>
+          )}
+        </div>
       </footer>
       {notification && <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>{notification.message}</div>}
 

@@ -100,6 +100,8 @@ export function OcrEditor({ width }: OcrEditorProps) {
           <div className="placeholder">データなし</div>
         ) : !currentPage ? (
           <div className="placeholder">読み込み中...</div>
+        ) : currentPage.textBlocks.length === 0 ? (
+          <div className="placeholder placeholder--no-ocr">OCRテキストなし</div>
         ) : (
           <DndContext
             sensors={sensors}
