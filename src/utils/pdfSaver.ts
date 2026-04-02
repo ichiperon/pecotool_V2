@@ -124,35 +124,68 @@ async function buildPdfDocument(originalPdfBytes: Uint8Array, documentState: Pec
   return pdfDoc;
 }
 
+import pdfWorkerUrl from './pdf.worker?worker&url';
+
 export async function savePDF(
   originalPdfBytes: Uint8Array,
   documentState: PecoDocument,
   compression: 'none' | 'compressed' | 'rasterized' = 'none',
-  rasterizeQuality: number = 0.6
+  rasterizeQuality: number = 0.6,
+  fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
   if (compression === 'rasterized') {
-    return await buildRasterizedPdfDocument(originalPdfBytes, documentState, rasterizeQuality);
+    return await buildRasterizedPdfDocument(originalPdfBytes, documentState, rasterizeQuality, fontBytes);
   }
 
-  const pdfDoc = await buildPdfDocument(originalPdfBytes, documentState);
-  return await pdfDoc.save({ 
-    useObjectStreams: compression === 'compressed', 
-    addDefaultPage: false 
+  // Use Worker for standard saving to keep UI responsive
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
+    
+    worker.onmessage = (e) => {
+      const { type, data, message } = e.data;
+      if (type === 'SAVE_PDF_SUCCESS') {
+        resolve(data);
+        worker.terminate();
+      } else if (type === 'ERROR') {
+        reject(new Error(message));
+        worker.terminate();
+      }
+    };
+
+    worker.onerror = (err) => {
+      reject(err);
+      worker.terminate();
+    };
+
+    // Serialize documentState (Map to Object)
+    const serializedPages: Record<number, any> = {};
+    for (const [idx, page] of documentState.pages.entries()) {
+      serializedPages[idx] = page;
+    }
+
+    const startSave = async () => {
+      worker.postMessage({
+        type: 'SAVE_PDF',
+        data: {
+          originalPdfBytes,
+          documentState: { ...documentState, pages: serializedPages },
+          compression,
+          rasterizeQuality,
+          fontBytes
+        }
+      }, [originalPdfBytes.buffer, fontBytes].filter(Boolean) as any);
+    };
+
+    startSave();
   });
 }
 
-async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, documentState: PecoDocument, quality: number = 0.6): Promise<Uint8Array> {
+async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, documentState: PecoDocument, quality: number = 0.6, fontBytes?: ArrayBuffer): Promise<Uint8Array> {
   const newPdf = await PDFDocument.create();
   newPdf.registerFontkit(fontkit);
 
-  if (!cachedFontBytes) {
-    try {
-      const res = await fetch('/fonts/IPAexGothic.ttf');
-      if (res.ok) cachedFontBytes = await res.arrayBuffer();
-    } catch(e) {}
-  }
-  const customFont = cachedFontBytes 
-    ? await newPdf.embedFont(cachedFontBytes, { subset: true }) 
+  const customFont = fontBytes 
+    ? await newPdf.embedFont(fontBytes, { subset: true }) 
     : await newPdf.embedFont(StandardFonts.Helvetica);
 
   const pdfJsDoc = await pdfjsLib.getDocument({ data: originalPdfBytes.slice() }).promise;

@@ -22,9 +22,10 @@ import { Search } from 'lucide-react';
 
 interface OcrEditorProps {
   width: number;
+  searchInputRef: React.RefObject<HTMLInputElement | null>;
 }
 
-export function OcrEditor({ width }: OcrEditorProps) {
+export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
   const { document, currentPageIndex, updatePageData, toggleSelection, selectedIds, lastSelectedId, setSelectedIds } = usePecoStore();
   const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
@@ -109,6 +110,7 @@ export function OcrEditor({ width }: OcrEditorProps) {
         <div className="search-container">
           <Search size={14} className="search-icon" />
           <input
+            ref={searchInputRef}
             type="text"
             placeholder="検索..."
             className="search-box"

@@ -18,19 +18,10 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
-  const { document, originalBytes, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
+  const { document, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
-
-  // Drawing state
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
-  const [currentPos, setCurrentPos] = useState({ x: 0, y: 0 });
-
-  // Alt Drag state
-  const [isAltDragging, setIsAltDragging] = useState(false);
-  const [altDragStart, setAltDragStart] = useState({ x: 0, y: 0 });
-  const [altDragEnd, setAltDragEnd] = useState({ x: 0, y: 0 });
+  const { readFile } = await import('@tauri-apps/plugin-fs');
 
   // Moving/Resizing state
   const [dragMode, setDragMode] = useState<'none' | 'move' | 'resize-nw' | 'resize-ne' | 'resize-sw' | 'resize-se'>('none');
@@ -41,15 +32,17 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const preDragPageRef = useRef<PageData | null>(null);
   const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
-  // Open PDF document only when bytes change (expensive)
+  // Open PDF document only when filePath changes (expensive)
   useEffect(() => {
-    if (!originalBytes) return;
+    if (!document?.filePath) return;
     let cancelled = false;
 
     (async () => {
       try {
+        const content = await readFile(document.filePath);
+        const bytes = new Uint8Array(content);
         const doc = await pdfjsLib.getDocument({ 
-          data: originalBytes.slice(), // Restore .slice() to prevent detachment
+          data: bytes,
           cMapUrl: CMAP_URL,
           cMapPacked: CMAP_PACKED,
           standardFontDataUrl: STANDARD_FONT_DATA_URL,
@@ -66,9 +59,12 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
     return () => {
       cancelled = true;
-      pdfDocRef.current = null;
+      if (pdfDocRef.current) {
+        pdfDocRef.current.destroy().catch(() => {});
+        pdfDocRef.current = null;
+      }
     };
-  }, [originalBytes]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [document?.filePath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load specific page using cached doc (cheap)
   useEffect(() => {
