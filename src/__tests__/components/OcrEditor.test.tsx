@@ -83,7 +83,8 @@ const blocks = [
 function setup() {
   const doc = makeDoc(blocks)
   usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
-  return render(<OcrEditor width={350} />)
+  const searchInputRef = { current: null }
+  return render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 }
 
 afterEach(() => cleanup())

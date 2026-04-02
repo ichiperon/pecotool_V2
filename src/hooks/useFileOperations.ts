@@ -1,15 +1,14 @@
-import { useCallback, useRef } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from '../store/pecoStore';
 import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF } from '../utils/pdfLoader';
-import { savePDF, estimateSizes } from '../utils/pdfSaver';
+import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../components/SaveDialog';
 
 export function useFileOperations(showToast: (msg: string, isError?: boolean) => void) {
   const { 
-    document, setDocument, originalBytes, resetDirty, updatePageData, 
-    isDirty, currentPageIndex, fontBytes, isFontLoaded
+    document, setDocument, resetDirty, updatePageData, 
+    fontBytes, isFontLoaded
   } = usePecoStore();
 
   const addToRecent = (path: string) => {

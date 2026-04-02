@@ -9,7 +9,7 @@ self.onmessage = async (e: MessageEvent) => {
 
   if (type === 'SAVE_PDF') {
     try {
-      const { originalPdfBytes, documentState, compression, rasterizeQuality, fontBytes } = data;
+      const { originalPdfBytes, documentState, compression, fontBytes } = data;
       
       // Note: Rasterization involves Canvas, which is NOT available in standard Web Workers.
       // For now, we handle the non-rasterized buildPdfDocument logic here.
@@ -94,7 +94,7 @@ self.onmessage = async (e: MessageEvent) => {
         infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
       }
 
-      const savedBytes = await pdfDoc.save({ useObjectStreams: compression === 'compressed' });
+      const savedBytes = await pdfDoc.save({ useObjectStreams: compression === 'compressed', addDefaultPage: false });
       self.postMessage({ type: 'SAVE_PDF_SUCCESS', data: savedBytes }, [savedBytes.buffer] as any);
     } catch (err: any) {
       self.postMessage({ type: 'ERROR', message: err.message });

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from 'pdfjs-dist';
+import { readFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from "../store/pecoStore";
 import { Action, PageData, TextBlock } from "../types";
 import { classifyDirection, getDirectionLabel, reorderBlocks } from "../utils/bulkReorder";
@@ -21,7 +22,16 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const { document, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const { readFile } = await import('@tauri-apps/plugin-fs');
+
+  // Drawing state
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
+  const [currentPos, setCurrentPos] = useState({ x: 0, y: 0 });
+
+  // Alt+Drag Reorder state
+  const [isAltDragging, setIsAltDragging] = useState(false);
+  const [altDragStart, setAltDragStart] = useState({ x: 0, y: 0 });
+  const [altDragEnd, setAltDragEnd] = useState({ x: 0, y: 0 });
 
   // Moving/Resizing state
   const [dragMode, setDragMode] = useState<'none' | 'move' | 'resize-nw' | 'resize-ne' | 'resize-sw' | 'resize-se'>('none');

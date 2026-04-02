@@ -1,13 +1,12 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
+import { getAllWindows } from '@tauri-apps/api/window';
 import { emit, listen } from '@tauri-apps/api/event';
-import { ask } from '@tauri-apps/plugin-dialog';
 import { usePecoStore } from '../store/pecoStore';
 
 export function usePreviewWindow() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const { document, currentPageIndex, isDirty } = usePecoStore();
+  const { document, currentPageIndex } = usePecoStore();
   const currentPage = document?.pages.get(currentPageIndex);
 
   const previewText = useMemo(() => {
@@ -45,23 +44,29 @@ export function usePreviewWindow() {
           visible: false
         });
       }
-      setIsPreviewOpen(true);
-      await win.show();
-      await win.setFocus();
+      return win;
     } catch (e) {
       console.error(e);
+      return undefined;
     }
   }, []);
 
   const togglePreviewWindow = useCallback(async () => {
     try {
       const windows = await getAllWindows();
-      const win = windows.find(w => w.label === 'preview-window');
+      let win = windows.find(w => w.label === 'preview-window');
       if (win && isPreviewOpen) {
         await win.hide();
         setIsPreviewOpen(false);
       } else {
-        await initPreviewWindow();
+        if (!win) {
+          win = await initPreviewWindow();
+        }
+        if (win) {
+          setIsPreviewOpen(true);
+          await win.show();
+          await win.setFocus();
+        }
       }
     } catch (e) {
       console.error(e);

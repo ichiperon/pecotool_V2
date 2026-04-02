@@ -1,5 +1,4 @@
 import React from 'react';
-import { Terminal } from 'lucide-react';
 
 interface LogEntry {
   level: 'error' | 'warn' | 'log';

@@ -4,10 +4,11 @@ import {
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, 
   ChevronDown, Settings 
 } from "lucide-react";
+import { PageData, PecoDocument } from '../../types';
 
 interface ToolbarProps {
-  document: any;
-  currentPage: any;
+  document: PecoDocument | null;
+  currentPage: PageData | undefined;
   isDirty: boolean;
   undoStackLength: number;
   redoStackLength: number;

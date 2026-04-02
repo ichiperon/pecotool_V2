@@ -1,0 +1,223 @@
+diff --git a/src/App.tsx b/src/App.tsx
+index ef1c2bd..e6544b0 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -11,7 +11,7 @@ import { PdfCanvas } from "./components/PdfCanvas";
+ import { OcrEditor } from "./components/OcrEditor";
+ import { SaveDialog } from "./components/SaveDialog";
+ import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
+-import { TextBlock, Action } from "./types";
++import { TextBlock } from "./types";
+ 
+ // Hooks
+ import { useFileOperations } from "./hooks/useFileOperations";
+@@ -27,11 +27,11 @@ import { ConsolePanel } from "./components/Console/ConsolePanel";
+ 
+ function App() {
+   const { 
+-    document, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, 
++    document, currentPageIndex, zoom, setZoom, 
+     setCurrentPage, updatePageData, selectedIds, showOcr, toggleShowOcr, 
+     ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack, 
+     isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, 
+-    isDirty, thumbnails, resetDirty, copySelected, pasteClipboard 
++    isDirty, thumbnails, copySelected, pasteClipboard 
+   } = usePecoStore();
+ 
+   const [leftWidth, setLeftWidth] = useState(200);
+diff --git a/src/__tests__/components/OcrEditor.test.tsx b/src/__tests__/components/OcrEditor.test.tsx
+index 845717c..048f514 100644
+--- a/src/__tests__/components/OcrEditor.test.tsx
++++ b/src/__tests__/components/OcrEditor.test.tsx
+@@ -83,7 +83,8 @@ const blocks = [
+ function setup() {
+   const doc = makeDoc(blocks)
+   usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
+-  return render(<OcrEditor width={350} />)
++  const searchInputRef = { current: null }
++  return render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
+ }
+ 
+ afterEach(() => cleanup())
+diff --git a/src/components/Console/ConsolePanel.tsx b/src/components/Console/ConsolePanel.tsx
+index f0a3c71..4812255 100644
+--- a/src/components/Console/ConsolePanel.tsx
++++ b/src/components/Console/ConsolePanel.tsx
+@@ -1,5 +1,4 @@
+ import React from 'react';
+-import { Terminal } from 'lucide-react';
+ 
+ interface LogEntry {
+   level: 'error' | 'warn' | 'log';
+diff --git a/src/components/PdfCanvas.tsx b/src/components/PdfCanvas.tsx
+index abf58b5..6d8cd7f 100644
+--- a/src/components/PdfCanvas.tsx
++++ b/src/components/PdfCanvas.tsx
+@@ -1,5 +1,6 @@
+ import { useEffect, useRef, useState } from "react";
+ import * as pdfjsLib from 'pdfjs-dist';
++import { readFile } from '@tauri-apps/plugin-fs';
+ import { usePecoStore } from "../store/pecoStore";
+ import { Action, PageData, TextBlock } from "../types";
+ import { classifyDirection, getDirectionLabel, reorderBlocks } from "../utils/bulkReorder";
+@@ -21,7 +22,16 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
+   const { document, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
+   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
+   const wrapperRef = useRef<HTMLDivElement>(null);
+-  const { readFile } = await import('@tauri-apps/plugin-fs');
++
++  // Drawing state
++  const [isDrawing, setIsDrawing] = useState(false);
++  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
++  const [currentPos, setCurrentPos] = useState({ x: 0, y: 0 });
++
++  // Alt+Drag Reorder state
++  const [isAltDragging, setIsAltDragging] = useState(false);
++  const [altDragStart, setAltDragStart] = useState({ x: 0, y: 0 });
++  const [altDragEnd, setAltDragEnd] = useState({ x: 0, y: 0 });
+ 
+   // Moving/Resizing state
+   const [dragMode, setDragMode] = useState<'none' | 'move' | 'resize-nw' | 'resize-ne' | 'resize-sw' | 'resize-se'>('none');
+diff --git a/src/components/Toolbar/Toolbar.tsx b/src/components/Toolbar/Toolbar.tsx
+index 7a6dbf7..4de729e 100644
+--- a/src/components/Toolbar/Toolbar.tsx
++++ b/src/components/Toolbar/Toolbar.tsx
+@@ -4,10 +4,11 @@ import {
+   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, 
+   ChevronDown, Settings 
+ } from "lucide-react";
++import { PageData, PecoDocument } from '../../types';
+ 
+ interface ToolbarProps {
+-  document: any;
+-  currentPage: any;
++  document: PecoDocument | null;
++  currentPage: PageData | undefined;
+   isDirty: boolean;
+   undoStackLength: number;
+   redoStackLength: number;
+diff --git a/src/hooks/useFileOperations.ts b/src/hooks/useFileOperations.ts
+index e18a866..ad89938 100644
+--- a/src/hooks/useFileOperations.ts
++++ b/src/hooks/useFileOperations.ts
+@@ -1,15 +1,14 @@
+-import { useCallback, useRef } from 'react';
+ import { open, save } from '@tauri-apps/plugin-dialog';
+ import { readFile, writeFile } from '@tauri-apps/plugin-fs';
+ import { usePecoStore } from '../store/pecoStore';
+ import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF } from '../utils/pdfLoader';
+-import { savePDF, estimateSizes } from '../utils/pdfSaver';
++import { savePDF } from '../utils/pdfSaver';
+ import { formatFileSize } from '../components/SaveDialog';
+ 
+ export function useFileOperations(showToast: (msg: string, isError?: boolean) => void) {
+   const { 
+-    document, setDocument, originalBytes, resetDirty, updatePageData, 
+-    isDirty, currentPageIndex, fontBytes, isFontLoaded
++    document, setDocument, resetDirty, updatePageData, 
++    fontBytes, isFontLoaded
+   } = usePecoStore();
+ 
+   const addToRecent = (path: string) => {
+diff --git a/src/hooks/usePreviewWindow.ts b/src/hooks/usePreviewWindow.ts
+index 100ea2a..d712162 100644
+--- a/src/hooks/usePreviewWindow.ts
++++ b/src/hooks/usePreviewWindow.ts
+@@ -1,13 +1,12 @@
+ import { useState, useEffect, useMemo, useCallback } from 'react';
+ import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+-import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
++import { getAllWindows } from '@tauri-apps/api/window';
+ import { emit, listen } from '@tauri-apps/api/event';
+-import { ask } from '@tauri-apps/plugin-dialog';
+ import { usePecoStore } from '../store/pecoStore';
+ 
+ export function usePreviewWindow() {
+   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+-  const { document, currentPageIndex, isDirty } = usePecoStore();
++  const { document, currentPageIndex } = usePecoStore();
+   const currentPage = document?.pages.get(currentPageIndex);
+ 
+   const previewText = useMemo(() => {
+@@ -45,23 +44,29 @@ export function usePreviewWindow() {
+           visible: false
+         });
+       }
+-      setIsPreviewOpen(true);
+-      await win.show();
+-      await win.setFocus();
++      return win;
+     } catch (e) {
+       console.error(e);
++      return undefined;
+     }
+   }, []);
+ 
+   const togglePreviewWindow = useCallback(async () => {
+     try {
+       const windows = await getAllWindows();
+-      const win = windows.find(w => w.label === 'preview-window');
++      let win = windows.find(w => w.label === 'preview-window');
+       if (win && isPreviewOpen) {
+         await win.hide();
+         setIsPreviewOpen(false);
+       } else {
+-        await initPreviewWindow();
++        if (!win) {
++          win = await initPreviewWindow();
++        }
++        if (win) {
++          setIsPreviewOpen(true);
++          await win.show();
++          await win.setFocus();
++        }
+       }
+     } catch (e) {
+       console.error(e);
+diff --git a/src/utils/pdf.worker.ts b/src/utils/pdf.worker.ts
+index 3423c5c..b817e5d 100644
+--- a/src/utils/pdf.worker.ts
++++ b/src/utils/pdf.worker.ts
+@@ -9,7 +9,7 @@ self.onmessage = async (e: MessageEvent) => {
+ 
+   if (type === 'SAVE_PDF') {
+     try {
+-      const { originalPdfBytes, documentState, compression, rasterizeQuality, fontBytes } = data;
++      const { originalPdfBytes, documentState, compression, fontBytes } = data;
+       
+       // Note: Rasterization involves Canvas, which is NOT available in standard Web Workers.
+       // For now, we handle the non-rasterized buildPdfDocument logic here.
+@@ -94,7 +94,7 @@ self.onmessage = async (e: MessageEvent) => {
+         infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
+       }
+ 
+-      const savedBytes = await pdfDoc.save({ useObjectStreams: compression === 'compressed' });
++      const savedBytes = await pdfDoc.save({ useObjectStreams: compression === 'compressed', addDefaultPage: false });
+       self.postMessage({ type: 'SAVE_PDF_SUCCESS', data: savedBytes }, [savedBytes.buffer] as any);
+     } catch (err: any) {
+       self.postMessage({ type: 'ERROR', message: err.message });
+diff --git a/src/utils/pdfSaver.ts b/src/utils/pdfSaver.ts
+index c8b0c97..37438b9 100644
+--- a/src/utils/pdfSaver.ts
++++ b/src/utils/pdfSaver.ts
+@@ -124,8 +124,6 @@ async function buildPdfDocument(originalPdfBytes: Uint8Array, documentState: Pec
+   return pdfDoc;
+ }
+ 
+-import pdfWorkerUrl from './pdf.worker?worker&url';
+-
+ export async function savePDF(
+   originalPdfBytes: Uint8Array,
+   documentState: PecoDocument,
+@@ -275,10 +273,7 @@ async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, document
+   newPdf.setTitle(documentState.metadata?.title || 'OCR Document');
+   newPdf.setCreator('PecoTool V2');
+   
+-  let infoDict = (newPdf as any).getInfoDict();
+-  if (!infoDict) {
+-    infoDict = (newPdf as any).getInfoDict();
+-  }
++  const infoDict = (newPdf as any).getInfoDict();
+   if (infoDict) {
+     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
+   }

@@ -11,7 +11,7 @@ import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { SaveDialog } from "./components/SaveDialog";
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
-import { TextBlock, Action } from "./types";
+import { TextBlock } from "./types";
 
 // Hooks
 import { useFileOperations } from "./hooks/useFileOperations";
@@ -27,11 +27,11 @@ import { ConsolePanel } from "./components/Console/ConsolePanel";
 
 function App() {
   const { 
-    document, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, 
+    document, currentPageIndex, zoom, setZoom, 
     setCurrentPage, updatePageData, selectedIds, showOcr, toggleShowOcr, 
     ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack, 
     isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, 
-    isDirty, thumbnails, resetDirty, copySelected, pasteClipboard 
+    isDirty, thumbnails, copySelected, pasteClipboard 
   } = usePecoStore();
 
   const [leftWidth, setLeftWidth] = useState(200);

@@ -124,8 +124,6 @@ async function buildPdfDocument(originalPdfBytes: Uint8Array, documentState: Pec
   return pdfDoc;
 }
 
-import pdfWorkerUrl from './pdf.worker?worker&url';
-
 export async function savePDF(
   originalPdfBytes: Uint8Array,
   documentState: PecoDocument,
@@ -275,10 +273,7 @@ async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, document
   newPdf.setTitle(documentState.metadata?.title || 'OCR Document');
   newPdf.setCreator('PecoTool V2');
   
-  let infoDict = (newPdf as any).getInfoDict();
-  if (!infoDict) {
-    infoDict = (newPdf as any).getInfoDict();
-  }
+  const infoDict = (newPdf as any).getInfoDict();
   if (infoDict) {
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
