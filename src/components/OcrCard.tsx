@@ -12,10 +12,11 @@ interface OcrCardProps {
   pageIndex: number;
   dragListeners?: any;
   onNavigate?: (direction: 'up' | 'down') => void;
+  onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
 }
 
 export const OcrCard = forwardRef<OcrCardHandle, OcrCardProps>(
-  function OcrCard({ block, pageIndex, dragListeners, onNavigate }, ref) {
+  function OcrCard({ block, pageIndex, dragListeners, onNavigate, onSelect }, ref) {
   const { updatePageData, document, selectedIds, toggleSelection } = usePecoStore();
   const contentRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -66,7 +67,11 @@ export const OcrCard = forwardRef<OcrCardHandle, OcrCardProps>(
 
   const handleClick = (e: React.MouseEvent) => {
     if (contentRef.current?.contains(e.target as Node) && isSelected) return;
-    toggleSelection(block.id, e.ctrlKey || e.shiftKey);
+    if (onSelect) {
+      onSelect(block.id, e.ctrlKey || e.metaKey, e.shiftKey);
+    } else {
+      toggleSelection(block.id, e.ctrlKey || e.metaKey || e.shiftKey);
+    }
   };
 
   const handleContextMenu = (e: React.MouseEvent) => {

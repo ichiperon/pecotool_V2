@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from 'pdfjs-dist';
+import { Virtuoso } from 'react-virtuoso';
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
 import { FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, MousePointer2, ChevronDown, Settings, Terminal } from "lucide-react";
@@ -16,12 +17,32 @@ import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
 import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi';
 import { emit, listen } from '@tauri-apps/api/event';
 
+const ThumbnailItemNode = React.memo(({ index, currentPageIndex, thumbnailData, isDirty, onSelect, onRequest }: any) => {
+  useEffect(() => {
+    if (!thumbnailData) onRequest(index);
+  }, [index, thumbnailData, onRequest]);
+
+  return (
+    <div className={`thumbnail-item ${index === currentPageIndex ? 'active' : ''}`} onClick={() => onSelect(index)}>
+      <div className="thumbnail-box">
+        {thumbnailData ? (
+          <img src={thumbnailData} alt={`Page ${index + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+        ) : (
+          <span style={{ color: '#d1d5db', fontSize: 24 }}>{index + 1}</span>
+        )}
+      </div>
+      <div className="thumbnail-label">{index + 1} ページ {isDirty && "●"}</div>
+    </div>
+  );
+});
+
 function App() {
   const { document, setDocument, setThumbnail, originalBytes, currentPageIndex, zoom, setZoom, setCurrentPage, updatePageData, selectedIds, clearSelection, showOcr, toggleShowOcr, ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack, isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, isDirty, thumbnails, resetDirty, copySelected, pasteClipboard } = usePecoStore();
 
   const [leftWidth, setLeftWidth] = useState(200);
   const [rightWidth, setRightWidth] = useState(400);
   const [isAutoFit, setIsAutoFit] = useState(true);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(true);
   
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
@@ -107,6 +128,57 @@ function App() {
     });
   };
 
+  // --- Thumbnail Queue Mechanism ---
+  const thumbnailQueue = useRef<number[]>([]);
+  const isProcessingQueue = useRef(false);
+
+  const requestThumbnail = useCallback((pageIndex: number) => {
+    const state = usePecoStore.getState();
+    if (state.thumbnails.has(pageIndex)) return;
+    
+    if (!thumbnailQueue.current.includes(pageIndex)) {
+      thumbnailQueue.current.push(pageIndex);
+      processThumbnailQueue();
+    }
+  }, []);
+
+  const processThumbnailQueue = useCallback(async () => {
+    if (isProcessingQueue.current) return;
+    isProcessingQueue.current = true;
+    
+    const { originalBytes } = usePecoStore.getState();
+    if (!originalBytes) {
+      isProcessingQueue.current = false;
+      return;
+    }
+
+    let pdfProxy: pdfjsLib.PDFDocumentProxy | null = null;
+    
+    try {
+      while (thumbnailQueue.current.length > 0) {
+        const pageIndex = thumbnailQueue.current.pop()!;
+        const state = usePecoStore.getState();
+        
+        if (state.thumbnails.has(pageIndex)) continue; 
+        
+        if (!pdfProxy) {
+          pdfProxy = await openPDFTask(originalBytes).promise;
+        }
+        
+        const dataUrl = await generateThumbnail(pdfProxy, pageIndex);
+        state.setThumbnail(pageIndex, dataUrl);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    } catch (err) {
+      console.error("Thumbnail queue error:", err);
+    } finally {
+      if (pdfProxy) {
+        try { pdfProxy.destroy(); } catch (e) {}
+      }
+      isProcessingQueue.current = false;
+    }
+  }, []);
+
   // --- Handlers ---
 
   const handleOpen = async (explicitPath?: string) => {
@@ -143,25 +215,11 @@ function App() {
           alert(`テキスト抽出に失敗しました:\n${err}`);
         }
 
-        (async () => {
-          try {
-            for (let i = 0; i < doc.totalPages; i++) {
-              if (i > 0 && i % 10 === 0) await new Promise(resolve => setTimeout(resolve, 10));
-              try {
-                const dataUrl = await generateThumbnail(pdf, i);
-                setThumbnail(i, dataUrl);
-              } catch (err) {
-                console.error("Thumbnail error:", err);
-              }
-            }
-          } finally {
-            try {
-              pdf.destroy();
-            } catch (e) {
-              console.error(e);
-            }
-          }
-        })();
+        try {
+          pdf.destroy();
+        } catch (e) {
+          console.error(e);
+        }
       }
     } catch (err) {
       console.error("Failed to open file:", err);
@@ -385,21 +443,23 @@ function App() {
   actionRefs.current.copySelected = copySelected;
   actionRefs.current.pasteClipboard = pasteClipboard;
 
-  const openPreviewWindow = async () => {
+  const initPreviewWindow = async () => {
     try {
       const windows = await getAllWindows();
       const previewWin = windows.find(w => w.label === 'preview-window');
       
+      const mainWin = getCurrentWindow();
+      const mainSize = await mainWin.outerSize();
+      const mainPos = await mainWin.outerPosition();
+      
       if (previewWin) {
-        const mainWin = getCurrentWindow();
-        const mainSize = await mainWin.outerSize();
-        const mainPos = await mainWin.outerPosition();
         const currentPreviewSize = await previewWin.outerSize();
         const newWidth = currentPreviewSize.width || Math.floor(600 * await mainWin.scaleFactor()); 
         await previewWin.setSize(new PhysicalSize(newWidth, mainSize.height));
         await previewWin.setPosition(new PhysicalPosition(mainPos.x + mainSize.width, mainPos.y));
         await previewWin.show();
         await previewWin.setFocus();
+        setIsPreviewOpen(true);
       } else {
         const webview = new WebviewWindow('preview-window', {
           url: 'index.html#preview',
@@ -408,9 +468,37 @@ function App() {
           height: 800,
           center: true
         });
+        
+        webview.once('tauri://created', async () => {
+          setIsPreviewOpen(true);
+          const newWidth = Math.floor(600 * await mainWin.scaleFactor()); 
+          await webview.setSize(new PhysicalSize(newWidth, mainSize.height));
+          await webview.setPosition(new PhysicalPosition(mainPos.x + mainSize.width, mainPos.y));
+        });
+        
         webview.once('tauri://error', (e) => {
           console.error('Error creating preview window:', e);
         });
+
+        webview.onCloseRequested(() => {
+          setIsPreviewOpen(false);
+        });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const togglePreviewWindow = async () => {
+    try {
+      const windows = await getAllWindows();
+      const previewWin = windows.find(w => w.label === 'preview-window');
+      
+      if (previewWin) {
+        await previewWin.close();
+        setIsPreviewOpen(false);
+      } else {
+        await initPreviewWindow();
       }
     } catch (e) {
       console.error(e);
@@ -440,7 +528,7 @@ function App() {
   }, [currentPage]);
 
   useEffect(() => {
-    openPreviewWindow();
+    initPreviewWindow();
   }, []);
 
   useEffect(() => {
@@ -846,7 +934,7 @@ function App() {
             )}
           </div>
           
-          <button onClick={openPreviewWindow} title="プレビュー" className="feature-btn" disabled={!document}><ClipboardList size={18} /><span>テキスト確認</span></button>
+          <button onClick={togglePreviewWindow} title="プレビュー" className={`feature-btn ${isPreviewOpen ? 'active' : ''}`} disabled={!document}><ClipboardList size={18} /><span>テキスト確認</span></button>
         </div>
       </header>
 
@@ -858,12 +946,22 @@ function App() {
             if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); if (currentPageIndex < document.totalPages - 1) setCurrentPage(currentPageIndex + 1); }
             else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); if (currentPageIndex > 0) setCurrentPage(currentPageIndex - 1); }
           }}>
-            {document ? Array.from({ length: document.totalPages }).map((_, i) => (
-              <div key={i} className={`thumbnail-item ${i === currentPageIndex ? 'active' : ''}`} onClick={() => setCurrentPage(i)}>
-                <div className="thumbnail-box">{thumbnails.get(i) ? <img src={thumbnails.get(i)} alt={`Page ${i + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain' }} /> : <span style={{ color: '#d1d5db', fontSize: 24 }}>{i + 1}</span>}</div>
-                <div className="thumbnail-label">{i + 1} ページ {document.pages.get(i)?.isDirty && "●"}</div>
-              </div>
-            )) : <div className="placeholder">なし</div>}
+            {document ? (
+              <Virtuoso
+                style={{ height: '100%' }}
+                totalCount={document.totalPages}
+                itemContent={(i) => (
+                  <ThumbnailItemNode
+                    index={i}
+                    currentPageIndex={currentPageIndex}
+                    thumbnailData={thumbnails.get(i)}
+                    isDirty={document.pages.get(i)?.isDirty}
+                    onSelect={setCurrentPage}
+                    onRequest={requestThumbnail}
+                  />
+                )}
+              />
+            ) : <div className="placeholder">なし</div>}
           </div>
         </aside>
         <div className="resizer" onMouseDown={startResizeLeft} />

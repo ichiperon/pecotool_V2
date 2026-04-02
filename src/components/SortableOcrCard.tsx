@@ -8,10 +8,11 @@ interface SortableOcrCardProps {
   block: TextBlock;
   pageIndex: number;
   onNavigate?: (direction: 'up' | 'down') => void;
+  onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
 }
 
 export const SortableOcrCard = forwardRef<OcrCardHandle, SortableOcrCardProps>(
-  function SortableOcrCard({ block, pageIndex, onNavigate }, ref) {
+  function SortableOcrCard({ block, pageIndex, onNavigate, onSelect }, ref) {
   const {
     attributes,
     listeners,
@@ -37,6 +38,7 @@ export const SortableOcrCard = forwardRef<OcrCardHandle, SortableOcrCardProps>(
         pageIndex={pageIndex}
         dragListeners={listeners}
         onNavigate={onNavigate}
+        onSelect={onSelect}
       />
     </div>
   );

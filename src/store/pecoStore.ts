@@ -15,6 +15,7 @@ interface PecoState {
   isDrawingMode: boolean;
   isSplitMode: boolean;
   selectedIds: Set<string>;
+  lastSelectedId: string | null;
   clipboard: TextBlock[];
   undoStack: Action[];
   redoStack: Action[];
@@ -33,6 +34,7 @@ interface PecoState {
   resetDirty: () => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
+  setSelectedIds: (ids: string[]) => void;
   clearSelection: () => void;
   copySelected: () => void;
   pasteClipboard: () => void;
@@ -57,6 +59,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   isDrawingMode: false,
   isSplitMode: false,
   selectedIds: new Set(),
+  lastSelectedId: null,
   clipboard: [],
   undoStack: [],
   redoStack: [],
@@ -77,6 +80,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       isDrawingMode: false,
       isSplitMode: false,
       selectedIds: new Set(),
+      lastSelectedId: null,
       clipboard: [],
       undoStack: [],
       redoStack: []
@@ -95,7 +99,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   setCurrentPage: (index) => set((state) => {
     const newOrder = [index, ...state.pageAccessOrder.filter(i => i !== index)];
-    return { currentPageIndex: index, selectedIds: new Set(), pageAccessOrder: newOrder };
+    return { currentPageIndex: index, selectedIds: new Set(), lastSelectedId: null, pageAccessOrder: newOrder };
   }),
 
   setZoom: (zoom) => set({ zoom }),
@@ -175,15 +179,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   toggleSelection: (id, multi) => set((state) => {
     const newSelection = new Set(multi ? state.selectedIds : []);
+    let newLastId = state.lastSelectedId;
     if (newSelection.has(id)) {
       newSelection.delete(id);
+      if (newLastId === id) newLastId = null;
     } else {
       newSelection.add(id);
+      newLastId = id;
     }
-    return { selectedIds: newSelection };
+    return { selectedIds: newSelection, lastSelectedId: newLastId };
   }),
 
-  clearSelection: () => set({ selectedIds: new Set() }),
+  setSelectedIds: (ids) => set({ selectedIds: new Set(ids), lastSelectedId: ids[ids.length - 1] || null }),
+
+  clearSelection: () => set({ selectedIds: new Set(), lastSelectedId: null }),
 
   copySelected: () => {
     const { document, currentPageIndex, selectedIds } = get();

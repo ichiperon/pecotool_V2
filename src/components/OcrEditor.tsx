@@ -25,7 +25,7 @@ interface OcrEditorProps {
 }
 
 export function OcrEditor({ width }: OcrEditorProps) {
-  const { document, currentPageIndex, updatePageData, toggleSelection } = usePecoStore();
+  const { document, currentPageIndex, updatePageData, toggleSelection, selectedIds, lastSelectedId, setSelectedIds } = usePecoStore();
   const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -80,6 +80,28 @@ export function OcrEditor({ width }: OcrEditorProps) {
     }, 50);
   };
 
+  const handleSelect = (id: string, ctrl: boolean, shift: boolean) => {
+    if (shift && lastSelectedId) {
+      const startIdx = filteredBlocks.findIndex(b => b.id === lastSelectedId);
+      const endIdx = filteredBlocks.findIndex(b => b.id === id);
+      if (startIdx !== -1 && endIdx !== -1) {
+        const min = Math.min(startIdx, endIdx);
+        const max = Math.max(startIdx, endIdx);
+        const rangeIds = filteredBlocks.slice(min, max + 1).map(b => b.id);
+        
+        if (ctrl) {
+          const newSet = new Set(selectedIds);
+          rangeIds.forEach(rId => newSet.add(rId));
+          setSelectedIds(Array.from(newSet));
+        } else {
+          setSelectedIds(rangeIds);
+        }
+        return;
+      }
+    }
+    toggleSelection(id, ctrl || shift);
+  };
+
   return (
     <aside className="editor-panel" style={{ width: `${width}px` }}>
       <div className="panel-header">
@@ -120,6 +142,7 @@ export function OcrEditor({ width }: OcrEditorProps) {
                     block={block}
                     pageIndex={currentPageIndex}
                     onNavigate={(dir) => handleNavigate(block.id, dir)}
+                    onSelect={handleSelect}
                   />
                 ))}
               </div>

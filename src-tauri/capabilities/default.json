@@ -24,6 +24,16 @@
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" }
       ]
+    },
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        { "path": "**" },
+        { "path": "$HOME/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" }
+      ]
     }
   ]
 }

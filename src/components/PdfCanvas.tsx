@@ -35,7 +35,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   // Moving/Resizing state
   const [dragMode, setDragMode] = useState<'none' | 'move' | 'resize-nw' | 'resize-ne' | 'resize-sw' | 'resize-se'>('none');
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [dragStartBbox, setDragStartBbox] = useState<any>(null);
+  const [dragStartBbox, setDragStartBbox] = useState<any>(null); // For single block resizing
+  const [dragStartBboxes, setDragStartBboxes] = useState<Map<string, {x: number, y: number, width: number, height: number}>>(new Map()); // For multiple block moving
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
   const preDragPageRef = useRef<PageData | null>(null);
   const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
@@ -461,14 +462,29 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         const h = block.bbox.height * scale;
 
         if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
+          let curSelectedIds = selectedIds;
           if (!selectedIds.has(block.id)) {
             toggleSelection(block.id, e.ctrlKey || e.shiftKey);
+            if (e.ctrlKey || e.shiftKey) {
+              curSelectedIds = new Set(selectedIds);
+              curSelectedIds.add(block.id);
+            } else {
+              curSelectedIds = new Set([block.id]);
+            }
           }
           const pg = document?.pages.get(pageIndex);
           preDragPageRef.current = pg ? { ...pg, textBlocks: [...pg.textBlocks] } : null;
           setDraggedId(block.id);
           setDragMode('move');
           setDragStartBbox({ ...block.bbox });
+          
+          const newBboxes = new Map();
+          pg?.textBlocks.forEach(b => {
+             if (curSelectedIds.has(b.id)) {
+                newBboxes.set(b.id, { ...b.bbox });
+             }
+          });
+          setDragStartBboxes(newBboxes);
           setDragStartMouse(pos);
           return;
         }
@@ -500,33 +516,48 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
       const pageData = document?.pages.get(pageIndex);
       if (!pageData) return;
 
-      const newBbox = { ...dragStartBbox };
-
       if (dragMode === 'move') {
-        newBbox.x += dx;
-        newBbox.y += dy;
-      } else if (dragMode === 'resize-se') {
-        newBbox.width = Math.max(1, dragStartBbox.width + dx);
-        newBbox.height = Math.max(1, dragStartBbox.height + dy);
-      } else if (dragMode === 'resize-sw') {
-        newBbox.x = Math.min(dragStartBbox.x + dragStartBbox.width - 1, dragStartBbox.x + dx);
-        newBbox.width = Math.max(1, dragStartBbox.width - dx);
-        newBbox.height = Math.max(1, dragStartBbox.height + dy);
-      } else if (dragMode === 'resize-ne') {
-        newBbox.y = Math.min(dragStartBbox.y + dragStartBbox.height - 1, dragStartBbox.y + dy);
-        newBbox.width = Math.max(1, dragStartBbox.width + dx);
-        newBbox.height = Math.max(1, dragStartBbox.height - dy);
-      } else if (dragMode === 'resize-nw') {
-        newBbox.x = Math.min(dragStartBbox.x + dragStartBbox.width - 1, dragStartBbox.x + dx);
-        newBbox.y = Math.min(dragStartBbox.y + dragStartBbox.height - 1, dragStartBbox.y + dy);
-        newBbox.width = Math.max(1, dragStartBbox.width - dx);
-        newBbox.height = Math.max(1, dragStartBbox.height - dy);
-      }
+        const newBlocks = pageData.textBlocks.map(b => {
+          if (dragStartBboxes.has(b.id)) {
+            const startBbox = dragStartBboxes.get(b.id)!;
+            return {
+              ...b,
+              bbox: {
+                ...startBbox,
+                x: startBbox.x + dx,
+                y: startBbox.y + dy
+              },
+              isDirty: true
+            };
+          }
+          return b;
+        });
+        updatePageData(pageIndex, { textBlocks: newBlocks }, false);
+      } else {
+        const newBbox = { ...dragStartBbox };
+        if (dragMode === 'resize-se') {
+          newBbox.width = Math.max(1, dragStartBbox.width + dx);
+          newBbox.height = Math.max(1, dragStartBbox.height + dy);
+        } else if (dragMode === 'resize-sw') {
+          newBbox.x = Math.min(dragStartBbox.x + dragStartBbox.width - 1, dragStartBbox.x + dx);
+          newBbox.width = Math.max(1, dragStartBbox.width - dx);
+          newBbox.height = Math.max(1, dragStartBbox.height + dy);
+        } else if (dragMode === 'resize-ne') {
+          newBbox.y = Math.min(dragStartBbox.y + dragStartBbox.height - 1, dragStartBbox.y + dy);
+          newBbox.width = Math.max(1, dragStartBbox.width + dx);
+          newBbox.height = Math.max(1, dragStartBbox.height - dy);
+        } else if (dragMode === 'resize-nw') {
+          newBbox.x = Math.min(dragStartBbox.x + dragStartBbox.width - 1, dragStartBbox.x + dx);
+          newBbox.y = Math.min(dragStartBbox.y + dragStartBbox.height - 1, dragStartBbox.y + dy);
+          newBbox.width = Math.max(1, dragStartBbox.width - dx);
+          newBbox.height = Math.max(1, dragStartBbox.height - dy);
+        }
 
-      const newBlocks = pageData.textBlocks.map(b => 
-        b.id === draggedId ? { ...b, bbox: newBbox, isDirty: true } : b
-      );
-      updatePageData(pageIndex, { textBlocks: newBlocks }, false);
+        const newBlocks = pageData.textBlocks.map(b => 
+          b.id === draggedId ? { ...b, bbox: newBbox, isDirty: true } : b
+        );
+        updatePageData(pageIndex, { textBlocks: newBlocks }, false);
+      }
     } else {
       // Hover effect for cursor
       const pageData = document?.pages.get(pageIndex);
