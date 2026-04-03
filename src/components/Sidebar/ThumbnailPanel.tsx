@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { Virtuoso } from 'react-virtuoso';
+import React, { useEffect, useRef } from 'react';
+import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 
 interface ThumbnailItemProps {
   index: number;
@@ -38,9 +38,15 @@ interface ThumbnailPanelProps {
   onRequestThumbnail: (index: number) => void;
 }
 
-export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({ 
-  width, document, currentPageIndex, thumbnails, onSelectPage, onRequestThumbnail 
+export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
+  width, document, currentPageIndex, thumbnails, onSelectPage, onRequestThumbnail
 }) => {
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+
+  useEffect(() => {
+    virtuosoRef.current?.scrollIntoView({ index: currentPageIndex, behavior: 'smooth', done: () => {} });
+  }, [currentPageIndex]);
+
   return (
     <aside className="thumbnails-panel" style={{ width: `${width}px` }}>
       <div className="panel-header">サムネイル</div>
@@ -57,6 +63,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
       }}>
         {document ? (
           <Virtuoso
+            ref={virtuosoRef}
             style={{ height: '100%' }}
             totalCount={document.totalPages}
             itemContent={(i) => (

@@ -159,12 +159,12 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
       try {
         await renderTaskRef.current.promise;
-        // PDF描画完了後にオーバーレイを再描画（キャンバスサイズリセットによる消去を防ぐ）
-        renderOverlaysRef.current?.();
       } catch (err: any) {
         if (err.name === 'RenderingCancelledException') return;
         console.error("PDF render error:", err);
       }
+      // PDF描画完了後にオーバーレイを再描画（キャンバスサイズリセットによる消去を防ぐ）
+      renderOverlaysRef.current?.();
     };
 
     // ズーム連続変更時の無駄なワーカー呼び出しを防ぐ30msデバウンス
@@ -182,7 +182,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     if (!overlayCanvasRef.current || !pdfPage) return;
 
     const renderOverlays = () => {
-      const canvas = overlayCanvasRef.current!;
+      if (!overlayCanvasRef.current) return;
+      const canvas = overlayCanvasRef.current;
       const context = canvas.getContext('2d')!;
       
       // Clear previous overlays
