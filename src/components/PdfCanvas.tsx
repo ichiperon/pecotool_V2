@@ -445,10 +445,16 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         const h = block.bbox.height * scale;
 
         if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
+          // Ctrl+クリックで既選択ブロックをクリック → 選択解除のみ（ドラッグ開始しない）
+          if ((e.ctrlKey || e.metaKey) && selectedIds.has(block.id)) {
+            toggleSelection(block.id, true);
+            return;
+          }
+
           let curSelectedIds = selectedIds;
           if (!selectedIds.has(block.id)) {
-            toggleSelection(block.id, e.ctrlKey || e.shiftKey);
-            if (e.ctrlKey || e.shiftKey) {
+            toggleSelection(block.id, e.ctrlKey || e.metaKey || e.shiftKey);
+            if (e.ctrlKey || e.metaKey || e.shiftKey) {
               curSelectedIds = new Set(selectedIds);
               curSelectedIds.add(block.id);
             } else {
@@ -460,7 +466,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           setDraggedId(block.id);
           setDragMode('move');
           setDragStartBbox({ ...block.bbox });
-          
+
           const newBboxes = new Map();
           pg?.textBlocks.forEach(b => {
              if (curSelectedIds.has(b.id)) {

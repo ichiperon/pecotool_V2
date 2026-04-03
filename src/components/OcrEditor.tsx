@@ -46,16 +46,69 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    if (over && active.id !== over.id && currentPage) {
-      const oldIndex = currentPage.textBlocks.findIndex((b) => b.id === active.id);
-      const newIndex = currentPage.textBlocks.findIndex((b) => b.id === over.id);
-      
-      const newBlocks = arrayMove(currentPage.textBlocks, oldIndex, newIndex).map((b, i) => ({
+    if (!over || active.id === over.id || !currentPage) return;
+
+    const blocks = currentPage.textBlocks;
+    const activeIsSelected = selectedIds.has(active.id as string);
+
+    if (activeIsSelected && selectedIds.size > 1) {
+      // 複数選択ドラッグ: 選択グループをまとめて over の位置に移動
+      const overIndex = blocks.findIndex((b) => b.id === over.id);
+      const selected = blocks.filter((b) => selectedIds.has(b.id));
+      const notSelected = blocks.filter((b) => !selectedIds.has(b.id));
+
+      // over が選択外のブロックの場合のみ挿入位置を決定
+      const overIsSelected = selectedIds.has(over.id as string);
+      let insertIndex: number;
+      if (overIsSelected) {
+        // ドロップ先も選択中の場合: active と over の位置関係で決める
+        const activeIndex = blocks.findIndex((b) => b.id === active.id);
+        insertIndex = overIndex > activeIndex
+          ? notSelected.findIndex((b) => {
+              const idx = blocks.findIndex((bb) => bb.id === b.id);
+              return idx > overIndex;
+            })
+          : notSelected.findIndex((b) => {
+              const idx = blocks.findIndex((bb) => bb.id === b.id);
+              return idx >= overIndex;
+            });
+        if (insertIndex === -1) insertIndex = notSelected.length;
+      } else {
+        // over が選択外: そのブロックの前後に挿入
+        const activeIndex = blocks.findIndex((b) => b.id === active.id);
+        if (overIndex > activeIndex) {
+          // 下に移動: over の後ろ側に挿入
+          insertIndex = notSelected.findIndex((b) => {
+            const idx = blocks.findIndex((bb) => bb.id === b.id);
+            return idx > overIndex;
+          });
+          if (insertIndex === -1) insertIndex = notSelected.length;
+        } else {
+          // 上に移動: over の手前に挿入
+          insertIndex = notSelected.findIndex((b) => {
+            const idx = blocks.findIndex((bb) => bb.id === b.id);
+            return idx >= overIndex;
+          });
+          if (insertIndex === -1) insertIndex = notSelected.length;
+        }
+      }
+
+      const newBlocks = [
+        ...notSelected.slice(0, insertIndex),
+        ...selected,
+        ...notSelected.slice(insertIndex),
+      ].map((b, i) => ({ ...b, order: i, isDirty: true }));
+
+      updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
+    } else {
+      // 単一ドラッグ（従来通り）
+      const oldIndex = blocks.findIndex((b) => b.id === active.id);
+      const newIndex = blocks.findIndex((b) => b.id === over.id);
+      const newBlocks = arrayMove(blocks, oldIndex, newIndex).map((b, i) => ({
         ...b,
         order: i,
-        isDirty: b.isDirty || oldIndex !== newIndex
+        isDirty: b.isDirty || oldIndex !== newIndex,
       }));
-
       updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
     }
   };
