@@ -1,11 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import * as pdfjsLib from 'pdfjs-dist';
 import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
 import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
-import { generateThumbnail, loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
+import { generateThumbnail, loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, getCachedPageProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
 import { estimateSizes } from "./utils/pdfSaver";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
@@ -181,34 +180,48 @@ function App() {
   });
 
   const latestLoadRef = useRef<number>(-1);
+  const bboxMetaRef = useRef<Record<string, Array<{
+    bbox: import('./types').BoundingBox;
+    writingMode: string;
+    order: number;
+    text: string;
+  }>> | null | undefined>(undefined);
 
   const thumbnailQueueRef = useRef<number[]>([]);
   const isThumbnailProcessingRef = useRef<boolean>(false);
+
+  const THUMBNAIL_CONCURRENCY = 2;
 
   const processThumbnailQueue = useCallback(async () => {
     if (isThumbnailProcessingRef.current || !document) return;
     isThumbnailProcessingRef.current = true;
 
     try {
-      let pdfProxy: pdfjsLib.PDFDocumentProxy | null = null;
+      const pdfProxy = await getSharedPdfProxy(document.filePath);
 
       while (thumbnailQueueRef.current.length > 0) {
-        const pageIdx = thumbnailQueueRef.current.shift()!;
-        const state = usePecoStore.getState();
-        if (state.thumbnails.has(pageIdx)) continue;
+        const batch: number[] = [];
+        while (batch.length < THUMBNAIL_CONCURRENCY && thumbnailQueueRef.current.length > 0) {
+          const pageIdx = thumbnailQueueRef.current.shift()!;
+          if (!usePecoStore.getState().thumbnails.has(pageIdx)) {
+            batch.push(pageIdx);
+          }
+        }
+        if (batch.length === 0) continue;
 
-        // Uses URL-based shared proxy (much faster, no readFile needed)
-        pdfProxy = await getSharedPdfProxy(document.filePath);
-
-        const dataUrl = await generateThumbnail(pdfProxy, pageIdx);
-        usePecoStore.getState().setThumbnail(pageIdx, dataUrl);
+        await Promise.allSettled(
+          batch.map(async (pageIdx) => {
+            const dataUrl = await generateThumbnail(pdfProxy, pageIdx);
+            usePecoStore.getState().setThumbnail(pageIdx, dataUrl);
+          })
+        );
       }
     } catch (err) {
       console.error("Thumbnail error:", err);
     } finally {
       isThumbnailProcessingRef.current = false;
       if (thumbnailQueueRef.current.length > 0) {
-        setTimeout(processThumbnailQueue, 0); // Next tick
+        setTimeout(processThumbnailQueue, 0);
       }
     }
   }, [document]);
@@ -229,31 +242,51 @@ function App() {
     }, 300); // メイン画像のレンダリングを優先させるため300ms遅延
   }, [processThumbnailQueue, document]);
 
-    const loadCurrentPage = useCallback(async (pageIdx: number) => {
+  const loadCurrentPage = useCallback(async (pageIdx: number) => {
     latestLoadRef.current = pageIdx;
-    await new Promise(resolve => setTimeout(resolve, 50));
     if (latestLoadRef.current !== pageIdx) return;
 
     if (!document) return;
 
     try {
-      // Uses URL-based shared proxy (much faster, no readFile needed)
       const pdf = await getSharedPdfProxy(document.filePath);
 
       if (latestLoadRef.current !== pageIdx) return;
 
-      const bboxMeta = await loadPecoToolBBoxMeta(pdf);
-      const pageData = await loadPage(pdf, pageIdx, document.filePath, bboxMeta);
+      // bboxMetaはファイルごとに一度だけ取得してキャッシュ
+      if (bboxMetaRef.current === undefined) {
+        bboxMetaRef.current = await loadPecoToolBBoxMeta(pdf);
+      }
+
+      const pageData = await loadPage(pdf, pageIdx, document.filePath, bboxMetaRef.current);
 
       if (latestLoadRef.current === pageIdx) {
         updatePageData(pageIdx, pageData, false);
       }
+
+      // 隣接ページのプロキシをバックグラウンドでプリフェッチ
+      const prefetch = (i: number) => {
+        if (i >= 0 && i < document.totalPages) {
+          getCachedPageProxy(document.filePath, i).catch(() => {});
+        }
+      };
+      prefetch(pageIdx - 1);
+      prefetch(pageIdx + 1);
     } catch (err: any) {
       if (latestLoadRef.current !== pageIdx) return;
       console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
       showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
     }
   }, [document, updatePageData, showToast]);
+
+  // ファイルが変わったときにbboxMetaキャッシュをリセット
+  const prevFilePathRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (document?.filePath !== prevFilePathRef.current) {
+      bboxMetaRef.current = undefined;
+      prevFilePathRef.current = document?.filePath;
+    }
+  }, [document?.filePath]);
 
   useEffect(() => {
     if (document && !document.pages.has(currentPageIndex)) {

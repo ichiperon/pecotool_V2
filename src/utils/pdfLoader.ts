@@ -9,9 +9,9 @@ if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorker;
 }
 
-const CMAP_URL = 'https://unpkg.com/pdfjs-dist@5.5.207/cmaps/';
+const CMAP_URL = '/cmaps/';
 const CMAP_PACKED = true;
-const STANDARD_FONT_DATA_URL = 'https://unpkg.com/pdfjs-dist@5.5.207/standard_fonts/';
+const STANDARD_FONT_DATA_URL = '/standard_fonts/';
 
 /**
  * Open a PDF document using a URL (convertFileSrc) to enable range requests and streaming.
@@ -67,7 +67,17 @@ export async function openPDF(filePath: string): Promise<pdfjsLib.PDFDocumentPro
 
 // ページプロキシのメモリキャッシュ（ページ切り替えをゼロ秒にするため）
 let globalSharedPdfProxy: { filePath: string, promise: Promise<pdfjsLib.PDFDocumentProxy> } | null = null;
+
+// LRUキャッシュ：挿入順序を利用してMapで最大20ページ分を保持
+const PAGE_PROXY_CACHE_LIMIT = 20;
 const pageProxyCache = new Map<string, pdfjsLib.PDFPageProxy>();
+
+function evictPageProxyCache() {
+  while (pageProxyCache.size > PAGE_PROXY_CACHE_LIMIT) {
+    const oldestKey = pageProxyCache.keys().next().value!;
+    pageProxyCache.delete(oldestKey);
+  }
+}
 
 export async function getSharedPdfProxy(filePath: string): Promise<pdfjsLib.PDFDocumentProxy> {
   if (globalSharedPdfProxy?.filePath === filePath) {
@@ -83,12 +93,17 @@ export async function getSharedPdfProxy(filePath: string): Promise<pdfjsLib.PDFD
 export async function getCachedPageProxy(filePath: string, pageIndex: number): Promise<pdfjsLib.PDFPageProxy> {
   const key = `${filePath}:${pageIndex}`;
   if (pageProxyCache.has(key)) {
-    return pageProxyCache.get(key)!;
+    // アクセスされたエントリを末尾に移動してLRU順序を更新
+    const page = pageProxyCache.get(key)!;
+    pageProxyCache.delete(key);
+    pageProxyCache.set(key, page);
+    return page;
   }
-  
+
   const doc = await getSharedPdfProxy(filePath);
   const page = await doc.getPage(pageIndex + 1);
   pageProxyCache.set(key, page);
+  evictPageProxyCache();
   return page;
 }
 
@@ -157,17 +172,26 @@ export async function loadPecoToolBBoxMeta(pdf: pdfjsLib.PDFDocumentProxy): Prom
 const DB_NAME = 'peco_ocr_cache';
 const STORE_NAME = 'pages';
 
-async function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-        request.result.createObjectStore(STORE_NAME);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+// DB接続を一度だけ開いて使い回す
+let dbPromise: Promise<IDBDatabase> | null = null;
+
+function openDB(): Promise<IDBDatabase> {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains(STORE_NAME)) {
+          request.result.createObjectStore(STORE_NAME);
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => {
+        dbPromise = null; // エラー時は次回再試行できるようにリセット
+        reject(request.error);
+      };
+    });
+  }
+  return dbPromise;
 }
 
 async function getCachedPage(key: string): Promise<PageData | null> {
