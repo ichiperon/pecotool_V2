@@ -3,7 +3,7 @@ import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from '../store/pecoStore';
 import { loadPDF } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
-import { formatFileSize } from '../components/SaveDialog';
+import { formatFileSize } from '../utils/format';
 
 export function useFileOperations(showToast: (msg: string, isError?: boolean) => void, setIsSaving?: (v: boolean) => void) {
   const {
@@ -29,10 +29,11 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
       }
 
       if (selected && typeof selected === 'string') {
+        const content = await readFile(selected);
+        const bytes = new Uint8Array(content);
         const doc = await loadPDF(selected);
-        setDocument(doc, undefined);
+        setDocument(doc, bytes);
         addToRecent(selected);
-        // page 0 の読み込みは App.tsx の useEffect (loadCurrentPage) に任せる
       }
     } catch (err) {
       console.error("Failed to open file:", err);
@@ -41,22 +42,16 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
   };
 
   const handleSave = async () => {
-    if (!document) return;
+    const { document, originalBytes, fontBytes, isFontLoaded } = usePecoStore.getState();
+    if (!document || !originalBytes) return;
+
     if (!isFontLoaded || !fontBytes) {
       showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);
-      // Even if font is missing, we proceed, but the user is warned.
-      // Ideally, we might want to block saving if it's a hard requirement.
     }
 
     setIsSaving?.(true);
     try {
-      const content = await readFile(document.filePath);
-      const bytesToSave = new Uint8Array(content);
-      const compressionPref = (localStorage.getItem('peco-save-compression') as 'none' | 'compressed' | 'rasterized') || 'none';
-      const storedQuality = localStorage.getItem('peco-rasterize-quality');
-      const qNum = storedQuality ? parseInt(storedQuality, 10) / 100 : 0.6;
-
-      const savedBytes = await savePDF(bytesToSave, document, compressionPref, qNum, fontBytes || undefined);
+      const savedBytes = await savePDF(originalBytes, document, fontBytes || undefined);
 
       await writeFile(document.filePath, savedBytes);
       resetDirty();
@@ -69,8 +64,10 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
     }
   };
 
-  const executeSaveAs = async (compression: 'none' | 'compressed' | 'rasterized', quality?: number) => {
-    if (!document) return;
+  const executeSaveAs = async () => {
+    const { document, originalBytes, fontBytes, isFontLoaded } = usePecoStore.getState();
+    if (!document || !originalBytes) return;
+
     if (!isFontLoaded || !fontBytes) {
       showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);
     }
@@ -81,26 +78,15 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
         defaultPath: document.fileName
       });
       if (path && typeof path === 'string') {
-        localStorage.setItem('peco-save-compression', compression);
-        if (compression === 'rasterized' && typeof quality === 'number') {
-          localStorage.setItem('peco-rasterize-quality', quality.toString());
-        }
-
-        const content = await readFile(document.filePath);
-        const bytesToSave = new Uint8Array(content);
-
         setIsSaving?.(true);
-        if (compression === 'rasterized') {
-          showToast(`高圧縮処理中です(画質${quality}%)...しばらくお待ち下さい`, false);
-        }
 
         try {
-          const savedBytes = await savePDF(bytesToSave, document, compression, quality ? quality / 100 : 0.6, fontBytes || undefined);
+          const savedBytes = await savePDF(originalBytes, document, fontBytes || undefined);
 
           await writeFile(path, savedBytes);
           document.filePath = path;
           resetDirty();
-          showToast(`名前を付けて保存しました。(${formatFileSize(savedBytes.length)}・${compression === 'rasterized' ? '高圧縮' : compression === 'compressed' ? '標準圧縮' : '非圧縮'})`);
+          showToast(`名前を付けて保存しました。(${formatFileSize(savedBytes.length)})`);
           addToRecent(path);
         } finally {
           setIsSaving?.(false);

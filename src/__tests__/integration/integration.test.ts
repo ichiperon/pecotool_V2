@@ -26,7 +26,7 @@ const m = vi.hoisted(() => ({
   popGsFn:         vi.fn(() => ({ type: 'popGs' })),
 }))
 
-vi.mock('pdf-lib', () => ({
+vi.mock('@cantoo/pdf-lib', () => ({
   PDFDocument:       { load: m.pdfLoad },
   degrees:           (n: number) => ({ type: 'degrees', angle: n }),
   PDFName:           { of: vi.fn((s: string) => s) },
@@ -281,6 +281,7 @@ describe('I-06: 縦書きPDFの保存', () => {
     }
     m.embedFont.mockResolvedValue({
       widthOfTextAtSize: vi.fn().mockReturnValue(10),
+      heightAtSize: vi.fn().mockReturnValue(1.448),
     })
     m.insertPage.mockReturnValue(mockPage)
     m.embedJpg.mockResolvedValue({ width: 1, height: 1 })

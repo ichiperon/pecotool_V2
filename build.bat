@@ -31,21 +31,12 @@ if %errorlevel% neq 0 (
 :: 4. Collect Output
 echo [4/5] Collecting new build artifacts...
 
-:: EXEをコピー (実行ファイル名が tauri-app.exe になってるみたいね！)
-echo Copying EXE executable...
-if exist "src-tauri\target\release\tauri-app.exe" (
-    copy "src-tauri\target\release\tauri-app.exe" "dist-bin\pecotool-v2.exe" /Y >nul
-) else if exist "src-tauri\target\release\pecotool-v2.exe" (
-    copy "src-tauri\target\release\pecotool-v2.exe" "dist-bin\pecotool-v2.exe" /Y >nul
+:: EXEをコピー
+echo Copying EXE installer...
+if exist "src-tauri\target\release\bundle\nsis\*.exe" (
+    copy "src-tauri\target\release\bundle\nsis\*.exe" "dist-bin\" /Y >nul
 ) else (
-    echo [ERROR] EXE file not found in release directory.
-)
-
-:: MSIをコピー
-echo Copying MSI installer...
-copy "src-tauri\target\release\bundle\msi\*.msi" "dist-bin\" /Y >nul
-if %errorlevel% neq 0 (
-    echo [WARNING] MSI file not found or copy failed.
+    echo [ERROR] EXE installer not found.
 )
 
 :: MANUALをコピー

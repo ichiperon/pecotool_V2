@@ -1,23 +1,105 @@
-import { PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState, translate, scale, PDFName, PDFHexString, PDFString } from 'pdf-lib';
+import {
+  PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState,
+  translate, scale, PDFName, PDFHexString, PDFString, PDFRawStream
+} from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
-import * as pdfjsLib from 'pdfjs-dist';
+import { inflate } from 'pako';
 
 /**
- * Common PDF building logic used by both Worker and direct calls (tests).
- * Returns the Uint8Array of the saved PDF.
+ * Decompress a PDFRawStream's contents.
+ * Handles FlateDecode (the overwhelmingly common case in modern PDFs).
+ * Falls back to returning the raw bytes for unrecognized or absent filters.
  */
+/**
+ * Returns decompressed stream contents, or null if decoding failed / unsupported filter.
+ * Callers must skip stream modification when null is returned.
+ */
+function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
+  const filter = stream.dict.lookup(PDFName.of('Filter'));
+  const raw = stream.getContents();
+  if (filter instanceof PDFName && filter.asString() === '/FlateDecode') {
+    try {
+      return inflate(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!filter) {
+    // No compression — raw bytes are already plain text operators
+    return raw;
+  }
+  // Unsupported filter (LZW, ASCII85, etc.) — skip modification
+  return null;
+}
+
+/**
+ * Strips all text blocks (BT...ET) from a decoded (uncompressed) content stream.
+ * BT and ET must appear as standalone tokens (surrounded by whitespace or line boundaries)
+ * to avoid accidentally matching binary data that happens to contain those byte sequences.
+ * The input MUST be already decoded bytes — do NOT pass raw/compressed stream contents.
+ * We use 'latin1' so each byte maps 1:1 to a character, avoiding UTF-8 corruption.
+ */
+function stripTextBlocks(decodedContent: Uint8Array): Uint8Array {
+  const decoder = new TextDecoder('latin1');
+  const text = decoder.decode(decodedContent);
+  // BT and ET must be standalone PDF operators (preceded/followed by whitespace or line end).
+  // This prevents matching binary content that coincidentally contains 0x42 0x54 or 0x45 0x54.
+  const stripped = text.replace(/(^|[\r\n\s])BT[\s\S]*?ET([\r\n\s]|$)/g, '$1$2');
+  const result = new Uint8Array(stripped.length);
+  for (let i = 0; i < stripped.length; i++) {
+    result[i] = stripped.charCodeAt(i) & 0xFF;
+  }
+  return result;
+}
+
+/**
+ * Common PDF building logic.
+ * Uses incremental update to only write changed pages.
+ * Performs surgical removal of old text layers to prevent "Double OCR".
+ * Powered by @cantoo/pdf-lib.
+ */
+/**
+ * Extract the PDF version string (e.g. "1.4") from the original file header.
+ * Returns null if not found.
+ */
+function extractPdfVersion(bytes: Uint8Array): string | null {
+  // %PDF-X.Y in the first 16 bytes
+  const header = new TextDecoder('latin1').decode(bytes.slice(0, 16));
+  const m = header.match(/%PDF-(\d+\.\d+)/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Overwrite the %PDF-X.Y header in an already-serialized PDF byte array.
+ * @cantoo/pdf-lib hardcodes PDF-1.7 on full rewrite; this restores the original version.
+ */
+function restorePdfVersion(savedBytes: Uint8Array, version: string): void {
+  const target = `%PDF-${version}`;
+  const current = new TextDecoder('latin1').decode(savedBytes.slice(0, 16));
+  const m = current.match(/%PDF-\d+\.\d+/);
+  if (!m) return;
+  // Only patch if the version actually changed
+  if (current.startsWith(target)) return;
+  const encoder = new TextEncoder();
+  const patch = encoder.encode(target);
+  // Overwrite in-place (same length guaranteed: both are %PDF-X.Y format)
+  for (let i = 0; i < patch.length && i < m[0].length; i++) {
+    savedBytes[m.index! + i] = patch[i];
+  }
+}
+
 export async function buildPdfDocument(
   originalPdfBytes: Uint8Array,
   documentState: PecoDocument,
-  compression: 'none' | 'compressed' | 'rasterized' = 'none',
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
+  const originalVersion = extractPdfVersion(originalPdfBytes);
   const pdfDoc = await PDFDocument.load(originalPdfBytes);
   pdfDoc.registerFontkit(fontkit);
 
-  const customFont = fontBytes 
-    ? await pdfDoc.embedFont(fontBytes, { subset: true }) 
+  const customFont = fontBytes
+    ? await pdfDoc.embedFont(fontBytes, { subset: true })
     : await pdfDoc.embedFont(StandardFonts.Helvetica);
 
   let infoDict = (pdfDoc as any).getInfoDict();
@@ -35,49 +117,80 @@ export async function buildPdfDocument(
   }
 
   const bboxMeta = { ...existingBBoxMeta };
+  let metaChanged = false;
 
   for (const [pageIndexStr, pageData] of documentState.pages.entries()) {
     const pageIndex = typeof pageIndexStr === 'string' ? parseInt(pageIndexStr, 10) : pageIndexStr;
-    const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
+    
+    // Only update metadata and draw if the page was touched
+    if (!pageData.isDirty) continue;
 
+    const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
     bboxMeta[String(pageIndex)] = sortedBlocks.map(b => ({
       bbox: b.bbox,
       writingMode: b.writingMode,
       order: b.order,
       text: b.text
     }));
-
-    if (!pageData.isDirty) continue;
+    metaChanged = true;
 
     const page = pdfDoc.getPage(pageIndex);
     const { height } = page.getSize();
 
+    // --- Surgical Text Stripping ---
+    const contentStreams = (page.node as any).Contents();
+    if (contentStreams) {
+      const streams = Array.isArray(contentStreams) ? contentStreams : [contentStreams];
+      const newStreams = [];
+      for (const streamRef of streams) {
+        const stream = pdfDoc.context.lookup(streamRef);
+        if (stream instanceof PDFRawStream) {
+          const decoded = decodeStreamContents(stream);
+          if (decoded !== null) {
+            const cleaned = stripTextBlocks(decoded);
+            const newStream = pdfDoc.context.flateStream(cleaned);
+            newStreams.push(pdfDoc.context.register(newStream));
+          } else {
+            newStreams.push(streamRef);
+          }
+        } else {
+          newStreams.push(streamRef);
+        }
+      }
+      page.node.set(PDFName.of('Contents'), pdfDoc.context.obj(newStreams));
+    }
+
+    // Now draw the NEW text blocks onto the cleaned page
     for (const block of sortedBlocks) {
       if (!block.text) continue;
 
       try {
+        const fontSize = 1;
+        const textWidth = customFont.widthOfTextAtSize(block.text, fontSize);
+        const textHeight = customFont.heightAtSize(fontSize);
+        
+        if (textWidth === 0 || textHeight === 0) continue;
+
         if (block.writingMode === 'vertical') {
-          const fontSize = 1;
-          const textWidth = customFont.widthOfTextAtSize(block.text, fontSize);
-          const textHeight = customFont.heightAtSize(fontSize);
-          
           const sx = block.bbox.width / textHeight;
           const sy = block.bbox.height / textWidth;
+          
+          if (!isFinite(sx) || !isFinite(sy)) continue;
+
           const baselineX = block.bbox.x + textHeight * sx * 0.2;
           const baselineY = height - block.bbox.y;
-          
+
           page.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
           page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, rotate: degrees(-90), opacity: 0 });
           page.pushOperators(popGraphicsState());
         } else {
-          const fontSize = 1;
-          const textWidth = customFont.widthOfTextAtSize(block.text, fontSize);
-          const textHeight = customFont.heightAtSize(fontSize);
-          
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
-          const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
           
+          if (!isFinite(sx) || !isFinite(sy)) continue;
+
+          const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
+
           page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
           page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, opacity: 0 });
           page.pushOperators(popGraphicsState());
@@ -88,33 +201,32 @@ export async function buildPdfDocument(
     }
   }
 
-  if (infoDict) {
+  if (metaChanged && infoDict) {
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
-  return await pdfDoc.save({ useObjectStreams: compression === 'compressed', addDefaultPage: false });
+  const savedBytes = await pdfDoc.save({ rewrite: true, useObjectStreams: false, addDefaultPage: false });
+  // @cantoo/pdf-lib hardcodes PDF-1.7 on full rewrite; restore the original version
+  // so that older viewers (e.g. Acrobat 7, which supports up to PDF 1.6) can open the file.
+  if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
+  return savedBytes;
 }
+
 
 export async function savePDF(
   originalPdfBytes: Uint8Array,
   documentState: PecoDocument,
-  compression: 'none' | 'compressed' | 'rasterized' = 'none',
-  rasterizeQuality: number = 0.6,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
-  if (compression === 'rasterized') {
-    return await buildRasterizedPdfDocument(originalPdfBytes, documentState, rasterizeQuality, fontBytes);
-  }
-
   // Use direct call if Worker is not available (e.g. in JSDOM tests)
   if (typeof Worker === 'undefined' || (typeof process !== 'undefined' && process.env.NODE_ENV === 'test')) {
-    return await buildPdfDocument(originalPdfBytes, documentState, compression, fontBytes);
+    return await buildPdfDocument(originalPdfBytes, documentState, fontBytes);
   }
 
   return new Promise((resolve, reject) => {
     try {
       const worker = new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
-      
+
       worker.onmessage = (e) => {
         const { type, data, message } = e.data;
         if (type === 'SAVE_PDF_SUCCESS') {
@@ -136,142 +248,27 @@ export async function savePDF(
         serializedPages[idx] = page;
       }
 
+      // Transfer the buffer directly if possible to avoid copying large files
+      // Note: We slice() here because pdf-lib's load() might be affected if we transfer the underlying buffer
+      // But actually originalPdfBytes is a Uint8Array, so originalPdfBytes.buffer is the ArrayBuffer.
+      // To keep it in main thread, we MUST copy.
+      const bytesClone = originalPdfBytes.slice();
+      const transferables: Transferable[] = [bytesClone.buffer];
+      const fontBytesClone = fontBytes instanceof ArrayBuffer ? fontBytes.slice(0) : undefined;
+      if (fontBytesClone) transferables.push(fontBytesClone);
+
       worker.postMessage({
         type: 'SAVE_PDF',
         data: {
-          originalPdfBytes,
+          originalPdfBytes: bytesClone,
           documentState: { ...documentState, pages: serializedPages },
-          compression,
-          rasterizeQuality,
-          fontBytes
+          fontBytes: fontBytesClone,
         }
-      }, [originalPdfBytes.buffer, fontBytes instanceof ArrayBuffer ? fontBytes.slice(0) : undefined].filter(Boolean) as any);
+      }, transferables);
     } catch (err) {
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
-      buildPdfDocument(originalPdfBytes, documentState, compression, fontBytes).then(resolve).catch(reject);
+      buildPdfDocument(originalPdfBytes, documentState, fontBytes).then(resolve).catch(reject);
     }
   });
 }
 
-async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, documentState: PecoDocument, quality: number = 0.6, fontBytes?: ArrayBuffer): Promise<Uint8Array> {
-  const newPdf = await PDFDocument.create();
-  newPdf.registerFontkit(fontkit);
-
-  const customFont = fontBytes 
-    ? await newPdf.embedFont(fontBytes, { subset: true }) 
-    : await newPdf.embedFont(StandardFonts.Helvetica);
-
-  const pdfJsDoc = await pdfjsLib.getDocument({
-    data: originalPdfBytes.slice(),
-    cMapUrl: '/cmaps/',
-    cMapPacked: true,
-    standardFontDataUrl: '/standard_fonts/',
-  }).promise;
-  const totalPages = pdfJsDoc.numPages;
-  const bboxMeta: Record<string, any> = {};
-
-  for (let i = 0; i < totalPages; i++) {
-    const pageIndex = i;
-    const pageData = documentState.pages.get(pageIndex);
-    
-    const jsPage = await pdfJsDoc.getPage(i + 1);
-    const viewport = jsPage.getViewport({ scale: 1.5 });
-    const canvas = window.document.createElement('canvas');
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    const context = canvas.getContext('2d');
-    if (context) {
-      await jsPage.render({ canvasContext: context, viewport, canvas }).promise;
-    }
-    const jpegBase64 = canvas.toDataURL('image/jpeg', quality);
-    
-    const jpgImage = await newPdf.embedJpg(jpegBase64);
-    
-    const page = newPdf.addPage([viewport.width / 1.5, viewport.height / 1.5]);
-    const { width, height } = page.getSize();
-    
-    page.drawImage(jpgImage, {
-      x: 0,
-      y: 0,
-      width: width,
-      height: height,
-    });
-
-    if (pageData) {
-      const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
-      bboxMeta[String(pageIndex)] = sortedBlocks.map(b => ({
-        bbox: b.bbox,
-        writingMode: b.writingMode,
-        order: b.order,
-        text: b.text
-      }));
-
-      for (const block of sortedBlocks) {
-        if (!block.text) continue;
-        try {
-          if (block.writingMode === 'vertical') {
-            const fontSize = 1;
-            let textWidth = block.text.length;
-            let textHeight = 1.448;
-            try {
-              textWidth = customFont.widthOfTextAtSize(block.text, fontSize) || textWidth;
-              textHeight = customFont.heightAtSize(fontSize) || textHeight;
-            } catch(e) {}
-            
-            const sx = block.bbox.width / textHeight;
-            const sy = block.bbox.height / textWidth;
-            const baselineX = block.bbox.x + textHeight * sx * 0.2;
-            const baselineY = height - block.bbox.y;
-            
-            page.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
-            page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, rotate: degrees(-90), opacity: 0 });
-            page.pushOperators(popGraphicsState());
-          } else {
-            const fontSize = 1;
-            let textWidth = block.text.length;
-            let textHeight = 1.448;
-            try {
-              textWidth = customFont.widthOfTextAtSize(block.text, fontSize) || textWidth;
-              textHeight = customFont.heightAtSize(fontSize) || textHeight;
-            } catch(e) {}
-            
-            const sx = block.bbox.width / textWidth;
-            const sy = block.bbox.height / textHeight;
-            const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
-            
-            page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
-            page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, opacity: 0 });
-            page.pushOperators(popGraphicsState());
-          }
-        } catch(e) {}
-      }
-    }
-  }
-
-  newPdf.setTitle(documentState.metadata?.title || 'OCR Document');
-  newPdf.setCreator('PecoTool V2');
-  
-  const infoDict = (newPdf as any).getInfoDict();
-  if (infoDict) {
-    infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
-  }
-
-  return await newPdf.save({ useObjectStreams: true, addDefaultPage: false });
-}
-
-export async function estimateSizes(
-  originalPdfBytes: Uint8Array,
-  _documentState: PecoDocument
-): Promise<{ uncompressed: number; compressed: number }> {
-  // Use non-compressed save for uncompressed estimate
-  const pdfDoc = await PDFDocument.load(originalPdfBytes);
-  const [uncompressedBytes, compressedBytes] = await Promise.all([
-    pdfDoc.save({ useObjectStreams: false, addDefaultPage: false }),
-    pdfDoc.save({ useObjectStreams: true, addDefaultPage: false })
-  ]);
-
-  return {
-    uncompressed: uncompressedBytes.length,
-    compressed: compressedBytes.length
-  };
-}

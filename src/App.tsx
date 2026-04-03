@@ -5,10 +5,8 @@ import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
 import { generateThumbnail, loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
-import { estimateSizes } from "./utils/pdfSaver";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
-import { SaveDialog } from "./components/SaveDialog";
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
 import { TextBlock } from "./types";
 
@@ -49,9 +47,6 @@ function App() {
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
-  const [showSaveDialog, setShowSaveDialog] = useState(false);
-  const [isEstimating, setIsEstimating] = useState(false);
-  const [estimatedSizes, setEstimatedSizes] = useState<{ uncompressed: number; compressed: number } | null>(null);
 
   const [reorderThreshold, setReorderThreshold] = useState(() => {
     const stored = localStorage.getItem('peco-reorder-threshold');
@@ -74,19 +69,7 @@ function App() {
   // --- Handlers ---
   const handleSaveAs = async () => {
     if (!document) return;
-    setShowSaveDialog(true);
-    setIsEstimating(true);
-    setEstimatedSizes(null);
-    try {
-      const content = await readFile(document.filePath);
-      const bytes = new Uint8Array(content);
-      const sizes = await estimateSizes(bytes, document);
-      setEstimatedSizes(sizes);
-    } catch (err) {
-      console.error("Failed to estimate sizes:", err);
-    } finally {
-      setIsEstimating(false);
-    }
+    await executeSaveAs();
   };
 
   const handleClose = useCallback(async () => {
@@ -262,9 +245,25 @@ function App() {
 
       if (latestLoadRef.current !== pageIdx) return;
 
-      // bboxMetaはファイルごとに一度だけ取得してキャッシュ
+      // bboxMetaが未取得の場合、1ページ目表示をブロックせずバックグラウンドで取得する。
+      // 取得完了後にキャッシュ済みでないページを再ロードしてbboxMetaを反映する。
       if (bboxMetaRef.current === undefined) {
-        bboxMetaRef.current = await loadPecoToolBBoxMeta(pdf);
+        bboxMetaRef.current = null; // 取得中フラグ（undefinedでなくnullにして再取得を防ぐ）
+        loadPecoToolBBoxMeta(pdf).then((meta) => {
+          bboxMetaRef.current = meta;
+          if (!meta) return; // PecoTool保存でなければ何もしない
+          // bboxMetaがあるファイルの場合、ロード済みページを再取得して正確なbboxを反映
+          const state = usePecoStore.getState();
+          if (!state.document || state.document.filePath !== doc.filePath) return;
+          state.document.pages.forEach((_, i) => {
+            loadPage(pdf, i, doc.filePath, meta)
+              .then((pd) => {
+                const s = usePecoStore.getState();
+                if (s.document?.filePath === doc.filePath) updatePageData(i, pd, false);
+              })
+              .catch(() => {});
+          });
+        }).catch(() => {});
       }
 
       const pageData = await loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current);
@@ -509,14 +508,6 @@ function App() {
         </div>
       </footer>
       {notification && <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>{notification.message}</div>}
-
-      {showSaveDialog && (
-        <SaveDialog 
-          isEstimating={isEstimating} estimatedSizes={estimatedSizes} onConfirm={executeSaveAs} onCancel={() => setShowSaveDialog(false)}
-          defaultCompression={(localStorage.getItem('peco-save-compression') as any) || 'none'}
-          defaultRasterizeQuality={localStorage.getItem('peco-rasterize-quality') ? parseInt(localStorage.getItem('peco-rasterize-quality')!, 10) : 60}
-        />
-      )}
     </div>
   );
 }

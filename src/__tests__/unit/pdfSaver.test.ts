@@ -20,7 +20,7 @@ const m = vi.hoisted(() => ({
   popGsFn:             vi.fn(() => ({ type: 'popGs' })),
 }))
 
-vi.mock('pdf-lib', () => ({
+vi.mock('@cantoo/pdf-lib', () => ({
   PDFDocument:      { load: m.pdfLoad },
   degrees:          (n: number) => ({ type: 'degrees', angle: n }),
   PDFName:          { of: vi.fn((s: string) => s) },
@@ -98,6 +98,7 @@ beforeEach(() => {
   m.save.mockResolvedValue(new Uint8Array([1, 2, 3]))
   m.embedFont.mockResolvedValue({
     widthOfTextAtSize: vi.fn().mockReturnValue(10),
+    heightAtSize: vi.fn().mockReturnValue(1.448),
   })
   m.pdfLoad.mockResolvedValue({
     registerFontkit: m.registerFontkit,
@@ -259,7 +260,7 @@ describe('pdfSaver / savePDF', () => {
       expect(result).toBeInstanceOf(Uint8Array)
       // console.warn が呼ばれる
       expect(warnSpy).toHaveBeenCalledWith(
-        'Skipping block due to render error:',
+        expect.stringContaining('block error'),
         expect.any(Error),
       )
       // 2件ともdrawText が呼ばれる（1件目は例外で落ちた後もループ継続）

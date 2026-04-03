@@ -7,7 +7,9 @@
       "Bash(npm test:*)",
       "Bash(npx vitest:*)",
       "Bash(ls:*)",
-      "Bash(npx eslint:*)"
+      "Bash(npx eslint:*)",
+      "WebFetch(domain:github.com)",
+      "WebSearch"
     ]
   }
 }

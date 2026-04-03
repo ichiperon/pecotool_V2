@@ -40,22 +40,32 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
   if (url.startsWith('asset.localhost')) {
     url = 'http://' + url;
   }
-  const loadingTask = getDocumentTask(url);
-  const pdf = await loadingTask.promise;
-  
+
+  // getDocument の結果を globalSharedPdfProxy に直接格納することで
+  // 後続の getSharedPdfProxy が2回目の getDocument を呼ばないようにする
+  destroySharedPdfProxy();
+  const promise = getDocumentTask(url).promise;
+  globalSharedPdfProxy = { filePath, promise };
+
+  const pdf = await promise;
   const totalPages = pdf.numPages;
-  const metadata = await pdf.getMetadata();
-  
+
   const doc: PecoDocument = {
     filePath: filePath,
     fileName: filePath.split(/[\\/]/).pop() || 'document.pdf',
     totalPages: totalPages,
     metadata: {
-      title: (metadata.info as any)?.Title,
-      author: (metadata.info as any)?.Author,
+      title: undefined,
+      author: undefined,
     },
     pages: new Map(),
   };
+
+  // getMetadata はページ表示に不要なため非同期で取得（ブロックしない）
+  pdf.getMetadata().then((metadata) => {
+    doc.metadata.title = (metadata.info as any)?.Title;
+    doc.metadata.author = (metadata.info as any)?.Author;
+  }).catch(() => {});
 
   return doc;
 }

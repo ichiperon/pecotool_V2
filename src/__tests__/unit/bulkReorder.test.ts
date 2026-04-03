@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyDirection, reorderBlocks, DragDirection } from '../../utils/bulkReorder';
+import { classifyDirection, reorderBlocks } from '../../utils/bulkReorder';
 import { TextBlock } from '../../types';
 
 describe('bulkReorder - classifyDirection', () => {
@@ -29,9 +29,9 @@ describe('bulkReorder - classifyDirection', () => {
 
 describe('bulkReorder - reorderBlocks', () => {
   const mockBlocks: TextBlock[] = [
-    { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', order: 0, pageIndex: 0 },
-    { id: '2', bbox: { x: 200, y: 100, width: 50, height: 20 }, text: 'B', order: 1, pageIndex: 0 },
-    { id: '3', bbox: { x: 100, y: 150, width: 50, height: 20 }, text: 'C', order: 2, pageIndex: 0 },
+    { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 0, isNew: false, isDirty: false },
+    { id: '2', bbox: { x: 200, y: 100, width: 50, height: 20 }, text: 'B', originalText: 'B', writingMode: 'horizontal', order: 1, isNew: false, isDirty: false },
+    { id: '3', bbox: { x: 100, y: 150, width: 50, height: 20 }, text: 'C', originalText: 'C', writingMode: 'horizontal', order: 2, isNew: false, isDirty: false },
   ];
 
   it('should reorder blocks from left to right', () => {
@@ -59,8 +59,8 @@ describe('bulkReorder - reorderBlocks', () => {
 
   it('should handle small vertical offsets within threshold for horizontal sorting', () => {
     const multiLineBlocks: TextBlock[] = [
-      { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', order: 0, pageIndex: 0 },
-      { id: '2', bbox: { x: 200, y: 105, width: 50, height: 20 }, text: 'B', order: 1, pageIndex: 0 }, // Slightly lower but Y-offset is only 5
+      { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 0, isNew: false, isDirty: false },
+      { id: '2', bbox: { x: 200, y: 105, width: 50, height: 20 }, text: 'B', originalText: 'B', writingMode: 'horizontal', order: 1, isNew: false, isDirty: false }, // Slightly lower but Y-offset is only 5
     ];
     // up-down sorting (typical reading order)
     // avgH = 20. threshold = 50% -> tvY = 10.
@@ -75,8 +75,8 @@ describe('bulkReorder - reorderBlocks', () => {
     // Result: A, B (still A, B but because yA < yB)
     // If B was slightly higher (y=95):
     const reversedBlocks: TextBlock[] = [
-      { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', order: 0, pageIndex: 0 },
-      { id: '2', bbox: { x: 200, y: 95, width: 50, height: 20 }, text: 'B', order: 1, pageIndex: 0 },
+      { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 0, isNew: false, isDirty: false },
+      { id: '2', bbox: { x: 200, y: 95, width: 50, height: 20 }, text: 'B', originalText: 'B', writingMode: 'horizontal', order: 1, isNew: false, isDirty: false },
     ];
     // threshold 50% -> tvY = 10. 5 <= 10. Same line. Sort by X. Result: A, B.
     const resSameLine = reorderBlocks(reversedBlocks, 'up-down', 50);
@@ -91,8 +91,8 @@ describe('bulkReorder - reorderBlocks', () => {
 
   it('should handle overlapping or very close blocks deterministically', () => {
     const overlappingBlocks: TextBlock[] = [
-      { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', order: 0, pageIndex: 0 },
-      { id: '2', bbox: { x: 102, y: 102, width: 50, height: 20 }, text: 'B', order: 1, pageIndex: 0 },
+      { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 0, isNew: false, isDirty: false },
+      { id: '2', bbox: { x: 102, y: 102, width: 50, height: 20 }, text: 'B', originalText: 'B', writingMode: 'horizontal', order: 1, isNew: false, isDirty: false },
     ];
     // Threshold 50% -> tvY = 10. |100-102| = 2. Same line. Sort by X.
     // Result: A(100) then B(102)
