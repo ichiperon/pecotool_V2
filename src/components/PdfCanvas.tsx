@@ -105,6 +105,9 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     });
   }, [selectedIds, zoom, document, pageIndex]);
 
+  // Overlay rendering function (called both from its own effect and after PDF render completes)
+  const renderOverlaysRef = useRef<(() => void) | null>(null);
+
   // PDF Layer Rendering
   useEffect(() => {
     if (!pdfPage || !pdfCanvasRef.current) return;
@@ -116,7 +119,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
       const viewport = pdfPage.getViewport({ scale: zoom / 100 });
       const w = Math.floor(viewport.width);
       const h = Math.floor(viewport.height);
-      
+
       canvas.width = w;
       canvas.height = h;
 
@@ -156,6 +159,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
       try {
         await renderTaskRef.current.promise;
+        // PDF描画完了後にオーバーレイを再描画（キャンバスサイズリセットによる消去を防ぐ）
+        renderOverlaysRef.current?.();
       } catch (err: any) {
         if (err.name === 'RenderingCancelledException') return;
         console.error("PDF render error:", err);
@@ -313,6 +318,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
       }
     };
 
+    // refを更新して PDF 描画完了後も最新の描画関数を呼べるようにする
+    renderOverlaysRef.current = renderOverlays;
     renderOverlays();
   }, [zoom, document, pageIndex, showOcr, ocrOpacity, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage, isAltDragging, altDragStart, altDragEnd]);
 
