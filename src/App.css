@@ -421,7 +421,7 @@ body, #root {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 24px;
+  padding: 20px;
   min-height: 100%;
   width: max-content;
   min-width: 100%;
@@ -442,6 +442,7 @@ body, #root {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  contain: layout;
 }
 
 .status-bar {

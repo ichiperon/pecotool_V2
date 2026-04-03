@@ -114,22 +114,23 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
       const context = canvas.getContext('2d', { alpha: false, willReadFrequently: false })!;
 
       const viewport = pdfPage.getViewport({ scale: zoom / 100 });
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+      const w = Math.floor(viewport.width);
+      const h = Math.floor(viewport.height);
+      
+      canvas.width = w;
+      canvas.height = h;
 
       // PDFの白背景化（描画高速化）
       context.fillStyle = '#ffffff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillRect(0, 0, w, h);
 
       // Update overlay dimensions to match
       if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.width = viewport.width;
-        overlayCanvasRef.current.height = viewport.height;
+        overlayCanvasRef.current.width = w;
+        overlayCanvasRef.current.height = h;
       }
 
       // Sync CSS display size directly via DOM to avoid React async timing issues
-      const w = viewport.width;
-      const h = viewport.height;
       canvas.style.width = `${w}px`;
       canvas.style.height = `${h}px`;
       canvas.style.display = 'block';
@@ -144,7 +145,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
       const renderContext = {
         canvasContext: context,
-        viewport: viewport,
+        viewport: viewport, // Use original viewport for rendering
         canvas: canvas,
       };
 

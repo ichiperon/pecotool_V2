@@ -109,8 +109,10 @@ function App() {
     const container = viewerRef.current;
     const pageData = document?.pages.get(currentPageIndex);
     if (container && pageData) {
-      const ratioH = (container.clientHeight - 40) / pageData.height;
-      const ratioW = (container.clientWidth - 40) / pageData.width;
+      // padding: 24px (上下左右計48px) + 余裕 12px = 60px
+      const margin = 60;
+      const ratioH = (container.clientHeight - margin) / pageData.height;
+      const ratioW = (container.clientWidth - margin) / pageData.width;
       const newZoom = Math.floor(Math.min(ratioH, ratioW) * 100);
       setZoom(Math.max(25, newZoom));
     }
