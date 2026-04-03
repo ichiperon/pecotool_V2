@@ -47,7 +47,7 @@ interface PecoState {
   redo: () => void;
 }
 
-const MAX_CACHED_PAGES = 30;
+const MAX_CACHED_PAGES = 50;
 
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,

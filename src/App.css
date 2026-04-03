@@ -477,6 +477,16 @@ body, #root {
   font-weight: bold;
 }
 
+.status-loading {
+  color: var(--accent-color);
+  animation: status-blink 1s ease-in-out infinite;
+}
+
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 /* Text Preview Window */
 .text-preview-window {
   position: absolute;

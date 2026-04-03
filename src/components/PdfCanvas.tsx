@@ -16,6 +16,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
+  const renderDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { document, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -106,7 +107,6 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
   // PDF Layer Rendering
   useEffect(() => {
-    console.log('[PdfCanvas] pdfPage:', pdfPage, 'canvasRef:', pdfCanvasRef.current);
     if (!pdfPage || !pdfCanvasRef.current) return;
 
     const renderPdf = async () => {
@@ -116,11 +116,11 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
       const viewport = pdfPage.getViewport({ scale: zoom / 100 });
       canvas.width = viewport.width;
       canvas.height = viewport.height;
-      
+
       // PDFの白背景化（描画高速化）
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, canvas.width, canvas.height);
-      
+
       // Update overlay dimensions to match
       if (overlayCanvasRef.current) {
         overlayCanvasRef.current.width = viewport.width;
@@ -155,14 +155,20 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
       try {
         await renderTaskRef.current.promise;
-        console.log('[PdfCanvas] render completed, canvas size:', canvas.width, canvas.height);
       } catch (err: any) {
         if (err.name === 'RenderingCancelledException') return;
         console.error("PDF render error:", err);
       }
     };
 
-    renderPdf();
+    // ズーム連続変更時の無駄なワーカー呼び出しを防ぐ30msデバウンス
+    if (renderDebounceRef.current) clearTimeout(renderDebounceRef.current);
+    renderDebounceRef.current = setTimeout(() => { renderPdf(); }, 30);
+
+    return () => {
+      if (renderDebounceRef.current) clearTimeout(renderDebounceRef.current);
+      renderTaskRef.current?.cancel();
+    };
   }, [pdfPage, zoom]);
 
   // Overlay Layer Rendering

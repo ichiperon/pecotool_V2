@@ -68,8 +68,8 @@ export async function openPDF(filePath: string): Promise<pdfjsLib.PDFDocumentPro
 // ページプロキシのメモリキャッシュ（ページ切り替えをゼロ秒にするため）
 let globalSharedPdfProxy: { filePath: string, promise: Promise<pdfjsLib.PDFDocumentProxy> } | null = null;
 
-// LRUキャッシュ：挿入順序を利用してMapで最大20ページ分を保持
-const PAGE_PROXY_CACHE_LIMIT = 20;
+// LRUキャッシュ：挿入順序を利用してMapで最大50ページ分を保持
+const PAGE_PROXY_CACHE_LIMIT = 50;
 const pageProxyCache = new Map<string, pdfjsLib.PDFPageProxy>();
 
 function evictPageProxyCache() {
@@ -118,10 +118,10 @@ export function destroySharedPdfProxy() {
 }
 
 
-export async function generateThumbnail(pdf: pdfjsLib.PDFDocumentProxy, pageIndex: number): Promise<string> {
-  const page = await pdf.getPage(pageIndex + 1);
+export async function generateThumbnail(filePath: string, pageIndex: number): Promise<string> {
+  const page = await getCachedPageProxy(filePath, pageIndex);
   const unscaledViewport = page.getViewport({ scale: 1.0 });
-  const scale = Math.min(250 / unscaledViewport.width, 1.0); // 最大幅250pxに制限
+  const scale = Math.min(150 / unscaledViewport.width, 1.0); // 最大幅150pxに制限
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
   canvas.width = viewport.width;
@@ -221,7 +221,7 @@ async function setCachedPage(key: string, data: PageData) {
 }
 
 export async function loadPage(
-  pdf: pdfjsLib.PDFDocumentProxy,
+  _pdf: pdfjsLib.PDFDocumentProxy,
   pageIndex: number,
   filePath: string,
   bboxMeta?: Record<string, Array<{
@@ -234,19 +234,17 @@ export async function loadPage(
   const cacheKey = `${filePath}:${pageIndex}`;
   const cached = await getCachedPage(cacheKey);
   if (cached) {
-    console.log(`[loadPage] page ${pageIndex}: cache hit`);
     return { ...cached, pageIndex }; // Ensure pageIndex is correct
   }
 
-  const page = await pdf.getPage(pageIndex + 1);
+  // キャッシュ済みプロキシを再利用して二重getPageを回避
+  const page = await getCachedPageProxy(filePath, pageIndex);
   const viewport = page.getViewport({ scale: 1.0 });
   const textContent = await page.getTextContent();
 
   // pdfjs v5 mixes TextItem and TextMarkedContent in items array.
   const allItems = textContent.items;
   const textItems = allItems.filter((item: any) => typeof item.str === 'string');
-  const nonEmpty = textItems.filter((item: any) => item.str.trim() !== '');
-  console.log(`[loadPage] page ${pageIndex}: total=${allItems.length}, hasStr=${textItems.length}, nonEmpty=${nonEmpty.length}`);
 
   let textBlocks: TextBlock[] = [];
 

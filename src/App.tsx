@@ -4,7 +4,7 @@ import { usePecoStore } from "./store/pecoStore";
 import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
-import { generateThumbnail, loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, getCachedPageProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
+import { generateThumbnail, loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
 import { estimateSizes } from "./utils/pdfSaver";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
@@ -41,6 +41,8 @@ function App() {
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0, scrollX: 0, scrollY: 0 });
   const [notification, setNotification] = useState<{ message: string; isError: boolean } | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingPage, setIsLoadingPage] = useState(false);
   const [helpMenu, setHelpMenu] = useState<{ x: number, y: number, visible: boolean }>({ x: 0, y: 0, visible: false });
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [showRecentDropdown, setShowRecentDropdown] = useState(false);
@@ -65,7 +67,7 @@ function App() {
   useFontLoader();
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
-  const { handleOpen, handleSave, executeSaveAs } = useFileOperations(showToast);
+  const { handleOpen, handleSave, executeSaveAs } = useFileOperations(showToast, setIsSaving);
 
   const currentPage = document?.pages.get(currentPageIndex);
 
@@ -190,15 +192,14 @@ function App() {
   const thumbnailQueueRef = useRef<number[]>([]);
   const isThumbnailProcessingRef = useRef<boolean>(false);
 
-  const THUMBNAIL_CONCURRENCY = 2;
+  const THUMBNAIL_CONCURRENCY = 4;
 
   const processThumbnailQueue = useCallback(async () => {
-    if (isThumbnailProcessingRef.current || !document) return;
+    const doc = usePecoStore.getState().document;
+    if (isThumbnailProcessingRef.current || !doc) return;
     isThumbnailProcessingRef.current = true;
 
     try {
-      const pdfProxy = await getSharedPdfProxy(document.filePath);
-
       while (thumbnailQueueRef.current.length > 0) {
         const batch: number[] = [];
         while (batch.length < THUMBNAIL_CONCURRENCY && thumbnailQueueRef.current.length > 0) {
@@ -211,7 +212,7 @@ function App() {
 
         await Promise.allSettled(
           batch.map(async (pageIdx) => {
-            const dataUrl = await generateThumbnail(pdfProxy, pageIdx);
+            const dataUrl = await generateThumbnail(doc.filePath, pageIdx);
             usePecoStore.getState().setThumbnail(pageIdx, dataUrl);
           })
         );
@@ -224,32 +225,38 @@ function App() {
         setTimeout(processThumbnailQueue, 0);
       }
     }
-  }, [document]);
+  }, []);
 
-  const thumbnailTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const thumbnailTimerRef = useRef<number | null>(null);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
     const state = usePecoStore.getState();
-    if (state.thumbnails.has(pageIndex) || !document) return;
-    
+    if (state.thumbnails.has(pageIndex) || !state.document) return;
+
     if (!thumbnailQueueRef.current.includes(pageIndex)) {
       thumbnailQueueRef.current.push(pageIndex);
     }
 
-    if (thumbnailTimerRef.current) clearTimeout(thumbnailTimerRef.current);
-    thumbnailTimerRef.current = setTimeout(() => {
-      processThumbnailQueue();
-    }, 300); // メイン画像のレンダリングを優先させるため300ms遅延
-  }, [processThumbnailQueue, document]);
+    if (thumbnailTimerRef.current !== null) {
+      ((window as any).cancelIdleCallback ?? clearTimeout)(thumbnailTimerRef.current);
+    }
+    // メイン画像のレンダリングを優先させるため、アイドル時 or 最大400ms後に処理開始
+    thumbnailTimerRef.current = ((window as any).requestIdleCallback ?? ((cb: () => void) => setTimeout(cb, 300)))(
+      () => { processThumbnailQueue(); },
+      { timeout: 400 }
+    ) as number;
+  }, [processThumbnailQueue]);
 
   const loadCurrentPage = useCallback(async (pageIdx: number) => {
     latestLoadRef.current = pageIdx;
     if (latestLoadRef.current !== pageIdx) return;
 
-    if (!document) return;
+    const doc = usePecoStore.getState().document;
+    if (!doc) return;
 
+    setIsLoadingPage(true);
     try {
-      const pdf = await getSharedPdfProxy(document.filePath);
+      const pdf = await getSharedPdfProxy(doc.filePath);
 
       if (latestLoadRef.current !== pageIdx) return;
 
@@ -258,26 +265,41 @@ function App() {
         bboxMetaRef.current = await loadPecoToolBBoxMeta(pdf);
       }
 
-      const pageData = await loadPage(pdf, pageIdx, document.filePath, bboxMetaRef.current);
+      const pageData = await loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current);
 
       if (latestLoadRef.current === pageIdx) {
         updatePageData(pageIdx, pageData, false);
       }
 
-      // 隣接ページのプロキシをバックグラウンドでプリフェッチ
-      const prefetch = (i: number) => {
-        if (i >= 0 && i < document.totalPages) {
-          getCachedPageProxy(document.filePath, i).catch(() => {});
-        }
+      // 隣接ページのデータをバックグラウンドでプリフェッチ（50ms遅延でメインレンダーを優先）
+      const prefetchPage = (i: number) => {
+        if (i < 0 || i >= doc.totalPages) return;
+        if (usePecoStore.getState().document?.pages.has(i)) return;
+        setTimeout(() => {
+          const currentDoc = usePecoStore.getState().document;
+          if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
+          loadPage(pdf, i, doc.filePath, bboxMetaRef.current)
+            .then((pd) => {
+              const state = usePecoStore.getState();
+              if (state.document?.filePath === doc.filePath && !state.document.pages.has(i)) {
+                updatePageData(i, pd, false);
+              }
+            })
+            .catch(() => {});
+        }, 50);
       };
-      prefetch(pageIdx - 1);
-      prefetch(pageIdx + 1);
+      prefetchPage(pageIdx - 1);
+      prefetchPage(pageIdx + 1);
     } catch (err: any) {
       if (latestLoadRef.current !== pageIdx) return;
       console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
       showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
+    } finally {
+      if (latestLoadRef.current === pageIdx) {
+        setIsLoadingPage(false);
+      }
     }
-  }, [document, updatePageData, showToast]);
+  }, [updatePageData, showToast]);
 
   // ファイルが変わったときにbboxMetaキャッシュをリセット
   const prevFilePathRef = useRef<string | undefined>(undefined);
@@ -292,7 +314,7 @@ function App() {
     if (document && !document.pages.has(currentPageIndex)) {
       loadCurrentPage(currentPageIndex);
     }
-  }, [document, currentPageIndex, loadCurrentPage]);
+  }, [document?.filePath, document?.pages, currentPageIndex, loadCurrentPage]);
 
   // --- Effects ---
   useEffect(() => {
@@ -476,7 +498,9 @@ function App() {
         <div className="status-item">ズーム: {zoom}%</div>
         <div className="status-item">BB数: {currentPage?.textBlocks?.length || 0}</div>
         <div className="status-item flex-grow" />
-        {(isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
+        {isLoadingPage && <div className="status-item status-loading">⏳ ページ読込中...</div>}
+        {isSaving && <div className="status-item status-loading">💾 保存中...</div>}
+        {!isSaving && (isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
         <div className={`status-item console-toggle-btn${logs.filter(l => l.level === 'error').length > 0 ? ' has-errors' : ''}`} onClick={() => setShowConsole(v => !v)} title="コンソールを開く">
           <Terminal size={12} /><span>コンソール</span>
           {logs.filter(l => l.level === 'error').length > 0 && <span className="console-error-badge">{logs.filter(l => l.level === 'error').length}</span>}

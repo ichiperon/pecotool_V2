@@ -161,7 +161,12 @@ async function buildRasterizedPdfDocument(originalPdfBytes: Uint8Array, document
     ? await newPdf.embedFont(fontBytes, { subset: true }) 
     : await newPdf.embedFont(StandardFonts.Helvetica);
 
-  const pdfJsDoc = await pdfjsLib.getDocument({ data: originalPdfBytes.slice() }).promise;
+  const pdfJsDoc = await pdfjsLib.getDocument({
+    data: originalPdfBytes.slice(),
+    cMapUrl: '/cmaps/',
+    cMapPacked: true,
+    standardFontDataUrl: '/standard_fonts/',
+  }).promise;
   const totalPages = pdfJsDoc.numPages;
   const bboxMeta: Record<string, any> = {};
 

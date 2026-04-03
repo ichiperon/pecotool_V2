@@ -5,8 +5,8 @@ import { loadPDF } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../components/SaveDialog';
 
-export function useFileOperations(showToast: (msg: string, isError?: boolean) => void) {
-  const { 
+export function useFileOperations(showToast: (msg: string, isError?: boolean) => void, setIsSaving?: (v: boolean) => void) {
+  const {
     document, setDocument, resetDirty,
     fontBytes, isFontLoaded
   } = usePecoStore();
@@ -44,25 +44,28 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
     if (!document) return;
     if (!isFontLoaded || !fontBytes) {
       showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);
-      // Even if font is missing, we proceed, but the user is warned. 
+      // Even if font is missing, we proceed, but the user is warned.
       // Ideally, we might want to block saving if it's a hard requirement.
     }
 
+    setIsSaving?.(true);
     try {
       const content = await readFile(document.filePath);
-      const bytesToSave = new Uint8Array(content); 
+      const bytesToSave = new Uint8Array(content);
       const compressionPref = (localStorage.getItem('peco-save-compression') as 'none' | 'compressed' | 'rasterized') || 'none';
       const storedQuality = localStorage.getItem('peco-rasterize-quality');
       const qNum = storedQuality ? parseInt(storedQuality, 10) / 100 : 0.6;
-      
+
       const savedBytes = await savePDF(bytesToSave, document, compressionPref, qNum, fontBytes || undefined);
-      
+
       await writeFile(document.filePath, savedBytes);
       resetDirty();
       showToast(`保存しました。(${formatFileSize(savedBytes.length)})`);
     } catch (err) {
       console.error("Failed to save:", err);
       showToast("保存に失敗しました。", true);
+    } finally {
+      setIsSaving?.(false);
     }
   };
 
@@ -85,18 +88,23 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
 
         const content = await readFile(document.filePath);
         const bytesToSave = new Uint8Array(content);
-        
+
+        setIsSaving?.(true);
         if (compression === 'rasterized') {
           showToast(`高圧縮処理中です(画質${quality}%)...しばらくお待ち下さい`, false);
         }
-        
-        const savedBytes = await savePDF(bytesToSave, document, compression, quality ? quality / 100 : 0.6, fontBytes || undefined);
 
-        await writeFile(path, savedBytes);
-        document.filePath = path;
-        resetDirty();
-        showToast(`名前を付けて保存しました。(${formatFileSize(savedBytes.length)}・${compression === 'rasterized' ? '高圧縮' : compression === 'compressed' ? '標準圧縮' : '非圧縮'})`);
-        addToRecent(path);
+        try {
+          const savedBytes = await savePDF(bytesToSave, document, compression, quality ? quality / 100 : 0.6, fontBytes || undefined);
+
+          await writeFile(path, savedBytes);
+          document.filePath = path;
+          resetDirty();
+          showToast(`名前を付けて保存しました。(${formatFileSize(savedBytes.length)}・${compression === 'rasterized' ? '高圧縮' : compression === 'compressed' ? '標準圧縮' : '非圧縮'})`);
+          addToRecent(path);
+        } finally {
+          setIsSaving?.(false);
+        }
       }
     } catch (err) {
       console.error("Failed to save as:", err);
