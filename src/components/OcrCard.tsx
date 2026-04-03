@@ -66,6 +66,7 @@ export const OcrCard = forwardRef<OcrCardHandle, OcrCardProps>(
   };
 
   const handleClick = (e: React.MouseEvent) => {
+    if (e.shiftKey) e.preventDefault();
     if (contentRef.current?.contains(e.target as Node) && isSelected) return;
     if (onSelect) {
       onSelect(block.id, e.ctrlKey || e.metaKey, e.shiftKey);
@@ -108,15 +109,17 @@ export const OcrCard = forwardRef<OcrCardHandle, OcrCardProps>(
     <div
       ref={cardRef}
       className={`ocr-card ${block.isDirty ? 'dirty' : ''} ${isSelected ? 'selected' : ''}`}
+      onMouseDown={(e) => { if (e.shiftKey || e.ctrlKey || e.metaKey) e.preventDefault(); }}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
     >
       <div className="ocr-card-header">
-        <div {...dragListeners} style={{ cursor: 'grab', opacity: 0.5, display: 'flex', alignItems: 'center' }} title="ドラッグして並び替え">
+        <div {...dragListeners} className="ocr-card-drag-handle" title="ドラッグして並び替え">
           <GripVertical size={14} />
         </div>
         <span>#{block.order + 1}</span>
         <button
+          type="button"
           className="mode-badge"
           onClick={toggleWritingMode}
           title="クリックで縦書き/横書きを切り替え"
