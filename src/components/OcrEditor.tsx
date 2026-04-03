@@ -1,12 +1,14 @@
 import { useRef } from 'react';
 import {
   DndContext,
+  DragOverlay,
   closestCenter,
   KeyboardSensor,
   PointerSensor,
   useSensor,
   useSensors,
   DragEndEvent,
+  DragStartEvent,
 } from '@dnd-kit/core';
 import {
   arrayMove,
@@ -29,6 +31,7 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
   const { document, currentPageIndex, updatePageData, toggleSelection, selectedIds, lastSelectedId, setSelectedIds } = usePecoStore();
   const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
+  const [activeId, setActiveId] = useState<string | null>(null);
 
   // 各カードへの ref 配列
   const cardRefs = useRef<(OcrCardHandle | null)[]>([]);
@@ -44,7 +47,12 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     })
   );
 
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(event.active.id as string);
+  };
+
   const handleDragEnd = (event: DragEndEvent) => {
+    setActiveId(null);
     const { active, over } = event;
     if (!over || active.id === over.id || !currentPage) return;
 
@@ -183,6 +191,7 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
+            onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
             <SortableContext
@@ -202,6 +211,24 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
                 ))}
               </div>
             </SortableContext>
+            {activeId && selectedIds.has(activeId) && selectedIds.size > 1 && (() => {
+              const activeBlock = filteredBlocks.find(b => b.id === activeId);
+              if (!activeBlock) return null;
+              return (
+                <DragOverlay>
+                  <div className="drag-overlay-wrapper">
+                    <div className="ocr-card selected">
+                      <div className="ocr-card-header">
+                        <span>#{activeBlock.order + 1}</span>
+                        <span className="mode-badge">{activeBlock.writingMode === 'vertical' ? '縦書き' : '横書き'}</span>
+                      </div>
+                      <div className="ocr-card-content">{activeBlock.text}</div>
+                    </div>
+                    <div className="drag-selection-badge">{selectedIds.size}</div>
+                  </div>
+                </DragOverlay>
+              );
+            })()}
           </DndContext>
         )}
       </div>
