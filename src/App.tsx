@@ -312,11 +312,15 @@ function App() {
     if (!isAutoFit || !document) return;
     const container = viewerRef.current;
     if (!container) return;
+    let rafId: number;
     const observer = new ResizeObserver(() => {
-      if (isAutoFit) fitToScreen(true);
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        if (isAutoFit) fitToScreen(true);
+      });
     });
     observer.observe(container);
-    return () => observer.disconnect();
+    return () => { observer.disconnect(); cancelAnimationFrame(rafId); };
   }, [document, currentPageIndex, isAutoFit]);
 
   // --- Resizing ---

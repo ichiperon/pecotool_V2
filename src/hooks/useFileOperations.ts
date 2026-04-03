@@ -1,13 +1,13 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from '../store/pecoStore';
-import { loadPDF, loadPage, loadPecoToolBBoxMeta, openPDF } from '../utils/pdfLoader';
+import { loadPDF } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../components/SaveDialog';
 
 export function useFileOperations(showToast: (msg: string, isError?: boolean) => void) {
   const { 
-    document, setDocument, resetDirty, updatePageData, 
+    document, setDocument, resetDirty,
     fontBytes, isFontLoaded
   } = usePecoStore();
 
@@ -29,29 +29,10 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
       }
 
       if (selected && typeof selected === 'string') {
-        // No longer reading the whole file here! 
-        // We pass the path to loadPDF which uses convertFileSrc.
         const doc = await loadPDF(selected);
-        
         setDocument(doc, undefined);
         addToRecent(selected);
-
-        const pdf = await openPDF(selected);
-        const bboxMeta = await loadPecoToolBBoxMeta(pdf);
-
-        try {
-          const pageData = await loadPage(pdf, 0, selected, bboxMeta);
-          updatePageData(0, pageData, false);
-        } catch (err) {
-          console.error('[handleOpen] page 0 text extraction failed:', err);
-          showToast(`テキスト抽出に失敗しました:\n${err}`, true);
-        }
-
-        try {
-          pdf.destroy();
-        } catch (e) {
-          console.error(e);
-        }
+        // page 0 の読み込みは App.tsx の useEffect (loadCurrentPage) に任せる
       }
     } catch (err) {
       console.error("Failed to open file:", err);
