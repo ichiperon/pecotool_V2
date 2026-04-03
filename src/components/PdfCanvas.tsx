@@ -3,7 +3,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import { usePecoStore } from "../store/pecoStore";
 import { Action, PageData, TextBlock } from "../types";
 import { classifyDirection, getDirectionLabel, reorderBlocks } from "../utils/bulkReorder";
-import { getCachedPageProxy, getSharedPdfProxy } from "../utils/pdfLoader";
+import { getCachedPageProxy } from "../utils/pdfLoader";
 
 interface PdfCanvasProps {
   pageIndex: number;
@@ -37,7 +37,6 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const [dragStartBboxes, setDragStartBboxes] = useState<Map<string, {x: number, y: number, width: number, height: number}>>(new Map()); // For multiple block moving
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
   const preDragPageRef = useRef<PageData | null>(null);
-  const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
   // Combined effect to load PDF document and page (optimized)
   useEffect(() => {

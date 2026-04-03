@@ -6,7 +6,8 @@
       "Bash(npx tsc:*)",
       "Bash(npm test:*)",
       "Bash(npx vitest:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(npx eslint:*)"
     ]
   }
 }
