@@ -205,10 +205,10 @@ export async function buildPdfDocument(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
-  const savedBytes = await pdfDoc.save({ rewrite: true, useObjectStreams: false, addDefaultPage: false });
-  // @cantoo/pdf-lib hardcodes PDF-1.7 on full rewrite; restore the original version
-  // so that older viewers (e.g. Acrobat 7, which supports up to PDF 1.6) can open the file.
-  if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
+  // rewrite: false (default) = incremental update: original PDF bytes are preserved at the
+  // front of the output, so the original PDF version and structure are retained as-is.
+  // This ensures compatibility with older viewers such as Acrobat 7 (supports up to PDF 1.6).
+  const savedBytes = await pdfDoc.save({ useObjectStreams: false, addDefaultPage: false });
   return savedBytes;
 }
 
