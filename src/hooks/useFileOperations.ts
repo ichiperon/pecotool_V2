@@ -6,10 +6,7 @@ import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
 
 export function useFileOperations(showToast: (msg: string, isError?: boolean) => void, setIsSaving?: (v: boolean) => void) {
-  const {
-    document, setDocument, resetDirty,
-    fontBytes, isFontLoaded
-  } = usePecoStore();
+  const { setDocument, resetDirty } = usePecoStore();
 
   const addToRecent = (path: string) => {
     const saved = localStorage.getItem('peco-recent-files');

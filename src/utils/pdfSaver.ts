@@ -59,42 +59,12 @@ function stripTextBlocks(decodedContent: Uint8Array): Uint8Array {
  * Performs surgical removal of old text layers to prevent "Double OCR".
  * Powered by @cantoo/pdf-lib.
  */
-/**
- * Extract the PDF version string (e.g. "1.4") from the original file header.
- * Returns null if not found.
- */
-function extractPdfVersion(bytes: Uint8Array): string | null {
-  // %PDF-X.Y in the first 16 bytes
-  const header = new TextDecoder('latin1').decode(bytes.slice(0, 16));
-  const m = header.match(/%PDF-(\d+\.\d+)/);
-  return m ? m[1] : null;
-}
-
-/**
- * Overwrite the %PDF-X.Y header in an already-serialized PDF byte array.
- * @cantoo/pdf-lib hardcodes PDF-1.7 on full rewrite; this restores the original version.
- */
-function restorePdfVersion(savedBytes: Uint8Array, version: string): void {
-  const target = `%PDF-${version}`;
-  const current = new TextDecoder('latin1').decode(savedBytes.slice(0, 16));
-  const m = current.match(/%PDF-\d+\.\d+/);
-  if (!m) return;
-  // Only patch if the version actually changed
-  if (current.startsWith(target)) return;
-  const encoder = new TextEncoder();
-  const patch = encoder.encode(target);
-  // Overwrite in-place (same length guaranteed: both are %PDF-X.Y format)
-  for (let i = 0; i < patch.length && i < m[0].length; i++) {
-    savedBytes[m.index! + i] = patch[i];
-  }
-}
 
 export async function buildPdfDocument(
   originalPdfBytes: Uint8Array,
   documentState: PecoDocument,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
-  const originalVersion = extractPdfVersion(originalPdfBytes);
   const pdfDoc = await PDFDocument.load(originalPdfBytes);
   pdfDoc.registerFontkit(fontkit);
 
