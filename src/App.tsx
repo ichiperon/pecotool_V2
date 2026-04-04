@@ -158,12 +158,23 @@ function App() {
     showToast(`${selectedBlocks.length}個のブロックをグループ化しました。`);
   };
 
+  const handleRemoveSpaces = () => {
+    if (selectedIds.size === 0 || !currentPage) return;
+    const newBlocks = currentPage.textBlocks.map(b => {
+      if (!selectedIds.has(b.id)) return b;
+      const stripped = b.text.replace(/[ \u3000]/g, '');
+      if (stripped === b.text) return b;
+      return { ...b, text: stripped, isDirty: true };
+    });
+    updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
+  };
+
   // --- useKeyboardShortcuts ---
   useKeyboardShortcuts({
-    undo, redo, fitToScreen, handleSave, handleSaveAs, copySelected, 
-    pasteClipboard, handleDelete, toggleDrawingMode, toggleSplitMode, 
+    undo, redo, fitToScreen, handleSave, handleSaveAs, copySelected,
+    pasteClipboard, handleDelete, toggleDrawingMode, toggleSplitMode,
     handleGroup, setZoom, zoom, setIsAutoFit,
-    searchInputRef
+    searchInputRef, handleRemoveSpaces
   });
 
   const latestLoadRef = useRef<number>(-1);

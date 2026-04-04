@@ -12,6 +12,7 @@ interface ShortcutActions {
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
   handleGroup: () => void;
+  handleRemoveSpaces: () => void;
   setZoom: (zoom: number) => void;
   zoom: number;
   setIsAutoFit: (val: boolean) => void;
@@ -63,6 +64,9 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
         actions.pasteClipboard();
       } else if (e.key === 'Delete' && !isEditing) {
         actions.handleDelete();
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'Space' && !isEditing) {
+        e.preventDefault();
+        actions.handleRemoveSpaces();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
