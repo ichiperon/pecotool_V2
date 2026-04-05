@@ -1,13 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-// ── pdfjs-dist をモック（pdfLoader テストと同じパターン）─────────
-vi.mock('pdfjs-dist', () => ({
-  GlobalWorkerOptions: { workerSrc: '' },
-  getDocument: m.pdfjsGetDocument,
-}))
-vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
-
-// ── pdf-lib / fontkit をモック（pdfSaver テストと同じパターン）───
+// ── hoisted mocks ──────────────────────────────────────────────
 const m = vi.hoisted(() => ({
   drawText:        vi.fn(),
   drawImage:       vi.fn(),
@@ -26,6 +19,12 @@ const m = vi.hoisted(() => ({
   popGsFn:         vi.fn(() => ({ type: 'popGs' })),
 }))
 
+vi.mock('pdfjs-dist', () => ({
+  GlobalWorkerOptions: { workerSrc: '' },
+  getDocument: m.pdfjsGetDocument,
+}))
+vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
+
 vi.mock('@cantoo/pdf-lib', () => ({
   PDFDocument:       { load: m.pdfLoad },
   degrees:           (n: number) => ({ type: 'degrees', angle: n }),
@@ -41,7 +40,7 @@ vi.mock('@cantoo/pdf-lib', () => ({
 
 vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
 
-import { loadPage } from '../../utils/pdfLoader'
+import { loadPage, destroySharedPdfProxy } from '../../utils/pdfLoader'
 import { savePDF } from '../../utils/pdfSaver'
 import { usePecoStore } from '../../store/pecoStore'
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
@@ -61,7 +60,14 @@ function makeMockPdf(items: FakeItem[], viewportWidth = 595, viewportHeight = 84
       getViewport: vi.fn().mockReturnValue({ width: viewportWidth, height: viewportHeight }),
       getTextContent: vi.fn().mockResolvedValue({ items }),
     }),
-  } as unknown as import('pdfjs-dist').PDFDocumentProxy
+  }
+}
+
+/** getDocument がこの items を持つ pdf を返すようにセットアップ */
+function setupGetDocument(items: FakeItem[], viewportWidth = 595, viewportHeight = 842) {
+  const mockPdf = makeMockPdf(items, viewportWidth, viewportHeight)
+  m.pdfjsGetDocument.mockReturnValue({ promise: Promise.resolve(mockPdf) })
+  return mockPdf
 }
 
 function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
@@ -99,6 +105,11 @@ function makeDoc(pages: Map<number, PageData>): PecoDocument {
   }
 }
 
+// ── グローバル beforeEach：キャッシュをテスト間でリセット ──────
+beforeEach(() => {
+  destroySharedPdfProxy()
+})
+
 // ── I-01: テキスト抽出パイプライン（横書き）──────────────────
 
 describe('I-01: テキスト抽出パイプライン（横書き）', () => {
@@ -108,9 +119,8 @@ describe('I-01: テキスト抽出パイプライン（横書き）', () => {
       { str: 'World', transform: [12, 0, 0, 12, 200, 700], width: 60, height: 12 },
       { str: 'Line2', transform: [12, 0, 0, 12, 72, 650], width: 60, height: 12 },
     ]
-    const mockPdf = makeMockPdf(items, 595, 842)
-
-    const pageData = await loadPage(mockPdf as any, 0, "")
+    setupGetDocument(items)
+    const pageData = await loadPage({} as any, 0, '')
 
     expect(pageData.textBlocks.length).toBe(3)
 
@@ -120,7 +130,6 @@ describe('I-01: テキスト抽出パイプライン（横書き）', () => {
       expect(block.bbox.y).toBeGreaterThanOrEqual(0)
       expect(block.bbox.width).toBeGreaterThan(0)
       expect(block.bbox.height).toBeGreaterThan(0)
-      // 横書き: width > height
       expect(block.bbox.width).toBeGreaterThan(block.bbox.height)
     }
   })
@@ -131,9 +140,8 @@ describe('I-01: テキスト抽出パイプライン（横書き）', () => {
       { str: '   ', transform: [12, 0, 0, 12, 150, 700], width: 0, height: 12 },
       { str: 'World', transform: [12, 0, 0, 12, 200, 700], width: 60, height: 12 },
     ]
-    const mockPdf = makeMockPdf(items)
-
-    const pageData = await loadPage(mockPdf as any, 0, "")
+    setupGetDocument(items)
+    const pageData = await loadPage({} as any, 0, '')
 
     expect(pageData.textBlocks.length).toBe(2)
     expect(pageData.textBlocks.map(b => b.text)).toEqual(['Hello', 'World'])
@@ -145,19 +153,16 @@ describe('I-01: テキスト抽出パイプライン（横書き）', () => {
 describe('I-02: テキスト抽出パイプライン（縦書き）', () => {
   it('縦書きアイテムのページ → 全ブロックが writingMode="vertical"、bbox が縦長', async () => {
     const items: FakeItem[] = [
-      // transform[0]=0, transform[1]=14 → isVertical=true
       { str: '縦書き', transform: [0, 14, -14, 0, 500, 600], width: 42, height: 14 },
       { str: 'テスト', transform: [0, 14, -14, 0, 460, 600], width: 42, height: 14 },
     ]
-    const mockPdf = makeMockPdf(items)
-
-    const pageData = await loadPage(mockPdf as any, 0, "")
+    setupGetDocument(items)
+    const pageData = await loadPage({} as any, 0, '')
 
     expect(pageData.textBlocks.length).toBe(2)
 
     for (const block of pageData.textBlocks) {
       expect(block.writingMode).toBe('vertical')
-      // 縦書き: height > width（縦長）
       expect(block.bbox.height).toBeGreaterThan(block.bbox.width)
     }
   })
@@ -167,9 +172,8 @@ describe('I-02: テキスト抽出パイプライン（縦書き）', () => {
       { str: 'A', transform: [0, 14, -14, 0, 500, 600], width: 14, height: 14 },
       { str: 'B', transform: [0, 14, -14, 0, 460, 600], width: 14, height: 14 },
     ]
-    const mockPdf = makeMockPdf(items)
-
-    const pageData = await loadPage(mockPdf as any, 0, "")
+    setupGetDocument(items)
+    const pageData = await loadPage({} as any, 0, '')
 
     expect(pageData.textBlocks[0].order).toBe(0)
     expect(pageData.textBlocks[1].order).toBe(1)
@@ -196,21 +200,17 @@ describe('I-04: Undo/Redo サイクル', () => {
 
     const { updatePageData } = usePecoStore.getState()
 
-    // 編集: text を 'edited' に変更
     const editedBlock = { ...originalBlock, text: 'edited', isDirty: true }
-    updatePageData(0, { textBlocks: [editedBlock], isDirty: true }) // undoable=true (default)
+    updatePageData(0, { textBlocks: [editedBlock], isDirty: true })
 
-    // 編集後の状態確認
     expect(usePecoStore.getState().document?.pages.get(0)?.textBlocks[0].text).toBe('edited')
     expect(usePecoStore.getState().undoStack.length).toBe(1)
 
-    // undo → 編集前に戻る
     usePecoStore.getState().undo()
     expect(usePecoStore.getState().document?.pages.get(0)?.textBlocks[0].text).toBe('original')
     expect(usePecoStore.getState().undoStack.length).toBe(0)
     expect(usePecoStore.getState().redoStack.length).toBe(1)
 
-    // redo → 編集後に戻る
     usePecoStore.getState().redo()
     expect(usePecoStore.getState().document?.pages.get(0)?.textBlocks[0].text).toBe('edited')
     expect(usePecoStore.getState().undoStack.length).toBe(1)
@@ -249,21 +249,18 @@ describe('I-06: 縦書きPDFの保存', () => {
   beforeEach(() => {
     vi.clearAllMocks()
 
-    // fetch mock for font loading
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(100)),
     }))
 
-    // translate/scale fns を毎回リセット
     m.translateFn.mockImplementation((...args: any[]) => ({ type: 'translate', args }))
     m.scaleFn.mockImplementation((...args: any[]) => ({ type: 'scale', args }))
 
-    // pdf-lib モックのセットアップ
     const mockPage = {
       drawText:     m.drawText,
       drawImage:    m.drawImage,
       pushOperators: m.pushOperators,
-      node: { normalizedEntries: () => ({ Contents: undefined }) },
+      node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
       getWidth: () => 595,
       getHeight: () => 842,
       getSize: () => ({ width: 595, height: 842 }),
@@ -288,7 +285,6 @@ describe('I-06: 縦書きPDFの保存', () => {
     m.save.mockResolvedValue(new Uint8Array(10))
     m.pdfLoad.mockResolvedValue(mockPdfDoc)
 
-    // pdfjs mock for font rendering
     m.pdfjsGetDocument.mockReturnValue({
       promise: Promise.resolve({
         getPage: vi.fn().mockResolvedValue({

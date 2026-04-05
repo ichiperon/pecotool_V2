@@ -1,8 +1,8 @@
 import React from 'react';
-import { 
-  FolderOpen, Save, RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize, 
-  Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser, X, 
-  ChevronDown, Settings 
+import {
+  RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
+  Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
+  ChevronDown, Settings, RemoveFormatting
 } from "lucide-react";
 import { PageData, PecoDocument } from '../../types';
 
@@ -21,14 +21,8 @@ interface ToolbarProps {
   ocrOpacity: number;
   reorderThreshold: number;
   isPreviewOpen: boolean;
-  recentFiles: string[];
-  showRecentDropdown: boolean;
   showSettingsDropdown: boolean;
-  
-  onOpen: (path?: string) => void;
-  onClose: () => void;
-  onSave: () => void;
-  onSaveAs: () => void;
+
   onUndo: () => void;
   onRedo: () => void;
   onZoomIn: () => void;
@@ -38,41 +32,18 @@ interface ToolbarProps {
   onToggleSplit: () => void;
   onGroup: () => void;
   onDeduplicate: () => void;
+  onRemoveSpaces: () => void;
   onDelete: () => void;
   onToggleOcr: () => void;
   onSetOcrOpacity: (val: number) => void;
   onSetReorderThreshold: (val: number) => void;
   onTogglePreview: () => void;
-  onToggleRecentDropdown: (e: React.MouseEvent) => void;
   onToggleSettingsDropdown: (e: React.MouseEvent) => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = (props) => {
   return (
     <header className="toolbar">
-      <div className="toolbar-group">
-        <div className="btn-group">
-          <button onClick={() => props.onOpen()} title="開く"><FolderOpen size={18} /><span>開く</span></button>
-          <button className="dropdown-btn" onClick={props.onToggleRecentDropdown} title="最近のファイル">
-            <ChevronDown size={14} />
-          </button>
-          {props.showRecentDropdown && props.recentFiles.length > 0 && (
-            <div className="recent-dropdown">
-              {props.recentFiles.map((path, i) => (
-                <div key={i} className="recent-item" onClick={() => props.onOpen(path)} title={path}>
-                  {path.split(/[\\/]/).pop()}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <button onClick={props.onClose} title="閉じる" disabled={!props.document} className="danger"><X size={18} /><span>閉じる</span></button>
-        <button onClick={props.onSave} title="保存" disabled={!props.document || (!props.isDirty && !props.currentPage?.isDirty)}><Save size={18} /><span>保存</span></button>
-        <button onClick={props.onSaveAs} title="名前を付けて保存" disabled={!props.document}><Save size={18} /><span>別名で保存</span></button>
-      </div>
-      
-      <div className="divider" />
-      
       <div className="toolbar-group">
         <button onClick={props.onUndo} disabled={props.undoStackLength === 0} title="元に戻す (Ctrl+Z)"><RotateCcw size={18} /></button>
         <button onClick={props.onRedo} disabled={props.redoStackLength === 0} title="やり直し (Ctrl+Y)"><RotateCw size={18} /></button>
@@ -93,6 +64,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
         <button onClick={props.onToggleSplit} title="BB分割" className={props.isSplitMode ? "active" : ""} disabled={!props.document}><Scissors size={18} /><span>分割</span></button>
         <button onClick={props.onGroup} title="グループ化" disabled={props.selectedIdsCount < 2}><Group size={18} /><span>グループ化</span></button>
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>
+        <button onClick={props.onRemoveSpaces} title="スペース削除 (Ctrl+Shift+Space)" disabled={props.selectedIdsCount === 0}><RemoveFormatting size={18} /><span>スペース削除</span></button>
         <button onClick={props.onDelete} title="削除" className="danger" disabled={props.selectedIdsCount === 0}><Trash2 size={18} /></button>
       </div>
       

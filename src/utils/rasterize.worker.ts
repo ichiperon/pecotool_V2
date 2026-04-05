@@ -134,7 +134,7 @@ self.onmessage = async (e: MessageEvent) => {
               page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, opacity: 0 });
               page.pushOperators(popGraphicsState());
             }
-          } catch (_) {}
+          } catch { /* ignore block draw errors */ }
         }
       }
     }

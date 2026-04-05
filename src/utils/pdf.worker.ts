@@ -76,7 +76,7 @@ self.onmessage = async (e: MessageEvent) => {
         ? await pdfDoc.embedFont(fontBytes, { subset: true })
         : await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-      let infoDict = (pdfDoc as any).getInfoDict();
+      const infoDict = (pdfDoc as any).getInfoDict();
       let existingBBoxMeta: Record<string, any> = {};
 
       if (infoDict) {
@@ -87,7 +87,7 @@ self.onmessage = async (e: MessageEvent) => {
           } else if (value instanceof PDFString) {
             existingBBoxMeta = JSON.parse(value.decodeText());
           }
-        } catch(e) {}
+        } catch { /* ignore parse errors */ }
       }
 
       const bboxMeta = { ...existingBBoxMeta };

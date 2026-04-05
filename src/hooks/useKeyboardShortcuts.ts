@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 interface ShortcutActions {
   undo: () => void;
   redo: () => void;
+  handleOpen: () => void;
   fitToScreen: (keep?: boolean) => void;
   handleSave: () => void;
   handleSaveAs: () => void;
@@ -54,7 +55,10 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
       const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'o' && !isEditing) {
+        e.preventDefault();
+        actions.handleOpen();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         if (e.shiftKey) actions.handleSaveAs();
         else actions.handleSave();

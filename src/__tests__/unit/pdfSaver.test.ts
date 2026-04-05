@@ -88,7 +88,7 @@ beforeEach(() => {
     drawImage:    m.drawImage,
     drawText:     m.drawText,
     pushOperators: m.pushOperators,
-    node: { normalizedEntries: () => ({ Contents: undefined }) },
+    node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
     getWidth: () => 595,
     getHeight: () => 842,
     getSize: () => ({ width: 595, height: 842 }),

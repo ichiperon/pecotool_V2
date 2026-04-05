@@ -18,6 +18,7 @@ import { useFontLoader } from "./hooks/useFontLoader";
 
 // Components
 import { Toolbar } from "./components/Toolbar/Toolbar";
+import { MenuBar } from "./components/MenuBar/MenuBar";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 import { ConsolePanel } from "./components/Console/ConsolePanel";
 
@@ -42,8 +43,8 @@ function App() {
   const [isLoadingPage, setIsLoadingPage] = useState(false);
   const [helpMenu, setHelpMenu] = useState<{ x: number, y: number, visible: boolean }>({ x: 0, y: 0, visible: false });
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
-  const [showRecentDropdown, setShowRecentDropdown] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+  const [helpModal, setHelpModal] = useState<'shortcuts' | 'usage' | 'version' | null>(null);
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
 
@@ -173,7 +174,8 @@ function App() {
     undo, redo, fitToScreen, handleSave, handleSaveAs, copySelected,
     pasteClipboard, handleDelete, toggleDrawingMode, toggleSplitMode,
     handleGroup, setZoom, zoom, setIsAutoFit,
-    searchInputRef, handleRemoveSpaces
+    searchInputRef, handleRemoveSpaces,
+    handleOpen,
   });
 
   const latestLoadRef = useRef<number>(-1);
@@ -436,49 +438,154 @@ function App() {
       onContextMenu={(e) => { e.preventDefault(); setHelpMenu({ x: e.clientX, y: e.clientY, visible: true }); }}
       onClick={() => {
         if (helpMenu.visible) setHelpMenu({ ...helpMenu, visible: false });
-        if (showRecentDropdown) setShowRecentDropdown(false);
         if (showSettingsDropdown) setShowSettingsDropdown(false);
       }}
     >
+      {/* 右クリックショートカットヘルプ（既存機能を維持） */}
       {helpMenu.visible && (
         <div className="help-context-menu" style={{ top: helpMenu.y, left: helpMenu.x }} onClick={(e) => e.stopPropagation()}>
           <div className="help-header"><MousePointer2 size={14} />ショートカットヘルプ</div>
           <div className="help-grid">
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>O</kbd><span>開く</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>S</kbd><span>保存</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd><span>別名保存</span></div>
+            <div className="help-divider" />
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd><span>元に戻す</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd><span>やり直し</span></div>
+            <div className="help-divider" />
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F10</kbd><span>追加</span></div>
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F11</kbd><span>分割</span></div>
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F12</kbd><span>グループ化</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd><span>スペース削除</span></div>
             <div className="help-divider" />
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>C</kbd><span>コピー</span></div>
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>V</kbd><span>貼り付け</span></div>
-            <div className="help-divider" />
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>S</kbd><span>保存</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd><span>別名保存</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd><span>元に戻す</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd><span>やり直し</span></div>
-            <div className="help-item"><kbd>Delete</kbd><span>削除</span></div>
+            <div className="help-item"><kbd>Delete</kbd><span>BB削除</span></div>
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>フィット</span></div>
-            <div className="help-item"><kbd>Space</kbd>+<span>ドラッグで移動</span></div>
+            <div className="help-item"><kbd>Space</kbd>+<span>ドラッグで画面移動</span></div>
           </div>
         </div>
       )}
 
-      <Toolbar 
+      {/* ヘルプモーダル */}
+      {helpModal && (
+        <div className="modal-backdrop" onClick={() => setHelpModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              {helpModal === 'shortcuts' && 'ショートカットキー一覧'}
+              {helpModal === 'usage' && 'ツールの使い方'}
+              {helpModal === 'version' && 'バージョン情報'}
+              <button className="modal-close" onClick={() => setHelpModal(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              {helpModal === 'shortcuts' && (
+                <div className="help-grid">
+                  <div className="modal-section-title">ファイル操作</div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>O</kbd><span>開く</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>S</kbd><span>保存</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd><span>別名で保存</span></div>
+                  <div className="help-divider" />
+                  <div className="modal-section-title">編集</div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd><span>元に戻す</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd><span>やり直し</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>C</kbd><span>BBをコピー（非編集時）</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>V</kbd><span>BBを貼り付け（非編集時）</span></div>
+                  <div className="help-item"><kbd>Delete</kbd><span>選択BBを削除（非編集時）</span></div>
+                  <div className="help-divider" />
+                  <div className="modal-section-title">BB操作</div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F10</kbd><span>BB追加モード</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F11</kbd><span>BB分割モード</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F12</kbd><span>選択BBをグループ化</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd><span>選択BB内のスペース削除</span></div>
+                  <div className="help-divider" />
+                  <div className="modal-section-title">表示</div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>画面にフィット</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>/<kbd>Alt</kbd>+<kbd>ホイール</kbd><span>ズーム</span></div>
+                  <div className="help-item"><kbd>Space</kbd>+<span>ドラッグ 画面移動（パン）</span></div>
+                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F</kbd><span>テキスト検索</span></div>
+                </div>
+              )}
+              {helpModal === 'usage' && (
+                <div className="usage-guide">
+                  <div className="usage-section">
+                    <div className="usage-title">基本的な流れ</div>
+                    <ol className="usage-list">
+                      <li>「ファイル → 開く」からPDFを読み込む</li>
+                      <li>左のサムネイルでページを選択</li>
+                      <li>中央のPDFビュー上でBB（テキストブロック）を確認・編集</li>
+                      <li>右パネルでBBのテキストを直接編集</li>
+                      <li>「ファイル → 保存」で保存</li>
+                    </ol>
+                  </div>
+                  <div className="usage-section">
+                    <div className="usage-title">BBの選択</div>
+                    <ul className="usage-list">
+                      <li>PDFビューまたは右パネルのBBをクリックで選択</li>
+                      <li><kbd>Ctrl</kbd>+クリック で複数選択</li>
+                      <li><kbd>Shift</kbd>+クリック で範囲選択（右パネルのみ）</li>
+                    </ul>
+                  </div>
+                  <div className="usage-section">
+                    <div className="usage-title">BB操作</div>
+                    <ul className="usage-list">
+                      <li><b>追加：</b> Ctrl+F10 で追加モード → PDFビュー上をドラッグ</li>
+                      <li><b>移動・リサイズ：</b> 選択後にPDFビュー上でドラッグ</li>
+                      <li><b>分割：</b> Ctrl+F11 で分割モード → BBをクリック</li>
+                      <li><b>グループ化：</b> 複数選択して Ctrl+F12</li>
+                      <li><b>並び順修正：</b> <kbd>Alt</kbd>+ドラッグで位置を移動して序列を更新</li>
+                    </ul>
+                  </div>
+                  <div className="usage-section">
+                    <div className="usage-title">テキスト編集</div>
+                    <ul className="usage-list">
+                      <li>右パネルのBBカードをクリックして直接入力</li>
+                      <li>OCRの誤認識スペースは「スペース削除」ボタンまたは Ctrl+Shift+Space で一括削除</li>
+                      <li>Ctrl+↑↓ でBB間を移動</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+              {helpModal === 'version' && (
+                <div className="version-info">
+                  <div className="version-logo">PecoTool V2</div>
+                  <div className="version-number">バージョン 1.3.0</div>
+                  <div className="version-desc">PDF OCR 手動編集ツール</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <MenuBar
+        document={document}
+        isDirty={isDirty}
+        currentPageIsDirty={currentPage?.isDirty ?? false}
+        recentFiles={recentFiles}
+        onOpen={handleOpen}
+        onClose={handleClose}
+        onSave={handleSave}
+        onSaveAs={handleSaveAs}
+        onShowShortcuts={() => setHelpModal('shortcuts')}
+        onShowUsage={() => setHelpModal('usage')}
+        onShowVersion={() => setHelpModal('version')}
+      />
+
+      <Toolbar
         document={document} currentPage={currentPage} isDirty={isDirty}
         undoStackLength={undoStack.length} redoStackLength={redoStack.length}
         zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode}
         selectedIdsCount={selectedIds.size} showOcr={showOcr} ocrOpacity={ocrOpacity}
         reorderThreshold={reorderThreshold} isPreviewOpen={isPreviewOpen}
-        recentFiles={recentFiles} showRecentDropdown={showRecentDropdown} showSettingsDropdown={showSettingsDropdown}
-        onOpen={handleOpen} onClose={handleClose} onSave={handleSave} onSaveAs={handleSaveAs}
+        showSettingsDropdown={showSettingsDropdown}
         onUndo={undo} onRedo={redo} onZoomIn={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }}
         onZoomOut={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom - 10)); }}
         onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode}
-        onGroup={handleGroup} onDeduplicate={handleDeduplicate} onDelete={handleDelete}
-        onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity} 
+        onGroup={handleGroup} onDeduplicate={handleDeduplicate} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
+        onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity}
         onSetReorderThreshold={(val) => { setReorderThreshold(val); localStorage.setItem('peco-reorder-threshold', val.toString()); }}
         onTogglePreview={togglePreviewWindow}
-        onToggleRecentDropdown={(e) => { e.stopPropagation(); setShowRecentDropdown(!showRecentDropdown); }}
-        onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); setShowRecentDropdown(false); }}
+        onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
       />
 
       <main className="main-content">

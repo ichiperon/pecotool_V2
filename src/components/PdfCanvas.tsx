@@ -199,8 +199,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           
           const x = block.bbox.x * (zoom / 100);
           const y = block.bbox.y * (zoom / 100);
-          let w = block.bbox.width * (zoom / 100);
-          let h = block.bbox.height * (zoom / 100);
+          const w = block.bbox.width * (zoom / 100);
+          const h = block.bbox.height * (zoom / 100);
 
           // 隣接BBを視覚的に分離するための表示用インセット（bboxデータは変更しない）
           const inset = isSelected ? 0 : 1;
@@ -355,8 +355,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           
           if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
              const isVertical = block.writingMode === 'vertical';
-             let b1 = { ...block, id: crypto.randomUUID(), isDirty: true };
-             let b2 = { ...block, id: crypto.randomUUID(), isDirty: true };
+             const b1 = { ...block, id: crypto.randomUUID(), isDirty: true };
+             const b2 = { ...block, id: crypto.randomUUID(), isDirty: true };
              
              const getSplitIndex = (text: string, ratio: number) => {
                if (text.length <= 1) return 1;

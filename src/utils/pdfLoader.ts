@@ -1,5 +1,4 @@
 import * as pdfjsLib from 'pdfjs-dist';
-// @ts-ignore
 import PdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PecoDocument, PageData, TextBlock, BoundingBox } from '../types';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -120,7 +119,7 @@ export async function getCachedPageProxy(filePath: string, pageIndex: number): P
 export function destroySharedPdfProxy() {
   if (globalSharedPdfProxy) {
     globalSharedPdfProxy.promise.then(p => {
-      try { p.destroy(); } catch (e) {}
+      try { p.destroy(); } catch { /* ignore */ }
     }).catch(() => {});
     globalSharedPdfProxy = null;
   }
@@ -227,7 +226,7 @@ async function setCachedPage(key: string, data: PageData) {
     // Remove thumbnail from cached data to save space in IndexedDB
     const dataToCache = { ...data, thumbnail: null };
     store.put(dataToCache, key);
-  } catch {}
+  } catch { /* ignore write errors */ }
 }
 
 export async function loadPage(
@@ -256,7 +255,7 @@ export async function loadPage(
   const allItems = textContent.items;
   const textItems = allItems.filter((item: any) => typeof item.str === 'string');
 
-  let textBlocks: TextBlock[] = [];
+  let textBlocks: TextBlock[];
 
   // If PecoTool-saved bbox metadata is available for this page, use it directly.
   const savedMeta = bboxMeta?.[String(pageIndex)];
