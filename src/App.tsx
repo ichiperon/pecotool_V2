@@ -53,6 +53,27 @@ function App() {
     return stored ? parseInt(stored, 10) : 50;
   });
 
+  const [pageInputValue, setPageInputValue] = useState<string | null>(null);
+
+  const handlePageInputCommit = () => {
+    if (pageInputValue !== null && document) {
+      const pageNum = parseInt(pageInputValue, 10);
+      if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= document.totalPages) {
+        setCurrentPage(pageNum - 1);
+      }
+    }
+    setPageInputValue(null);
+  };
+
+  const handlePageInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.currentTarget.blur();
+    } else if (e.key === 'Escape') {
+      setPageInputValue(null);
+      e.currentTarget.blur();
+    }
+  };
+
   const showToast = useCallback((message: string, isError = false) => {
     setNotification({ message, isError });
     setTimeout(() => setNotification(null), 3000);
@@ -612,16 +633,33 @@ function App() {
       )}
 
       <footer className="status-bar">
-        <div className="status-item">ページ: {document ? `${currentPageIndex + 1} / ${document.totalPages}` : "0 / 0"}</div>
-        <div className="status-item">ズーム: {zoom}%</div>
-        <div className="status-item">BB数: {currentPage?.textBlocks?.length || 0}</div>
-        <div className="status-item flex-grow" />
-        {isLoadingPage && <div className="status-item status-loading">⏳ ページ読込中...</div>}
-        {isSaving && <div className="status-item status-loading">💾 保存中...</div>}
-        {!isSaving && (isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
-        <div className={`status-item console-toggle-btn${logs.filter(l => l.level === 'error').length > 0 ? ' has-errors' : ''}`} onClick={() => setShowConsole(v => !v)} title="コンソールを開く">
-          <Terminal size={12} /><span>コンソール</span>
-          {logs.filter(l => l.level === 'error').length > 0 && <span className="console-error-badge">{logs.filter(l => l.level === 'error').length}</span>}
+        <div className="status-left">
+          <div className="status-item">ズーム: {zoom}%</div>
+          <div className="status-item">BB数: {currentPage?.textBlocks?.length || 0}</div>
+        </div>
+        <div className="status-center">
+          <div className="status-item">
+            <input
+              type="text"
+              className="page-input"
+              value={pageInputValue !== null ? pageInputValue : String(document ? currentPageIndex + 1 : 0)}
+              onFocus={() => setPageInputValue(String(document ? currentPageIndex + 1 : 0))}
+              onChange={(e) => setPageInputValue(e.target.value)}
+              onBlur={handlePageInputCommit}
+              onKeyDown={handlePageInputKeyDown}
+              disabled={!document}
+            />
+            <span>/ {document ? document.totalPages : 0}</span>
+          </div>
+        </div>
+        <div className="status-right">
+          {isLoadingPage && <div className="status-item status-loading">⏳ ページ読込中...</div>}
+          {isSaving && <div className="status-item status-loading">💾 保存中...</div>}
+          {!isSaving && (isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
+          <div className={`status-item console-toggle-btn${logs.filter(l => l.level === 'error').length > 0 ? ' has-errors' : ''}`} onClick={() => setShowConsole(v => !v)} title="コンソールを開く">
+            <Terminal size={12} /><span>コンソール</span>
+            {logs.filter(l => l.level === 'error').length > 0 && <span className="console-error-badge">{logs.filter(l => l.level === 'error').length}</span>}
+          </div>
         </div>
       </footer>
       {notification && <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>{notification.message}</div>}
