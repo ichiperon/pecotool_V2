@@ -183,7 +183,6 @@ self.onmessage = async (e: MessageEvent) => {
       }
 
       const savedBytes = await pdfDoc.save({
-        rewrite: true,
         useObjectStreams: false,
         addDefaultPage: false,
       });
