@@ -1,0 +1,4 @@
+paddlepaddle==2.6.1
+paddleocr==2.8.1
+pillow
+numpy

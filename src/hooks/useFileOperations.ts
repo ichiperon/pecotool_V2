@@ -9,6 +9,7 @@ export function useFileOperations(
   showToast: (msg: string, isError?: boolean) => void,
   setIsSaving?: (v: boolean) => void,
   setIsLoadingFile?: (v: boolean) => void,
+  onOpenComplete?: (doc: import('../types').PecoDocument) => void,
 ) {
   const { setDocument, resetDirty } = usePecoStore();
 
@@ -38,6 +39,7 @@ export function useFileOperations(
           const doc = await loadPDF(selected);
           setDocument(doc);
           addToRecent(selected);
+          onOpenComplete?.(doc);
           // readFile がすでに完了している場合も未完了の場合も、then で確実にセット
           readFilePromise.then((content) => {
             usePecoStore.getState().setOriginalBytes(new Uint8Array(content));
