@@ -32,16 +32,18 @@ export function useFileOperations(
       if (selected && typeof selected === 'string') {
         setIsLoadingFile?.(true);
         try {
-          // loadPDF でUIを即座に表示し、readFile はバックグラウンドで並行実行
-          const [doc] = await Promise.all([
-            loadPDF(selected),
-            // readFile は originalBytes セット用。完了次第ストアに格納
-            readFile(selected).then((content) => {
-              usePecoStore.getState().setOriginalBytes(new Uint8Array(content));
-            }),
-          ]);
+          // loadPDF でUIを即座に表示。readFile は独立したバックグラウンド処理で並行実行。
+          // setDocument は originalBytes をリセットするため、readFile の完了後に setOriginalBytes を呼ぶ。
+          const readFilePromise = readFile(selected);
+          const doc = await loadPDF(selected);
           setDocument(doc);
           addToRecent(selected);
+          // readFile がすでに完了している場合も未完了の場合も、then で確実にセット
+          readFilePromise.then((content) => {
+            usePecoStore.getState().setOriginalBytes(new Uint8Array(content));
+          }).catch((err) => {
+            console.error("Failed to read file bytes:", err);
+          });
         } finally {
           setIsLoadingFile?.(false);
         }
