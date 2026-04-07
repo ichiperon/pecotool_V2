@@ -2,6 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PecoDocument, PageData, TextBlock, BoundingBox } from '../types';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { stat } from '@tauri-apps/plugin-fs';
 
 // 爆速化の要：Worker を Blob URL 化して確実に別スレッドで動かす
 if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
@@ -65,6 +66,15 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
     doc.metadata.title = (metadata.info as any)?.Title;
     doc.metadata.author = (metadata.info as any)?.Author;
   }).catch(() => {});
+
+  // ファイルの最終更新時刻をキャッシュキーに使うために取得
+  try {
+    const fileStat = await stat(filePath);
+    const mt = fileStat.mtime;
+    doc.mtime = mt instanceof Date ? mt.getTime() : (mt ?? Date.now());
+  } catch {
+    doc.mtime = Date.now();
+  }
 
   return doc;
 }
@@ -238,9 +248,10 @@ export async function loadPage(
     writingMode: string;
     order: number;
     text: string;
-  }>> | null
+  }>> | null,
+  mtime?: number
 ): Promise<PageData> {
-  const cacheKey = `${filePath}:${pageIndex}`;
+  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
   const cached = await getCachedPage(cacheKey);
   if (cached) {
     return { ...cached, pageIndex }; // Ensure pageIndex is correct
@@ -278,31 +289,54 @@ export async function loadPage(
     }));
   } else {
     // Fallback: compute bboxes from pdfjs transform (original OCR text)
+    // Use viewport.convertToViewportPoint to correctly handle page rotation (/Rotate)
+    // and CropBox offsets set by Acrobat.
     let order = 0;
     textBlocks = textItems
       .filter((item: any) => item.str.trim() !== '')
       .map((item: any) => {
-        const isVertical = Math.abs(item.transform[0]) < Math.abs(item.transform[1]);
-        let bbox: BoundingBox;
-        if (isVertical) {
-          const thickness = Math.sqrt(item.transform[2] * item.transform[2] + item.transform[3] * item.transform[3]) || 12;
-          const runLength = item.width || Math.abs(item.transform[1]) * item.str.length || thickness * item.str.length;
-          bbox = {
-            x: item.transform[4] - thickness * 0.288,
-            y: viewport.height - item.transform[5],
-            width: thickness,
-            height: runLength,
-          };
-        } else {
-          const thickness = item.height > 0 ? item.height : Math.abs(item.transform[3]) || 12;
-          const runLength = item.width || thickness * item.str.length * 0.6;
-          bbox = {
-            x: item.transform[4],
-            y: viewport.height - item.transform[5] - thickness * 1.16,
-            width: runLength,
-            height: thickness,
-          };
-        }
+        const tx = item.transform;
+        // Text run direction unit vector in PDF user space
+        const mag = Math.sqrt(tx[0] * tx[0] + tx[1] * tx[1]) || 1;
+        const ux = tx[0] / mag;
+        const uy = tx[1] / mag;
+        // Perpendicular direction (above baseline) in PDF user space
+        const px = -uy;
+        const py = ux;
+
+        const thickness = item.height > 0
+          ? item.height
+          : (Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]) || mag || 12);
+        const runLength = item.width || mag * item.str.length * 0.6;
+        const ascent = thickness * 1.16;
+
+        // Compute 4 corners of the text bbox in PDF user space, then transform
+        // all of them to viewport (screen) space via convertToViewportPoint.
+        // This correctly handles page rotation and CropBox offsets.
+        const corners: [number, number][] = [
+          [tx[4],                                    tx[5]],
+          [tx[4] + ux * runLength,                   tx[5] + uy * runLength],
+          [tx[4] + px * ascent,                      tx[5] + py * ascent],
+          [tx[4] + ux * runLength + px * ascent,     tx[5] + uy * runLength + py * ascent],
+        ];
+
+        const vc = corners.map(([cx, cy]) => viewport.convertToViewportPoint(cx, cy));
+        const vxs = vc.map(c => c[0]);
+        const vys = vc.map(c => c[1]);
+
+        const bbox: BoundingBox = {
+          x: Math.min(...vxs),
+          y: Math.min(...vys),
+          width: Math.max(...vxs) - Math.min(...vxs),
+          height: Math.max(...vys) - Math.min(...vys),
+        };
+
+        // Determine writing mode from screen-space text run direction.
+        // Using bbox shape would misclassify short vertical runs (e.g. single char)
+        // where ascent > run length. The direction vector is always reliable.
+        const [vDirX, vDirY] = viewport.convertToViewportPoint(tx[4] + ux, tx[5] + uy);
+        const isVertical = Math.abs(vDirY - vc[0][1]) > Math.abs(vDirX - vc[0][0]);
+
         return {
           id: crypto.randomUUID(),
           text: item.str,

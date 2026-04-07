@@ -43,6 +43,7 @@ export interface PecoDocument {
   totalPages: number;
   metadata: PDFMetadata;
   pages: Map<number, PageData>;
+  mtime?: number;
 }
 
 export interface Action {

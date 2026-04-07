@@ -40,6 +40,7 @@ function App() {
   const [panStart, setPanStart] = useState({ x: 0, y: 0, scrollX: 0, scrollY: 0 });
   const [notification, setNotification] = useState<{ message: string; isError: boolean } | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingFile, setIsLoadingFile] = useState(false);
   const [isLoadingPage, setIsLoadingPage] = useState(false);
   const [helpMenu, setHelpMenu] = useState<{ x: number, y: number, visible: boolean }>({ x: 0, y: 0, visible: false });
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
@@ -83,7 +84,7 @@ function App() {
   useFontLoader();
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
-  const { handleOpen, handleSave, executeSaveAs } = useFileOperations(showToast, setIsSaving);
+  const { handleOpen, handleSave, executeSaveAs } = useFileOperations(showToast, setIsSaving, setIsLoadingFile);
 
   const currentPage = document?.pages.get(currentPageIndex);
 
@@ -289,7 +290,7 @@ function App() {
           const state = usePecoStore.getState();
           if (!state.document || state.document.filePath !== doc.filePath) return;
           state.document.pages.forEach((_, i) => {
-            loadPage(pdf, i, doc.filePath, meta)
+            loadPage(pdf, i, doc.filePath, meta, doc.mtime)
               .then((pd) => {
                 const s = usePecoStore.getState();
                 if (s.document?.filePath === doc.filePath) updatePageData(i, pd, false);
@@ -299,7 +300,7 @@ function App() {
         }).catch(() => {});
       }
 
-      const pageData = await loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current);
+      const pageData = await loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime);
 
       if (latestLoadRef.current === pageIdx) {
         updatePageData(pageIdx, pageData, false);
@@ -312,7 +313,7 @@ function App() {
         setTimeout(() => {
           const currentDoc = usePecoStore.getState().document;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
-          loadPage(pdf, i, doc.filePath, bboxMetaRef.current)
+          loadPage(pdf, i, doc.filePath, bboxMetaRef.current, doc.mtime)
             .then((pd) => {
               const state = usePecoStore.getState();
               if (state.document?.filePath === doc.filePath && !state.document.pages.has(i)) {
@@ -615,14 +616,22 @@ function App() {
           thumbnails={thumbnails} onSelectPage={setCurrentPage} onRequestThumbnail={requestThumbnail}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
-        <section 
+        <section
           ref={viewerRef}
-          className={`pdf-viewer-panel ${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : ''}`} 
+          className={`pdf-viewer-panel ${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : ''}`}
           onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={() => setIsPanning(false)} onMouseLeave={() => setIsPanning(false)}
         >
           <div className="pdf-canvas-container">
             {document ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
+          {(isLoadingFile || isLoadingPage) && (
+            <div className="loading-overlay">
+              <div className="loading-spinner" />
+              <div className="loading-message">
+                {isLoadingFile ? 'PDFを読み込んでいます...' : 'ページを読み込んでいます...'}
+              </div>
+            </div>
+          )}
         </section>
         <div className="resizer" onMouseDown={startResizeRight} />
         <OcrEditor width={rightWidth} searchInputRef={searchInputRef} />
@@ -653,7 +662,8 @@ function App() {
           </div>
         </div>
         <div className="status-right">
-          {isLoadingPage && <div className="status-item status-loading">⏳ ページ読込中...</div>}
+          {isLoadingFile && <div className="status-item status-loading">📂 PDF読込中...</div>}
+          {!isLoadingFile && isLoadingPage && <div className="status-item status-loading">⏳ ページ読込中...</div>}
           {isSaving && <div className="status-item status-loading">💾 保存中...</div>}
           {!isSaving && (isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
           <div className={`status-item console-toggle-btn${logs.filter(l => l.level === 'error').length > 0 ? ' has-errors' : ''}`} onClick={() => setShowConsole(v => !v)} title="コンソールを開く">

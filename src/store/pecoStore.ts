@@ -26,6 +26,7 @@ interface PecoState {
   setFontBytes: (bytes: ArrayBuffer) => void;
   setFontLoaded: (loaded: boolean) => void;
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
+  setOriginalBytes: (bytes: Uint8Array) => void;
   setThumbnail: (pageIndex: number, blobUrl: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
@@ -72,6 +73,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   setFontBytes: (bytes) => set({ fontBytes: bytes, isFontLoaded: true }),
   setFontLoaded: (loaded) => set({ isFontLoaded: loaded }),
+  setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
 
   setDocument: (doc, bytes) => set((state) => {
     // Revoke all existing thumbnail URLs to free memory

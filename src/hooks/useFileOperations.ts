@@ -5,7 +5,11 @@ import { loadPDF } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
 
-export function useFileOperations(showToast: (msg: string, isError?: boolean) => void, setIsSaving?: (v: boolean) => void) {
+export function useFileOperations(
+  showToast: (msg: string, isError?: boolean) => void,
+  setIsSaving?: (v: boolean) => void,
+  setIsLoadingFile?: (v: boolean) => void,
+) {
   const { setDocument, resetDirty } = usePecoStore();
 
   const addToRecent = (path: string) => {
@@ -26,21 +30,47 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
       }
 
       if (selected && typeof selected === 'string') {
-        const content = await readFile(selected);
-        const bytes = new Uint8Array(content);
-        const doc = await loadPDF(selected);
-        setDocument(doc, bytes);
-        addToRecent(selected);
+        setIsLoadingFile?.(true);
+        try {
+          // loadPDF でUIを即座に表示し、readFile はバックグラウンドで並行実行
+          const [doc] = await Promise.all([
+            loadPDF(selected),
+            // readFile は originalBytes セット用。完了次第ストアに格納
+            readFile(selected).then((content) => {
+              usePecoStore.getState().setOriginalBytes(new Uint8Array(content));
+            }),
+          ]);
+          setDocument(doc);
+          addToRecent(selected);
+        } finally {
+          setIsLoadingFile?.(false);
+        }
       }
     } catch (err) {
       console.error("Failed to open file:", err);
       showToast("ファイルの読み込みに失敗しました。", true);
+      setIsLoadingFile?.(false);
     }
   };
 
   const handleSave = async () => {
-    const { document, originalBytes, fontBytes, isFontLoaded } = usePecoStore.getState();
-    if (!document || !originalBytes) return;
+    const { document, fontBytes, isFontLoaded } = usePecoStore.getState();
+    if (!document) return;
+
+    // originalBytes がバックグラウンド読込中の場合、最大10秒待機
+    let { originalBytes } = usePecoStore.getState();
+    if (!originalBytes) {
+      showToast("ファイルを準備中です。しばらくお待ちください...");
+      for (let i = 0; i < 100; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        originalBytes = usePecoStore.getState().originalBytes;
+        if (originalBytes) break;
+      }
+      if (!originalBytes) {
+        showToast("ファイルの読み込みが完了していません。再度お試しください。", true);
+        return;
+      }
+    }
 
     if (!isFontLoaded || !fontBytes) {
       showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);
@@ -62,8 +92,22 @@ export function useFileOperations(showToast: (msg: string, isError?: boolean) =>
   };
 
   const executeSaveAs = async () => {
-    const { document, originalBytes, fontBytes, isFontLoaded } = usePecoStore.getState();
-    if (!document || !originalBytes) return;
+    const { document, fontBytes, isFontLoaded } = usePecoStore.getState();
+    if (!document) return;
+
+    let { originalBytes } = usePecoStore.getState();
+    if (!originalBytes) {
+      showToast("ファイルを準備中です。しばらくお待ちください...");
+      for (let i = 0; i < 100; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        originalBytes = usePecoStore.getState().originalBytes;
+        if (originalBytes) break;
+      }
+      if (!originalBytes) {
+        showToast("ファイルの読み込みが完了していません。再度お試しください。", true);
+        return;
+      }
+    }
 
     if (!isFontLoaded || !fontBytes) {
       showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);

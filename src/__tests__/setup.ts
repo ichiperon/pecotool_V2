@@ -59,6 +59,10 @@ vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: vi.fn((path) => `asset://${path}`),
 }))
 
+vi.mock('@tauri-apps/plugin-fs', () => ({
+  stat: vi.fn().mockResolvedValue({ mtime: new Date('2024-01-01') }),
+}))
+
 Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
   value: () => ({
     fillStyle: '',

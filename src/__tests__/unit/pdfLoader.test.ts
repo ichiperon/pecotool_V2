@@ -24,7 +24,12 @@ function makeMockPdf(
 ) {
   return {
     getPage: vi.fn().mockResolvedValue({
-      getViewport: vi.fn().mockReturnValue({ width: viewportWidth, height: viewportHeight }),
+      getViewport: vi.fn().mockReturnValue({
+        width: viewportWidth,
+        height: viewportHeight,
+        // Standard non-rotated viewport: x stays, y flips
+        convertToViewportPoint: (x: number, y: number) => [x, viewportHeight - y],
+      }),
       getTextContent: vi.fn().mockResolvedValue({ items }),
     }),
   }
@@ -84,10 +89,10 @@ describe('pdfLoader / loadPage', () => {
   })
 
   describe('U-L-04: 幅フォールバック', () => {
-    it('item.width=0 → bbox.width = height × str.length × 0.6', async () => {
-      // height=12, str="ABC"(3文字) → 12 * 3 * 0.6 = 21.6
+    it('item.width=0 → bbox.width = mag × str.length × 0.6', async () => {
+      // mag=12 (transform[0]=12), str="ABC"(3文字) → 12 * 3 * 0.6 = 21.6
       const pdf = makeMockPdf([
-        { str: 'ABC', transform: [1, 0, 0, 12, 100, 700], width: 0, height: 12 },
+        { str: 'ABC', transform: [12, 0, 0, 12, 100, 700], width: 0, height: 12 },
       ])
       setupGetDocument(pdf)
       const page = await loadPage(pdf as any, 0, 'test.pdf')
@@ -118,22 +123,24 @@ describe('pdfLoader / loadPage', () => {
   })
 
   describe('U-L-06: height フォールバック', () => {
-    it('item.height=0 → |transform[3]| が bbox.height になる', async () => {
+    it('item.height=0 → sqrt(tx[2]^2+tx[3]^2) が thickness となり bbox.height = thickness * 1.16', async () => {
+      // thickness = sqrt(0 + 14^2) = 14, bbox.height = 14 * 1.16 = 16.24
       const pdf = makeMockPdf([
         { str: 'X', transform: [1, 0, 0, 14, 100, 700], width: 10, height: 0 },
       ])
       setupGetDocument(pdf)
       const page = await loadPage(pdf as any, 0, 'test.pdf')
-      expect(page.textBlocks[0].bbox.height).toBe(14)
+      expect(page.textBlocks[0].bbox.height).toBeCloseTo(16.24, 1)
     })
 
-    it('item.height=0 かつ transform[3]=0 → デフォルト値 12 になる', async () => {
+    it('item.height=0 かつ transform[3]=0 → mag がフォールバックとして使われる', async () => {
+      // mag=12 (transform[0]=12), thickness=12, bbox.height = 12 * 1.16 = 13.92
       const pdf = makeMockPdf([
-        { str: 'X', transform: [1, 0, 0, 0, 100, 700], width: 10, height: 0 },
+        { str: 'X', transform: [12, 0, 0, 0, 100, 700], width: 10, height: 0 },
       ])
       setupGetDocument(pdf)
       const page = await loadPage(pdf as any, 0, 'test.pdf')
-      expect(page.textBlocks[0].bbox.height).toBe(12)
+      expect(page.textBlocks[0].bbox.height).toBeCloseTo(13.92, 1)
     })
   })
 

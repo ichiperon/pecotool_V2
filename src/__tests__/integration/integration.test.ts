@@ -57,7 +57,12 @@ interface FakeItem {
 function makeMockPdf(items: FakeItem[], viewportWidth = 595, viewportHeight = 842) {
   return {
     getPage: vi.fn().mockResolvedValue({
-      getViewport: vi.fn().mockReturnValue({ width: viewportWidth, height: viewportHeight }),
+      getViewport: vi.fn().mockReturnValue({
+        width: viewportWidth,
+        height: viewportHeight,
+        // Standard non-rotated viewport: x stays, y flips
+        convertToViewportPoint: (x: number, y: number) => [x, viewportHeight - y],
+      }),
       getTextContent: vi.fn().mockResolvedValue({ items }),
     }),
   }
