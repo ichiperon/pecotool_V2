@@ -187,9 +187,10 @@ export async function loadPecoToolBBoxMeta(pdf: pdfjsLib.PDFDocumentProxy): Prom
   return null;
 }
 
-// IndexedDB cache for OCR results
+// IndexedDB cache for OCR results and temporary edits
 const DB_NAME = 'peco_ocr_cache';
 const STORE_NAME = 'pages';
+const STORE_NAME_DIRTY = 'temporary_changes'; // New store for un-saved edits
 
 // DB接続を一度だけ開いて使い回す
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -197,20 +198,93 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 function openDB(): Promise<IDBDatabase> {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 1);
-      request.onupgradeneeded = () => {
-        if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-          request.result.createObjectStore(STORE_NAME);
+      const request = indexedDB.open(DB_NAME, 2); // Version up to 2 for new store
+      request.onupgradeneeded = (event: any) => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME);
+        }
+        if (!db.objectStoreNames.contains(STORE_NAME_DIRTY)) {
+          db.createObjectStore(STORE_NAME_DIRTY);
         }
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => {
-        dbPromise = null; // エラー時は次回再試行できるようにリセット
+        dbPromise = null;
         reject(request.error);
       };
     });
   }
   return dbPromise;
+}
+
+export async function getTemporaryPageData(filePath: string, pageIndex: number): Promise<Partial<PageData> | null> {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME_DIRTY, 'readonly');
+    const store = tx.objectStore(STORE_NAME_DIRTY);
+    const key = `${filePath}:${pageIndex}`;
+    const request = store.get(key);
+    return new Promise((resolve) => {
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function saveTemporaryPageData(filePath: string, pageIndex: number, data: Partial<PageData>) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
+    const store = tx.objectStore(STORE_NAME_DIRTY);
+    const key = `${filePath}:${pageIndex}`;
+    // Always strip thumbnails before saving to IDB to save space
+    const { thumbnail, ...cleanData } = data as any;
+    store.put(cleanData, key);
+  } catch { /* ignore */ }
+}
+
+export async function clearTemporaryChanges(filePath: string) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
+    const store = tx.objectStore(STORE_NAME_DIRTY);
+    // There is no easy way to clear by prefix in IDB without cursor,
+    // but we can at least clear the whole store when a document is saved/closed.
+    // For now, let's just clear the specific keys if we know them.
+    store.clear(); 
+  } catch { /* ignore */ }
+}
+
+export async function getAllTemporaryPageData(filePath: string): Promise<Map<number, Partial<PageData>>> {
+  const results = new Map<number, Partial<PageData>>();
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME_DIRTY, 'readonly');
+    const store = tx.objectStore(STORE_NAME_DIRTY);
+    const request = store.openCursor();
+    
+    return new Promise((resolve) => {
+      request.onsuccess = (event: any) => {
+        const cursor = event.target.result;
+        if (cursor) {
+          const key = cursor.key as string;
+          if (key.startsWith(`${filePath}:`)) {
+            const pageIndex = parseInt(key.split(':')[1], 10);
+            results.set(pageIndex, cursor.value);
+          }
+          cursor.continue();
+        } else {
+          resolve(results);
+        }
+      };
+      request.onerror = () => resolve(results);
+    });
+  } catch {
+    return results;
+  }
 }
 
 async function getCachedPage(key: string): Promise<PageData | null> {
@@ -253,112 +327,122 @@ export async function loadPage(
 ): Promise<PageData> {
   const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
   const cached = await getCachedPage(cacheKey);
+  const tempEdited = await getTemporaryPageData(filePath, pageIndex);
+
+  let pageData: PageData;
+
   if (cached) {
-    return { ...cached, pageIndex }; // Ensure pageIndex is correct
-  }
-
-  // キャッシュ済みプロキシを再利用して二重getPageを回避
-  const page = await getCachedPageProxy(filePath, pageIndex);
-  const viewport = page.getViewport({ scale: 1.0 });
-  const textContent = await page.getTextContent();
-
-  // pdfjs v5 mixes TextItem and TextMarkedContent in items array.
-  const allItems = textContent.items;
-  const textItems = allItems.filter((item: any) => typeof item.str === 'string');
-
-  let textBlocks: TextBlock[];
-
-  // If PecoTool-saved bbox metadata is available for this page, use it directly.
-  const savedMeta = bboxMeta?.[String(pageIndex)];
-  if (savedMeta && savedMeta.length > 0) {
-    const textByOrder = new Map(
-      textItems
-        .filter((item: any) => item.str.trim() !== '')
-        .map((item: any, idx: number) => [idx, item.str as string])
-    );
-
-    textBlocks = savedMeta.map((meta, idx) => ({
-      id: crypto.randomUUID(),
-      text: textByOrder.get(idx) ?? meta.text,
-      originalText: textByOrder.get(idx) ?? meta.text,
-      bbox: meta.bbox,
-      writingMode: meta.writingMode as 'horizontal' | 'vertical',
-      order: meta.order,
-      isNew: false,
-      isDirty: false,
-    }));
+    pageData = { ...cached, pageIndex };
   } else {
-    // Fallback: compute bboxes from pdfjs transform (original OCR text)
-    // Use viewport.convertToViewportPoint to correctly handle page rotation (/Rotate)
-    // and CropBox offsets set by Acrobat.
-    let order = 0;
-    textBlocks = textItems
-      .filter((item: any) => item.str.trim() !== '')
-      .map((item: any) => {
-        const tx = item.transform;
-        // Text run direction unit vector in PDF user space
-        const mag = Math.sqrt(tx[0] * tx[0] + tx[1] * tx[1]) || 1;
-        const ux = tx[0] / mag;
-        const uy = tx[1] / mag;
-        // Perpendicular direction (above baseline) in PDF user space
-        const px = -uy;
-        const py = ux;
+    // キャッシュ済みプロキシを再利用して二重getPageを回避
+    const page = await getCachedPageProxy(filePath, pageIndex);
+    const viewport = page.getViewport({ scale: 1.0 });
+    const textContent = await page.getTextContent();
 
-        const thickness = item.height > 0
-          ? item.height
-          : (Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]) || mag || 12);
-        const runLength = item.width || mag * item.str.length * 0.6;
-        const ascent = thickness * 1.16;
+    // pdfjs v5 mixes TextItem and TextMarkedContent in items array.
+    const allItems = textContent.items;
+    const textItems = allItems.filter((item: any) => typeof item.str === 'string');
 
-        // Compute 4 corners of the text bbox in PDF user space, then transform
-        // all of them to viewport (screen) space via convertToViewportPoint.
-        // This correctly handles page rotation and CropBox offsets.
-        const corners: [number, number][] = [
-          [tx[4],                                    tx[5]],
-          [tx[4] + ux * runLength,                   tx[5] + uy * runLength],
-          [tx[4] + px * ascent,                      tx[5] + py * ascent],
-          [tx[4] + ux * runLength + px * ascent,     tx[5] + uy * runLength + py * ascent],
-        ];
+    let textBlocks: TextBlock[];
 
-        const vc = corners.map(([cx, cy]) => viewport.convertToViewportPoint(cx, cy));
-        const vxs = vc.map(c => c[0]);
-        const vys = vc.map(c => c[1]);
+    // If PecoTool-saved bbox metadata is available for this page, use it directly.
+    const savedMeta = bboxMeta?.[String(pageIndex)];
+    if (savedMeta && savedMeta.length > 0) {
+      const textByOrder = new Map(
+        textItems
+          .filter((item: any) => item.str.trim() !== '')
+          .map((item: any, idx: number) => [idx, item.str as string])
+      );
 
-        const bbox: BoundingBox = {
-          x: Math.min(...vxs),
-          y: Math.min(...vys),
-          width: Math.max(...vxs) - Math.min(...vxs),
-          height: Math.max(...vys) - Math.min(...vys),
-        };
+      textBlocks = savedMeta.map((meta, idx) => ({
+        id: crypto.randomUUID(),
+        text: textByOrder.get(idx) ?? meta.text,
+        originalText: textByOrder.get(idx) ?? meta.text,
+        bbox: meta.bbox,
+        writingMode: meta.writingMode as 'horizontal' | 'vertical',
+        order: meta.order,
+        isNew: false,
+        isDirty: false,
+      }));
+    } else {
+      // Fallback: compute bboxes from pdfjs transform (original OCR text)
+      // Use viewport.convertToViewportPoint to correctly handle page rotation (/Rotate)
+      // and CropBox offsets set by Acrobat.
+      let order = 0;
+      textBlocks = textItems
+        .filter((item: any) => item.str.trim() !== '')
+        .map((item: any) => {
+          const tx = item.transform;
+          // Text run direction unit vector in PDF user space
+          const mag = Math.sqrt(tx[0] * tx[0] + tx[1] * tx[1]) || 1;
+          const ux = tx[0] / mag;
+          const uy = tx[1] / mag;
+          // Perpendicular direction (above baseline) in PDF user space
+          const px = -uy;
+          const py = ux;
 
-        // Determine writing mode from screen-space text run direction.
-        // Using bbox shape would misclassify short vertical runs (e.g. single char)
-        // where ascent > run length. The direction vector is always reliable.
-        const [vDirX, vDirY] = viewport.convertToViewportPoint(tx[4] + ux, tx[5] + uy);
-        const isVertical = Math.abs(vDirY - vc[0][1]) > Math.abs(vDirX - vc[0][0]);
+          const thickness = item.height > 0
+            ? item.height
+            : (Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]) || mag || 12);
+          const runLength = item.width || mag * item.str.length * 0.6;
+          const ascent = thickness * 1.16;
 
-        return {
-          id: crypto.randomUUID(),
-          text: item.str,
-          originalText: item.str,
-          bbox,
-          writingMode: isVertical ? 'vertical' : 'horizontal',
-          order: order++,
-          isNew: false,
-          isDirty: false,
-        };
-      });
+          // Compute 4 corners of the text bbox in PDF user space, then transform
+          // all of them to viewport (screen) space via convertToViewportPoint.
+          // This correctly handles page rotation and CropBox offsets.
+          const corners: [number, number][] = [
+            [tx[4],                                    tx[5]],
+            [tx[4] + ux * runLength,                   tx[5] + uy * runLength],
+            [tx[4] + px * ascent,                      tx[5] + py * ascent],
+            [tx[4] + ux * runLength + px * ascent,     tx[5] + uy * runLength + py * ascent],
+          ];
+
+          const vc = corners.map(([cx, cy]) => viewport.convertToViewportPoint(cx, cy));
+          const vxs = vc.map(c => c[0]);
+          const vys = vc.map(c => c[1]);
+
+          const bbox: BoundingBox = {
+            x: Math.min(...vxs),
+            y: Math.min(...vys),
+            width: Math.max(...vxs) - Math.min(...vxs),
+            height: Math.max(...vys) - Math.min(...vys),
+          };
+
+          // Determine writing mode from screen-space text run direction.
+          // Using bbox shape would misclassify short vertical runs (e.g. single char)
+          // where ascent > run length. The direction vector is always reliable.
+          const [vDirX, vDirY] = viewport.convertToViewportPoint(tx[4] + ux, tx[5] + uy);
+          const isVertical = Math.abs(vDirY - vc[0][1]) > Math.abs(vDirX - vc[0][0]);
+
+          return {
+            id: crypto.randomUUID(),
+            text: item.str,
+            originalText: item.str,
+            bbox,
+            writingMode: isVertical ? 'vertical' : 'horizontal',
+            order: order++,
+            isNew: false,
+            isDirty: false,
+          };
+        });
+    }
+
+    pageData = {
+      pageIndex,
+      width: viewport.width,
+      height: viewport.height,
+      textBlocks,
+      isDirty: false,
+      thumbnail: null,
+    };
+    await setCachedPage(cacheKey, pageData);
   }
 
-  const pageData: PageData = {
-    pageIndex,
-    width: viewport.width,
-    height: viewport.height,
-    textBlocks,
-    isDirty: false,
-    thumbnail: null,
-  };
+  // If there are temporary (un-saved) edits, merge them
+  if (tempEdited) {
+    pageData = { ...pageData, ...tempEdited, isDirty: true };
+  }
 
-  await setCachedPage(cacheKey, pageData);
   return pageData;
 }
+

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { PecoDocument, PageData, Action, TextBlock } from '../types';
+import { saveTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 
 interface PecoState {
   document: PecoDocument | null;
@@ -78,6 +79,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   setDocument: (doc, bytes) => set((state) => {
     // Revoke all existing thumbnail URLs to free memory
     state.thumbnails.forEach(url => URL.revokeObjectURL(url));
+
+    if (doc) {
+      clearTemporaryChanges(doc.filePath);
+    }
 
     return {
       document: doc,
@@ -158,12 +163,17 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const newOrder = [pageIndex, ...state.pageAccessOrder.filter(i => i !== pageIndex)];
 
     // LRU Purge: If we exceed MAX_CACHED_PAGES, remove the oldest non-dirty page
+    // OR save dirty page to IDB and then remove from memory.
     if (newPages.size > MAX_CACHED_PAGES) {
       for (let i = newOrder.length - 1; i >= 0; i--) {
         const idxToRemove = newOrder[i];
         const pageToRemove = newPages.get(idxToRemove);
-        // Never purge the current page, and never purge dirty pages (unsaved changes)
-        if (idxToRemove !== state.currentPageIndex && pageToRemove && !pageToRemove.isDirty) {
+        // Never purge the current page
+        if (idxToRemove !== state.currentPageIndex && pageToRemove) {
+          if (pageToRemove.isDirty) {
+            // Backup to IndexedDB before evicting from memory
+            saveTemporaryPageData(state.document.filePath, idxToRemove, pageToRemove);
+          }
           newPages.delete(idxToRemove);
           newOrder.splice(i, 1);
           if (newPages.size <= MAX_CACHED_PAGES) break;

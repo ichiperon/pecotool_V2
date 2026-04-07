@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { writeFile, remove } from '@tauri-apps/plugin-fs';
-import { tempDir } from '@tauri-apps/api/path';
+import { tempDir, join } from '@tauri-apps/api/path';
 import { usePecoStore } from '../store/pecoStore';
 import { getCachedPageProxy, getSharedPdfProxy } from '../utils/pdfLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
@@ -26,7 +26,8 @@ async function renderPageToTempFile(filePath: string, pageIndex: number): Promis
   const bytes = new Uint8Array(arrayBuffer);
 
   const tmp = await tempDir();
-  const tempPath = `${tmp}peco_ocr_${pageIndex}_${Date.now()}.png`;
+  const fileName = `peco_ocr_${pageIndex}_${Date.now()}.png`;
+  const tempPath = await join(tmp, fileName);
   await writeFile(tempPath, bytes);
   return tempPath;
 }

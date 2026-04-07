@@ -3706,6 +3706,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-opener",
  "tokio",
+ "windows",
 ]
 
 [[package]]
@@ -4075,7 +4076,6 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "windows-sys 0.61.2",
 ]

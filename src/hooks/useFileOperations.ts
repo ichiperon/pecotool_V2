@@ -1,9 +1,10 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from '../store/pecoStore';
-import { loadPDF } from '../utils/pdfLoader';
+import { loadPDF, getAllTemporaryPageData } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
+import { PecoDocument, PageData } from '../types';
 
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean) => void,
@@ -82,7 +83,18 @@ export function useFileOperations(
 
     setIsSaving?.(true);
     try {
-      const savedBytes = await savePDF(originalBytes, document, fontBytes || undefined);
+      // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
+      const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
+      
+      // 保存用にドキュメント状態を統合（メモリ上の Map + IDB の Map）
+      const mergedPages = new Map<number, PageData>(document.pages);
+      for (const [idx, data] of tempDirtyPages.entries()) {
+        const existing = mergedPages.get(idx);
+        mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+      }
+
+      const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
+      const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
 
       await writeFile(document.filePath, savedBytes);
       resetDirty();
@@ -126,7 +138,17 @@ export function useFileOperations(
         setIsSaving?.(true);
 
         try {
-          const savedBytes = await savePDF(originalBytes, document, fontBytes || undefined);
+          // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
+          const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
+          
+          const mergedPages = new Map<number, PageData>(document.pages);
+          for (const [idx, data] of tempDirtyPages.entries()) {
+            const existing = mergedPages.get(idx);
+            mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+          }
+
+          const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
+          const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
 
           await writeFile(path, savedBytes);
           document.filePath = path;
