@@ -112,10 +112,10 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
         let writing_mode = if h > w * 1.5 {
              "vertical" 
         } else if word_count > 1 {
-            let first_word = words.GetAt(0).unwrap();
-            let last_word = words.GetAt(word_count - 1).unwrap();
-            let first_rect = first_word.BoundingRect().unwrap();
-            let last_rect = last_word.BoundingRect().unwrap();
+            let first_word = words.GetAt(0).map_err(|e| format!("Word(0)取得失敗: {e}"))?;
+            let last_word = words.GetAt(word_count - 1).map_err(|e| format!("Word(last)取得失敗: {e}"))?;
+            let first_rect = first_word.BoundingRect().map_err(|e| format!("BBox(0)取得失敗: {e}"))?;
+            let last_rect = last_word.BoundingRect().map_err(|e| format!("BBox(last)取得失敗: {e}"))?;
             let dy = (last_rect.Y - first_rect.Y).abs();
             let dx = (last_rect.X - first_rect.X).abs();
             if dy > dx * 2.0 { "vertical" } else { "horizontal" }

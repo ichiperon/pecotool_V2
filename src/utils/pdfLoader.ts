@@ -199,7 +199,7 @@ function openDB(): Promise<IDBDatabase> {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, 2); // Version up to 2 for new store
-      request.onupgradeneeded = (event: any) => {
+      request.onupgradeneeded = (_event: any) => {
         const db = request.result;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
           db.createObjectStore(STORE_NAME);
@@ -241,12 +241,12 @@ export async function saveTemporaryPageData(filePath: string, pageIndex: number,
     const store = tx.objectStore(STORE_NAME_DIRTY);
     const key = `${filePath}:${pageIndex}`;
     // Always strip thumbnails before saving to IDB to save space
-    const { thumbnail, ...cleanData } = data as any;
+    const { thumbnail: _thumbnail, ...cleanData } = data as any;
     store.put(cleanData, key);
   } catch { /* ignore */ }
 }
 
-export async function clearTemporaryChanges(filePath: string) {
+export async function clearTemporaryChanges(_filePath: string) {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
