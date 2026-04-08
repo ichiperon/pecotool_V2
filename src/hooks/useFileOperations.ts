@@ -6,6 +6,23 @@ import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
 import { PecoDocument, PageData } from '../types';
 
+/** originalBytes が設定されるまで最大 timeoutMs 待機する（subscribe ベース） */
+function waitForOriginalBytes(timeoutMs = 10000): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    const current = usePecoStore.getState().originalBytes;
+    if (current) { resolve(current); return; }
+
+    const timer = setTimeout(() => { unsubscribe(); resolve(null); }, timeoutMs);
+    const unsubscribe = usePecoStore.subscribe((state) => {
+      if (state.originalBytes) {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(state.originalBytes);
+      }
+    });
+  });
+}
+
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean) => void,
   setIsSaving?: (v: boolean) => void,
@@ -40,7 +57,7 @@ export function useFileOperations(
             readFile(selected),
             loadPDF(selected)
           ]);
-          
+
           setDocument(doc, new Uint8Array(content));
           addToRecent(selected);
           onOpenComplete?.(doc);
@@ -55,22 +72,22 @@ export function useFileOperations(
     }
   };
 
-  const handleSave = async () => {
+  /**
+   * 保存の共通処理。originalBytes の待機 → IDB マージ → PDF 生成 → ファイル書き込みを行う。
+   * @param targetPath 書き込み先パス。省略時は document.filePath に上書き保存。
+   * @returns 書き込んだバイト数。失敗時は null。
+   */
+  const _executeSave = async (targetPath?: string): Promise<number | null> => {
     const { document, fontBytes, isFontLoaded } = usePecoStore.getState();
-    if (!document) return;
+    if (!document) return null;
 
-    // originalBytes がバックグラウンド読込中の場合、最大10秒待機
-    let { originalBytes } = usePecoStore.getState();
+    let originalBytes = usePecoStore.getState().originalBytes;
     if (!originalBytes) {
       showToast("ファイルを準備中です。しばらくお待ちください...");
-      for (let i = 0; i < 100; i++) {
-        await new Promise(r => setTimeout(r, 100));
-        originalBytes = usePecoStore.getState().originalBytes;
-        if (originalBytes) break;
-      }
+      originalBytes = await waitForOriginalBytes();
       if (!originalBytes) {
         showToast("ファイルの読み込みが完了していません。再度お試しください。", true);
-        return;
+        return null;
       }
     }
 
@@ -78,24 +95,34 @@ export function useFileOperations(
       showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);
     }
 
+    // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
+    const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
+
+    const mergedPages = new Map<number, PageData>(document.pages);
+    for (const [idx, data] of tempDirtyPages.entries()) {
+      const existing = mergedPages.get(idx);
+      mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+    }
+
+    const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
+    const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
+    const writePath = targetPath ?? document.filePath;
+
+    await writeFile(writePath, savedBytes);
+    return savedBytes.length;
+  };
+
+  const handleSave = async () => {
+    const { document } = usePecoStore.getState();
+    if (!document) return;
+
     setIsSaving?.(true);
     try {
-      // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
-      const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
-      
-      // 保存用にドキュメント状態を統合（メモリ上の Map + IDB の Map）
-      const mergedPages = new Map<number, PageData>(document.pages);
-      for (const [idx, data] of tempDirtyPages.entries()) {
-        const existing = mergedPages.get(idx);
-        mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+      const size = await _executeSave();
+      if (size !== null) {
+        resetDirty();
+        showToast(`保存しました。(${formatFileSize(size)})`);
       }
-
-      const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
-      const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
-
-      await writeFile(document.filePath, savedBytes);
-      resetDirty();
-      showToast(`保存しました。(${formatFileSize(savedBytes.length)})`);
     } catch (err) {
       console.error("Failed to save:", err);
       showToast("保存に失敗しました。", true);
@@ -105,26 +132,8 @@ export function useFileOperations(
   };
 
   const executeSaveAs = async () => {
-    const { document, fontBytes, isFontLoaded } = usePecoStore.getState();
+    const { document } = usePecoStore.getState();
     if (!document) return;
-
-    let { originalBytes } = usePecoStore.getState();
-    if (!originalBytes) {
-      showToast("ファイルを準備中です。しばらくお待ちください...");
-      for (let i = 0; i < 100; i++) {
-        await new Promise(r => setTimeout(r, 100));
-        originalBytes = usePecoStore.getState().originalBytes;
-        if (originalBytes) break;
-      }
-      if (!originalBytes) {
-        showToast("ファイルの読み込みが完了していません。再度お試しください。", true);
-        return;
-      }
-    }
-
-    if (!isFontLoaded || !fontBytes) {
-      showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);
-    }
 
     try {
       const path = await save({
@@ -133,25 +142,14 @@ export function useFileOperations(
       });
       if (path && typeof path === 'string') {
         setIsSaving?.(true);
-
         try {
-          // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
-          const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
-          
-          const mergedPages = new Map<number, PageData>(document.pages);
-          for (const [idx, data] of tempDirtyPages.entries()) {
-            const existing = mergedPages.get(idx);
-            mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+          const size = await _executeSave(path);
+          if (size !== null) {
+            setDocumentFilePath(path);
+            resetDirty();
+            showToast(`名前を付けて保存しました。(${formatFileSize(size)})`);
+            addToRecent(path);
           }
-
-          const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
-          const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
-
-          await writeFile(path, savedBytes);
-          setDocumentFilePath(path);
-          resetDirty();
-          showToast(`名前を付けて保存しました。(${formatFileSize(savedBytes.length)})`);
-          addToRecent(path);
         } finally {
           setIsSaving?.(false);
         }

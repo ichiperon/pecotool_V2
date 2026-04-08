@@ -139,13 +139,19 @@ export async function buildPdfDocument(
         const textWidth = customFont.widthOfTextAtSize(block.text, fontSize);
         const textHeight = customFont.heightAtSize(fontSize);
         
-        if (textWidth === 0 || textHeight === 0) continue;
+        if (textWidth === 0 || textHeight === 0) {
+          console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (zero font metrics) text="${block.text.slice(0, 20)}"`);
+          continue;
+        }
 
         if (block.writingMode === 'vertical') {
           const sx = block.bbox.width / textHeight;
           const sy = block.bbox.height / textWidth;
-          
-          if (!isFinite(sx) || !isFinite(sy)) continue;
+
+          if (!isFinite(sx) || !isFinite(sy)) {
+            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx} sy=${sy}) text="${block.text.slice(0, 20)}"`);
+            continue;
+          }
 
           const baselineX = block.bbox.x + textHeight * sx * 0.2;
           const baselineY = height - block.bbox.y;
@@ -157,7 +163,10 @@ export async function buildPdfDocument(
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
           
-          if (!isFinite(sx) || !isFinite(sy)) continue;
+          if (!isFinite(sx) || !isFinite(sy)) {
+            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx} sy=${sy}) text="${block.text.slice(0, 20)}"`);
+            continue;
+          }
 
           const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
 

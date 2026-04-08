@@ -44,10 +44,18 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
   // getDocument の結果を globalSharedPdfProxy に直接格納することで
   // 後続の getSharedPdfProxy が2回目の getDocument を呼ばないようにする
   destroySharedPdfProxy();
+  const loadId = ++globalLoadId;
   const promise = getDocumentTask(url).promise;
-  globalSharedPdfProxy = { filePath, promise };
+  globalSharedPdfProxy = { filePath, promise, loadId };
 
   const pdf = await promise;
+
+  // ファイルが切り替わっていた場合は破棄
+  if (globalLoadId !== loadId) {
+    try { pdf.destroy(); } catch { /* ignore */ }
+    throw new Error('[loadPDF] cancelled: newer file load started');
+  }
+
   const totalPages = pdf.numPages;
 
   const doc: PecoDocument = {
@@ -89,7 +97,9 @@ export async function openPDF(filePath: string): Promise<pdfjsLib.PDFDocumentPro
 }
 
 // ページプロキシのメモリキャッシュ（ページ切り替えをゼロ秒にするため）
-let globalSharedPdfProxy: { filePath: string, promise: Promise<pdfjsLib.PDFDocumentProxy> } | null = null;
+let globalSharedPdfProxy: { filePath: string, promise: Promise<pdfjsLib.PDFDocumentProxy>, loadId: number } | null = null;
+// 単調増加カウンタ：ファイル切り替え時に古い非同期処理を識別して無視するために使う
+let globalLoadId = 0;
 
 // LRUキャッシュ：挿入順序を利用してMapで最大50ページ分を保持
 const PAGE_PROXY_CACHE_LIMIT = 50;
@@ -107,9 +117,10 @@ export async function getSharedPdfProxy(filePath: string): Promise<pdfjsLib.PDFD
     return globalSharedPdfProxy.promise;
   }
   destroySharedPdfProxy();
+  const loadId = ++globalLoadId;
   const url = convertFileSrc(filePath);
   const promise = getDocumentTask(url).promise;
-  globalSharedPdfProxy = { filePath, promise };
+  globalSharedPdfProxy = { filePath, promise, loadId };
   return promise;
 }
 
@@ -123,7 +134,14 @@ export async function getCachedPageProxy(filePath: string, pageIndex: number): P
     return page;
   }
 
+  const capturedLoadId = globalLoadId;
   const doc = await getSharedPdfProxy(filePath);
+
+  // await 中にファイルが切り替わっていた場合は古い結果を返さない
+  if (globalLoadId !== capturedLoadId || globalSharedPdfProxy?.filePath !== filePath) {
+    throw new Error(`[getCachedPageProxy] cancelled: file switched (page ${pageIndex})`);
+  }
+
   const page = await doc.getPage(pageIndex + 1);
   pageProxyCache.set(key, page);
   evictPageProxyCache();
@@ -259,15 +277,27 @@ export async function saveTemporaryPageData(filePath: string, pageIndex: number,
   } catch { /* ignore */ }
 }
 
-export async function clearTemporaryChanges(_filePath: string) {
+export async function clearTemporaryChanges(filePath: string) {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
     const store = tx.objectStore(STORE_NAME_DIRTY);
-    // There is no easy way to clear by prefix in IDB without cursor,
-    // but we can at least clear the whole store when a document is saved/closed.
-    // For now, let's just clear the specific keys if we know them.
-    store.clear(); 
+    const prefix = `${filePath}:`;
+    const request = store.openCursor();
+    await new Promise<void>((resolve, reject) => {
+      request.onsuccess = (event: any) => {
+        const cursor = event.target.result;
+        if (cursor) {
+          if ((cursor.key as string).startsWith(prefix)) {
+            cursor.delete();
+          }
+          cursor.continue();
+        } else {
+          resolve();
+        }
+      };
+      request.onerror = () => reject(request.error);
+    });
   } catch { /* ignore */ }
 }
 

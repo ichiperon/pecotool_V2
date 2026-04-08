@@ -28,7 +28,6 @@ interface PecoState {
   setFontLoaded: (loaded: boolean) => void;
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
   setDocumentFilePath: (filePath: string) => void;
-  setOriginalBytes: (bytes: Uint8Array) => void;
   setThumbnail: (pageIndex: number, blobUrl: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
@@ -75,7 +74,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   setFontBytes: (bytes) => set({ fontBytes: bytes, isFontLoaded: true }),
   setFontLoaded: (loaded) => set({ isFontLoaded: loaded }),
-  setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
   setDocumentFilePath: (filePath) => set((state) => {
     if (!state.document) return state;
     const fileName = filePath.split(/[\\/]/).pop() || state.document.fileName;
