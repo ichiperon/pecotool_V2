@@ -12,7 +12,12 @@
       "WebSearch",
       "Bash(npm run:*)",
       "Bash(cp /c/Users/user/Desktop/workspace20/pecotool_v2/src-tauri/target/release/bundle/nsis/*.exe /c/Users/user/Desktop/workspace20/pecotool_v2/dist-bin/)",
-      "Bash(cp /c/Users/user/Desktop/workspace20/pecotool_v2/MANUAL.md /c/Users/user/Desktop/workspace20/pecotool_v2/dist-bin/README_MANUAL.md)"
+      "Bash(cp /c/Users/user/Desktop/workspace20/pecotool_v2/MANUAL.md /c/Users/user/Desktop/workspace20/pecotool_v2/dist-bin/README_MANUAL.md)",
+      "Bash(mv HANDOVER.md docs/)",
+      "Bash(mv MANUAL.md docs/)",
+      "Bash(mv REQUIREMENTS_追加機能.md docs/)",
+      "Bash(mv TEST_REQUIREMENTS.md docs/)",
+      "Bash(mv スプシ.url docs/)"
     ]
   }
 }
