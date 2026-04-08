@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { PecoDocument } from '../../types';
 
-type ActiveMenu = 'file' | 'help' | null;
+type ActiveMenu = 'file' | 'settings' | 'help' | null;
 
 interface MenuBarProps {
   document: PecoDocument | null;
@@ -16,6 +16,7 @@ interface MenuBarProps {
   onShowShortcuts: () => void;
   onShowUsage: () => void;
   onShowVersion: () => void;
+  onShowOcrSettings: () => void;
 }
 
 export const MenuBar: React.FC<MenuBarProps> = (props) => {
@@ -115,6 +116,23 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
               onClick={() => props.document && run(props.onSaveAs)}
             >
               別名で保存<span className="menu-shortcut">Ctrl+Shift+S</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 設定 */}
+      <div className="menubar-item-wrap">
+        <button
+          className={`menubar-item ${activeMenu === 'settings' ? 'active' : ''}`}
+          onClick={() => toggle('settings' as ActiveMenu)}
+        >
+          設定
+        </button>
+        {activeMenu === 'settings' && (
+          <div className="menu-dropdown">
+            <div className="menu-dropdown-item" onClick={() => run(props.onShowOcrSettings)}>
+              OCR 序列設定
             </div>
           </div>
         )}

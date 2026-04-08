@@ -6,6 +6,8 @@ import { tempDir, join } from '@tauri-apps/api/path';
 import { usePecoStore } from '../store/pecoStore';
 import { getCachedPageProxy, getSharedPdfProxy } from '../utils/pdfLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
+import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
+import { sortOcrBlocks } from '../utils/ocrSort';
 
 const RENDER_SCALE = 2.0;
 
@@ -32,11 +34,10 @@ async function renderPageToTempFile(filePath: string, pageIndex: number): Promis
   return tempPath;
 }
 
-function toTextBlocks(blocks: OcrResultBlock[]): TextBlock[] {
-  return blocks
-    .filter((b) => b.text.trim() !== '')
-    .sort((a, b) => a.bbox.y - b.bbox.y)
-    .map((b, i) => ({
+function toTextBlocks(blocks: OcrResultBlock[], settings: OcrSortSettings): TextBlock[] {
+  const filtered = blocks.filter((b) => b.text.trim() !== '');
+  const sorted = sortOcrBlocks(filtered, settings);
+  return sorted.map((b, i) => ({
       id: crypto.randomUUID(),
       text: b.text,
       originalText: b.text,
@@ -114,7 +115,8 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
         return;
       }
 
-      const newBlocks = toTextBlocks(result.blocks ?? []);
+      const settings = useOcrSettingsStore.getState();
+      const newBlocks = toTextBlocks(result.blocks ?? [], settings);
       usePecoStore.getState().updatePageData(pageIdx, { textBlocks: newBlocks, isDirty: true }, true);
       showToast(`OCRが完了しました（${newBlocks.length}件）`);
     } catch (e) {
@@ -181,7 +183,8 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
             console.error(`[OCR] ページ ${i + 1} エラー: ${result.message}`);
             continue;
           }
-          const newBlocks = toTextBlocks(result.blocks ?? []);
+          const settings = useOcrSettingsStore.getState();
+          const newBlocks = toTextBlocks(result.blocks ?? [], settings);
           usePecoStore.getState().updatePageData(i, { textBlocks: newBlocks, isDirty: true }, false);
         } catch (e) {
           console.error(`[OCR] ページ ${i + 1} 失敗:`, e);

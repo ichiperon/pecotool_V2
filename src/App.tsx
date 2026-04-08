@@ -22,6 +22,7 @@ import { Toolbar } from "./components/Toolbar/Toolbar";
 import { MenuBar } from "./components/MenuBar/MenuBar";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 import { ConsolePanel } from "./components/Console/ConsolePanel";
+import { OcrSettingsModal } from "./components/OcrSettingsModal";
 
 function App() {
   const { 
@@ -47,6 +48,7 @@ function App() {
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [helpModal, setHelpModal] = useState<'shortcuts' | 'usage' | 'version' | null>(null);
+  const [showOcrSettings, setShowOcrSettings] = useState(false);
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
 
@@ -495,6 +497,8 @@ function App() {
       )}
 
       {/* ヘルプモーダル */}
+      {showOcrSettings && <OcrSettingsModal onClose={() => setShowOcrSettings(false)} />}
+
       {helpModal && (
         <div className="modal-backdrop" onClick={() => setHelpModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -596,6 +600,7 @@ function App() {
         onShowShortcuts={() => setHelpModal('shortcuts')}
         onShowUsage={() => setHelpModal('usage')}
         onShowVersion={() => setHelpModal('version')}
+        onShowOcrSettings={() => setShowOcrSettings(true)}
       />
 
       <Toolbar
