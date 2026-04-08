@@ -1013,6 +1013,10 @@ body, #root {
 }
 
 /* Settings Dropdown */
+.ocr-dropdown {
+  min-width: 120px;
+}
+
 .settings-dropdown {
   padding: 12px;
   min-width: 220px;

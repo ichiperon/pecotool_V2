@@ -15,6 +15,7 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useConsoleLogs } from "./hooks/useConsoleLogs";
 import { usePreviewWindow } from "./hooks/usePreviewWindow";
 import { useFontLoader } from "./hooks/useFontLoader";
+import { useOcrEngine } from "./hooks/useOcrEngine";
 
 // Components
 import { Toolbar } from "./components/Toolbar/Toolbar";
@@ -84,7 +85,11 @@ function App() {
   useFontLoader();
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
-  const { handleOpen, handleSave, executeSaveAs } = useFileOperations(showToast, setIsSaving, setIsLoadingFile);
+  const { isOcrRunning, ocrProgress, runOcrCurrentPage, runOcrAllPages, cancelOcr, checkAndPromptOcrZero } = useOcrEngine(showToast);
+  const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
+    showToast, setIsSaving, setIsLoadingFile,
+    (doc) => { checkAndPromptOcrZero(doc); }
+  );
 
   const currentPage = document?.pages.get(currentPageIndex);
 
@@ -600,6 +605,7 @@ function App() {
         selectedIdsCount={selectedIds.size} showOcr={showOcr} ocrOpacity={ocrOpacity}
         reorderThreshold={reorderThreshold} isPreviewOpen={isPreviewOpen}
         showSettingsDropdown={showSettingsDropdown}
+        isOcrRunning={isOcrRunning} ocrProgress={ocrProgress}
         onUndo={undo} onRedo={redo} onZoomIn={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }}
         onZoomOut={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom - 10)); }}
         onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode}
@@ -608,6 +614,9 @@ function App() {
         onSetReorderThreshold={(val) => { setReorderThreshold(val); localStorage.setItem('peco-reorder-threshold', val.toString()); }}
         onTogglePreview={togglePreviewWindow}
         onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
+        onRunOcrCurrentPage={runOcrCurrentPage}
+        onRunOcrAllPages={runOcrAllPages}
+        onCancelOcr={cancelOcr}
       />
 
       <main className="main-content">

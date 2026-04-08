@@ -52,3 +52,16 @@ export interface Action {
   before: PageData;
   after: PageData;
 }
+
+export interface OcrResultBlock {
+  text: string;
+  bbox: BoundingBox;
+  writingMode: WritingMode;
+  confidence: number;
+}
+
+export interface OcrResult {
+  status: 'ok' | 'error';
+  blocks: OcrResultBlock[];
+  message?: string;
+}

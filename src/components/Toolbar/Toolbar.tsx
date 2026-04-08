@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2
 } from "lucide-react";
 import { PageData, PecoDocument } from '../../types';
 
@@ -22,6 +22,8 @@ interface ToolbarProps {
   reorderThreshold: number;
   isPreviewOpen: boolean;
   showSettingsDropdown: boolean;
+  isOcrRunning: boolean;
+  ocrProgress: { current: number; total: number } | null;
 
   onUndo: () => void;
   onRedo: () => void;
@@ -39,9 +41,21 @@ interface ToolbarProps {
   onSetReorderThreshold: (val: number) => void;
   onTogglePreview: () => void;
   onToggleSettingsDropdown: (e: React.MouseEvent) => void;
+  onRunOcrCurrentPage: () => void;
+  onRunOcrAllPages: () => void;
+  onCancelOcr: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = (props) => {
+  const [showOcrDropdown, setShowOcrDropdown] = useState(false);
+
+  useEffect(() => {
+    if (!showOcrDropdown) return;
+    const close = () => setShowOcrDropdown(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [showOcrDropdown]);
+
   return (
     <header className="toolbar">
       <div className="toolbar-group">
@@ -99,6 +113,52 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
         </div>
         
         <button onClick={props.onTogglePreview} title="プレビュー" className={`feature-btn ${props.isPreviewOpen ? 'active' : ''}`} disabled={!props.document}><ClipboardList size={18} /><span>テキスト確認</span></button>
+      </div>
+
+      <div className="divider" />
+
+      <div className="toolbar-group">
+        <div className="btn-group">
+          <button
+            className={`dropdown-btn ${showOcrDropdown ? 'active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setShowOcrDropdown(!showOcrDropdown); }}
+            disabled={!props.document || props.isOcrRunning}
+            title="OCR実行"
+            style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
+          >
+            {props.isOcrRunning
+              ? <Loader2 size={14} style={{ marginRight: '4px', animation: 'spin 1s linear infinite' }} />
+              : <ScanText size={14} style={{ marginRight: '4px' }} />
+            }
+            <span>
+              {props.isOcrRunning && props.ocrProgress
+                ? `OCR ${props.ocrProgress.current}/${props.ocrProgress.total}`
+                : 'OCR実行'}
+            </span>
+            {!props.isOcrRunning && <ChevronDown size={14} style={{ marginLeft: '2px' }} />}
+          </button>
+          {showOcrDropdown && !props.isOcrRunning && (
+            <div className="recent-dropdown ocr-dropdown" onClick={(e) => e.stopPropagation()}>
+              <div
+                className="recent-item"
+                onClick={() => { setShowOcrDropdown(false); props.onRunOcrCurrentPage(); }}
+              >
+                現在のページ
+              </div>
+              <div
+                className="recent-item"
+                onClick={() => { setShowOcrDropdown(false); props.onRunOcrAllPages(); }}
+              >
+                全ページ
+              </div>
+            </div>
+          )}
+        </div>
+        {props.isOcrRunning && props.ocrProgress && (
+          <button onClick={props.onCancelOcr} title="キャンセル" className="danger">
+            <X size={14} /><span>キャンセル</span>
+          </button>
+        )}
       </div>
     </header>
   );

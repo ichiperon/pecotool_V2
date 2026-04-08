@@ -1,14 +1,16 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from '../store/pecoStore';
-import { loadPDF } from '../utils/pdfLoader';
+import { loadPDF, getAllTemporaryPageData } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
+import { PecoDocument, PageData } from '../types';
 
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean) => void,
   setIsSaving?: (v: boolean) => void,
   setIsLoadingFile?: (v: boolean) => void,
+  onOpenComplete?: (doc: import('../types').PecoDocument) => void,
 ) {
   const { setDocument, resetDirty } = usePecoStore();
 
@@ -32,18 +34,16 @@ export function useFileOperations(
       if (selected && typeof selected === 'string') {
         setIsLoadingFile?.(true);
         try {
-          // loadPDF でUIを即座に表示。readFile は独立したバックグラウンド処理で並行実行。
-          // setDocument は originalBytes をリセットするため、readFile の完了後に setOriginalBytes を呼ぶ。
-          const readFilePromise = readFile(selected);
-          const doc = await loadPDF(selected);
-          setDocument(doc);
+          // Promise.all で構造 (loadPDF) とバイナリ (readFile) の両方を待機し、
+          // レースコンディション（バイナリ読み込み完了前に setDocument で null にリセットされる問題）を防ぐ。
+          const [content, doc] = await Promise.all([
+            readFile(selected),
+            loadPDF(selected)
+          ]);
+          
+          setDocument(doc, new Uint8Array(content));
           addToRecent(selected);
-          // readFile がすでに完了している場合も未完了の場合も、then で確実にセット
-          readFilePromise.then((content) => {
-            usePecoStore.getState().setOriginalBytes(new Uint8Array(content));
-          }).catch((err) => {
-            console.error("Failed to read file bytes:", err);
-          });
+          onOpenComplete?.(doc);
         } finally {
           setIsLoadingFile?.(false);
         }
@@ -80,7 +80,18 @@ export function useFileOperations(
 
     setIsSaving?.(true);
     try {
-      const savedBytes = await savePDF(originalBytes, document, fontBytes || undefined);
+      // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
+      const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
+      
+      // 保存用にドキュメント状態を統合（メモリ上の Map + IDB の Map）
+      const mergedPages = new Map<number, PageData>(document.pages);
+      for (const [idx, data] of tempDirtyPages.entries()) {
+        const existing = mergedPages.get(idx);
+        mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+      }
+
+      const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
+      const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
 
       await writeFile(document.filePath, savedBytes);
       resetDirty();
@@ -124,7 +135,17 @@ export function useFileOperations(
         setIsSaving?.(true);
 
         try {
-          const savedBytes = await savePDF(originalBytes, document, fontBytes || undefined);
+          // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
+          const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
+          
+          const mergedPages = new Map<number, PageData>(document.pages);
+          for (const [idx, data] of tempDirtyPages.entries()) {
+            const existing = mergedPages.get(idx);
+            mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+          }
+
+          const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
+          const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
 
           await writeFile(path, savedBytes);
           document.filePath = path;
