@@ -160,12 +160,19 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
 
         // ページデータがロード済みならそのサイズを使用。未ロードの場合は pdfjs から取得
         const pageData = usePecoStore.getState().document?.pages.get(i);
-        const pageWidth = pageData?.width ?? 0;
-        const pageHeight = pageData?.height ?? 0;
+        let pageWidth = pageData?.width ?? 0;
+        let pageHeight = pageData?.height ?? 0;
 
         if (pageWidth === 0 || pageHeight === 0) {
-          console.warn(`[OCR] ページ ${i + 1}: サイズ未ロード (${pageWidth}x${pageHeight})、スキップします`);
-          continue;
+          try {
+            const page = await getCachedPageProxy(doc.filePath, i);
+            const viewport = page.getViewport({ scale: 1.0 });
+            pageWidth = viewport.width;
+            pageHeight = viewport.height;
+          } catch (e) {
+            console.warn(`[OCR] ページ ${i + 1}: サイズ取得失敗、スキップします`, e);
+            continue;
+          }
         }
 
         try {
