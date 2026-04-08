@@ -62,7 +62,11 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
   };
 
   // getMetadata はページ表示に不要なため非同期で取得（ブロックしない）
+  // filePath をクロージャーで保持し、globalSharedPdfProxy が切り替わった後は書き込まない
+  const capturedFilePath = filePath;
   pdf.getMetadata().then((metadata) => {
+    // 既に別ファイルに切り替わっている場合は書き込まない
+    if (globalSharedPdfProxy?.filePath !== capturedFilePath) return;
     doc.metadata.title = (metadata.info as any)?.Title;
     doc.metadata.author = (metadata.info as any)?.Author;
   }).catch(() => {});
@@ -128,10 +132,19 @@ export async function getCachedPageProxy(filePath: string, pageIndex: number): P
 
 export function destroySharedPdfProxy() {
   if (globalSharedPdfProxy) {
-    globalSharedPdfProxy.promise.then(p => {
-      try { p.destroy(); } catch { /* ignore */ }
-    }).catch(() => {});
-    globalSharedPdfProxy = null;
+    const proxy = globalSharedPdfProxy;
+    globalSharedPdfProxy = null; // 先にnullにして後続のgetSharedPdfProxy呼び出しをブロックしない
+    proxy.promise.then(p => {
+      try { p.destroy(); } catch (e) {
+        console.warn('[pdfLoader] PDFDocumentProxy.destroy() 失敗:', e);
+      }
+    }).catch((e) => {
+      console.warn('[pdfLoader] destroySharedPdfProxy: Promiseエラー:', e);
+    });
+  }
+  // pageProxyCacheのページも明示的にcleanupする
+  for (const page of pageProxyCache.values()) {
+    try { page.cleanup(); } catch { /* ignore */ }
   }
   pageProxyCache.clear();
 }

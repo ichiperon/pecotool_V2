@@ -12,7 +12,7 @@ export function useFileOperations(
   setIsLoadingFile?: (v: boolean) => void,
   onOpenComplete?: (doc: import('../types').PecoDocument) => void,
 ) {
-  const { setDocument, resetDirty } = usePecoStore();
+  const { setDocument, setDocumentFilePath, resetDirty } = usePecoStore();
 
   const addToRecent = (path: string) => {
     const saved = localStorage.getItem('peco-recent-files');
@@ -148,7 +148,7 @@ export function useFileOperations(
           const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
 
           await writeFile(path, savedBytes);
-          document.filePath = path;
+          setDocumentFilePath(path);
           resetDirty();
           showToast(`名前を付けて保存しました。(${formatFileSize(savedBytes.length)})`);
           addToRecent(path);

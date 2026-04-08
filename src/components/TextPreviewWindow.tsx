@@ -8,40 +8,35 @@ export function TextPreviewWindow() {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    let mounted = true;
-    let cleanup: (() => void) | undefined;
+    // アンマウント済みフラグ（非同期setup完了前にアンマウントされた場合に即解除）
+    let unmounted = false;
+    const unlisteners: Array<() => void> = [];
 
-    // Listen for updates from Main Window
     const setupListener = async () => {
       const waitUnlisten = await listen<string>('preview-update', (event) => {
         setText(event.payload);
       });
+      if (unmounted) { waitUnlisten(); return; }
+      unlisteners.push(waitUnlisten);
+
       // バツボタンを押したときにウインドウを破壊せず非表示にする
       const win = getCurrentWindow();
       const closeUnlisten = await win.onCloseRequested((event) => {
         event.preventDefault();
         win.hide();
       });
+      if (unmounted) { closeUnlisten(); return; }
+      unlisteners.push(closeUnlisten);
+
       // Request initial text from main window
       await emit('request-preview');
-      return () => {
-        waitUnlisten();
-        closeUnlisten();
-      };
     };
 
-    setupListener().then(fn => {
-      if (mounted) {
-        cleanup = fn;
-      } else {
-        // Already unmounted before async setup completed
-        fn?.();
-      }
-    });
+    setupListener().catch(() => {});
 
     return () => {
-      mounted = false;
-      if (cleanup) cleanup();
+      unmounted = true;
+      unlisteners.forEach(fn => fn());
     };
   }, []);
 

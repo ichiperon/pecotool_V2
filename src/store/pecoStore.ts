@@ -27,6 +27,7 @@ interface PecoState {
   setFontBytes: (bytes: ArrayBuffer) => void;
   setFontLoaded: (loaded: boolean) => void;
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
+  setDocumentFilePath: (filePath: string) => void;
   setOriginalBytes: (bytes: Uint8Array) => void;
   setThumbnail: (pageIndex: number, blobUrl: string) => void;
   setCurrentPage: (index: number) => void;
@@ -75,18 +76,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   setFontBytes: (bytes) => set({ fontBytes: bytes, isFontLoaded: true }),
   setFontLoaded: (loaded) => set({ isFontLoaded: loaded }),
   setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
+  setDocumentFilePath: (filePath) => set((state) => {
+    if (!state.document) return state;
+    const fileName = filePath.split(/[\\/]/).pop() || state.document.fileName;
+    return { document: { ...state.document, filePath, fileName } };
+  }),
 
-  setDocument: (doc, bytes) => set((state) => {
+  setDocument: (doc, bytes) => {
     // Revoke all existing thumbnail URLs to free memory
-    state.thumbnails.forEach(url => URL.revokeObjectURL(url));
+    const { thumbnails } = get();
+    thumbnails.forEach(url => URL.revokeObjectURL(url));
 
-    if (doc) {
-      clearTemporaryChanges(doc.filePath);
-    }
-
-    return {
+    set({
       document: doc,
-      originalBytes: bytes || null, // No slice to avoid duplication in memory
+      originalBytes: bytes || null,
       thumbnails: new Map(),
       pageAccessOrder: [],
       currentPageIndex: 0,
@@ -100,8 +103,15 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       clipboard: [],
       undoStack: [],
       redoStack: []
-    };
-  }),
+    });
+
+    // IDB一時データのクリアをset()外でawaitして確実に完了させる
+    if (doc) {
+      clearTemporaryChanges(doc.filePath).catch((e) => {
+        console.warn('[Store] clearTemporaryChanges失敗:', e);
+      });
+    }
+  },
 
   setThumbnail: (pageIndex, blobUrl) => set((state) => {
     const newThumbnails = new Map(state.thumbnails);
@@ -112,22 +122,30 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     newThumbnails.set(pageIndex, blobUrl);
 
     // LRU for thumbnails: Keep only 100 most recent thumbnails
-    // (A bit more than page cache because thumbnails are small but frequent)
     const MAX_THUMBNAILS = 100;
     if (newThumbnails.size > MAX_THUMBNAILS) {
-      // Find oldest thumbnail that is not the current page
+      // accessOrder は最近アクセス順（先頭が最新）。
+      // accessOrder に含まれないページは古いものとして削除対象にする。
+      // accessOrder に含まれる場合は末尾（古い）から削除する。
       const accessOrder = state.pageAccessOrder;
-      const pagesWithThumbnails = Array.from(newThumbnails.keys());
-      
-      // Remove the ones that are NOT in the recent access order
-      let removedCount = 0;
-      for (const idx of pagesWithThumbnails) {
-        if (idx !== state.currentPageIndex && !accessOrder.slice(0, MAX_THUMBNAILS).includes(idx)) {
+      const recentSet = new Set(accessOrder);
+
+      // まず accessOrder に含まれないページから削除
+      for (const idx of newThumbnails.keys()) {
+        if (newThumbnails.size <= MAX_THUMBNAILS) break;
+        if (idx !== state.currentPageIndex && !recentSet.has(idx)) {
           const urlToRevoke = newThumbnails.get(idx);
           if (urlToRevoke) URL.revokeObjectURL(urlToRevoke);
           newThumbnails.delete(idx);
-          removedCount++;
-          if (newThumbnails.size <= MAX_THUMBNAILS) break;
+        }
+      }
+      // まだ超えている場合は accessOrder の末尾（最も古い）から削除
+      for (let i = accessOrder.length - 1; i >= 0 && newThumbnails.size > MAX_THUMBNAILS; i--) {
+        const idx = accessOrder[i];
+        if (idx !== state.currentPageIndex && newThumbnails.has(idx)) {
+          const urlToRevoke = newThumbnails.get(idx);
+          if (urlToRevoke) URL.revokeObjectURL(urlToRevoke);
+          newThumbnails.delete(idx);
         }
       }
     }
@@ -152,59 +170,77 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   
   toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false })),
 
-  updatePageData: (pageIndex, data, undoable = true) => set((state) => {
-    if (!state.document) return state;
-    const oldPage = state.document.pages.get(pageIndex);
-    const newPage = oldPage ? { ...oldPage, ...data } : (data as PageData);
-    const newPages = new Map(state.document.pages);
-    newPages.set(pageIndex, newPage);
+  updatePageData: (pageIndex, data, undoable = true) => {
+    // LRU退避時のIndexedDB保存をset()の外で非同期実行するためペンディングリストを収集
+    const pendingSaves: Array<{ filePath: string; idx: number; page: PageData }> = [];
 
-    // Update access order
-    const newOrder = [pageIndex, ...state.pageAccessOrder.filter(i => i !== pageIndex)];
+    set((state) => {
+      if (!state.document) return state;
+      const oldPage = state.document.pages.get(pageIndex);
+      const newPage = oldPage ? { ...oldPage, ...data } : (data as PageData);
+      const newPages = new Map(state.document.pages);
+      newPages.set(pageIndex, newPage);
 
-    // LRU Purge: If we exceed MAX_CACHED_PAGES, remove the oldest non-dirty page
-    // OR save dirty page to IDB and then remove from memory.
-    if (newPages.size > MAX_CACHED_PAGES) {
-      for (let i = newOrder.length - 1; i >= 0; i--) {
-        const idxToRemove = newOrder[i];
-        const pageToRemove = newPages.get(idxToRemove);
-        // Never purge the current page
-        if (idxToRemove !== state.currentPageIndex && pageToRemove) {
-          if (pageToRemove.isDirty) {
-            // Backup to IndexedDB before evicting from memory
-            saveTemporaryPageData(state.document.filePath, idxToRemove, pageToRemove);
+      // Update access order
+      const newOrder = [pageIndex, ...state.pageAccessOrder.filter(i => i !== pageIndex)];
+
+      // LRU Purge: If we exceed MAX_CACHED_PAGES, remove the oldest non-dirty page
+      // OR save dirty page to IDB and then remove from memory.
+      if (newPages.size > MAX_CACHED_PAGES) {
+        for (let i = newOrder.length - 1; i >= 0; i--) {
+          const idxToRemove = newOrder[i];
+          const pageToRemove = newPages.get(idxToRemove);
+          // Never purge the current page
+          if (idxToRemove !== state.currentPageIndex && pageToRemove) {
+            if (pageToRemove.isDirty) {
+              // set()コールバックは同期のため、保存対象を収集してset()外で非同期実行する
+              pendingSaves.push({ filePath: state.document!.filePath, idx: idxToRemove, page: pageToRemove });
+            }
+            newPages.delete(idxToRemove);
+            newOrder.splice(i, 1);
+            if (newPages.size <= MAX_CACHED_PAGES) break;
           }
-          newPages.delete(idxToRemove);
-          newOrder.splice(i, 1);
-          if (newPages.size <= MAX_CACHED_PAGES) break;
         }
       }
-    }
 
-    const newState: Partial<PecoState> = {
-      document: { ...state.document, pages: newPages },
-      pageAccessOrder: newOrder,
-    };
-
-    if (data.isDirty !== false) {
-      newState.isDirty = true;
-    }
-
-    if (undoable && oldPage) {
-      const action: Action = {
-        type: 'update_page',
-        pageIndex,
-        before: oldPage,
-        after: newPage
+      const newState: Partial<PecoState> = {
+        document: { ...state.document, pages: newPages },
+        pageAccessOrder: newOrder,
       };
-      const newUndo = [...state.undoStack, action];
-      if (newUndo.length > 100) newUndo.shift();
-      newState.undoStack = newUndo;
-      newState.redoStack = [];
-    }
 
-    return newState;
-  }),
+      if (data.isDirty !== false) {
+        newState.isDirty = true;
+      }
+
+      if (undoable && oldPage) {
+        const action: Action = {
+          type: 'update_page',
+          pageIndex,
+          before: oldPage,
+          after: newPage
+        };
+        const newUndo = [...state.undoStack, action];
+        if (newUndo.length > 100) newUndo.shift();
+        newState.undoStack = newUndo;
+        newState.redoStack = [];
+      }
+
+      return newState;
+    });
+
+    // set()外でIndexedDB保存を順次実行（書き込み完了を保証）
+    if (pendingSaves.length > 0) {
+      (async () => {
+        for (const { filePath, idx, page } of pendingSaves) {
+          try {
+            await saveTemporaryPageData(filePath, idx, page);
+          } catch (e) {
+            console.warn(`[Store] IndexedDB保存失敗 (page ${idx}):`, e);
+          }
+        }
+      })();
+    }
+  },
 
   resetDirty: () => set((state) => {
     if (!state.document) return state;

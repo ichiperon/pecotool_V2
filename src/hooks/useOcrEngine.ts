@@ -34,7 +34,7 @@ async function renderPageToTempFile(filePath: string, pageIndex: number): Promis
 
 function toTextBlocks(blocks: OcrResultBlock[]): TextBlock[] {
   return blocks
-    .filter((b) => b.text.trim() !== '' && b.confidence >= 0.5)
+    .filter((b) => b.text.trim() !== '')
     .sort((a, b) => a.bbox.y - b.bbox.y)
     .map((b, i) => ({
       id: crypto.randomUUID(),
@@ -63,10 +63,18 @@ async function runOcrForPage(
       pageHeight,
       renderScale: RENDER_SCALE,
     });
-    return JSON.parse(raw) as OcrResult;
+    let parsed: OcrResult;
+    try {
+      parsed = JSON.parse(raw) as OcrResult;
+    } catch (e) {
+      return { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` };
+    }
+    return parsed;
   } finally {
     if (tempPath) {
-      remove(tempPath).catch(() => {});
+      remove(tempPath).catch((e) => {
+        console.warn(`[OCR] テンポラリファイルの削除に失敗: ${tempPath}`, e);
+      });
     }
   }
 }
@@ -106,7 +114,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
         return;
       }
 
-      const newBlocks = toTextBlocks(result.blocks);
+      const newBlocks = toTextBlocks(result.blocks ?? []);
       usePecoStore.getState().updatePageData(pageIdx, { textBlocks: newBlocks, isDirty: true }, true);
       showToast(`OCRが完了しました（${newBlocks.length}件）`);
     } catch (e) {
@@ -155,13 +163,18 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
         const pageWidth = pageData?.width ?? 0;
         const pageHeight = pageData?.height ?? 0;
 
+        if (pageWidth === 0 || pageHeight === 0) {
+          console.warn(`[OCR] ページ ${i + 1}: サイズ未ロード (${pageWidth}x${pageHeight})、スキップします`);
+          continue;
+        }
+
         try {
           const result = await runOcrForPage(doc.filePath, i, pageWidth, pageHeight);
           if (result.status === 'error') {
             console.error(`[OCR] ページ ${i + 1} エラー: ${result.message}`);
             continue;
           }
-          const newBlocks = toTextBlocks(result.blocks);
+          const newBlocks = toTextBlocks(result.blocks ?? []);
           usePecoStore.getState().updatePageData(i, { textBlocks: newBlocks, isDirty: true }, false);
         } catch (e) {
           console.error(`[OCR] ページ ${i + 1} 失敗:`, e);

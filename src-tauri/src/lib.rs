@@ -19,13 +19,28 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
         Graphics::Imaging::BitmapDecoder,
         Media::Ocr::OcrEngine,
         Storage::{FileAccessMode, StorageFile},
-        Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED},
+        Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
     };
 
     // このスレッドの COM 初期化
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    // S_OK (0)      = 初期化成功 → 関数終了時に CoUninitialize が必要
+    // S_FALSE (1)   = 既に初期化済み → CoUninitialize を呼んではいけない
+    // それ以外       = 失敗
+    let needs_uninit = unsafe {
+        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if hr.is_err() && hr.0 != 0x00000001u32 as i32 {
+            return Err(format!("COM初期化失敗: {:?}", hr));
+        }
+        hr.0 == 0 // S_OK のみ CoUninitialize が必要
+    };
+
+    struct ComGuard;
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
     }
+    let _com_guard = if needs_uninit { Some(ComGuard) } else { None };
 
     let path_h = HSTRING::from(image_path);
 
@@ -106,11 +121,12 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
         let w = ((max_x - min_x) as f64) / render_scale;
         let h = ((max_y - min_y) as f64) / render_scale;
 
-        // 縦書き判定の改善: 
-        // 1. アスペクト比 (高さ > 幅 * 1.5)
-        // 2. 複数ワードがある場合、Y座標の差分がX座標の差分より大きい
+        // 縦書き判定:
+        // 1. アスペクト比 (高さ > 幅 * 1.5) → 縦書き
+        // 2. 複数ワードがある場合、Y座標の差分がX座標の差分より大きい → 縦書き
+        // 3. 単一ワードの場合もアスペクト比で判定済みのため horizontal にフォールバック
         let writing_mode = if h > w * 1.5 {
-             "vertical" 
+            "vertical"
         } else if word_count > 1 {
             let first_word = words.GetAt(0).map_err(|e| format!("Word(0)取得失敗: {e}"))?;
             let last_word = words.GetAt(word_count - 1).map_err(|e| format!("Word(last)取得失敗: {e}"))?;
@@ -120,7 +136,9 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
             let dx = (last_rect.X - first_rect.X).abs();
             if dy > dx * 2.0 { "vertical" } else { "horizontal" }
         } else {
-             "horizontal" 
+            // word_count == 1: アスペクト比条件（h > w * 1.5）で判定済み。
+            // ここに来た場合は幅が高さと同程度かそれ以上なので横書きとみなす。
+            "horizontal"
         };
 
         blocks.push(serde_json::json!({

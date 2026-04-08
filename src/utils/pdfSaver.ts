@@ -183,6 +183,8 @@ export async function buildPdfDocument(
 }
 
 
+let activeSaveWorker: Worker | null = null;
+
 export async function savePDF(
   originalPdfBytes: Uint8Array,
   documentState: PecoDocument,
@@ -193,24 +195,36 @@ export async function savePDF(
     return await buildPdfDocument(originalPdfBytes, documentState, fontBytes);
   }
 
+  // 前回の保存が完了していない場合は強制終了して新しい保存を優先する
+  if (activeSaveWorker) {
+    activeSaveWorker.terminate();
+    activeSaveWorker = null;
+  }
+
   return new Promise((resolve, reject) => {
     try {
       const worker = new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
+      activeSaveWorker = worker;
+
+      const cleanup = () => {
+        if (activeSaveWorker === worker) activeSaveWorker = null;
+        worker.terminate();
+      };
 
       worker.onmessage = (e) => {
         const { type, data, message } = e.data;
         if (type === 'SAVE_PDF_SUCCESS') {
+          cleanup();
           resolve(data);
-          worker.terminate();
         } else if (type === 'ERROR') {
+          cleanup();
           reject(new Error(message));
-          worker.terminate();
         }
       };
 
       worker.onerror = (err) => {
+        cleanup();
         reject(err);
-        worker.terminate();
       };
 
       const serializedPages: Record<number, any> = {};
@@ -236,6 +250,7 @@ export async function savePDF(
         }
       }, transferables);
     } catch (err) {
+      activeSaveWorker = null;
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
       buildPdfDocument(originalPdfBytes, documentState, fontBytes).then(resolve).catch(reject);
     }
