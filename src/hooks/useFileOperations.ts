@@ -1,6 +1,6 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
-import { usePecoStore } from '../store/pecoStore';
+import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
@@ -92,8 +92,12 @@ export function useFileOperations(
     }
 
     if (!isFontLoaded || !fontBytes) {
-      showToast("日本語フォントの準備ができていません。保存すると文字化けする可能性があります。", true);
+      showToast("日本語フォントの読み込みが完了していません。しばらく待ってから再度お試しください。", true);
+      return null;
     }
+
+    // LRU退避のIDB書き込みが全て完了してからIDBを読み込む（競合状態回避）
+    await waitForPendingIdbSaves();
 
     // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
     const tempDirtyPages = await getAllTemporaryPageData(document.filePath);

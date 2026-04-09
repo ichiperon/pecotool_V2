@@ -21,9 +21,9 @@ function groupByTolerance(
     if (current.length === 0) {
       current.push(block);
     } else {
-      const lastVal = keyFn(current[current.length - 1]);
+      const groupBase = keyFn(current[0]);
       const currVal = keyFn(block);
-      if (Math.abs(currVal - lastVal) <= tolerance) {
+      if (Math.abs(currVal - groupBase) <= tolerance) {
         current.push(block);
       } else {
         groups.push(current);
@@ -89,7 +89,7 @@ export function sortOcrBlocks(
   blocks: OcrResultBlock[],
   settings: OcrSortSettings
 ): OcrResultBlock[] {
-  const { horizontal, vertical, groupTolerance } = settings;
+  const { horizontal, vertical, groupTolerance, mixedOrder } = settings;
 
   const hBlocks = blocks.filter((b) => b.writingMode === 'horizontal');
   const vBlocks = blocks.filter((b) => b.writingMode === 'vertical');
@@ -97,8 +97,9 @@ export function sortOcrBlocks(
   const sortedH = sortHorizontal(hBlocks, horizontal.rowOrder, horizontal.columnOrder, groupTolerance);
   const sortedV = sortVertical(vBlocks, vertical.columnOrder, vertical.rowOrder, groupTolerance);
 
-  // 混在時: 縦書き → 横書きの順で結合
   if (sortedH.length === 0) return sortedV;
   if (sortedV.length === 0) return sortedH;
-  return [...sortedV, ...sortedH];
+  return mixedOrder === 'vertical-first'
+    ? [...sortedV, ...sortedH]
+    : [...sortedH, ...sortedV];
 }

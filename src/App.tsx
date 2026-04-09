@@ -293,10 +293,12 @@ function App() {
         loadPecoToolBBoxMeta(pdf).then((meta) => {
           bboxMetaRef.current = meta;
           if (!meta) return; // PecoTool保存でなければ何もしない
-          // bboxMetaがあるファイルの場合、ロード済みページを再取得して正確なbboxを反映
+          // bboxMetaがあるファイルの場合、メモリにロード済みかつDirtyでないページのみ
+          // 再取得してbboxMetaを反映する（Dirtyページは既に編集済みのため上書き不要）
           const state = usePecoStore.getState();
           if (!state.document || state.document.filePath !== doc.filePath) return;
-          state.document.pages.forEach((_, i) => {
+          state.document.pages.forEach((pageData, i) => {
+            if (pageData.isDirty) return; // 編集済みページは上書きしない
             loadPage(pdf, i, doc.filePath, meta, doc.mtime)
               .then((pd) => {
                 const s = usePecoStore.getState();

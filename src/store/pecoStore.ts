@@ -1,6 +1,16 @@
 import { create } from 'zustand';
 import { PecoDocument, PageData, Action, TextBlock } from '../types';
-import { saveTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
+import { saveTemporaryPageDataBatch, clearTemporaryChanges } from '../utils/pdfLoader';
+
+// 進行中のLRU退避IDB書き込みPromiseを追跡する。
+// 保存処理はこれらが完了してからIDBを読み込む必要がある。
+const pendingIdbSaves: Set<Promise<void>> = new Set();
+
+/** 全てのLRU退避IDB書き込みが完了するまで待機する */
+export function waitForPendingIdbSaves(): Promise<void> {
+  if (pendingIdbSaves.size === 0) return Promise.resolve();
+  return Promise.all(Array.from(pendingIdbSaves)).then(() => {});
+}
 
 interface PecoState {
   document: PecoDocument | null;
@@ -226,17 +236,16 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       return newState;
     });
 
-    // set()外でIndexedDB保存を順次実行（書き込み完了を保証）
+    // set()外でIndexedDB保存をバッチ実行（1トランザクションでまとめて書き込み）
+    // pendingIdbSaves に登録して保存処理が完了を待機できるようにする
     if (pendingSaves.length > 0) {
-      (async () => {
-        for (const { filePath, idx, page } of pendingSaves) {
-          try {
-            await saveTemporaryPageData(filePath, idx, page);
-          } catch (e) {
-            console.warn(`[Store] IndexedDB保存失敗 (page ${idx}):`, e);
-          }
-        }
-      })();
+      const savePromise = saveTemporaryPageDataBatch(
+        pendingSaves.map(({ filePath, idx, page }) => ({ filePath, pageIndex: idx, data: page }))
+      ).catch((e) => {
+        console.warn('[Store] IndexedDB バッチ保存失敗:', e);
+      });
+      pendingIdbSaves.add(savePromise);
+      savePromise.finally(() => pendingIdbSaves.delete(savePromise));
     }
   },
 

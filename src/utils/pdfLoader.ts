@@ -266,14 +266,27 @@ export async function getTemporaryPageData(filePath: string, pageIndex: number):
 }
 
 export async function saveTemporaryPageData(filePath: string, pageIndex: number, data: Partial<PageData>) {
+  await saveTemporaryPageDataBatch([{ filePath, pageIndex, data }]);
+}
+
+export async function saveTemporaryPageDataBatch(
+  entries: Array<{ filePath: string; pageIndex: number; data: Partial<PageData> }>
+) {
+  if (entries.length === 0) return;
   try {
     const db = await openDB();
     const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
     const store = tx.objectStore(STORE_NAME_DIRTY);
-    const key = `${filePath}:${pageIndex}`;
-    // Always strip thumbnails before saving to IDB to save space
-    const { thumbnail: _thumbnail, ...cleanData } = data as any;
-    store.put(cleanData, key);
+    for (const { filePath, pageIndex, data } of entries) {
+      const key = `${filePath}:${pageIndex}`;
+      // Always strip thumbnails before saving to IDB to save space
+      const { thumbnail: _thumbnail, ...cleanData } = data as any;
+      store.put(cleanData, key);
+    }
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
   } catch { /* ignore */ }
 }
 
@@ -283,14 +296,14 @@ export async function clearTemporaryChanges(filePath: string) {
     const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
     const store = tx.objectStore(STORE_NAME_DIRTY);
     const prefix = `${filePath}:`;
-    const request = store.openCursor();
+    // IDBKeyRange でfilePath配下のキーのみに絞り込む（フルスキャン回避）
+    const range = IDBKeyRange.bound(prefix, prefix + '\uFFFF', false, false);
+    const request = store.openCursor(range);
     await new Promise<void>((resolve, reject) => {
       request.onsuccess = (event: any) => {
         const cursor = event.target.result;
         if (cursor) {
-          if ((cursor.key as string).startsWith(prefix)) {
-            cursor.delete();
-          }
+          cursor.delete();
           cursor.continue();
         } else {
           resolve();
@@ -307,17 +320,18 @@ export async function getAllTemporaryPageData(filePath: string): Promise<Map<num
     const db = await openDB();
     const tx = db.transaction(STORE_NAME_DIRTY, 'readonly');
     const store = tx.objectStore(STORE_NAME_DIRTY);
-    const request = store.openCursor();
-    
+    const prefix = `${filePath}:`;
+    // IDBKeyRange でfilePath配下のキーのみに絞り込む（フルスキャン回避）
+    const range = IDBKeyRange.bound(prefix, prefix + '\uFFFF', false, false);
+    const request = store.openCursor(range);
+
     return new Promise((resolve) => {
       request.onsuccess = (event: any) => {
         const cursor = event.target.result;
         if (cursor) {
           const key = cursor.key as string;
-          if (key.startsWith(`${filePath}:`)) {
-            const pageIndex = parseInt(key.split(':')[1], 10);
-            results.set(pageIndex, cursor.value);
-          }
+          const pageIndex = parseInt(key.slice(prefix.length), 10);
+          results.set(pageIndex, cursor.value);
           cursor.continue();
         } else {
           resolve(results);

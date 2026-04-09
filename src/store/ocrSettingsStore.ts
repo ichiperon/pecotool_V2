@@ -14,6 +14,13 @@ export const COLUMN_ORDER_LABELS: Record<ColumnOrder, string> = {
   'right-to-left': '右 → 左',
 };
 
+export type MixedOrder = 'vertical-first' | 'horizontal-first';
+
+export const MIXED_ORDER_LABELS: Record<MixedOrder, string> = {
+  'vertical-first': '縦書き → 横書き',
+  'horizontal-first': '横書き → 縦書き',
+};
+
 export interface OcrSortSettings {
   horizontal: {
     rowOrder: RowOrder;       // 行の読み順（主軸）
@@ -24,6 +31,7 @@ export interface OcrSortSettings {
     rowOrder: RowOrder;       // 列内の行順（副軸）
   };
   groupTolerance: number;
+  mixedOrder: MixedOrder;
 }
 
 interface OcrSettingsState extends OcrSortSettings {
@@ -32,6 +40,7 @@ interface OcrSettingsState extends OcrSortSettings {
   setVerticalColumnOrder: (order: ColumnOrder) => void;
   setVerticalRowOrder: (order: RowOrder) => void;
   setGroupTolerance: (val: number) => void;
+  setMixedOrder: (order: MixedOrder) => void;
 }
 
 export const useOcrSettingsStore = create<OcrSettingsState>()(
@@ -46,6 +55,7 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
         rowOrder: 'top-to-bottom',
       },
       groupTolerance: 20,
+      mixedOrder: 'vertical-first',
       setHorizontalRowOrder: (order) =>
         set((s) => ({ horizontal: { ...s.horizontal, rowOrder: order } })),
       setHorizontalColumnOrder: (order) =>
@@ -55,6 +65,7 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       setVerticalRowOrder: (order) =>
         set((s) => ({ vertical: { ...s.vertical, rowOrder: order } })),
       setGroupTolerance: (val) => set({ groupTolerance: val }),
+      setMixedOrder: (order) => set({ mixedOrder: order }),
     }),
     { name: 'peco-ocr-settings' }
   )

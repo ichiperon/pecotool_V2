@@ -1334,3 +1334,61 @@ body, #root {
   color: #e5e7eb;
   letter-spacing: 0.02em;
 }
+
+/* OcrSettingsModal */
+.ocr-settings-modal {
+  min-width: 380px;
+}
+
+.ocr-settings-section-title {
+  margin-bottom: 8px;
+}
+
+.ocr-settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+}
+
+.ocr-settings-table td.label {
+  padding-right: 16px;
+  white-space: nowrap;
+  width: 100px;
+}
+
+.ocr-settings-table td.label.pb {
+  padding-bottom: 8px;
+}
+
+.ocr-settings-table td.value.pb {
+  padding-bottom: 8px;
+}
+
+.ocr-settings-table select {
+  width: 100%;
+}
+
+.ocr-settings-tolerance-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.ocr-settings-tolerance-row input {
+  width: 80px;
+}
+
+.ocr-settings-tolerance-hint {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.ocr-settings-note {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 4px;
+  font-size: 11px;
+  opacity: 0.7;
+}
