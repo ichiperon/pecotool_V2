@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX
 } from "lucide-react";
 import { PageData, PecoDocument } from '../../types';
 
@@ -44,10 +44,13 @@ interface ToolbarProps {
   onRunOcrCurrentPage: () => void;
   onRunOcrAllPages: () => void;
   onCancelOcr: () => void;
+  onClearOcrCurrentPage: () => void;
+  onClearOcrAllPages: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = (props) => {
   const [showOcrDropdown, setShowOcrDropdown] = useState(false);
+  const [showClearOcrDropdown, setShowClearOcrDropdown] = useState(false);
 
   useEffect(() => {
     if (!showOcrDropdown) return;
@@ -55,6 +58,13 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [showOcrDropdown]);
+
+  useEffect(() => {
+    if (!showClearOcrDropdown) return;
+    const close = () => setShowClearOcrDropdown(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [showClearOcrDropdown]);
 
   return (
     <header className="toolbar">
@@ -159,6 +169,36 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
             <X size={14} /><span>キャンセル</span>
           </button>
         )}
+
+        <div className="btn-group">
+          <button
+            className={`dropdown-btn ${showClearOcrDropdown ? 'active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setShowClearOcrDropdown(!showClearOcrDropdown); }}
+            disabled={!props.document}
+            title="OCRテキストを消去"
+            style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
+          >
+            <FileX size={14} style={{ marginRight: '4px' }} />
+            <span>OCR消去</span>
+            <ChevronDown size={14} style={{ marginLeft: '2px' }} />
+          </button>
+          {showClearOcrDropdown && (
+            <div className="recent-dropdown ocr-dropdown" onClick={(e) => e.stopPropagation()}>
+              <div
+                className="recent-item"
+                onClick={() => { setShowClearOcrDropdown(false); props.onClearOcrCurrentPage(); }}
+              >
+                現在のページ
+              </div>
+              <div
+                className="recent-item"
+                onClick={() => { setShowClearOcrDropdown(false); props.onClearOcrAllPages(); }}
+              >
+                全ページ
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );

@@ -26,11 +26,12 @@ import { OcrSettingsModal } from "./components/OcrSettingsModal";
 
 function App() {
   const { 
-    document, currentPageIndex, zoom, setZoom, 
-    setCurrentPage, updatePageData, selectedIds, showOcr, toggleShowOcr, 
-    ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack, 
-    isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode, 
-    isDirty, thumbnails, copySelected, pasteClipboard 
+    document, currentPageIndex, zoom, setZoom,
+    setCurrentPage, updatePageData, selectedIds, showOcr, toggleShowOcr,
+    ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack,
+    isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode,
+    isDirty, thumbnails, copySelected, pasteClipboard,
+    clearOcrCurrentPage, clearOcrAllPages
   } = usePecoStore();
 
   const [leftWidth, setLeftWidth] = useState(200);
@@ -187,6 +188,24 @@ function App() {
     showToast(`${selectedBlocks.length}個のブロックをグループ化しました。`);
   };
 
+  const handleClearOcrCurrentPage = async () => {
+    const confirmed = await ask('現在のページのOCRテキストをすべて削除しますか？', {
+      title: 'OCR消去', kind: 'warning'
+    });
+    if (!confirmed) return;
+    clearOcrCurrentPage();
+    showToast('現在のページのOCRテキストを削除しました。');
+  };
+
+  const handleClearOcrAllPages = async () => {
+    const confirmed = await ask('全ページのOCRテキストをすべて削除しますか？この操作は元に戻せません。', {
+      title: 'OCR消去（全ページ）', kind: 'warning'
+    });
+    if (!confirmed) return;
+    clearOcrAllPages();
+    showToast('全ページのOCRテキストを削除しました。');
+  };
+
   const handleRemoveSpaces = () => {
     if (selectedIds.size === 0 || !currentPage) return;
     const newBlocks = currentPage.textBlocks.map(b => {
@@ -312,22 +331,33 @@ function App() {
       const pageData = await loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime);
 
       if (latestLoadRef.current === pageIdx) {
-        updatePageData(pageIdx, pageData, false);
+        // ロード前にDirtyだったページ（OCR全消去など）はtextBlocksを上書きしない
+        const existing = usePecoStore.getState().document?.pages.get(pageIdx);
+        const mergedData = existing?.isDirty
+          ? { ...pageData, textBlocks: existing.textBlocks, isDirty: true }
+          : pageData;
+        updatePageData(pageIdx, mergedData, false);
       }
 
       // 隣接ページのデータをバックグラウンドでプリフェッチ（50ms遅延でメインレンダーを優先）
       const prefetchPage = (i: number) => {
         if (i < 0 || i >= doc.totalPages) return;
-        if (usePecoStore.getState().document?.pages.has(i)) return;
+        const existingPage = usePecoStore.getState().document?.pages.get(i);
+        // ロード済み（width>0）ならスキップ
+        if (existingPage && existingPage.width > 0) return;
         setTimeout(() => {
           const currentDoc = usePecoStore.getState().document;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
           loadPage(pdf, i, doc.filePath, bboxMetaRef.current, doc.mtime)
             .then((pd) => {
               const state = usePecoStore.getState();
-              if (state.document?.filePath === doc.filePath && !state.document.pages.has(i)) {
-                updatePageData(i, pd, false);
-              }
+              if (state.document?.filePath !== doc.filePath) return;
+              const ex = state.document.pages.get(i);
+              // DirtyページはtextBlocksを上書きしない
+              const merged = ex?.isDirty
+                ? { ...pd, textBlocks: ex.textBlocks, isDirty: true }
+                : pd;
+              if (!ex || ex.width === 0) updatePageData(i, merged, false);
             })
             .catch(() => {});
         }, 50);
@@ -355,7 +385,10 @@ function App() {
   }, [document?.filePath]);
 
   useEffect(() => {
-    if (document && !document.pages.has(currentPageIndex)) {
+    if (!document) return;
+    const pageData = document.pages.get(currentPageIndex);
+    // 未ロード、またはOCR全消去で作られたダミー（width===0）の場合はロードする
+    if (!pageData || pageData.width === 0) {
       loadCurrentPage(currentPageIndex);
     }
   }, [document?.filePath, document?.pages, currentPageIndex, loadCurrentPage]);
@@ -581,7 +614,7 @@ function App() {
               {helpModal === 'version' && (
                 <div className="version-info">
                   <div className="version-logo">PecoTool V2</div>
-                  <div className="version-number">バージョン 1.3.0</div>
+                  <div className="version-number">バージョン 1.5.1</div>
                   <div className="version-desc">PDF OCR 手動編集ツール</div>
                 </div>
               )}
@@ -624,6 +657,8 @@ function App() {
         onRunOcrCurrentPage={runOcrCurrentPage}
         onRunOcrAllPages={runOcrAllPages}
         onCancelOcr={cancelOcr}
+        onClearOcrCurrentPage={handleClearOcrCurrentPage}
+        onClearOcrAllPages={handleClearOcrAllPages}
       />
 
       <main className="main-content">

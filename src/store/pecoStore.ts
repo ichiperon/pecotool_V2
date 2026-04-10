@@ -57,6 +57,8 @@ interface PecoState {
   pushAction: (action: Action) => void;
   undo: () => void;
   redo: () => void;
+  clearOcrCurrentPage: () => void;
+  clearOcrAllPages: () => void;
 }
 
 const MAX_CACHED_PAGES = 50;
@@ -364,5 +366,45 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         isDirty: true
       });
     }
-  }
+  },
+
+  clearOcrCurrentPage: () => {
+    const { document, currentPageIndex, updatePageData } = get();
+    if (!document) return;
+    const page = document.pages.get(currentPageIndex);
+    if (!page) return;
+    updatePageData(currentPageIndex, { textBlocks: [], isDirty: true });
+  },
+
+  clearOcrAllPages: () => {
+    const { document } = get();
+    if (!document) return;
+    set((state) => {
+      if (!state.document) return state;
+      const newPages = new Map(state.document.pages);
+      // ロード済みページのtextBlocksを空にする
+      for (const [idx, page] of newPages.entries()) {
+        newPages.set(idx, { ...page, textBlocks: [], isDirty: true });
+      }
+      // 未ロードページ用にdocumentのtotalPagesを参照してダミーPageDataを作成
+      for (let i = 0; i < state.document.totalPages; i++) {
+        if (!newPages.has(i)) {
+          newPages.set(i, {
+            pageIndex: i,
+            width: 0,
+            height: 0,
+            textBlocks: [],
+            isDirty: true,
+            thumbnail: null,
+          });
+        }
+      }
+      return {
+        document: { ...state.document, pages: newPages },
+        isDirty: true,
+        undoStack: [],
+        redoStack: [],
+      };
+    });
+  },
 }));
