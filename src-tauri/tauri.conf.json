@@ -14,8 +14,7 @@
       {
         "title": "PecoTool V2",
         "width": 1640,
-        "height": 880,
-        "icon": "icons/icon.ico"
+        "height": 880
       },
       {
         "label": "preview-window",

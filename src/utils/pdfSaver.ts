@@ -65,7 +65,7 @@ export async function buildPdfDocument(
   documentState: PecoDocument,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.load(originalPdfBytes);
+  const pdfDoc = await PDFDocument.load(originalPdfBytes, { ignoreEncryption: true });
   pdfDoc.registerFontkit(fontkit);
 
   const customFont = fontBytes

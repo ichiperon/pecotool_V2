@@ -69,7 +69,7 @@ self.onmessage = async (e: MessageEvent) => {
       const { originalPdfBytes, documentState, fontBytes } = data;
 
       const originalVersion = extractPdfVersion(originalPdfBytes);
-      const pdfDoc = await PDFDocument.load(originalPdfBytes);
+      const pdfDoc = await PDFDocument.load(originalPdfBytes, { ignoreEncryption: true });
       pdfDoc.registerFontkit(fontkit);
 
       const customFont = fontBytes

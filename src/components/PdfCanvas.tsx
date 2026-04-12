@@ -41,30 +41,31 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
   // Combined effect to load PDF document and page (optimized)
   useEffect(() => {
-    if (!document?.filePath) {
-      setPdfPage(null);
-      return;
-    }
-    
+    // ファイルまたはページが切り替わった瞬間に古いプロキシを即座にクリア。
+    // これにより破棄済み transport への render 呼び出しを防ぐ。
+    setPdfPage(null);
+
+    if (!document?.filePath) return;
+
     let cancelled = false;
-    // console.log(`[PdfCanvas] Loading page ${pageIndex} for ${document.filePath}`);
 
     (async () => {
       try {
-        // 使用 getCachedPageProxy (Memory Cache)
         const page = await getCachedPageProxy(document.filePath, pageIndex);
         if (cancelled) return;
-        
         setPdfPage(page);
       } catch (err) {
-        if (!cancelled) console.error("Error loading PDF page:", err);
+        // "file switched" は意図的なキャンセルなのでログ不要
+        if (!cancelled && !(err instanceof Error && err.message.includes('file switched'))) {
+          console.error("Error loading PDF page:", err);
+        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [document?.filePath, pageIndex]); // Combined dependency array
+  }, [document?.filePath, pageIndex]);
 
   const getMousePos = (e: React.MouseEvent) => {
     const rect = overlayCanvasRef.current?.getBoundingClientRect();
@@ -155,12 +156,16 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
       if (renderTaskRef.current) {
         renderTaskRef.current.cancel();
       }
+      // transport が破棄済みの場合 render() 内部で unhandled rejection が発生するため事前チェック
+      if ((pdfPage as any)._transport?.destroyed) return;
       renderTaskRef.current = pdfPage.render(renderContext);
 
       try {
         await renderTaskRef.current.promise;
       } catch (err: any) {
         if (err.name === 'RenderingCancelledException') return;
+        // ファイル切り替え直後に transport が破棄されている場合は想定内
+        if (err instanceof TypeError && err.message.includes('sendWithPromise')) return;
         console.error("PDF render error:", err);
       }
       // PDF描画完了後にオーバーレイを再描画（キャンバスサイズリセットによる消去を防ぐ）
