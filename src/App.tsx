@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
-import { usePecoStore } from "./store/pecoStore";
+import { usePecoStore, waitForPendingIdbSaves } from "./store/pecoStore";
 import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
 import { loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
@@ -17,6 +17,7 @@ import { usePreviewWindow } from "./hooks/usePreviewWindow";
 import { useFontLoader } from "./hooks/useFontLoader";
 import { useOcrEngine } from "./hooks/useOcrEngine";
 import { useThumbnailPanel } from "./hooks/useThumbnailPanel";
+import { useAutoBackup, PendingBackup } from "./hooks/useAutoBackup";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
@@ -24,6 +25,7 @@ import { Toolbar } from "./components/Toolbar/Toolbar";
 import { MenuBar } from "./components/MenuBar/MenuBar";
 import { ConsolePanel } from "./components/Console/ConsolePanel";
 import { OcrSettingsModal } from "./components/OcrSettingsModal";
+import { BackupRestoreDialog } from "./components/BackupRestoreDialog";
 
 function App() {
   const { 
@@ -51,6 +53,8 @@ function App() {
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [helpModal, setHelpModal] = useState<'shortcuts' | 'usage' | 'version' | null>(null);
   const [showOcrSettings, setShowOcrSettings] = useState(false);
+  const [pendingBackups, setPendingBackups] = useState<PendingBackup[]>([]);
+  const [processingBackupPath, setProcessingBackupPath] = useState<string | null>(null);
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
 
@@ -87,6 +91,45 @@ function App() {
 
   // --- External Hooks ---
   useFontLoader();
+
+  const { clearBackup, loadBackupData } = useAutoBackup(
+    (backups) => setPendingBackups(backups),
+  );
+
+  const handleRestoreBackup = async (backup: PendingBackup) => {
+    if (processingBackupPath) return;
+    const data = await loadBackupData(backup.file_path);
+    if (!data?.pages) {
+      showToast('バックアップデータの読み込みに失敗しました。', true);
+      return;
+    }
+    setProcessingBackupPath(backup.file_path);
+    try {
+      usePecoStore.getState().setPendingRestoration(data.pages);
+      const success = await handleOpen(backup.file_path);
+      if (!success) {
+        usePecoStore.getState().setPendingRestoration(null);
+        return;
+      }
+      // IDB への復元書き込みが完了してからバックアップファイルを削除する
+      await waitForPendingIdbSaves();
+      await clearBackup(backup.file_path);
+      setPendingBackups((prev) => prev.filter((b) => b.file_path !== backup.file_path));
+    } finally {
+      setProcessingBackupPath(null);
+    }
+  };
+
+  const handleDiscardBackup = async (backup: PendingBackup) => {
+    if (processingBackupPath) return;
+    setProcessingBackupPath(backup.file_path);
+    try {
+      await clearBackup(backup.file_path);
+      setPendingBackups((prev) => prev.filter((b) => b.file_path !== backup.file_path));
+    } finally {
+      setProcessingBackupPath(null);
+    }
+  };
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
   const { thumbnails, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument } = useThumbnailPanel();
@@ -474,6 +517,17 @@ function App() {
             <div className="help-item"><kbd>Space</kbd>+<span>ドラッグで画面移動</span></div>
           </div>
         </div>
+      )}
+
+      {/* バックアップ復元ダイアログ */}
+      {pendingBackups.length > 0 && (
+        <BackupRestoreDialog
+          backups={pendingBackups}
+          onRestore={handleRestoreBackup}
+          onDiscard={handleDiscardBackup}
+          onClose={() => setPendingBackups([])}
+          processingFilePath={processingBackupPath}
+        />
       )}
 
       {/* ヘルプモーダル */}

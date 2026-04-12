@@ -1,3 +1,5 @@
+mod backup;
+
 #[tauri::command]
 async fn run_ocr(
     image_path: String,
@@ -158,7 +160,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![run_ocr])
+        .invoke_handler(tauri::generate_handler![
+            run_ocr,
+            backup::save_backup,
+            backup::check_pending_backups,
+            backup::clear_backup,
+            backup::load_backup,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

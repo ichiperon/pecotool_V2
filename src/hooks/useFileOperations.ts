@@ -1,5 +1,6 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
+import { invoke } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
@@ -38,7 +39,7 @@ export function useFileOperations(
     localStorage.setItem('peco-recent-files', JSON.stringify(recent));
   };
 
-  const handleOpen = async (explicitPath?: string) => {
+  const handleOpen = async (explicitPath?: string): Promise<boolean> => {
     try {
       let selected = explicitPath;
       if (!selected) {
@@ -78,11 +79,15 @@ export function useFileOperations(
             console.error('[handleOpen] readFile failed:', err);
             showToast('ファイルバイナリの読み込みに失敗しました。保存できない場合があります。', true);
           });
+
+        return true;
       }
+      return false;
     } catch (err) {
       console.error("Failed to open file:", err);
       showToast("ファイルの読み込みに失敗しました。", true);
       setIsLoadingFile?.(false);
+      return false;
     }
   };
 
@@ -140,6 +145,8 @@ export function useFileOperations(
       if (size !== null) {
         resetDirty();
         showToast(`保存しました。(${formatFileSize(size)})`);
+        // 正常保存後はバックアップファイルを削除する（fire-and-forget）
+        invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
       }
     } catch (err) {
       console.error("Failed to save:", err);
@@ -163,10 +170,14 @@ export function useFileOperations(
         try {
           const size = await _executeSave(path);
           if (size !== null) {
+            const prevPath = usePecoStore.getState().document?.filePath;
             setDocumentFilePath(path);
             resetDirty();
             showToast(`名前を付けて保存しました。(${formatFileSize(size)})`);
             addToRecent(path);
+            // 元のパスのバックアップも新しいパスのバックアップも削除する
+            if (prevPath) invoke('clear_backup', { filePath: prevPath }).catch(() => {});
+            invoke('clear_backup', { filePath: path }).catch(() => {});
           }
         } finally {
           setIsSaving?.(false);

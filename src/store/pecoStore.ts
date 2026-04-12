@@ -31,10 +31,13 @@ interface PecoState {
   redoStack: Action[];
   fontBytes: ArrayBuffer | null;
   isFontLoaded: boolean;
+  /** 復元待ちのバックアップページデータ。setDocument 内で IDB への書き込みに使われる。 */
+  pendingRestoration: Record<string, Partial<PageData>> | null;
 
   // Actions
   setFontBytes: (bytes: ArrayBuffer) => void;
   setFontLoaded: (loaded: boolean) => void;
+  setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
   setOriginalBytes: (bytes: Uint8Array) => void;
   setDocumentFilePath: (filePath: string) => void;
@@ -81,9 +84,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   redoStack: [],
   fontBytes: null,
   isFontLoaded: false,
+  pendingRestoration: null,
 
   setFontBytes: (bytes) => set({ fontBytes: bytes, isFontLoaded: true }),
   setFontLoaded: (loaded) => set({ isFontLoaded: loaded }),
+  setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
   setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
   setDocumentFilePath: (filePath) => set((state) => {
     if (!state.document) return state;
@@ -92,12 +97,16 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   }),
 
   setDocument: (doc, bytes) => {
+    // pendingRestoration を取り出してから state をリセットする
+    const restoration = get().pendingRestoration;
+
     set({
       document: doc,
       originalBytes: bytes || null,
       pageAccessOrder: [],
       currentPageIndex: 0,
-      isDirty: false,
+      // バックアップ復元時は即座に isDirty=true にしておく
+      isDirty: restoration !== null && doc !== null,
       showOcr: true,
       showTextPreview: false,
       isDrawingMode: false,
@@ -106,14 +115,32 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       lastSelectedId: null,
       clipboard: [],
       undoStack: [],
-      redoStack: []
+      redoStack: [],
+      pendingRestoration: null,
     });
 
-    // IDB一時データのクリアをset()外でawaitして確実に完了させる
+    // IDB一時データのクリアをset()外でawaitして確実に完了させる。
+    // 復元データがある場合はクリア完了後に IDB へ書き込む（順序保証）。
     if (doc) {
-      clearTemporaryChanges(doc.filePath).catch((e) => {
-        console.warn('[Store] clearTemporaryChanges失敗:', e);
-      });
+      const restorationPromise = clearTemporaryChanges(doc.filePath)
+        .then(async () => {
+          if (!restoration || Object.keys(restoration).length === 0) return;
+          const entries = Object.entries(restoration).map(([idx, data]) => ({
+            filePath: doc.filePath,
+            pageIndex: parseInt(idx, 10),
+            data,
+          }));
+          await saveTemporaryPageDataBatch(entries);
+        })
+        .catch((e) => {
+          console.warn('[Store] clearTemporaryChanges失敗:', e);
+        });
+
+      // 復元書き込みも pendingIdbSaves で追跡し、呼び出し元が完了を待機できるようにする
+      if (restoration && Object.keys(restoration).length > 0) {
+        pendingIdbSaves.add(restorationPromise);
+        restorationPromise.finally(() => pendingIdbSaves.delete(restorationPromise));
+      }
     }
   },
 
