@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useImperativeHandle, forwardRef } from "react";
+import React, { useRef, useEffect, useImperativeHandle, forwardRef, memo } from "react";
 import { GripVertical } from "lucide-react";
 import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
@@ -15,12 +15,13 @@ interface OcrCardProps {
   onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
 }
 
-export const OcrCard = forwardRef<OcrCardHandle, OcrCardProps>(
+export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   function OcrCard({ block, pageIndex, dragListeners, onNavigate, onSelect }, ref) {
-  const { updatePageData, document, selectedIds, toggleSelection } = usePecoStore();
+  // selectedIds全体ではなく、このブロックのisSelectedのみ購読（200回の再レンダリングを防ぐ）
+  const isSelected = usePecoStore(state => state.selectedIds.has(block.id));
+  const { updatePageData, document, toggleSelection } = usePecoStore();
   const contentRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
-  const isSelected = selectedIds.has(block.id);
 
   // 外部からテキストエリアにフォーカスできるようにする
   useImperativeHandle(ref, () => ({
@@ -138,4 +139,4 @@ export const OcrCard = forwardRef<OcrCardHandle, OcrCardProps>(
       />
     </div>
   );
-});
+}));

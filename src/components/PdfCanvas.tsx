@@ -178,6 +178,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   }, [pdfPage, zoom]);
 
   // Overlay Layer Rendering
+  const overlayRafRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!overlayCanvasRef.current || !pdfPage) return;
 
@@ -321,7 +323,20 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
 
     // refを更新して PDF 描画完了後も最新の描画関数を呼べるようにする
     renderOverlaysRef.current = renderOverlays;
-    renderOverlays();
+
+    // RAFでスロットル化（ドラッグ中などの高頻度更新時に無駄な描画を防ぐ）
+    if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
+    overlayRafRef.current = requestAnimationFrame(() => {
+      renderOverlays();
+      overlayRafRef.current = null;
+    });
+
+    return () => {
+      if (overlayRafRef.current) {
+        cancelAnimationFrame(overlayRafRef.current);
+        overlayRafRef.current = null;
+      }
+    };
   }, [zoom, document, pageIndex, showOcr, ocrOpacity, selectedIds, isDrawing, startPos, currentPos, draggedId, pdfPage, isAltDragging, altDragStart, altDragEnd]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -498,6 +513,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     toggleSelection('', false); // Clear selection
   };
 
+  const mouseMoveRafRef = useRef<number | null>(null);
+
   const handleMouseMove = (e: React.MouseEvent) => {
     if (disableDrawing) return;
     const pos = getMousePos(e);
@@ -562,58 +579,62 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         updatePageData(pageIndex, { textBlocks: newBlocks }, false);
       }
     } else {
-      // Hover effect for cursor
-      const pageData = document?.pages.get(pageIndex);
-      let hoverCursor = 'default';
-      
-      if (isDrawingMode) {
-        hoverCursor = 'crosshair';
-      } else if (isSplitMode) {
-        hoverCursor = 'crosshair';
-        if (pageData) {
-          for (let i = pageData.textBlocks.length - 1; i >= 0; i--) {
-            const block = pageData.textBlocks[i];
+      // Hover effect for cursor（RAFでスロットル化: 高頻度mousemoveでのO(n)スキャンを抑制）
+      if (mouseMoveRafRef.current) return;
+      mouseMoveRafRef.current = requestAnimationFrame(() => {
+        mouseMoveRafRef.current = null;
+        const pageData = document?.pages.get(pageIndex);
+        let hoverCursor = 'default';
+
+        if (isDrawingMode) {
+          hoverCursor = 'crosshair';
+        } else if (isSplitMode) {
+          hoverCursor = 'crosshair';
+          if (pageData) {
+            for (let i = pageData.textBlocks.length - 1; i >= 0; i--) {
+              const block = pageData.textBlocks[i];
+              const x = block.bbox.x * scale;
+              const y = block.bbox.y * scale;
+              const w = block.bbox.width * scale;
+              const h = block.bbox.height * scale;
+              if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
+                hoverCursor = block.writingMode === 'vertical' ? 'row-resize' : 'col-resize';
+                break;
+              }
+            }
+          }
+        } else if (pageData) {
+          // Check handles
+          for (const id of selectedIds) {
+            const block = pageData.textBlocks.find(b => b.id === id);
+            if (!block) continue;
             const x = block.bbox.x * scale;
             const y = block.bbox.y * scale;
             const w = block.bbox.width * scale;
             const h = block.bbox.height * scale;
-            if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
-              hoverCursor = block.writingMode === 'vertical' ? 'row-resize' : 'col-resize';
-              break;
+            const hs = 10;
+            if (Math.abs(pos.x - x) < hs && Math.abs(pos.y - y) < hs) hoverCursor = 'nw-resize';
+            else if (Math.abs(pos.x - (x + w)) < hs && Math.abs(pos.y - y) < hs) hoverCursor = 'ne-resize';
+            else if (Math.abs(pos.x - x) < hs && Math.abs(pos.y - (h + y)) < hs) hoverCursor = 'sw-resize';
+            else if (Math.abs(pos.x - (x + w)) < hs && Math.abs(pos.y - (h + y)) < hs) hoverCursor = 'se-resize';
+          }
+
+          if (hoverCursor === 'default') {
+            for (let i = pageData.textBlocks.length - 1; i >= 0; i--) {
+              const block = pageData.textBlocks[i];
+              const x = block.bbox.x * scale;
+              const y = block.bbox.y * scale;
+              const w = block.bbox.width * scale;
+              const h = block.bbox.height * scale;
+              if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
+                hoverCursor = 'move';
+                break;
+              }
             }
           }
         }
-      } else if (pageData) {
-        // Check handles
-        for (const id of selectedIds) {
-          const block = pageData.textBlocks.find(b => b.id === id);
-          if (!block) continue;
-          const x = block.bbox.x * scale;
-          const y = block.bbox.y * scale;
-          const w = block.bbox.width * scale;
-          const h = block.bbox.height * scale;
-          const hs = 10;
-          if (Math.abs(pos.x - x) < hs && Math.abs(pos.y - y) < hs) hoverCursor = 'nw-resize';
-          else if (Math.abs(pos.x - (x + w)) < hs && Math.abs(pos.y - y) < hs) hoverCursor = 'ne-resize';
-          else if (Math.abs(pos.x - x) < hs && Math.abs(pos.y - (h + y)) < hs) hoverCursor = 'sw-resize';
-          else if (Math.abs(pos.x - (x + w)) < hs && Math.abs(pos.y - (h + y)) < hs) hoverCursor = 'se-resize';
-        }
-        
-        if (hoverCursor === 'default') {
-          for (let i = pageData.textBlocks.length - 1; i >= 0; i--) {
-            const block = pageData.textBlocks[i];
-            const x = block.bbox.x * scale;
-            const y = block.bbox.y * scale;
-            const w = block.bbox.width * scale;
-            const h = block.bbox.height * scale;
-            if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
-              hoverCursor = 'move';
-              break;
-            }
-          }
-        }
-      }
-      if (overlayCanvasRef.current) overlayCanvasRef.current.style.cursor = hoverCursor;
+        if (overlayCanvasRef.current) overlayCanvasRef.current.style.cursor = hoverCursor;
+      });
     }
   };
 
