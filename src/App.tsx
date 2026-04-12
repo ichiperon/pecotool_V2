@@ -3,7 +3,7 @@ import "./App.css";
 import { usePecoStore } from "./store/pecoStore";
 import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
-import { generateThumbnail, loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
+import { loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
@@ -16,11 +16,12 @@ import { useConsoleLogs } from "./hooks/useConsoleLogs";
 import { usePreviewWindow } from "./hooks/usePreviewWindow";
 import { useFontLoader } from "./hooks/useFontLoader";
 import { useOcrEngine } from "./hooks/useOcrEngine";
+import { useThumbnailPanel } from "./hooks/useThumbnailPanel";
+import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
 import { Toolbar } from "./components/Toolbar/Toolbar";
 import { MenuBar } from "./components/MenuBar/MenuBar";
-import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 import { ConsolePanel } from "./components/Console/ConsolePanel";
 import { OcrSettingsModal } from "./components/OcrSettingsModal";
 
@@ -30,11 +31,11 @@ function App() {
     setCurrentPage, updatePageData, selectedIds, showOcr, toggleShowOcr,
     ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack,
     isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode,
-    isDirty, thumbnails, copySelected, pasteClipboard,
+    isDirty, copySelected, pasteClipboard,
     clearOcrCurrentPage, clearOcrAllPages
   } = usePecoStore();
 
-  const [leftWidth, setLeftWidth] = useState(200);
+  const [leftWidth, setLeftWidth] = useState(220);
   const [rightWidth, setRightWidth] = useState(400);
   const [isAutoFit, setIsAutoFit] = useState(true);
   
@@ -88,6 +89,7 @@ function App() {
   useFontLoader();
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
+  const { thumbnails, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument } = useThumbnailPanel();
   const { isOcrRunning, ocrProgress, runOcrCurrentPage, runOcrAllPages, cancelOcr, checkAndPromptOcrZero } = useOcrEngine(showToast);
   const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
@@ -234,63 +236,6 @@ function App() {
     text: string;
   }>> | null | undefined>(undefined);
 
-  const thumbnailQueueRef = useRef<number[]>([]);
-  const isThumbnailProcessingRef = useRef<boolean>(false);
-
-  const THUMBNAIL_CONCURRENCY = 4;
-
-  const processThumbnailQueue = useCallback(async () => {
-    const doc = usePecoStore.getState().document;
-    if (isThumbnailProcessingRef.current || !doc) return;
-    isThumbnailProcessingRef.current = true;
-
-    try {
-      while (thumbnailQueueRef.current.length > 0) {
-        const batch: number[] = [];
-        while (batch.length < THUMBNAIL_CONCURRENCY && thumbnailQueueRef.current.length > 0) {
-          const pageIdx = thumbnailQueueRef.current.shift()!;
-          if (!usePecoStore.getState().thumbnails.has(pageIdx)) {
-            batch.push(pageIdx);
-          }
-        }
-        if (batch.length === 0) continue;
-
-        await Promise.allSettled(
-          batch.map(async (pageIdx) => {
-            const dataUrl = await generateThumbnail(doc.filePath, pageIdx);
-            usePecoStore.getState().setThumbnail(pageIdx, dataUrl);
-          })
-        );
-      }
-    } catch (err) {
-      console.error("Thumbnail error:", err);
-    } finally {
-      isThumbnailProcessingRef.current = false;
-      if (thumbnailQueueRef.current.length > 0) {
-        setTimeout(processThumbnailQueue, 0);
-      }
-    }
-  }, []);
-
-  const thumbnailTimerRef = useRef<number | null>(null);
-
-  const requestThumbnail = useCallback((pageIndex: number) => {
-    const state = usePecoStore.getState();
-    if (state.thumbnails.has(pageIndex) || !state.document) return;
-
-    if (!thumbnailQueueRef.current.includes(pageIndex)) {
-      thumbnailQueueRef.current.push(pageIndex);
-    }
-
-    if (thumbnailTimerRef.current !== null) {
-      ((window as any).cancelIdleCallback ?? clearTimeout)(thumbnailTimerRef.current);
-    }
-    // メイン画像のレンダリングを優先させるため、アイドル時 or 最大400ms後に処理開始
-    thumbnailTimerRef.current = ((window as any).requestIdleCallback ?? ((cb: () => void) => setTimeout(cb, 300)))(
-      () => { processThumbnailQueue(); },
-      { timeout: 400 }
-    ) as number;
-  }, [processThumbnailQueue]);
 
   const loadCurrentPage = useCallback(async (pageIdx: number) => {
     latestLoadRef.current = pageIdx;
@@ -459,8 +404,8 @@ function App() {
   const startResizeLeft = (e: React.MouseEvent) => {
     const startX = e.clientX;
     const startWidth = leftWidth;
-    const onMouseMove = (moveEvent: MouseEvent) => setLeftWidth(Math.max(100, Math.min(500, startWidth + (moveEvent.clientX - startX))));
-    const onMouseUp = () => { window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp); };
+    const onMouseMove = (moveEvent: MouseEvent) => setLeftWidth(Math.max(150, Math.min(400, startWidth + (moveEvent.clientX - startX))));
+    const onMouseUp = () => { window.removeEventListener('mouseup', onMouseUp); window.removeEventListener('mousemove', onMouseMove); };
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   };
@@ -577,8 +522,8 @@ function App() {
                     <div className="usage-title">基本的な流れ</div>
                     <ol className="usage-list">
                       <li>「ファイル → 開く」からPDFを読み込む</li>
-                      <li>左のサムネイルでページを選択</li>
-                      <li>中央のPDFビュー上でBB（テキストブロック）を確認・編集</li>
+                      <li>サムネイルウィンドウ（自動表示）でページを選択</li>
+                      <li>PDFビュー上でBB（テキストブロック）を確認・編集</li>
                       <li>右パネルでBBのテキストを直接編集</li>
                       <li>「ファイル → 保存」で保存</li>
                     </ol>
@@ -662,9 +607,13 @@ function App() {
       />
 
       <main className="main-content">
-        <ThumbnailPanel 
-          width={leftWidth} document={document} currentPageIndex={currentPageIndex} 
-          thumbnails={thumbnails} onSelectPage={setCurrentPage} onRequestThumbnail={requestThumbnail}
+        <ThumbnailPanel
+          width={leftWidth}
+          document={fakeDocument}
+          currentPageIndex={currentPageIndex}
+          thumbnails={thumbnails}
+          onSelectPage={handleThumbnailSelectPage}
+          onRequestThumbnail={requestThumbnail}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
         <section

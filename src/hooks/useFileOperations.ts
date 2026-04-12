@@ -50,20 +50,34 @@ export function useFileOperations(
 
       if (selected && typeof selected === 'string') {
         setIsLoadingFile?.(true);
-        try {
-          // Promise.all で構造 (loadPDF) とバイナリ (readFile) の両方を待機し、
-          // レースコンディション（バイナリ読み込み完了前に setDocument で null にリセットされる問題）を防ぐ。
-          const [content, doc] = await Promise.all([
-            readFile(selected),
-            loadPDF(selected)
-          ]);
 
-          setDocument(doc, new Uint8Array(content));
+        // readFile（保存用バイナリ）はバックグラウンドで開始。表示には不要なので待たない。
+        const readFilePromise = readFile(selected);
+
+        try {
+          // loadPDF が完了した時点で即座に表示開始
+          const doc = await loadPDF(selected);
+          setDocument(doc); // bytes なしで表示 → UIが即座に反応する
           addToRecent(selected);
           onOpenComplete?.(doc);
         } finally {
           setIsLoadingFile?.(false);
         }
+
+        // readFile はバックグラウンドで継続し、完了後に originalBytes を更新
+        // capturedPath で「このファイルが今も表示中か」を確認してから書き込む（競合防止）
+        const capturedPath = selected;
+        readFilePromise
+          .then(content => {
+            const state = usePecoStore.getState();
+            if (state.document?.filePath === capturedPath) {
+              state.setOriginalBytes(new Uint8Array(content));
+            }
+          })
+          .catch(err => {
+            console.error('[handleOpen] readFile failed:', err);
+            showToast('ファイルバイナリの読み込みに失敗しました。保存できない場合があります。', true);
+          });
       }
     } catch (err) {
       console.error("Failed to open file:", err);

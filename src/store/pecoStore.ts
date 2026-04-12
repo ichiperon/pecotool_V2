@@ -14,9 +14,8 @@ export function waitForPendingIdbSaves(): Promise<void> {
 
 interface PecoState {
   document: PecoDocument | null;
-  originalBytes: Uint8Array | null; // This will eventually be removed or minimized
-  thumbnails: Map<number, string>; // Blob URL
-  pageAccessOrder: number[]; // For LRU
+  originalBytes: Uint8Array | null;
+  pageAccessOrder: number[]; // For page data LRU (1000ページ対応)
   currentPageIndex: number;
   zoom: number;
   isDirty: boolean;
@@ -37,8 +36,8 @@ interface PecoState {
   setFontBytes: (bytes: ArrayBuffer) => void;
   setFontLoaded: (loaded: boolean) => void;
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
+  setOriginalBytes: (bytes: Uint8Array) => void;
   setDocumentFilePath: (filePath: string) => void;
-  setThumbnail: (pageIndex: number, blobUrl: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
   toggleShowOcr: () => void;
@@ -66,7 +65,6 @@ const MAX_CACHED_PAGES = 50;
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
   originalBytes: null,
-  thumbnails: new Map(),
   pageAccessOrder: [],
   currentPageIndex: 0,
   zoom: 100,
@@ -86,6 +84,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   setFontBytes: (bytes) => set({ fontBytes: bytes, isFontLoaded: true }),
   setFontLoaded: (loaded) => set({ isFontLoaded: loaded }),
+  setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
   setDocumentFilePath: (filePath) => set((state) => {
     if (!state.document) return state;
     const fileName = filePath.split(/[\\/]/).pop() || state.document.fileName;
@@ -93,14 +92,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   }),
 
   setDocument: (doc, bytes) => {
-    // Revoke all existing thumbnail URLs to free memory
-    const { thumbnails } = get();
-    thumbnails.forEach(url => URL.revokeObjectURL(url));
-
     set({
       document: doc,
       originalBytes: bytes || null,
-      thumbnails: new Map(),
       pageAccessOrder: [],
       currentPageIndex: 0,
       isDirty: false,
@@ -122,46 +116,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
     }
   },
-
-  setThumbnail: (pageIndex, blobUrl) => set((state) => {
-    const newThumbnails = new Map(state.thumbnails);
-    // If we already have a thumbnail for this page, revoke the old one
-    const oldUrl = newThumbnails.get(pageIndex);
-    if (oldUrl) URL.revokeObjectURL(oldUrl);
-    
-    newThumbnails.set(pageIndex, blobUrl);
-
-    // LRU for thumbnails: Keep only 100 most recent thumbnails
-    const MAX_THUMBNAILS = 100;
-    if (newThumbnails.size > MAX_THUMBNAILS) {
-      // accessOrder は最近アクセス順（先頭が最新）。
-      // accessOrder に含まれないページは古いものとして削除対象にする。
-      // accessOrder に含まれる場合は末尾（古い）から削除する。
-      const accessOrder = state.pageAccessOrder;
-      const recentSet = new Set(accessOrder);
-
-      // まず accessOrder に含まれないページから削除
-      for (const idx of newThumbnails.keys()) {
-        if (newThumbnails.size <= MAX_THUMBNAILS) break;
-        if (idx !== state.currentPageIndex && !recentSet.has(idx)) {
-          const urlToRevoke = newThumbnails.get(idx);
-          if (urlToRevoke) URL.revokeObjectURL(urlToRevoke);
-          newThumbnails.delete(idx);
-        }
-      }
-      // まだ超えている場合は accessOrder の末尾（最も古い）から削除
-      for (let i = accessOrder.length - 1; i >= 0 && newThumbnails.size > MAX_THUMBNAILS; i--) {
-        const idx = accessOrder[i];
-        if (idx !== state.currentPageIndex && newThumbnails.has(idx)) {
-          const urlToRevoke = newThumbnails.get(idx);
-          if (urlToRevoke) URL.revokeObjectURL(urlToRevoke);
-          newThumbnails.delete(idx);
-        }
-      }
-    }
-
-    return { thumbnails: newThumbnails };
-  }),
 
   setCurrentPage: (index) => set((state) => {
     const newOrder = [index, ...state.pageAccessOrder.filter(i => i !== index)];

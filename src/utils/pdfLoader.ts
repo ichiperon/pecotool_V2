@@ -118,7 +118,10 @@ export async function getSharedPdfProxy(filePath: string): Promise<pdfjsLib.PDFD
   }
   destroySharedPdfProxy();
   const loadId = ++globalLoadId;
-  const url = convertFileSrc(filePath);
+  let url = convertFileSrc(filePath);
+  if (url.startsWith('asset.localhost')) {
+    url = 'http://' + url;
+  }
   const promise = getDocumentTask(url).promise;
   globalSharedPdfProxy = { filePath, promise, loadId };
   return promise;
