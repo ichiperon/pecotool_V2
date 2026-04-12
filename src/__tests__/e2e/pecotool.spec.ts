@@ -70,7 +70,7 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
 
   test.describe('E-P: プレビューウィンドウ連携', () => {
     test('[E-P-01] プレビューボタンの動作確認', async ({ page }) => {
-      const previewBtn = page.locator('button', { hasText: '別ウインドウで確認' });
+      const previewBtn = page.locator('button', { hasText: 'テキスト確認' });
       await expect(previewBtn).toBeVisible();
       // クリックしてエラーが出ないことを確認
       await previewBtn.click();
