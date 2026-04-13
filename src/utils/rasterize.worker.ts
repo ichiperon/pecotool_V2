@@ -1,9 +1,10 @@
 import * as pdfjsLib from 'pdfjs-dist';
+import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, StandardFonts, PDFName, PDFHexString, degrees, pushGraphicsState, popGraphicsState, translate, scale } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 
-// Worker内でネストしたWorkerを起動しないようFakeWorkerモードを使用
-pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+// pdfjs-dist v5 では workerSrc='' がエラーになるため正規のWorker URLを指定する
+pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 
 const BATCH_SIZE = 4;
 

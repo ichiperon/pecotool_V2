@@ -18,7 +18,9 @@
       "Bash(mv REQUIREMENTS_追加機能.md docs/)",
       "Bash(mv TEST_REQUIREMENTS.md docs/)",
       "Bash(mv スプシ.url docs/)",
-      "Bash(grep -E \"\\\\.ts$|\\\\.tsx$\")"
+      "Bash(grep -E \"\\\\.ts$|\\\\.tsx$\")",
+      "Bash(xargs cat:*)",
+      "Bash(xargs grep:*)"
     ]
   }
 }

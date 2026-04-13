@@ -1,8 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { listen, emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { generateThumbnail, destroySharedPdfProxy } from '../../utils/pdfLoader';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { ThumbnailPanel } from '../Sidebar/ThumbnailPanel';
+import '../../App.css';
+
+const CONCURRENCY = 6;
+
+function toAssetUrl(filePath: string): string {
+  let url = convertFileSrc(filePath);
+  if (url.startsWith('asset.localhost')) url = 'http://' + url;
+  return url;
+}
 
 interface ThumbnailFileOpenedPayload {
   filePath: string;
@@ -18,6 +27,17 @@ export function ThumbnailWindow() {
   const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
   const [dirtyPages, setDirtyPages] = useState<Set<number>>(new Set());
 
+  // --- Worker management ---
+  const workerRef = useRef<Worker | null>(null);
+  // pageIndex → resolve callback（ワーカーからの THUMBNAIL_DONE/ERROR 待ち）
+  const pendingRef = useRef<Map<number, (url: string | null) => void>>(new Map());
+  // PDF ロード完了待ち用の resolve callback
+  const loadResolveRef = useRef<((ok: boolean) => void) | null>(null);
+
+  const thumbnailQueueRef = useRef<number[]>([]);
+  const isProcessingRef = useRef(false);
+  const epochRef = useRef(0);
+
   // バツボタンで閉じず非表示にする
   useEffect(() => {
     const win = getCurrentWindow();
@@ -29,64 +49,139 @@ export function ThumbnailWindow() {
     return () => { unlisten?.(); };
   }, []);
 
-  // --- Thumbnail generation ---
-  const thumbnailQueueRef = useRef<number[]>([]);
-  const isProcessingRef = useRef(false);
-  const epochRef = useRef(0);
-  const CONCURRENCY = 4;
+  // Worker の初期化（マウント時1回）
+  useEffect(() => {
+    const worker = new Worker(
+      new URL('../../utils/thumbnail.worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+    workerRef.current = worker;
 
-  const processThumbnailQueue = useCallback(async (fp: string, epoch: number) => {
+    worker.onmessage = (e: MessageEvent) => {
+      const { type, pageIndex, bytes } = e.data;
+
+      // PDF ロード完了通知
+      if (type === 'LOAD_COMPLETE') {
+        loadResolveRef.current?.(true);
+        loadResolveRef.current = null;
+        return;
+      }
+      if (type === 'LOAD_ERROR') {
+        console.error('[ThumbnailWindow] Worker PDF load error:', e.data.message);
+        loadResolveRef.current?.(false);
+        loadResolveRef.current = null;
+        return;
+      }
+
+      // サムネイル生成完了
+      const resolve = pendingRef.current.get(pageIndex);
+      if (!resolve) return;
+      pendingRef.current.delete(pageIndex);
+
+      if (type === 'THUMBNAIL_DONE' && bytes instanceof Uint8Array) {
+        const blob = new Blob([bytes], { type: 'image/jpeg' });
+        resolve(URL.createObjectURL(blob));
+      } else {
+        resolve(null);
+      }
+    };
+
+    worker.onerror = (err) => {
+      console.error('[ThumbnailWindow] Worker error:', err);
+      loadResolveRef.current?.(false);
+      loadResolveRef.current = null;
+      pendingRef.current.forEach(r => r(null));
+      pendingRef.current.clear();
+    };
+
+    return () => {
+      worker.terminate();
+      workerRef.current = null;
+      loadResolveRef.current?.(false);
+      loadResolveRef.current = null;
+      pendingRef.current.forEach(r => r(null));
+      pendingRef.current.clear();
+    };
+  }, []);
+
+  // Worker に1ページ分のサムネイル生成を依頼し、完了を Promise で待つ
+  const generateViaWorker = useCallback((pageIdx: number): Promise<string | null> => {
+    return new Promise(resolve => {
+      const worker = workerRef.current;
+      if (!worker) { resolve(null); return; }
+
+      // 既にリクエスト中の場合は重複回避
+      if (pendingRef.current.has(pageIdx)) {
+        resolve(null);
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        if (pendingRef.current.has(pageIdx)) {
+          console.warn(`[ThumbnailWindow] Page ${pageIdx + 1} thumbnail timeout`);
+          pendingRef.current.delete(pageIdx);
+          resolve(null);
+        }
+      }, 15000);
+
+      pendingRef.current.set(pageIdx, (url: string | null) => {
+        clearTimeout(timeout);
+        resolve(url);
+      });
+      worker.postMessage({ type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx });
+    });
+  }, []);
+
+  // キュー処理（stale closure を避けるため epoch を引数で受け取る）
+  const processThumbnailQueue = useCallback(async (epoch: number) => {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     try {
       while (thumbnailQueueRef.current.length > 0) {
+        if (epochRef.current !== epoch) break;
         const batch: number[] = [];
         while (batch.length < CONCURRENCY && thumbnailQueueRef.current.length > 0) {
           batch.push(thumbnailQueueRef.current.shift()!);
         }
         if (batch.length === 0) continue;
+
         await Promise.allSettled(
           batch.map(async (pageIdx) => {
-            try {
-              const url = await generateThumbnail(fp, pageIdx);
-              // 空文字列の場合は保存しない（toBlob失敗 → リトライ可能にするため）
-              if (url && epochRef.current === epoch) {
-                setThumbnails(prev => {
-                  const next = new Map(prev);
-                  next.set(pageIdx, url);
-                  return next;
-                });
-              }
-            } catch {
-              // エラーは握りつぶし、次回のリクエストでリトライ可能にする
+            const url = await generateViaWorker(pageIdx);
+            if (!url) return;
+            if (epochRef.current === epoch) {
+              setThumbnails(prev => {
+                const next = new Map(prev);
+                next.set(pageIdx, url);
+                return next;
+              });
+            } else {
+              URL.revokeObjectURL(url);
             }
           })
         );
       }
     } finally {
       isProcessingRef.current = false;
-      if (thumbnailQueueRef.current.length > 0 && filePath) {
-        setTimeout(() => processThumbnailQueue(fp, epoch), 0);
+      if (thumbnailQueueRef.current.length > 0 && epochRef.current === epoch) {
+        setTimeout(() => processThumbnailQueue(epoch), 0);
       }
     }
-  }, [filePath]);
+  }, [generateViaWorker]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
-    if (!filePath) return;
     setThumbnails(prev => {
       if (prev.has(pageIndex)) return prev;
       if (!thumbnailQueueRef.current.includes(pageIndex)) {
         thumbnailQueueRef.current.push(pageIndex);
       }
-      const fp = filePath;
       const epoch = epochRef.current;
-      setTimeout(() => processThumbnailQueue(fp, epoch), 0);
+      setTimeout(() => processThumbnailQueue(epoch), 0);
       return prev;
     });
-  }, [filePath, processThumbnailQueue]);
+  }, [processThumbnailQueue]);
 
   // --- Event listeners ---
-  // 全リスナー登録完了後にrequest-stateを投げる（登録前に投げると応答イベントを取り逃す）
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
 
@@ -94,10 +189,19 @@ export function ThumbnailWindow() {
       // ファイルが開かれた
       unlisteners.push(await listen<ThumbnailFileOpenedPayload>('thumbnail:file-opened', (e) => {
         const { filePath: fp, currentPageIndex: page, totalPages: total, dirtyPages: dirty } = e.payload;
+
         epochRef.current++;
+        const epoch = epochRef.current;
         thumbnailQueueRef.current = [];
         isProcessingRef.current = false;
-        destroySharedPdfProxy();
+
+        // 前の PDF ロード待ちをキャンセル
+        loadResolveRef.current?.(false);
+        loadResolveRef.current = null;
+
+        pendingRef.current.forEach(r => r(null));
+        pendingRef.current.clear();
+
         setThumbnails(prev => {
           prev.forEach(url => { if (url) URL.revokeObjectURL(url); });
           return new Map();
@@ -106,6 +210,18 @@ export function ThumbnailWindow() {
         setTotalPages(total);
         setCurrentPageIndex(page);
         setDirtyPages(new Set(dirty));
+
+        // Worker に新しい PDF をロード
+        const assetUrl = toAssetUrl(fp);
+        workerRef.current?.postMessage({ type: 'LOAD_PDF', url: assetUrl });
+
+        // LOAD_COMPLETE を受け取ったらキュー処理開始（Promise で確実に待つ）
+        new Promise<boolean>(resolve => {
+          loadResolveRef.current = resolve;
+        }).then(ok => {
+          if (!ok || epochRef.current !== epoch) return;
+          processThumbnailQueue(epoch);
+        });
       }));
 
       // ファイルが閉じられた
@@ -113,7 +229,10 @@ export function ThumbnailWindow() {
         epochRef.current++;
         thumbnailQueueRef.current = [];
         isProcessingRef.current = false;
-        destroySharedPdfProxy();
+        loadResolveRef.current?.(false);
+        loadResolveRef.current = null;
+        pendingRef.current.forEach(r => r(null));
+        pendingRef.current.clear();
         setThumbnails(prev => {
           prev.forEach(url => { if (url) URL.revokeObjectURL(url); });
           return new Map();
@@ -134,13 +253,13 @@ export function ThumbnailWindow() {
         setDirtyPages(new Set(e.payload.dirtyPages));
       }));
 
-      // 全リスナー登録完了後に現在状態を要求（ウィンドウ表示が遅延した場合の同期）
+      // 全リスナー登録完了後に現在状態を要求
       await emit('thumbnail:request-state');
     };
 
     setup().catch(console.error);
     return () => { unlisteners.forEach(fn => fn()); };
-  }, []);
+  }, [processThumbnailQueue]);
 
   const handleSelectPage = useCallback((pageIndex: number) => {
     setCurrentPageIndex(pageIndex);

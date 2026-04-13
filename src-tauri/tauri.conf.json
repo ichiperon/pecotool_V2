@@ -23,10 +23,20 @@
         "width": 600,
         "height": 800,
         "visible": false
+      },
+      {
+        "label": "thumbnail-window",
+        "title": "サムネイル一覧",
+        "url": "/#thumbnails",
+        "width": 250,
+        "height": 800,
+        "visible": false,
+        "resizable": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: blob: data: http://asset.localhost; connect-src 'self' asset: blob: data: http://asset.localhost https://unpkg.com; worker-src 'self' blob:; object-src 'none';",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: blob: data: http://asset.localhost https://asset.localhost; connect-src 'self' asset: blob: data: http://asset.localhost https://asset.localhost https://unpkg.com; worker-src 'self' blob:; object-src 'none';",
       "assetProtocol": {
         "enable": true,
         "scope": ["**"]

@@ -35,8 +35,17 @@ function getDocumentTask(urlOrData: string | Uint8Array) {
   return pdfjsLib.getDocument(config);
 }
 
+// アプリ起動直後にworkerを起動しておく（初回PDF読込を高速化）
+// 不正なPDFデータで呼ぶためworker側でエラーになるが、プロセス起動は完了する
+export function prewarmPdfjsWorker(): void {
+  const task = pdfjsLib.getDocument({ data: new Uint8Array([0x25, 0x50, 0x44, 0x46]) }); // "%PDF"
+  task.promise.catch(() => {});
+}
+
 export async function loadPDF(filePath: string): Promise<PecoDocument> {
   let url = convertFileSrc(filePath);
+  // Tauri v2 (Windows) は https://asset.localhost を使う。
+  // CSP で https も許可したが、古い環境との互換性のために startsWith チェックを維持。
   if (url.startsWith('asset.localhost')) {
     url = 'http://' + url;
   }
@@ -48,6 +57,8 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
   const promise = getDocumentTask(url).promise;
   globalSharedPdfProxy = { filePath, promise, loadId };
 
+  // stat と getDocument を並列実行（statは通常先に完了する）
+  const statPromise = stat(filePath);
   const pdf = await promise;
 
   // ファイルが切り替わっていた場合は破棄
@@ -79,9 +90,9 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
     doc.metadata.author = (metadata.info as any)?.Author;
   }).catch(() => {});
 
-  // ファイルの最終更新時刻をキャッシュキーに使うために取得
+  // ファイルの最終更新時刻をキャッシュキーに使うために取得（getDocumentと並列取得済み）
   try {
-    const fileStat = await stat(filePath);
+    const fileStat = await statPromise;
     const mt = fileStat.mtime;
     doc.mtime = mt instanceof Date ? mt.getTime() : (mt ?? Date.now());
   } catch {

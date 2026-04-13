@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "preview-window"],
+  "windows": ["main", "preview-window", "thumbnail-window"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -27,6 +27,16 @@
     },
     {
       "identifier": "fs:allow-read-file",
+      "allow": [
+        { "path": "**" },
+        { "path": "$HOME/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-stat",
       "allow": [
         { "path": "**" },
         { "path": "$HOME/**" },

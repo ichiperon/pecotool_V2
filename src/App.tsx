@@ -3,7 +3,7 @@ import "./App.css";
 import { usePecoStore, waitForPendingIdbSaves } from "./store/pecoStore";
 import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
-import { loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy } from "./utils/pdfLoader";
+import { loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy, getCachedPageProxy, prewarmPdfjsWorker } from "./utils/pdfLoader";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
@@ -316,6 +316,25 @@ function App() {
         }).catch(() => {});
       }
 
+      // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）
+      // getCachedPageProxy はキャッシュ済みなので loadPage 内の再呼び出しは無コスト
+      {
+        const qp = await getCachedPageProxy(doc.filePath, pageIdx);
+        if (latestLoadRef.current !== pageIdx) return;
+        const qv = qp.getViewport({ scale: 1.0 });
+        const pre = usePecoStore.getState().document?.pages.get(pageIdx);
+        if (!pre || pre.width === 0) {
+          updatePageData(pageIdx, {
+            pageIndex: pageIdx,
+            width: qv.width,
+            height: qv.height,
+            textBlocks: [],
+            isDirty: false,
+            thumbnail: null,
+          }, false);
+        }
+      }
+
       const pageData = await loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime);
 
       if (latestLoadRef.current === pageIdx) {
@@ -383,6 +402,7 @@ function App() {
 
   // --- Effects ---
   useEffect(() => {
+    prewarmPdfjsWorker();
     const saved = localStorage.getItem('peco-recent-files');
     if (saved) setRecentFiles(JSON.parse(saved));
     initPreviewWindow();

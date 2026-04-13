@@ -48,7 +48,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   }, [currentPageIndex]);
 
   return (
-    <aside className="thumbnails-panel" style={{ width: `${width}px` }}>
+    <aside className="thumbnails-panel" style={{ width: `${width}px`, height: '100%', flex: 1 }}>
       <div className="panel-header">サムネイル</div>
       <div className="scroll-content" tabIndex={0} onKeyDown={(e) => {
         if (!document) return;
