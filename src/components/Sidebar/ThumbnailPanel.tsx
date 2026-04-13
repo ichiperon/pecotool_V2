@@ -6,14 +6,17 @@ interface ThumbnailItemProps {
   currentPageIndex: number;
   thumbnailData?: string;
   isDirty?: boolean;
+  loadEpoch: number;
   onSelect: (index: number) => void;
   onRequest: (index: number) => void;
 }
 
-export const ThumbnailItemNode = React.memo(({ index, currentPageIndex, thumbnailData, isDirty, onSelect, onRequest }: ThumbnailItemProps) => {
+export const ThumbnailItemNode = React.memo(({ index, currentPageIndex, thumbnailData, isDirty, loadEpoch, onSelect, onRequest }: ThumbnailItemProps) => {
   useEffect(() => {
     if (!thumbnailData) onRequest(index);
-  }, [index, thumbnailData, onRequest]);
+  // loadEpoch が変化したとき（ファイル切り替え後）に再リクエストを強制する
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, thumbnailData, onRequest, loadEpoch]);
 
   return (
     <div className={`thumbnail-item ${index === currentPageIndex ? 'active' : ''}`} onClick={() => onSelect(index)}>
@@ -34,12 +37,13 @@ interface ThumbnailPanelProps {
   document: any;
   currentPageIndex: number;
   thumbnails: Map<number, string>;
+  loadEpoch: number;
   onSelectPage: (index: number) => void;
   onRequestThumbnail: (index: number) => void;
 }
 
 export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
-  width, document, currentPageIndex, thumbnails, onSelectPage, onRequestThumbnail
+  width, document, currentPageIndex, thumbnails, loadEpoch, onSelectPage, onRequestThumbnail
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
@@ -48,7 +52,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   }, [currentPageIndex]);
 
   return (
-    <aside className="thumbnails-panel" style={{ width: `${width}px`, height: '100%', flex: 1 }}>
+    <aside className="thumbnails-panel" style={{ width: `${width}px` }}>
       <div className="panel-header">サムネイル</div>
       <div className="scroll-content" tabIndex={0} onKeyDown={(e) => {
         if (!document) return;
@@ -72,6 +76,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
                 currentPageIndex={currentPageIndex}
                 thumbnailData={thumbnails.get(i)}
                 isDirty={document.pages.get(i)?.isDirty}
+                loadEpoch={loadEpoch}
                 onSelect={onSelectPage}
                 onRequest={onRequestThumbnail}
               />

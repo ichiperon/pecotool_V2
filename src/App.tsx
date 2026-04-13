@@ -132,7 +132,7 @@ function App() {
   };
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
-  const { thumbnails, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument } = useThumbnailPanel();
+  const { thumbnails, loadEpoch, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument } = useThumbnailPanel();
   const { isOcrRunning, ocrProgress, runOcrCurrentPage, runOcrAllPages, cancelOcr, checkAndPromptOcrZero } = useOcrEngine(showToast);
   const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
@@ -686,6 +686,7 @@ function App() {
           document={fakeDocument}
           currentPageIndex={currentPageIndex}
           thumbnails={thumbnails}
+          loadEpoch={loadEpoch}
           onSelectPage={handleThumbnailSelectPage}
           onRequestThumbnail={requestThumbnail}
         />

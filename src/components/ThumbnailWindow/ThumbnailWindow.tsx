@@ -1,10 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { listen, emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { ThumbnailPanel } from '../Sidebar/ThumbnailPanel';
+import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import '../../App.css';
 
+// ★ 高速化1: 3ワーカー並列
+const NUM_WORKERS = 3;
 const CONCURRENCY = 6;
 
 function toAssetUrl(filePath: string): string {
@@ -20,23 +22,62 @@ interface ThumbnailFileOpenedPayload {
   dirtyPages: number[];
 }
 
+// ---- Thumbnail アイテム ----
+const ThumbnailItem = memo(({
+  index, currentPageIndex, thumbnailUrl, isDirty, onSelect, onRequest,
+}: {
+  index: number;
+  currentPageIndex: number;
+  thumbnailUrl?: string;
+  isDirty?: boolean;
+  onSelect: (i: number) => void;
+  onRequest: (i: number) => void;
+}) => {
+  useEffect(() => {
+    if (!thumbnailUrl) onRequest(index);
+  }, [index, thumbnailUrl, onRequest]);
+
+  return (
+    <div
+      className={`thumbnail-item ${index === currentPageIndex ? 'active' : ''}`}
+      onClick={() => onSelect(index)}
+    >
+      <div className="thumbnail-box">
+        {thumbnailUrl ? (
+          <img
+            src={thumbnailUrl}
+            alt={`Page ${index + 1}`}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+          />
+        ) : (
+          <span style={{ color: '#d1d5db', fontSize: 24 }}>{index + 1}</span>
+        )}
+      </div>
+      <div className="thumbnail-label">{index + 1} ページ {isDirty && '●'}</div>
+    </div>
+  );
+});
+
+// ---- ウィンドウコンポーネント ----
 export function ThumbnailWindow() {
-  const [filePath, setFilePath] = useState<string | null>(null);
   const [totalPages, setTotalPages] = useState(0);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
   const [dirtyPages, setDirtyPages] = useState<Set<number>>(new Set());
 
-  // --- Worker management ---
-  const workerRef = useRef<Worker | null>(null);
-  // pageIndex → resolve callback（ワーカーからの THUMBNAIL_DONE/ERROR 待ち）
-  const pendingRef = useRef<Map<number, (url: string | null) => void>>(new Map());
-  // PDF ロード完了待ち用の resolve callback
-  const loadResolveRef = useRef<((ok: boolean) => void) | null>(null);
+  // ★ Worker プール
+  const workersRef = useRef<Worker[]>([]);
+  const pendingsByWorkerRef = useRef<Array<Map<number, (url: string | null) => void>>>([]);
+  const loadResolvesRef = useRef<Array<((ok: boolean) => void) | null>>(
+    new Array(NUM_WORKERS).fill(null)
+  );
+  // ★ 全 Worker が LOAD_COMPLETE するまでキュー処理をブロックするフラグ
+  const isPdfReadyRef = useRef(false);
 
   const thumbnailQueueRef = useRef<number[]>([]);
   const isProcessingRef = useRef(false);
   const epochRef = useRef(0);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
 
   // バツボタンで閉じず非表示にする
   useEffect(() => {
@@ -49,82 +90,92 @@ export function ThumbnailWindow() {
     return () => { unlisten?.(); };
   }, []);
 
-  // Worker の初期化（マウント時1回）
+  // ---- Worker プール初期化（マウント時1回）----
   useEffect(() => {
-    const worker = new Worker(
-      new URL('../../utils/thumbnail.worker.ts', import.meta.url),
-      { type: 'module' }
-    );
-    workerRef.current = worker;
+    const pendingsByWorker: Array<Map<number, (url: string | null) => void>> = [];
+    const workers: Worker[] = [];
 
-    worker.onmessage = (e: MessageEvent) => {
-      const { type, pageIndex, bytes } = e.data;
+    for (let wi = 0; wi < NUM_WORKERS; wi++) {
+      const myPending = new Map<number, (url: string | null) => void>();
+      pendingsByWorker.push(myPending);
 
-      // PDF ロード完了通知
-      if (type === 'LOAD_COMPLETE') {
-        loadResolveRef.current?.(true);
-        loadResolveRef.current = null;
-        return;
-      }
-      if (type === 'LOAD_ERROR') {
-        console.error('[ThumbnailWindow] Worker PDF load error:', e.data.message);
-        loadResolveRef.current?.(false);
-        loadResolveRef.current = null;
-        return;
-      }
+      const worker = new Worker(
+        new URL('../../utils/thumbnail.worker.ts', import.meta.url),
+        { type: 'module' }
+      );
 
-      // サムネイル生成完了
-      const resolve = pendingRef.current.get(pageIndex);
-      if (!resolve) return;
-      pendingRef.current.delete(pageIndex);
+      const workerIndex = wi;
+      worker.onmessage = (e: MessageEvent) => {
+        const { type, pageIndex, bytes } = e.data;
 
-      if (type === 'THUMBNAIL_DONE' && bytes instanceof Uint8Array) {
-        const blob = new Blob([bytes], { type: 'image/jpeg' });
-        resolve(URL.createObjectURL(blob));
-      } else {
-        resolve(null);
-      }
-    };
+        if (type === 'LOAD_COMPLETE' || type === 'LOAD_ERROR') {
+          if (type === 'LOAD_ERROR') {
+            console.error(`[ThumbnailWindow] Worker ${workerIndex} load error:`, e.data.message);
+          }
+          // ★ per-worker resolve（古い LOAD_COMPLETE は null のため無害）
+          const resolve = loadResolvesRef.current[workerIndex];
+          if (resolve) {
+            loadResolvesRef.current[workerIndex] = null;
+            resolve(type === 'LOAD_COMPLETE');
+          }
+          return;
+        }
 
-    worker.onerror = (err) => {
-      console.error('[ThumbnailWindow] Worker error:', err);
-      loadResolveRef.current?.(false);
-      loadResolveRef.current = null;
-      pendingRef.current.forEach(r => r(null));
-      pendingRef.current.clear();
-    };
+        const resolve = myPending.get(pageIndex);
+        if (!resolve) return;
+        myPending.delete(pageIndex);
+
+        if (type === 'THUMBNAIL_DONE' && bytes instanceof Uint8Array) {
+          const blob = new Blob([bytes], { type: 'image/jpeg' });
+          resolve(URL.createObjectURL(blob));
+        } else {
+          resolve(null);
+        }
+      };
+
+      worker.onerror = () => {
+        myPending.forEach(r => r(null));
+        myPending.clear();
+      };
+
+      workers.push(worker);
+    }
+
+    workersRef.current = workers;
+    pendingsByWorkerRef.current = pendingsByWorker;
 
     return () => {
-      worker.terminate();
-      workerRef.current = null;
-      loadResolveRef.current?.(false);
-      loadResolveRef.current = null;
-      pendingRef.current.forEach(r => r(null));
-      pendingRef.current.clear();
+      workers.forEach(w => w.terminate());
+      workersRef.current = [];
+      pendingsByWorker.forEach(p => { p.forEach(r => r(null)); p.clear(); });
+      pendingsByWorkerRef.current = [];
+      loadResolvesRef.current.forEach((r, i) => {
+        if (r) { loadResolvesRef.current[i] = null; r(false); }
+      });
     };
   }, []);
 
-  // Worker に1ページ分のサムネイル生成を依頼し、完了を Promise で待つ
+  // ---- ページをワーカーに分散してサムネイル生成 ----
   const generateViaWorker = useCallback((pageIdx: number): Promise<string | null> => {
     return new Promise(resolve => {
-      const worker = workerRef.current;
-      if (!worker) { resolve(null); return; }
+      const workers = workersRef.current;
+      const pendingsByWorker = pendingsByWorkerRef.current;
+      if (workers.length === 0) { resolve(null); return; }
 
-      // 既にリクエスト中の場合は重複回避
-      if (pendingRef.current.has(pageIdx)) {
-        resolve(null);
-        return;
-      }
+      const workerIdx = pageIdx % workers.length;
+      const worker = workers[workerIdx];
+      const myPending = pendingsByWorker[workerIdx];
+
+      if (myPending.has(pageIdx)) { resolve(null); return; }
 
       const timeout = setTimeout(() => {
-        if (pendingRef.current.has(pageIdx)) {
-          console.warn(`[ThumbnailWindow] Page ${pageIdx + 1} thumbnail timeout`);
-          pendingRef.current.delete(pageIdx);
+        if (myPending.has(pageIdx)) {
+          myPending.delete(pageIdx);
           resolve(null);
         }
       }, 15000);
 
-      pendingRef.current.set(pageIdx, (url: string | null) => {
+      myPending.set(pageIdx, (url: string | null) => {
         clearTimeout(timeout);
         resolve(url);
       });
@@ -132,8 +183,9 @@ export function ThumbnailWindow() {
     });
   }, []);
 
-  // キュー処理（stale closure を避けるため epoch を引数で受け取る）
+  // ---- キュー処理 ----
   const processThumbnailQueue = useCallback(async (epoch: number) => {
+    if (!isPdfReadyRef.current) return; // PDF ロード完了前はキューを処理しない
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     try {
@@ -151,6 +203,7 @@ export function ThumbnailWindow() {
             if (!url) return;
             if (epochRef.current === epoch) {
               setThumbnails(prev => {
+                if (prev.has(pageIdx)) { URL.revokeObjectURL(url); return prev; }
                 const next = new Map(prev);
                 next.set(pageIdx, url);
                 return next;
@@ -181,12 +234,11 @@ export function ThumbnailWindow() {
     });
   }, [processThumbnailQueue]);
 
-  // --- Event listeners ---
+  // ---- Tauri イベントリスナー ----
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
 
     const setup = async () => {
-      // ファイルが開かれた
       unlisteners.push(await listen<ThumbnailFileOpenedPayload>('thumbnail:file-opened', (e) => {
         const { filePath: fp, currentPageIndex: page, totalPages: total, dirtyPages: dirty } = e.payload;
 
@@ -194,66 +246,89 @@ export function ThumbnailWindow() {
         const epoch = epochRef.current;
         thumbnailQueueRef.current = [];
         isProcessingRef.current = false;
+        isPdfReadyRef.current = false; // ★ ファイル切り替え時にリセット
 
-        // 前の PDF ロード待ちをキャンセル
-        loadResolveRef.current?.(false);
-        loadResolveRef.current = null;
-
-        pendingRef.current.forEach(r => r(null));
-        pendingRef.current.clear();
+        // 前のロード resolve を全ワーカー分キャンセル
+        loadResolvesRef.current.forEach((r, i) => {
+          if (r) { loadResolvesRef.current[i] = null; r(false); }
+        });
+        pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
 
         setThumbnails(prev => {
           prev.forEach(url => { if (url) URL.revokeObjectURL(url); });
           return new Map();
         });
-        setFilePath(fp);
         setTotalPages(total);
         setCurrentPageIndex(page);
         setDirtyPages(new Set(dirty));
 
-        // Worker に新しい PDF をロード
-        const assetUrl = toAssetUrl(fp);
-        workerRef.current?.postMessage({ type: 'LOAD_PDF', url: assetUrl });
+        // ★ 高速化3: メインスレッドで fetch → ArrayBuffer → 全ワーカーに零コピー転送
+        fetch(toAssetUrl(fp))
+          .then(res => {
+            if (epochRef.current !== epoch) return null;
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.arrayBuffer();
+          })
+          .then(buf => {
+            if (!buf || epochRef.current !== epoch) return;
 
-        // LOAD_COMPLETE を受け取ったらキュー処理開始（Promise で確実に待つ）
-        new Promise<boolean>(resolve => {
-          loadResolveRef.current = resolve;
-        }).then(ok => {
-          if (!ok || epochRef.current !== epoch) return;
-          processThumbnailQueue(epoch);
-        });
+            const workers = workersRef.current;
+
+            const perWorkerPromises = workers.map((_, i) =>
+              new Promise<boolean>(resolve => {
+                loadResolvesRef.current[i] = resolve;
+              })
+            );
+
+            workers.forEach((worker, i) => {
+              const bytes = (i < workers.length - 1) ? buf.slice(0) : buf;
+              worker.postMessage({ type: 'LOAD_PDF', bytes }, [bytes]);
+            });
+
+            // ★ 全 Worker の LOAD_COMPLETE 後に isPdfReady=true→キュー処理
+            Promise.all(perWorkerPromises).then(() => {
+              if (epochRef.current !== epoch) return;
+              isPdfReadyRef.current = true;
+              processThumbnailQueue(epoch);
+            });
+          })
+          .catch(err => {
+            if (epochRef.current === epoch) {
+              console.error('[ThumbnailWindow] Failed to fetch PDF:', err);
+            }
+          });
       }));
 
-      // ファイルが閉じられた
       unlisteners.push(await listen('thumbnail:file-closed', () => {
         epochRef.current++;
         thumbnailQueueRef.current = [];
         isProcessingRef.current = false;
-        loadResolveRef.current?.(false);
-        loadResolveRef.current = null;
-        pendingRef.current.forEach(r => r(null));
-        pendingRef.current.clear();
+        loadResolvesRef.current.forEach((r, i) => {
+          if (r) { loadResolvesRef.current[i] = null; r(false); }
+        });
+        pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
         setThumbnails(prev => {
           prev.forEach(url => { if (url) URL.revokeObjectURL(url); });
           return new Map();
         });
-        setFilePath(null);
         setTotalPages(0);
         setCurrentPageIndex(0);
         setDirtyPages(new Set());
       }));
 
-      // ページが変わった
       unlisteners.push(await listen<{ pageIndex: number }>('thumbnail:page-changed', (e) => {
         setCurrentPageIndex(e.payload.pageIndex);
+        virtuosoRef.current?.scrollIntoView({
+          index: e.payload.pageIndex,
+          behavior: 'smooth',
+          done: () => {},
+        });
       }));
 
-      // Dirty状態が更新された
       unlisteners.push(await listen<{ dirtyPages: number[] }>('thumbnail:dirty-update', (e) => {
         setDirtyPages(new Set(e.payload.dirtyPages));
       }));
 
-      // 全リスナー登録完了後に現在状態を要求
       await emit('thumbnail:request-state');
     };
 
@@ -266,21 +341,35 @@ export function ThumbnailWindow() {
     emit('thumbnail:page-selected', { pageIndex }).catch(console.error);
   }, []);
 
-  // ThumbnailPanel の document 互換オブジェクト
-  const fakeDocument = filePath
-    ? { totalPages, pages: new Map(Array.from(dirtyPages).map(i => [i, { isDirty: true }])) }
-    : null;
-
   return (
-    <div style={{ width: '100%', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <ThumbnailPanel
-        width={220}
-        document={fakeDocument}
-        currentPageIndex={currentPageIndex}
-        thumbnails={thumbnails}
-        onSelectPage={handleSelectPage}
-        onRequestThumbnail={requestThumbnail}
-      />
+    <div style={{
+      width: '100%',
+      height: '100vh',
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
+      background: 'var(--panel-bg)',
+    }}>
+      <div className="panel-header">サムネイル</div>
+      {totalPages > 0 ? (
+        <Virtuoso
+          ref={virtuosoRef}
+          style={{ flex: 1, minHeight: 0 }}
+          totalCount={totalPages}
+          itemContent={(i) => (
+            <ThumbnailItem
+              index={i}
+              currentPageIndex={currentPageIndex}
+              thumbnailUrl={thumbnails.get(i)}
+              isDirty={dirtyPages.has(i)}
+              onSelect={handleSelectPage}
+              onRequest={requestThumbnail}
+            />
+          )}
+        />
+      ) : (
+        <div className="placeholder">ファイルを開いてください</div>
+      )}
     </div>
   );
 }
