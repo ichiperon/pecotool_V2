@@ -24,6 +24,7 @@ export function TextPreviewWindow() {
       const closeUnlisten = await win.onCloseRequested((event) => {
         event.preventDefault();
         win.hide();
+        emit('preview-hidden');
       });
       if (unmounted) { closeUnlisten(); return; }
       unlisteners.push(closeUnlisten);

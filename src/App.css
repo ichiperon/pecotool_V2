@@ -536,22 +536,23 @@ body, #root {
 .pdf-canvas-container {
   display: flex;
   align-items: flex-start;
-  justify-content: center;
-  padding: 20px;
+  justify-content: flex-start;
+  padding: 24px;
   min-height: 100%;
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
   box-sizing: border-box;
 }
 
 .empty-state {
   text-align: center;
   color: #9ca3af;
+  margin: auto;
 }
 
 .canvas-wrapper {
+  margin: auto;
   background-color: white;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   min-width: 200px;
   min-height: 200px;
   display: flex;

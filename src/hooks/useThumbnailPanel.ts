@@ -74,10 +74,10 @@ export function useThumbnailPanel() {
       if (!thumbnailQueueRef.current.includes(pageIndex)) {
         thumbnailQueueRef.current.push(pageIndex);
       }
-      const epoch = epochRef.current;
-      setTimeout(() => processThumbnailQueue(epoch), 0);
       return prev;
     });
+    const epoch = epochRef.current;
+    setTimeout(() => processThumbnailQueue(epoch), 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [processThumbnailQueue, loadEpoch]);
 

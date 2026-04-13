@@ -2,7 +2,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
-import { loadPDF, getAllTemporaryPageData } from '../utils/pdfLoader';
+import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
 import { PecoDocument, PageData } from '../types';
@@ -127,11 +127,22 @@ export function useFileOperations(
       mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
     }
 
-    const mergedDoc: PecoDocument = { ...document, pages: mergedPages };
+    // Dirty ページのみを Worker に渡すことで postMessage の structured clone コストを
+    // 400ページ分 → 変更ページ数分 に削減する（最重要パフォーマンス修正）。
+    // Worker 内で既存 BBoxMeta を PDF から読み直して非 dirty ページ分を保持するため、
+    // dirty-only フィルタリングをしてもメタデータの欠損は発生しない。
+    const dirtyOnlyPages = new Map<number, PageData>(
+      [...mergedPages.entries()].filter(([, p]) => p.isDirty)
+    );
+    const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
     const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
     const writePath = targetPath ?? document.filePath;
 
     await writeFile(writePath, savedBytes);
+    // originalBytes を更新し、次回保存時もこの累積変更をベースにするようにする
+    usePecoStore.getState().setOriginalBytes(savedBytes);
+    // LRU退避ページの IDB エントリも保存完了済みとしてクリア
+    await clearTemporaryChanges(document.filePath);
     return savedBytes.length;
   };
 

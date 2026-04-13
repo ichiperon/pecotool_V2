@@ -1,6 +1,6 @@
 import {
   PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState,
-  translate, scale, PDFName, PDFHexString, PDFString, PDFRawStream
+  translate, scale, PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
@@ -40,17 +40,44 @@ function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
  * The input MUST be already decoded bytes — do NOT pass raw/compressed stream contents.
  * We use 'latin1' so each byte maps 1:1 to a character, avoiding UTF-8 corruption.
  */
-function stripTextBlocks(decodedContent: Uint8Array): Uint8Array {
-  const decoder = new TextDecoder('latin1');
-  const text = decoder.decode(decodedContent);
-  // BT and ET must be standalone PDF operators (preceded/followed by whitespace or line end).
-  // This prevents matching binary content that coincidentally contains 0x42 0x54 or 0x45 0x54.
-  const stripped = text.replace(/(^|[\r\n\s])BT[\s\S]*?ET([\r\n\s]|$)/g, '$1$2');
-  const result = new Uint8Array(stripped.length);
-  for (let i = 0; i < stripped.length; i++) {
-    result[i] = stripped.charCodeAt(i) & 0xFF;
+/**
+ * Strips all text blocks (BT...ET) from a decoded (uncompressed) content stream.
+ * Optimized to work directly on Uint8Array to avoid expensive string conversions and regex.
+ */
+function stripTextBlocks(decoded: Uint8Array): Uint8Array {
+  const result = new Uint8Array(decoded.length);
+  let resultIdx = 0;
+  let i = 0;
+  const len = decoded.length;
+
+  while (i < len) {
+    // Look for "BT" (Begin Text)
+    // Must be preceded by delimiter (space, tab, newline, (, [, <, /, %) or start of stream
+    // and followed by delimiter.
+    if (
+      decoded[i] === 0x42 && decoded[i+1] === 0x54 && // 'BT'
+      (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) && 
+      (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
+    ) {
+      // Found BT, skip until "ET" (End Text)
+      i += 2;
+      while (i < len) {
+        if (
+          decoded[i] === 0x45 && decoded[i+1] === 0x54 && // 'ET'
+          (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) &&
+          (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
+        ) {
+          i += 2;
+          break;
+        }
+        i++;
+      }
+    } else {
+      result[resultIdx++] = decoded[i++];
+    }
   }
-  return result;
+
+  return result.slice(0, resultIdx);
 }
 
 /**
@@ -65,12 +92,27 @@ export async function buildPdfDocument(
   documentState: PecoDocument,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.load(originalPdfBytes, { ignoreEncryption: true });
+  // throwOnInvalidObject:false → 不正オブジェクトの回復試行をスキップして高速化
+  // updateMetadata:false → 更新日時の自動書き換えを抑制
+  const pdfDoc = await PDFDocument.load(originalPdfBytes, {
+    ignoreEncryption: true,
+    throwOnInvalidObject: false,
+    updateMetadata: false,
+  });
   pdfDoc.registerFontkit(fontkit);
 
-  const customFont = fontBytes
-    ? await pdfDoc.embedFont(fontBytes, { subset: true })
-    : await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const dirtyPages = Array.from(documentState.pages.entries()).filter(([, pageData]) => pageData.isDirty);
+  
+  // Only embed font if we actually have something to draw
+  const needsFont = dirtyPages.some(([, pageData]) => 
+    pageData.textBlocks.some(b => b.text && b.text.trim() !== '')
+  );
+
+  const customFont = needsFont
+    ? (fontBytes
+        ? await pdfDoc.embedFont(fontBytes, { subset: true })
+        : await pdfDoc.embedFont(StandardFonts.Helvetica))
+    : null;
 
   const infoDict = (pdfDoc as any).getInfoDict();
   let existingBBoxMeta: Record<string, any> = {};
@@ -89,12 +131,9 @@ export async function buildPdfDocument(
   const bboxMeta = { ...existingBBoxMeta };
   let metaChanged = false;
 
-  for (const [pageIndexStr, pageData] of documentState.pages.entries()) {
+  for (const [pageIndexStr, pageData] of dirtyPages) {
     const pageIndex = typeof pageIndexStr === 'string' ? parseInt(pageIndexStr, 10) : pageIndexStr;
     
-    // Only update metadata and draw if the page was touched
-    if (!pageData.isDirty) continue;
-
     const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
     bboxMeta[String(pageIndex)] = sortedBlocks.map(b => ({
       bbox: b.bbox,
@@ -108,9 +147,15 @@ export async function buildPdfDocument(
     const { height } = page.getSize();
 
     // --- Surgical Text Stripping ---
-    const contentStreams = (page.node as any).Contents();
-    if (contentStreams) {
-      const streams = Array.isArray(contentStreams) ? contentStreams : [contentStreams];
+    const contentStreamsRef = (page.node as any).Contents();
+    if (contentStreamsRef) {
+      const resolved = pdfDoc.context.lookup(contentStreamsRef);
+      let streams: any[] = [];
+      if (resolved instanceof PDFArray) {
+        streams = resolved.asArray();
+      } else {
+        streams = [contentStreamsRef];
+      }
       const newStreams = [];
       for (const streamRef of streams) {
         const stream = pdfDoc.context.lookup(streamRef);
@@ -129,6 +174,8 @@ export async function buildPdfDocument(
       }
       page.node.set(PDFName.of('Contents'), pdfDoc.context.obj(newStreams));
     }
+
+    if (!customFont) continue;
 
     // Now draw the NEW text blocks onto the cleaned page
     for (const block of sortedBlocks) {
@@ -184,10 +231,14 @@ export async function buildPdfDocument(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
-  // rewrite: false (default) = incremental update: original PDF bytes are preserved at the
+  // update: true = incremental update: original PDF bytes are preserved at the
   // front of the output, so the original PDF version and structure are retained as-is.
   // This ensures compatibility with older viewers such as Acrobat 7 (supports up to PDF 1.6).
-  const savedBytes = await pdfDoc.save({ useObjectStreams: false, addDefaultPage: false });
+  const savedBytes = await pdfDoc.save({
+    useObjectStreams: false,
+    addDefaultPage: false,
+    update: true,
+  });
   return savedBytes;
 }
 
@@ -238,7 +289,10 @@ export async function savePDF(
 
       const serializedPages: Record<number, any> = {};
       for (const [idx, page] of documentState.pages.entries()) {
-        serializedPages[idx] = page;
+        // thumbnail は Worker 内で不要な blob URL であるため除去する
+        // (structured clone でエラーになる可能性があり、転送コスト削減にもなる)
+        const { thumbnail: _t, ...pageWithoutThumbnail } = page as any;
+        serializedPages[idx] = pageWithoutThumbnail;
       }
 
       // Transfer the buffer directly if possible to avoid copying large files

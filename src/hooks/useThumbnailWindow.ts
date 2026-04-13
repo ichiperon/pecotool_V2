@@ -1,12 +1,10 @@
-import { useEffect, useCallback, useRef } from 'react';
-import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
-import { PhysicalPosition } from '@tauri-apps/api/dpi';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
+import { getAllWindows } from '@tauri-apps/api/window';
 import { usePecoStore } from '../store/pecoStore';
 
-const WINDOW_LABEL = 'thumbnail-window';
-
 export function useThumbnailWindow() {
+  const [isThumbnailOpen, setIsThumbnailOpen] = useState(false);
   const { document, currentPageIndex } = usePecoStore();
   // Dirty なページインデックス一覧を追跡
   const prevDirtyRef = useRef<string>('');
@@ -19,47 +17,54 @@ export function useThumbnailWindow() {
     return result;
   }, []);
 
-  // --- サムネイルウィンドウを取得して位置を調整し表示する ---
-  const showThumbnailWindow = useCallback(async () => {
-    try {
-      const windows = await getAllWindows();
-      const win = windows.find(w => w.label === WINDOW_LABEL);
-      if (!win) return;
-
-      // メインウィンドウの左隣に配置
-      const mainWin = getCurrentWindow();
-      const pos = await mainWin.outerPosition();
-      const size = await win.outerSize();
-      const x = Math.max(0, pos.x - size.width - 4);
-      const y = pos.y;
-      await win.setPosition(new PhysicalPosition(x, y));
-      await win.show();
-    } catch (e) {
-      console.error('[useThumbnailWindow] show error:', e);
-    }
-  }, []);
-
   // --- ウィンドウ初期化（アプリ起動時）---
   const initThumbnailWindow = useCallback(async () => {
-    // tauri.conf.json で pre-configure 済みのため作成は不要。何もしない。
+    // tauri.conf.json で pre-configure 済みのため取得のみ
+    const windows = await getAllWindows();
+    return windows.find(w => w.label === 'thumbnail-window');
   }, []);
 
-  // --- サムネイル窓からの状態要求に応答 ---
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen('thumbnail:request-state', () => {
-      const doc = usePecoStore.getState().document;
-      const { currentPageIndex: page } = usePecoStore.getState();
-      if (doc) {
-        emit('thumbnail:file-opened', {
-          filePath: doc.filePath,
-          currentPageIndex: page,
-          totalPages: doc.totalPages,
-          dirtyPages: getDirtyPages(),
-        }).catch(console.error);
+  const toggleThumbnailWindow = useCallback(async () => {
+    try {
+      const win = await initThumbnailWindow();
+      if (win) {
+        if (isThumbnailOpen) {
+          await win.hide();
+          setIsThumbnailOpen(false);
+        } else {
+          await win.show();
+          await win.setFocus();
+          setIsThumbnailOpen(true);
+        }
       }
-    }).then(fn => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    } catch (e) {
+      console.error(e);
+    }
+  }, [isThumbnailOpen, initThumbnailWindow]);
+
+  // --- サズネイル窓からの状態要求に応答 ---
+  useEffect(() => {
+    const setup = async () => {
+      const u1 = await listen('thumbnail:request-state', () => {
+        const doc = usePecoStore.getState().document;
+        const { currentPageIndex: page } = usePecoStore.getState();
+        if (doc) {
+          emit('thumbnail:file-opened', {
+            filePath: doc.filePath,
+            currentPageIndex: page,
+            totalPages: doc.totalPages,
+            dirtyPages: getDirtyPages(),
+          }).catch(console.error);
+        }
+      });
+      const u2 = await listen('thumbnail:hidden', () => {
+        setIsThumbnailOpen(false);
+      });
+      return () => { u1(); u2(); };
+    };
+    let unlisten: (() => void) | undefined;
+    const p = setup().then(fn => { unlisten = fn; });
+    return () => { p.then(() => unlisten?.()); };
   }, [getDirtyPages]);
 
   // --- ページ選択をサムネイル窓から受け取る ---
@@ -71,10 +76,9 @@ export function useThumbnailWindow() {
     return () => { unlisten?.(); };
   }, []);
 
-  // --- ファイル開閉をサムネイル窓に通知（ファイルオープン時は自動表示）---
+  // --- ファイル開閉をサムネイル窓に通知（自動表示は行わず状態転送のみ）---
   useEffect(() => {
     if (document) {
-      showThumbnailWindow(); // ファイルを開いたら自動表示・位置調整
       emit('thumbnail:file-opened', {
         filePath: document.filePath,
         currentPageIndex,
@@ -102,5 +106,5 @@ export function useThumbnailWindow() {
     emit('thumbnail:dirty-update', { dirtyPages: dirty }).catch(console.error);
   });
 
-  return { initThumbnailWindow };
+  return { initThumbnailWindow, isThumbnailOpen, toggleThumbnailWindow };
 }

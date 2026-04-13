@@ -79,9 +79,13 @@ export function usePreviewWindow() {
 
   useEffect(() => {
     const setupListener = async () => {
-      return await listen('request-preview', () => {
+      const un1 = await listen('request-preview', () => {
         emit('preview-update', previewText).catch(e => console.error(e));
       });
+      const un2 = await listen('preview-hidden', () => {
+        setIsPreviewOpen(false);
+      });
+      return () => { un1(); un2(); };
     };
     let unlistenFn: (() => void) | undefined;
     setupListener().then(fn => unlistenFn = fn);

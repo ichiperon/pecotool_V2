@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { listen, emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -86,6 +86,7 @@ export function ThumbnailWindow() {
     win.onCloseRequested((event) => {
       event.preventDefault();
       win.hide();
+      emit('thumbnail:hidden');
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
@@ -303,6 +304,7 @@ export function ThumbnailWindow() {
         epochRef.current++;
         thumbnailQueueRef.current = [];
         isProcessingRef.current = false;
+        isPdfReadyRef.current = false;
         loadResolvesRef.current.forEach((r, i) => {
           if (r) { loadResolvesRef.current[i] = null; r(false); }
         });

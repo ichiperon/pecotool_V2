@@ -37,6 +37,8 @@ function App() {
     clearOcrCurrentPage, clearOcrAllPages
   } = usePecoStore();
 
+  const currentPage = document?.pages.get(currentPageIndex);
+
   const [leftWidth, setLeftWidth] = useState(220);
   const [rightWidth, setRightWidth] = useState(400);
   const [isAutoFit, setIsAutoFit] = useState(true);
@@ -139,8 +141,6 @@ function App() {
     (doc) => { checkAndPromptOcrZero(doc); }
   );
 
-  const currentPage = document?.pages.get(currentPageIndex);
-
   // --- Handlers ---
   const handleSaveAs = async () => {
     if (!document) return;
@@ -168,7 +168,8 @@ function App() {
     const pageData = document?.pages.get(currentPageIndex);
     if (container && pageData) {
       // padding: 24px (上下左右計48px) + 余裕 12px = 60px
-      const margin = 60;
+      // さらにスクロールバー出現によるガタつきを防ぐため少し余裕(buffer)を持たせる
+      const margin = 64;
       const ratioH = (container.clientHeight - margin) / pageData.height;
       const ratioW = (container.clientWidth - margin) / pageData.width;
       const newZoom = Math.floor(Math.min(ratioH, ratioW) * 100);
@@ -423,7 +424,11 @@ function App() {
             if (!confirmed) return;
           }
           const windows = await getAllWindows();
-          for (const w of windows) if (w.label !== currentWindow.label) await w.close();
+          for (const w of windows) {
+            if (w.label !== currentWindow.label) {
+              await w.destroy();
+            }
+          }
           await currentWindow.destroy();
         });
       };

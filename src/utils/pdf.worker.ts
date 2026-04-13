@@ -1,6 +1,6 @@
 import {
   PDFDocument, StandardFonts, PDFName, PDFHexString, PDFString, PDFRawStream,
-  pushGraphicsState, popGraphicsState, translate, scale, degrees
+  pushGraphicsState, popGraphicsState, translate, scale, degrees, PDFArray
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { inflate } from 'pako';
@@ -30,35 +30,66 @@ function restorePdfVersion(savedBytes: Uint8Array, version: string): void {
 function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
   const filter = stream.dict.lookup(PDFName.of('Filter'));
   const raw = stream.getContents();
-  if (filter instanceof PDFName && filter.asString() === '/FlateDecode') {
+
+  // Handle single filter (e.g. /FlateDecode) or array (e.g. [/FlateDecode])
+  const filters = filter instanceof PDFName 
+    ? [filter.asString()] 
+    : (Array.isArray((filter as any)?.array) ? (filter as any).array.map((f: any) => f.asString()) : []);
+  
+  // If no filters, raw bytes are already plain text operators
+  if (filters.length === 0) return raw;
+
+  // We only support a single /FlateDecode for now.
+  // Multiple filters (e.g. [/ASCII85Decode /FlateDecode]) are rare for text streams.
+  if (filters.length === 1 && filters[0] === '/FlateDecode') {
     try {
       return inflate(raw);
     } catch {
       return null;
     }
   }
-  if (!filter) {
-    return raw;
-  }
+  
   return null;
 }
 
 /**
  * Strips all text blocks (BT...ET) from a decoded (uncompressed) content stream.
- * BT and ET must appear as standalone tokens (surrounded by whitespace or line boundaries)
- * to avoid accidentally matching binary data that happens to contain those byte sequences.
- * The input MUST be already decoded bytes — do NOT pass raw/compressed stream contents.
- * We use 'latin1' so each byte maps 1:1 to a character, avoiding UTF-8 corruption.
+ * Optimized to work directly on Uint8Array to avoid expensive string conversions and regex.
  */
-function stripTextBlocks(decodedContent: Uint8Array): Uint8Array {
-  const decoder = new TextDecoder('latin1');
-  const text = decoder.decode(decodedContent);
-  const stripped = text.replace(/(^|[\r\n\s])BT[\s\S]*?ET([\r\n\s]|$)/g, '$1$2');
-  const result = new Uint8Array(stripped.length);
-  for (let i = 0; i < stripped.length; i++) {
-    result[i] = stripped.charCodeAt(i) & 0xFF;
+function stripTextBlocks(decoded: Uint8Array): Uint8Array {
+  const result = new Uint8Array(decoded.length);
+  let resultIdx = 0;
+  let i = 0;
+  const len = decoded.length;
+
+  while (i < len) {
+    // Look for "BT" (Begin Text)
+    // Must be preceded by delimiter (space, tab, newline) or start of stream
+    // and followed by delimiter.
+    if (
+      decoded[i] === 0x42 && decoded[i+1] === 0x54 && // 'BT'
+      (i === 0 || decoded[i-1] <= 0x20) && 
+      (i + 2 === len || decoded[i+2] <= 0x20)
+    ) {
+      // Found BT, skip until "ET" (End Text)
+      i += 2;
+      while (i < len) {
+        if (
+          decoded[i] === 0x45 && decoded[i+1] === 0x54 && // 'ET'
+          (i === 0 || decoded[i-1] <= 0x20) &&
+          (i + 2 === len || decoded[i+2] <= 0x20)
+        ) {
+          i += 2;
+          break;
+        }
+        i++;
+      }
+    } else {
+      result[resultIdx++] = decoded[i++];
+    }
   }
-  return result;
+
+  return result.slice(0, resultIdx);
 }
 
 self.onmessage = async (e: MessageEvent) => {
@@ -69,12 +100,28 @@ self.onmessage = async (e: MessageEvent) => {
       const { originalPdfBytes, documentState, fontBytes } = data;
 
       const originalVersion = extractPdfVersion(originalPdfBytes);
-      const pdfDoc = await PDFDocument.load(originalPdfBytes, { ignoreEncryption: true });
+      // throwOnInvalidObject:false → 不正オブジェクトの回復試行をスキップして高速化
+      // updateMetadata:false → 更新日時の自動書き換えを抑制（不要な書き込み削減）
+      const pdfDoc = await PDFDocument.load(originalPdfBytes, {
+        ignoreEncryption: true,
+        throwOnInvalidObject: false,
+        updateMetadata: false,
+      });
       pdfDoc.registerFontkit(fontkit);
 
-      const customFont = fontBytes
-        ? await pdfDoc.embedFont(fontBytes, { subset: true })
-        : await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const pagesArray = Object.entries(documentState.pages);
+      const dirtyPages = pagesArray.filter(([, pageData]: any) => pageData.isDirty);
+      
+      // Only embed font if we actually have something to draw
+      const needsFont = dirtyPages.some(([, pageData]: any) => 
+        pageData.textBlocks.some((b: any) => b.text && b.text.trim() !== '')
+      );
+
+      const customFont = needsFont
+        ? (fontBytes
+            ? await pdfDoc.embedFont(fontBytes, { subset: true })
+            : await pdfDoc.embedFont(StandardFonts.Helvetica))
+        : null;
 
       const infoDict = (pdfDoc as any).getInfoDict();
       let existingBBoxMeta: Record<string, any> = {};
@@ -91,14 +138,11 @@ self.onmessage = async (e: MessageEvent) => {
       }
 
       const bboxMeta = { ...existingBBoxMeta };
-      const pagesArray = Object.entries(documentState.pages);
       let metaChanged = false;
 
-      for (const [pageIndexStr, pageDataAny] of pagesArray) {
+      for (const [pageIndexStr, pageDataAny] of dirtyPages) {
         const pageIndex = parseInt(pageIndexStr, 10);
         const pageData = pageDataAny as any;
-
-        if (!pageData.isDirty) continue;
 
         const sortedBlocks = [...pageData.textBlocks].sort((a: any, b: any) => a.order - b.order);
 
@@ -114,12 +158,15 @@ self.onmessage = async (e: MessageEvent) => {
         const { height } = page.getSize();
 
         // --- Surgical Text Stripping ---
-        // Decode each stream first (decompresses FlateDecode/LZW/etc.), then strip BT..ET,
-        // then re-compress. Passing raw (still-compressed) bytes to stripTextBlocks would
-        // produce no-op replacements because BT/ET markers are not visible in compressed data.
-        const contentStreams = (page.node as any).Contents();
-        if (contentStreams) {
-          const streams = Array.isArray(contentStreams) ? contentStreams : [contentStreams];
+        const contentStreamsRef = (page.node as any).Contents();
+        if (contentStreamsRef) {
+          const resolved = pdfDoc.context.lookup(contentStreamsRef);
+          let streams: any[] = [];
+          if (resolved instanceof PDFArray) {
+            streams = resolved.asArray();
+          } else {
+            streams = [contentStreamsRef];
+          }
           const newStreams = [];
 
           for (const streamRef of streams) {
@@ -139,6 +186,8 @@ self.onmessage = async (e: MessageEvent) => {
           }
           page.node.set(PDFName.of('Contents'), pdfDoc.context.obj(newStreams));
         }
+
+        if (!customFont) continue;
 
         for (const block of sortedBlocks) {
           if (!block.text) continue;
@@ -185,6 +234,7 @@ self.onmessage = async (e: MessageEvent) => {
       const savedBytes = await pdfDoc.save({
         useObjectStreams: false,
         addDefaultPage: false,
+        update: true,
       });
       if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
       self.postMessage({ type: 'SAVE_PDF_SUCCESS', data: savedBytes }, [savedBytes.buffer] as any);
