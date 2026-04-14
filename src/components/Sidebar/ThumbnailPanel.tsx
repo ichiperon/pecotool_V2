@@ -1,17 +1,31 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useReducer, useRef } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 
 interface ThumbnailItemProps {
   index: number;
   currentPageIndex: number;
-  thumbnailData?: string;
   isDirty?: boolean;
   loadEpoch: number;
   onSelect: (index: number) => void;
   onRequest: (index: number) => void;
+  onSubscribeThumbnail: (index: number, cb: () => void) => () => void;
+  onGetThumbnail: (index: number) => string | undefined;
 }
 
-export const ThumbnailItemNode = React.memo(({ index, currentPageIndex, thumbnailData, isDirty, loadEpoch, onSelect, onRequest }: ThumbnailItemProps) => {
+export const ThumbnailItemNode = React.memo(({
+  index, currentPageIndex, isDirty, loadEpoch,
+  onSelect, onRequest, onSubscribeThumbnail, onGetThumbnail,
+}: ThumbnailItemProps) => {
+  const [, forceUpdate] = useReducer(x => x + 1, 0);
+
+  // このアイテム専用のサムネイル更新を購読（アンマウント時に自動解除）
+  useEffect(() => {
+    return onSubscribeThumbnail(index, forceUpdate);
+  }, [index, onSubscribeThumbnail]);
+
+  const thumbnailData = onGetThumbnail(index);
+
+  // サムネイルが未取得 or ファイル切替後に再リクエスト
   useEffect(() => {
     if (!thumbnailData) onRequest(index);
   // loadEpoch が変化したとき（ファイル切り替え後）に再リクエストを強制する
@@ -36,15 +50,17 @@ interface ThumbnailPanelProps {
   width: number;
   document: any;
   currentPageIndex: number;
-  thumbnails: Map<number, string>;
   loadEpoch: number;
   isOcrRunning: boolean;
   onSelectPage: (index: number) => void;
   onRequestThumbnail: (index: number) => void;
+  onSubscribeThumbnail: (index: number, cb: () => void) => () => void;
+  onGetThumbnail: (index: number) => string | undefined;
 }
 
 export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
-  width, document, currentPageIndex, thumbnails, loadEpoch, isOcrRunning, onSelectPage, onRequestThumbnail
+  width, document, currentPageIndex, loadEpoch, isOcrRunning,
+  onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail,
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
@@ -63,13 +79,13 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
       <div className="panel-header">サムネイル</div>
       <div className="scroll-content" tabIndex={0} onKeyDown={(e) => {
         if (!document) return;
-        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { 
-          e.preventDefault(); 
-          if (currentPageIndex < document.totalPages - 1) onSelectPage(currentPageIndex + 1); 
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+          e.preventDefault();
+          if (currentPageIndex < document.totalPages - 1) onSelectPage(currentPageIndex + 1);
         }
-        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { 
-          e.preventDefault(); 
-          if (currentPageIndex > 0) onSelectPage(currentPageIndex - 1); 
+        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+          e.preventDefault();
+          if (currentPageIndex > 0) onSelectPage(currentPageIndex - 1);
         }
       }}>
         {document ? (
@@ -81,11 +97,12 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
               <ThumbnailItemNode
                 index={i}
                 currentPageIndex={currentPageIndex}
-                thumbnailData={thumbnails.get(i)}
                 isDirty={document.pages.get(i)?.isDirty}
                 loadEpoch={loadEpoch}
                 onSelect={onSelectPage}
                 onRequest={onRequestThumbnail}
+                onSubscribeThumbnail={onSubscribeThumbnail}
+                onGetThumbnail={onGetThumbnail}
               />
             )}
           />

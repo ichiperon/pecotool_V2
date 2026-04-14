@@ -16,7 +16,16 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
 let loadPromise: Promise<void> | null = null;
 
+// OffscreenCanvas 同時レンダリング数を制限するセマフォ
+let activeRenders = 0;
+const MAX_CONCURRENT_RENDERS = 2;
+const renderWaitQueue: Array<() => void> = [];
+
 function handleLoadPdf(source: string | ArrayBuffer): void {
+  // 新しいPDFロード時にセマフォをリセット
+  activeRenders = 0;
+  renderWaitQueue.length = 0;
+
   if (pdfDoc) {
     pdfDoc.destroy().catch(() => {});
     pdfDoc = null;
@@ -59,6 +68,11 @@ function handleLoadPdf(source: string | ArrayBuffer): void {
 }
 
 async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
+  // セマフォ: 同時レンダリング数が上限に達していたら待機
+  if (activeRenders >= MAX_CONCURRENT_RENDERS) {
+    await new Promise<void>(resolve => renderWaitQueue.push(resolve));
+  }
+  activeRenders++;
   try {
     // loadPromise が設定されている場合は PDF ロード完了を待つ
     // （LOAD_PDF より先に GENERATE_THUMBNAIL が届いた場合の保護）
@@ -97,6 +111,9 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
   } catch (e) {
     console.error(`[thumbnail.worker] Page ${pageIndex + 1} failed:`, e);
     self.postMessage({ type: 'THUMBNAIL_ERROR', pageIndex });
+  } finally {
+    activeRenders--;
+    renderWaitQueue.shift()?.();
   }
 }
 

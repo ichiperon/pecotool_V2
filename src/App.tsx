@@ -134,7 +134,7 @@ function App() {
   };
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
-  const { thumbnails, loadEpoch, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument } = useThumbnailPanel();
+  const { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument } = useThumbnailPanel();
   const { isOcrRunning, ocrProgress, runOcrCurrentPage, runOcrAllPages, cancelOcr, checkAndPromptOcrZero } = useOcrEngine(showToast);
   const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
@@ -690,11 +690,12 @@ function App() {
           width={leftWidth}
           document={fakeDocument}
           currentPageIndex={currentPageIndex}
-          thumbnails={thumbnails}
           loadEpoch={loadEpoch}
           isOcrRunning={isOcrRunning}
           onSelectPage={handleThumbnailSelectPage}
           onRequestThumbnail={requestThumbnail}
+          onSubscribeThumbnail={subscribeThumbnail}
+          onGetThumbnail={getThumbnail}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
         <section

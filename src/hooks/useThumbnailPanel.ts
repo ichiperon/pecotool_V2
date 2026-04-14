@@ -18,7 +18,11 @@ function toAssetUrl(filePath: string): string {
 
 export function useThumbnailPanel() {
   const { document, currentPageIndex } = usePecoStore();
-  const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
+
+  // サムネイルデータはRefで保持（Reactの外）— 更新時に全アイテム再レンダリングを防ぐ
+  const thumbnailsRef = useRef<Map<number, string>>(new Map());
+  // アイテムごとの購読コールバック: index → Set<forceUpdate>
+  const itemListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
 
   const [loadEpoch, setLoadEpoch] = useState(0);
 
@@ -40,17 +44,35 @@ export function useThumbnailPanel() {
   const pendingBatchRef = useRef<Array<[number, string]>>([]);
   const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // サムネイルが届いたとき: refを更新し、そのアイテムのリスナーだけ呼ぶ（O(1)）
   const flushBatch = useCallback(() => {
     batchTimerRef.current = null;
     const entries = pendingBatchRef.current.splice(0);
     if (entries.length === 0) return;
-    setThumbnails(prev => {
-      const next = new Map(prev);
-      for (const [idx, url] of entries) {
-        if (prev.has(idx)) { URL.revokeObjectURL(url); } else { next.set(idx, url); }
+    for (const [idx, url] of entries) {
+      if (thumbnailsRef.current.has(idx)) {
+        URL.revokeObjectURL(url);
+      } else {
+        thumbnailsRef.current.set(idx, url);
+        itemListenersRef.current.get(idx)?.forEach(cb => cb());
       }
-      return next;
-    });
+    }
+  }, []);
+
+  // アイテムが自分のサムネイル更新を購読する
+  const subscribeThumbnail = useCallback((index: number, cb: () => void) => {
+    if (!itemListenersRef.current.has(index)) {
+      itemListenersRef.current.set(index, new Set());
+    }
+    itemListenersRef.current.get(index)!.add(cb);
+    return () => {
+      itemListenersRef.current.get(index)?.delete(cb);
+    };
+  }, []);
+
+  // アイテムが自分のサムネイルデータを取得する
+  const getThumbnail = useCallback((index: number) => {
+    return thumbnailsRef.current.get(index);
   }, []);
 
   // ページをワーカーに分散してサムネイル生成
@@ -210,10 +232,12 @@ export function useThumbnailPanel() {
     pendingBatchRef.current = [];
     if (batchTimerRef.current) { clearTimeout(batchTimerRef.current); batchTimerRef.current = null; }
 
-    setThumbnails(prev => {
-      prev.forEach(url => { if (url) URL.revokeObjectURL(url); });
-      return new Map();
-    });
+    // サムネイルrefをクリアし、全登録アイテムに通知（プレースホルダー表示へ）
+    thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
+    thumbnailsRef.current = new Map();
+    itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
+
+    // loadEpoch を増加させてアイテムの再リクエストを促す
     setLoadEpoch(prev => prev + 1);
 
     if (!document?.filePath || workersRef.current.length === 0) return;
@@ -241,17 +265,13 @@ export function useThumbnailPanel() {
   }, [document?.filePath, processThumbnailQueue]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
-    setThumbnails(prev => {
-      if (prev.has(pageIndex)) return prev;
-      if (!queueRef.current.includes(pageIndex)) {
-        queueRef.current.push(pageIndex);
-      }
-      const epoch = epochRef.current;
-      setTimeout(() => processThumbnailQueue(epoch), 0);
-      return prev;
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processThumbnailQueue, loadEpoch]);
+    if (thumbnailsRef.current.has(pageIndex)) return;
+    if (!queueRef.current.includes(pageIndex)) {
+      queueRef.current.push(pageIndex);
+    }
+    const epoch = epochRef.current;
+    setTimeout(() => processThumbnailQueue(epoch), 0);
+  }, [processThumbnailQueue]);
 
   const handleSelectPage = useCallback((pageIndex: number) => {
     usePecoStore.getState().setCurrentPage(pageIndex);
@@ -261,5 +281,5 @@ export function useThumbnailPanel() {
     ? { totalPages: document.totalPages, pages: document.pages }
     : null;
 
-  return { thumbnails, loadEpoch, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument };
+  return { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument };
 }

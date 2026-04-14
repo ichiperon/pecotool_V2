@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, memo } from 'react';
+import { useState, useEffect, useRef, useCallback, useReducer, memo } from 'react';
 import { listen, emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -24,18 +24,32 @@ interface ThumbnailFileOpenedPayload {
 
 // ---- Thumbnail アイテム ----
 const ThumbnailItem = memo(({
-  index, currentPageIndex, thumbnailUrl, isDirty, onSelect, onRequest,
+  index, currentPageIndex, isDirty, loadEpoch, onSelect, onRequest,
+  onSubscribeThumbnail, onGetThumbnail,
 }: {
   index: number;
   currentPageIndex: number;
-  thumbnailUrl?: string;
   isDirty?: boolean;
+  loadEpoch: number;
   onSelect: (i: number) => void;
   onRequest: (i: number) => void;
+  onSubscribeThumbnail: (index: number, cb: () => void) => () => void;
+  onGetThumbnail: (index: number) => string | undefined;
 }) => {
+  const [, forceUpdate] = useReducer(x => x + 1, 0);
+
+  // このアイテム専用のサムネイル更新を購読
+  useEffect(() => {
+    return onSubscribeThumbnail(index, forceUpdate);
+  }, [index, onSubscribeThumbnail]);
+
+  const thumbnailUrl = onGetThumbnail(index);
+
   useEffect(() => {
     if (!thumbnailUrl) onRequest(index);
-  }, [index, thumbnailUrl, onRequest]);
+  // loadEpoch が変化したとき（ファイル切り替え後）に再リクエストを強制する
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, thumbnailUrl, onRequest, loadEpoch]);
 
   return (
     <div
@@ -62,8 +76,12 @@ const ThumbnailItem = memo(({
 export function ThumbnailWindow() {
   const [totalPages, setTotalPages] = useState(0);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
-  const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
   const [dirtyPages, setDirtyPages] = useState<Set<number>>(new Set());
+  const [loadEpoch, setLoadEpoch] = useState(0);
+
+  // サムネイルデータはRefで保持（Reactの外）
+  const thumbnailsRef = useRef<Map<number, string>>(new Map());
+  const itemListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
 
   // ★ Worker プール
   const workersRef = useRef<Worker[]>([]);
@@ -89,6 +107,21 @@ export function ThumbnailWindow() {
       emit('thumbnail:hidden');
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
+  }, []);
+
+  // サムネイル取得 API（安定参照）
+  const subscribeThumbnail = useCallback((index: number, cb: () => void) => {
+    if (!itemListenersRef.current.has(index)) {
+      itemListenersRef.current.set(index, new Set());
+    }
+    itemListenersRef.current.get(index)!.add(cb);
+    return () => {
+      itemListenersRef.current.get(index)?.delete(cb);
+    };
+  }, []);
+
+  const getThumbnail = useCallback((index: number) => {
+    return thumbnailsRef.current.get(index);
   }, []);
 
   // ---- Worker プール初期化（マウント時1回）----
@@ -203,12 +236,12 @@ export function ThumbnailWindow() {
             const url = await generateViaWorker(pageIdx);
             if (!url) return;
             if (epochRef.current === epoch) {
-              setThumbnails(prev => {
-                if (prev.has(pageIdx)) { URL.revokeObjectURL(url); return prev; }
-                const next = new Map(prev);
-                next.set(pageIdx, url);
-                return next;
-              });
+              if (!thumbnailsRef.current.has(pageIdx)) {
+                thumbnailsRef.current.set(pageIdx, url);
+                itemListenersRef.current.get(pageIdx)?.forEach(cb => cb());
+              } else {
+                URL.revokeObjectURL(url);
+              }
             } else {
               URL.revokeObjectURL(url);
             }
@@ -224,15 +257,12 @@ export function ThumbnailWindow() {
   }, [generateViaWorker]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
-    setThumbnails(prev => {
-      if (prev.has(pageIndex)) return prev;
-      if (!thumbnailQueueRef.current.includes(pageIndex)) {
-        thumbnailQueueRef.current.push(pageIndex);
-      }
-      const epoch = epochRef.current;
-      setTimeout(() => processThumbnailQueue(epoch), 0);
-      return prev;
-    });
+    if (thumbnailsRef.current.has(pageIndex)) return;
+    if (!thumbnailQueueRef.current.includes(pageIndex)) {
+      thumbnailQueueRef.current.push(pageIndex);
+    }
+    const epoch = epochRef.current;
+    setTimeout(() => processThumbnailQueue(epoch), 0);
   }, [processThumbnailQueue]);
 
   // ---- Tauri イベントリスナー ----
@@ -255,13 +285,15 @@ export function ThumbnailWindow() {
         });
         pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
 
-        setThumbnails(prev => {
-          prev.forEach(url => { if (url) URL.revokeObjectURL(url); });
-          return new Map();
-        });
+        // サムネイルrefをクリアし、全登録アイテムに通知（プレースホルダー表示へ）
+        thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
+        thumbnailsRef.current = new Map();
+        itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
+
         setTotalPages(total);
         setCurrentPageIndex(page);
         setDirtyPages(new Set(dirty));
+        setLoadEpoch(prev => prev + 1);
 
         // ★ 高速化3: メインスレッドで fetch → ArrayBuffer → 全ワーカーに零コピー転送
         fetch(toAssetUrl(fp))
@@ -309,13 +341,13 @@ export function ThumbnailWindow() {
           if (r) { loadResolvesRef.current[i] = null; r(false); }
         });
         pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
-        setThumbnails(prev => {
-          prev.forEach(url => { if (url) URL.revokeObjectURL(url); });
-          return new Map();
-        });
+        thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
+        thumbnailsRef.current = new Map();
+        itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
         setTotalPages(0);
         setCurrentPageIndex(0);
         setDirtyPages(new Set());
+        setLoadEpoch(prev => prev + 1);
       }));
 
       unlisteners.push(await listen<{ pageIndex: number }>('thumbnail:page-changed', (e) => {
@@ -362,10 +394,12 @@ export function ThumbnailWindow() {
             <ThumbnailItem
               index={i}
               currentPageIndex={currentPageIndex}
-              thumbnailUrl={thumbnails.get(i)}
               isDirty={dirtyPages.has(i)}
+              loadEpoch={loadEpoch}
               onSelect={handleSelectPage}
               onRequest={requestThumbnail}
+              onSubscribeThumbnail={subscribeThumbnail}
+              onGetThumbnail={getThumbnail}
             />
           )}
         />
