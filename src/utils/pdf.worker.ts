@@ -31,24 +31,33 @@ function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
   const filter = stream.dict.lookup(PDFName.of('Filter'));
   const raw = stream.getContents();
 
-  // Handle single filter (e.g. /FlateDecode) or array (e.g. [/FlateDecode])
-  const filters = filter instanceof PDFName 
-    ? [filter.asString()] 
-    : (Array.isArray((filter as any)?.array) ? (filter as any).array.map((f: any) => f.asString()) : []);
-  
-  // If no filters, raw bytes are already plain text operators
-  if (filters.length === 0) return raw;
+  // Resolve filter names — Filter can be a single PDFName or a PDFArray of names.
+  let filterNames: string[];
+  if (filter instanceof PDFName) {
+    filterNames = [filter.asString()];
+  } else if (filter instanceof PDFArray) {
+    // Use .asArray() — PDFArray does NOT expose a .array property
+    filterNames = filter.asArray().map((f: any) => f.asString());
+  } else if (!filter) {
+    // No filter — bytes are already plain content operators
+    return raw;
+  } else {
+    // Unknown filter type — skip modification to avoid corrupting the stream
+    return null;
+  }
 
-  // We only support a single /FlateDecode for now.
-  // Multiple filters (e.g. [/ASCII85Decode /FlateDecode]) are rare for text streams.
-  if (filters.length === 1 && filters[0] === '/FlateDecode') {
+  if (filterNames.length === 0) return raw;
+
+  // Only handle a single /FlateDecode; multi-filter chains are left untouched.
+  if (filterNames.length === 1 && filterNames[0] === '/FlateDecode') {
     try {
       return inflate(raw);
     } catch {
       return null;
     }
   }
-  
+
+  // Unsupported filter (LZW, ASCII85, multi-filter chain, etc.) — skip modification
   return null;
 }
 
@@ -68,16 +77,16 @@ function stripTextBlocks(decoded: Uint8Array): Uint8Array {
     // and followed by delimiter.
     if (
       decoded[i] === 0x42 && decoded[i+1] === 0x54 && // 'BT'
-      (i === 0 || decoded[i-1] <= 0x20) && 
-      (i + 2 === len || decoded[i+2] <= 0x20)
+      (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) &&
+      (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
     ) {
       // Found BT, skip until "ET" (End Text)
       i += 2;
       while (i < len) {
         if (
           decoded[i] === 0x45 && decoded[i+1] === 0x54 && // 'ET'
-          (i === 0 || decoded[i-1] <= 0x20) &&
-          (i + 2 === len || decoded[i+2] <= 0x20)
+          (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) &&
+          (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
         ) {
           i += 2;
           break;
@@ -235,7 +244,7 @@ self.onmessage = async (e: MessageEvent) => {
         useObjectStreams: false,
         addDefaultPage: false,
         update: true,
-      });
+      } as any);
       if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
       self.postMessage({ type: 'SAVE_PDF_SUCCESS', data: savedBytes }, [savedBytes.buffer] as any);
     } catch (err: any) {

@@ -38,12 +38,13 @@ interface ThumbnailPanelProps {
   currentPageIndex: number;
   thumbnails: Map<number, string>;
   loadEpoch: number;
+  isOcrRunning: boolean;
   onSelectPage: (index: number) => void;
   onRequestThumbnail: (index: number) => void;
 }
 
 export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
-  width, document, currentPageIndex, thumbnails, loadEpoch, onSelectPage, onRequestThumbnail
+  width, document, currentPageIndex, thumbnails, loadEpoch, isOcrRunning, onSelectPage, onRequestThumbnail
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
@@ -53,6 +54,12 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
 
   return (
     <aside className="thumbnails-panel" style={{ width: `${width}px` }}>
+      {isOcrRunning && (
+        <div className="ocr-processing-overlay">
+          <div className="loading-spinner" />
+          <div className="loading-message">OCR処理中...</div>
+        </div>
+      )}
       <div className="panel-header">サムネイル</div>
       <div className="scroll-content" tabIndex={0} onKeyDown={(e) => {
         if (!document) return;

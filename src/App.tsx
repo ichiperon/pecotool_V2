@@ -692,6 +692,7 @@ function App() {
           currentPageIndex={currentPageIndex}
           thumbnails={thumbnails}
           loadEpoch={loadEpoch}
+          isOcrRunning={isOcrRunning}
           onSelectPage={handleThumbnailSelectPage}
           onRequestThumbnail={requestThumbnail}
         />
@@ -709,6 +710,14 @@ function App() {
               <div className="loading-spinner" />
               <div className="loading-message">
                 {isLoadingFile ? 'PDFを読み込んでいます...' : 'ページを読み込んでいます...'}
+              </div>
+            </div>
+          )}
+          {isOcrRunning && (
+            <div className="ocr-processing-overlay">
+              <div className="loading-spinner" />
+              <div className="loading-message">
+                {ocrProgress ? `OCR処理中... (${ocrProgress.current}/${ocrProgress.total})` : 'OCR処理中...'}
               </div>
             </div>
           )}

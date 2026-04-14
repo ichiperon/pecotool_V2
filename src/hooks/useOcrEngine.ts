@@ -1,18 +1,23 @@
 import { useRef, useState } from 'react';
+import type * as pdfjsLib from 'pdfjs-dist';
 import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { writeFile, remove } from '@tauri-apps/plugin-fs';
 import { tempDir, join } from '@tauri-apps/api/path';
 import { usePecoStore } from '../store/pecoStore';
-import { getCachedPageProxy, getSharedPdfProxy } from '../utils/pdfLoader';
+import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc } from '../utils/pdfLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
 
 const RENDER_SCALE = 2.0;
 
-async function renderPageToTempFile(filePath: string, pageIndex: number): Promise<string> {
-  const page = await getCachedPageProxy(filePath, pageIndex);
+/**
+ * Render a page from an isolated PDF document (not the shared LRU cache)
+ * so it never conflicts with PdfCanvas's concurrent render on the same proxy.
+ */
+async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex: number): Promise<string> {
+  const page = await ocrPdf.getPage(pageIndex + 1);
   const viewport = page.getViewport({ scale: RENDER_SCALE });
 
   const canvas = document.createElement('canvas');
@@ -22,6 +27,7 @@ async function renderPageToTempFile(filePath: string, pageIndex: number): Promis
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+  page.cleanup();
 
   const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
   const arrayBuffer = await blob.arrayBuffer();
@@ -50,6 +56,7 @@ function toTextBlocks(blocks: OcrResultBlock[], settings: OcrSortSettings): Text
 }
 
 async function runOcrForPage(
+  ocrPdf: pdfjsLib.PDFDocumentProxy,
   filePath: string,
   pageIndex: number,
   pageWidth: number,
@@ -57,7 +64,7 @@ async function runOcrForPage(
 ): Promise<OcrResult> {
   let tempPath: string | null = null;
   try {
-    tempPath = await renderPageToTempFile(filePath, pageIndex);
+    tempPath = await renderPageToTempFile(ocrPdf, pageIndex);
     const raw = await invoke<string>('run_ocr', {
       imagePath: tempPath,
       pageWidth,
@@ -94,8 +101,18 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     const doc = state.document;
     const pageIdx = state.currentPageIndex;
     if (!doc) return;
-    const pageData = doc.pages.get(pageIdx);
-    if (!pageData) return;
+    let pageData = doc.pages.get(pageIdx);
+    if (!pageData) {
+      // ページが未ロード（LRU退避済みを含む）の場合はサイズだけ取得してOCRを続行
+      try {
+        const page = await getCachedPageProxy(doc.filePath, pageIdx);
+        const viewport = page.getViewport({ scale: 1.0 });
+        pageData = { pageIndex: pageIdx, width: viewport.width, height: viewport.height, textBlocks: [], isDirty: false, thumbnail: null };
+      } catch (e) {
+        showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました。OCRを実行できません。`, true);
+        return;
+      }
+    }
 
     if ((pageData.textBlocks?.length ?? 0) > 0) {
       const confirmed = await ask(
@@ -106,9 +123,10 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     }
 
     setIsOcrRunning(true);
+    const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       console.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
-      const result = await runOcrForPage(doc.filePath, pageIdx, pageData.width, pageData.height);
+      const result = await runOcrForPage(ocrPdf, doc.filePath, pageIdx, pageData.width, pageData.height);
 
       if (result.status === 'error') {
         showToast(`OCRエラー: ${result.message}`, true);
@@ -123,6 +141,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
       console.error('[OCR] エラー:', e);
       showToast(`OCRに失敗しました: ${e}`, true);
     } finally {
+      ocrPdf.destroy().catch(() => {});
       setIsOcrRunning(false);
     }
   };
@@ -153,6 +172,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     setIsOcrRunning(true);
     setOcrProgress({ current: 0, total: doc.totalPages });
 
+    const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       for (let i = 0; i < doc.totalPages; i++) {
         if (cancelTokenRef.current) break;
@@ -160,17 +180,18 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
         setOcrProgress({ current: i + 1, total: doc.totalPages });
         console.log(`[OCR] 処理中: ${i + 1} / ${doc.totalPages} ページ`);
 
-        // ページデータがロード済みならそのサイズを使用。未ロードの場合は pdfjs から取得
+        // ページデータがロード済みならそのサイズを使用。未ロードの場合は ocrPdf から取得
         const pageData = usePecoStore.getState().document?.pages.get(i);
         let pageWidth = pageData?.width ?? 0;
         let pageHeight = pageData?.height ?? 0;
 
         if (pageWidth === 0 || pageHeight === 0) {
           try {
-            const page = await getCachedPageProxy(doc.filePath, i);
+            const page = await ocrPdf.getPage(i + 1);
             const viewport = page.getViewport({ scale: 1.0 });
             pageWidth = viewport.width;
             pageHeight = viewport.height;
+            page.cleanup();
           } catch (e) {
             console.warn(`[OCR] ページ ${i + 1}: サイズ取得失敗、スキップします`, e);
             continue;
@@ -178,7 +199,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
         }
 
         try {
-          const result = await runOcrForPage(doc.filePath, i, pageWidth, pageHeight);
+          const result = await runOcrForPage(ocrPdf, doc.filePath, i, pageWidth, pageHeight);
           if (result.status === 'error') {
             console.error(`[OCR] ページ ${i + 1} エラー: ${result.message}`);
             continue;
@@ -191,6 +212,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
         }
       }
     } finally {
+      ocrPdf.destroy().catch(() => {});
       setIsOcrRunning(false);
       setOcrProgress(null);
     }

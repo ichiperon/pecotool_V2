@@ -107,6 +107,20 @@ export async function openPDF(filePath: string): Promise<pdfjsLib.PDFDocumentPro
   return getDocumentTask(url).promise;
 }
 
+/**
+ * Open a fresh, isolated PDF document for OCR rendering.
+ * This does NOT touch the shared proxy or LRU page cache,
+ * so concurrent renders in PdfCanvas will not conflict.
+ * Caller is responsible for calling pdf.destroy() when done.
+ */
+export async function openFreshPdfDoc(filePath: string): Promise<pdfjsLib.PDFDocumentProxy> {
+  let url = convertFileSrc(filePath);
+  if (url.startsWith('asset.localhost')) {
+    url = 'http://' + url;
+  }
+  return getDocumentTask(url).promise;
+}
+
 // ページプロキシのメモリキャッシュ（ページ切り替えをゼロ秒にするため）
 let globalSharedPdfProxy: { filePath: string, promise: Promise<pdfjsLib.PDFDocumentProxy>, loadId: number } | null = null;
 // 単調増加カウンタ：ファイル切り替え時に古い非同期処理を識別して無視するために使う
@@ -119,7 +133,11 @@ const pageProxyCache = new Map<string, pdfjsLib.PDFPageProxy>();
 function evictPageProxyCache() {
   while (pageProxyCache.size > PAGE_PROXY_CACHE_LIMIT) {
     const oldestKey = pageProxyCache.keys().next().value!;
+    const evicted = pageProxyCache.get(oldestKey);
     pageProxyCache.delete(oldestKey);
+    if (evicted) {
+      try { evicted.cleanup(); } catch { /* ignore */ }
+    }
   }
 }
 

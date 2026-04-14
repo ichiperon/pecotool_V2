@@ -18,18 +18,34 @@ import { inflate } from 'pako';
 function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
   const filter = stream.dict.lookup(PDFName.of('Filter'));
   const raw = stream.getContents();
-  if (filter instanceof PDFName && filter.asString() === '/FlateDecode') {
+
+  // Resolve filter names — Filter can be a single PDFName or a PDFArray of names.
+  let filterNames: string[];
+  if (filter instanceof PDFName) {
+    filterNames = [filter.asString()];
+  } else if (filter instanceof PDFArray) {
+    // Use .asArray() — PDFArray does NOT expose a .array property
+    filterNames = filter.asArray().map((f: any) => f.asString());
+  } else if (!filter) {
+    // No filter — raw bytes are already plain content operators
+    return raw;
+  } else {
+    // Unknown filter type — skip modification to avoid corrupting the stream
+    return null;
+  }
+
+  if (filterNames.length === 0) return raw;
+
+  // Only handle a single /FlateDecode; multi-filter chains are left untouched.
+  if (filterNames.length === 1 && filterNames[0] === '/FlateDecode') {
     try {
       return inflate(raw);
     } catch {
       return null;
     }
   }
-  if (!filter) {
-    // No compression — raw bytes are already plain text operators
-    return raw;
-  }
-  // Unsupported filter (LZW, ASCII85, etc.) — skip modification
+
+  // Unsupported filter (LZW, ASCII85, multi-filter chain, etc.) — skip modification
   return null;
 }
 
@@ -238,7 +254,7 @@ export async function buildPdfDocument(
     useObjectStreams: false,
     addDefaultPage: false,
     update: true,
-  });
+  } as any);
   return savedBytes;
 }
 

@@ -2,8 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX,
-  LayoutTemplate
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX
 } from "lucide-react";
 import { PageData, PecoDocument } from '../../types';
 
