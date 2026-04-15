@@ -5,6 +5,7 @@ import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
+import { loadFontLazy } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 
 /** originalBytes が設定されるまで最大 timeoutMs 待機する（subscribe ベース） */
@@ -80,6 +81,7 @@ export function useFileOperations(
             showToast('ファイルバイナリの読み込みに失敗しました。保存できない場合があります。', true);
           });
 
+        loadFontLazy();
         return true;
       }
       return false;
@@ -97,7 +99,7 @@ export function useFileOperations(
    * @returns 書き込んだバイト数。失敗時は null。
    */
   const _executeSave = async (targetPath?: string): Promise<number | null> => {
-    const { document, fontBytes, isFontLoaded } = usePecoStore.getState();
+    const { document } = usePecoStore.getState();
     if (!document) return null;
 
     let originalBytes = usePecoStore.getState().originalBytes;
@@ -110,8 +112,9 @@ export function useFileOperations(
       }
     }
 
-    if (!isFontLoaded || !fontBytes) {
-      showToast("日本語フォントの読み込みが完了していません。しばらく待ってから再度お試しください。", true);
+    const fontBytes = await loadFontLazy();
+    if (!fontBytes) {
+      showToast("日本語フォントの読み込みに失敗しました。再度お試しください。", true);
       return null;
     }
 
@@ -135,7 +138,7 @@ export function useFileOperations(
       [...mergedPages.entries()].filter(([, p]) => p.isDirty)
     );
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
-    const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes || undefined);
+    const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes);
     const writePath = targetPath ?? document.filePath;
 
     await writeFile(writePath, savedBytes);

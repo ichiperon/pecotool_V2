@@ -16,6 +16,7 @@ interface MenuBarProps {
   onShowShortcuts: () => void;
   onShowUsage: () => void;
   onShowVersion: () => void;
+  onReload: () => void;
   onShowOcrSettings: () => void;
 }
 
@@ -97,6 +98,12 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
               )}
             </div>
 
+            <div
+              className={`menu-dropdown-item ${!props.document ? 'disabled' : ''}`}
+              onClick={() => props.document && run(props.onReload)}
+            >
+              再読み込み<span className="menu-shortcut">F5</span>
+            </div>
             <div className="menu-separator" />
             <div
               className={`menu-dropdown-item ${!props.document ? 'disabled' : ''}`}

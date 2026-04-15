@@ -14,6 +14,21 @@ export default defineConfig(async () => ({
     exclude: ['**/node_modules/**', '**/dist/**', '**/src/__tests__/e2e/**'],
   },
 
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // pdfjs-dist を別チャンクに分離（初回ロードを軽量化）
+          'pdfjs': ['pdfjs-dist'],
+          // pdf-lib は保存時のみ使用するため分離
+          'pdf-lib': ['@cantoo/pdf-lib'],
+          // react-virtuoso はサムネイルウィンドウでのみ使用
+          'virtuoso': ['react-virtuoso'],
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

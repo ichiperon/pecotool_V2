@@ -78,6 +78,8 @@ export function usePreviewWindow() {
   }, [previewText]);
 
   useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
     const setupListener = async () => {
       const un1 = await listen('request-preview', () => {
         emit('preview-update', previewText).catch(e => console.error(e));
@@ -87,12 +89,15 @@ export function usePreviewWindow() {
       });
       return () => { un1(); un2(); };
     };
-    let unlistenFn: (() => void) | undefined;
-    setupListener().then(fn => unlistenFn = fn);
+    setupListener().then(fn => {
+      if (cancelled) { fn(); return; }
+      unlistenFn = fn;
+    });
     return () => {
-      if (unlistenFn) unlistenFn();
+      cancelled = true;
+      unlistenFn?.();
     };
   }, [previewText]);
 
-  return { isPreviewOpen, togglePreviewWindow, initPreviewWindow };
+  return { isPreviewOpen, togglePreviewWindow };
 }

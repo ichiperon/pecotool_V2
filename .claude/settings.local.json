@@ -20,7 +20,9 @@
       "Bash(mv スプシ.url docs/)",
       "Bash(grep -E \"\\\\.ts$|\\\\.tsx$\")",
       "Bash(xargs cat:*)",
-      "Bash(xargs grep:*)"
+      "Bash(xargs grep:*)",
+      "Read(//c/Users/user/.claude/**)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

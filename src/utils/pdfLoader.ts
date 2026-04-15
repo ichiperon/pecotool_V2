@@ -21,7 +21,7 @@ function getDocumentTask(urlOrData: string | Uint8Array) {
     cMapUrl: CMAP_URL,
     cMapPacked: CMAP_PACKED,
     standardFontDataUrl: STANDARD_FONT_DATA_URL,
-    disableAutoFetch: true, 
+    disableAutoFetch: false,
     disableStream: false,
     disableRange: false,
   };
@@ -415,8 +415,10 @@ export async function loadPage(
   mtime?: number
 ): Promise<PageData> {
   const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
-  const cached = await getCachedPage(cacheKey);
-  const tempEdited = await getTemporaryPageData(filePath, pageIndex);
+  const [cached, tempEdited] = await Promise.all([
+    getCachedPage(cacheKey),
+    getTemporaryPageData(filePath, pageIndex),
+  ]);
 
   let pageData: PageData;
 
@@ -457,6 +459,8 @@ export async function loadPage(
       // Fallback: compute bboxes from pdfjs transform (original OCR text)
       // Use viewport.convertToViewportPoint to correctly handle page rotation (/Rotate)
       // and CropBox offsets set by Acrobat.
+      const pageW = viewport.width;
+      const pageH = viewport.height;
       let order = 0;
       textBlocks = textItems
         .filter((item: any) => item.str.trim() !== '')
@@ -513,6 +517,15 @@ export async function loadPage(
             isNew: false,
             isDirty: false,
           };
+        })
+        // OCRツールがForm XObjectを複数ページで共有している場合、getTextContent()が
+        // 他ページのテキストも返すことがある。ページ範囲外のブロックを除外する。
+        .filter(block => {
+          const b = block.bbox;
+          // bboxが完全にページ範囲外なら除外（少しのはみ出しは許容）
+          const margin = Math.max(pageW, pageH) * 0.05;
+          return b.x + b.width > -margin && b.x < pageW + margin
+              && b.y + b.height > -margin && b.y < pageH + margin;
         });
     }
 

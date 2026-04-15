@@ -39,6 +39,7 @@ export function useThumbnailPanel() {
   const isPdfReadyRef = useRef(false);
   const queueRef = useRef<number[]>([]);
   const isProcessingRef = useRef(false);
+  const deferredLoadRef = useRef<(() => void) | null>(null);
 
   // バッチ更新用
   const pendingBatchRef = useRef<Array<[number, string]>>([]);
@@ -242,26 +243,35 @@ export function useThumbnailPanel() {
 
     if (!document?.filePath || workersRef.current.length === 0) return;
 
-    // URL を直接 Worker に渡す（pdfjs が range request でストリーミング取得）
-    const url = toAssetUrl(document.filePath);
-    const workers = workersRef.current;
+    const capturedFilePath = document.filePath;
+    const capturedEpoch = epoch;
 
-    const perWorkerPromises = workers.map((_, i) =>
-      new Promise<boolean>(resolve => {
-        loadResolvesRef.current[i] = resolve;
-      })
-    );
+    const startWorkerLoad = () => {
+      if (epochRef.current !== capturedEpoch) return;
+      // URL を直接 Worker に渡す（pdfjs が range request でストリーミング取得）
+      const url = toAssetUrl(capturedFilePath);
+      const workers = workersRef.current;
 
-    workers.forEach(worker => {
-      worker.postMessage({ type: 'LOAD_PDF', url });
-    });
+      const perWorkerPromises = workers.map((_, i) =>
+        new Promise<boolean>(resolve => {
+          loadResolvesRef.current[i] = resolve;
+        })
+      );
 
-    Promise.all(perWorkerPromises).then((results) => {
-      console.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${epoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
-      if (epochRef.current !== epoch) return;
-      isPdfReadyRef.current = true;
-      processThumbnailQueue(epoch);
-    });
+      workers.forEach(worker => {
+        worker.postMessage({ type: 'LOAD_PDF', url });
+      });
+
+      Promise.all(perWorkerPromises).then((results) => {
+        console.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
+        if (epochRef.current !== capturedEpoch) return;
+        isPdfReadyRef.current = true;
+        processThumbnailQueue(capturedEpoch);
+      });
+    };
+
+    // 遅延ロードモード: triggerThumbnailLoad() が呼ばれるまで Worker への LOAD_PDF を保留
+    deferredLoadRef.current = startWorkerLoad;
   }, [document?.filePath, processThumbnailQueue]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
@@ -273,6 +283,14 @@ export function useThumbnailPanel() {
     setTimeout(() => processThumbnailQueue(epoch), 0);
   }, [processThumbnailQueue]);
 
+  const triggerThumbnailLoad = useCallback(() => {
+    const fn = deferredLoadRef.current;
+    if (fn) {
+      deferredLoadRef.current = null;
+      fn();
+    }
+  }, []);
+
   const handleSelectPage = useCallback((pageIndex: number) => {
     usePecoStore.getState().setCurrentPage(pageIndex);
   }, []);
@@ -281,5 +299,5 @@ export function useThumbnailPanel() {
     ? { totalPages: document.totalPages, pages: document.pages }
     : null;
 
-  return { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument };
+  return { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument, triggerThumbnailLoad };
 }

@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useRef, useState } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
 import { usePecoStore } from '../store/pecoStore';
 
@@ -17,11 +18,37 @@ export function useThumbnailWindow() {
     return result;
   }, []);
 
-  // --- ウィンドウ初期化（アプリ起動時）---
+  // --- ウィンドウ初期化（遅延生成）---
+  const thumbWinRef = useRef<WebviewWindow | null>(null);
+  const initPromiseRef = useRef<Promise<WebviewWindow> | null>(null);
+
   const initThumbnailWindow = useCallback(async () => {
-    // tauri.conf.json で pre-configure 済みのため取得のみ
-    const windows = await getAllWindows();
-    return windows.find(w => w.label === 'thumbnail-window');
+    if (thumbWinRef.current) return thumbWinRef.current;
+    if (initPromiseRef.current) return initPromiseRef.current;
+
+    initPromiseRef.current = (async () => {
+      const windows = await getAllWindows();
+      let win = windows.find(w => w.label === 'thumbnail-window') as WebviewWindow | undefined;
+      if (!win) {
+        win = new WebviewWindow('thumbnail-window', {
+          url: '/#thumbnails',
+          title: 'サムネイル一覧',
+          width: 250,
+          height: 800,
+          visible: false,
+          resizable: true,
+          alwaysOnTop: true,
+        });
+      }
+      thumbWinRef.current = win;
+      return win;
+    })();
+
+    try {
+      return await initPromiseRef.current;
+    } finally {
+      initPromiseRef.current = null;
+    }
   }, []);
 
   const toggleThumbnailWindow = useCallback(async () => {
@@ -42,7 +69,7 @@ export function useThumbnailWindow() {
     }
   }, [isThumbnailOpen, initThumbnailWindow]);
 
-  // --- サズネイル窓からの状態要求に応答 ---
+  // --- サムネイル窓からの状態要求に応答 ---
   useEffect(() => {
     const setup = async () => {
       const u1 = await listen('thumbnail:request-state', () => {
@@ -104,7 +131,7 @@ export function useThumbnailWindow() {
     if (serialized === prevDirtyRef.current) return;
     prevDirtyRef.current = serialized;
     emit('thumbnail:dirty-update', { dirtyPages: dirty }).catch(console.error);
-  });
+  }, [document, getDirtyPages]);
 
   return { initThumbnailWindow, isThumbnailOpen, toggleThumbnailWindow };
 }

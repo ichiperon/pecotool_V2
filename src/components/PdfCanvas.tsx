@@ -19,6 +19,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
   const renderDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { document, zoom, showOcr, ocrOpacity, selectedIds, isDrawingMode, isSplitMode, updatePageData, toggleDrawingMode, toggleSplitMode, toggleSelection, pushAction } = usePecoStore();
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   // Drawing state
@@ -58,6 +60,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         // "file switched" は意図的なキャンセルなのでログ不要
         if (!cancelled && !(err instanceof Error && err.message.includes('file switched'))) {
           console.error("Error loading PDF page:", err);
+          setLoadError(true);
         }
       }
     })();
@@ -65,7 +68,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
     return () => {
       cancelled = true;
     };
-  }, [document?.filePath, pageIndex]);
+  }, [document?.filePath, pageIndex, retryCount]);
 
   const getMousePos = (e: React.MouseEvent) => {
     const rect = overlayCanvasRef.current?.getBoundingClientRect();
@@ -167,6 +170,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
         // ファイル切り替え直後に transport が破棄されている場合は想定内
         if (err instanceof TypeError && err.message.includes('sendWithPromise')) return;
         console.error("PDF render error:", err);
+        setLoadError(true);
       }
       // PDF描画完了後にオーバーレイを再描画（キャンバスサイズリセットによる消去を防ぐ）
       renderOverlaysRef.current?.();
@@ -784,6 +788,43 @@ export function PdfCanvas({ pageIndex, disableDrawing = false }: PdfCanvasProps)
           cursor: isDrawingMode || isSplitMode ? 'crosshair' : draggedId ? (dragMode === 'move' ? 'move' : 'crosshair') : 'default',
         }}
       />
+      {loadError && !pdfPage && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          minHeight: '200px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: 'rgba(30, 41, 59, 0.85)',
+          zIndex: 10,
+          gap: '12px',
+        }}>
+          <span style={{
+            color: '#94a3b8',
+            fontSize: '14px',
+          }}>ページの表示に失敗しました</span>
+          <button
+            type="button"
+            onClick={() => { setLoadError(false); setRetryCount(c => c + 1); }}
+            style={{
+              padding: '6px 16px',
+              backgroundColor: '#334155',
+              color: '#e2e8f0',
+              border: '1px solid #475569',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '13px',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#475569'; }}
+            onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#334155'; }}
+          >再試行</button>
+        </div>
+      )}
     </div>
   );
 }

@@ -15,24 +15,6 @@
         "title": "PecoTool V2",
         "width": 1640,
         "height": 880
-      },
-      {
-        "label": "preview-window",
-        "title": "テキストコピー プレビュー",
-        "url": "/#preview",
-        "width": 600,
-        "height": 800,
-        "visible": false
-      },
-      {
-        "label": "thumbnail-window",
-        "title": "サムネイル一覧",
-        "url": "/#thumbnails",
-        "width": 250,
-        "height": 800,
-        "visible": false,
-        "resizable": true,
-        "alwaysOnTop": true
       }
     ],
     "security": {

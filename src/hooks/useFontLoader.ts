@@ -1,27 +1,32 @@
-import { useEffect } from 'react';
-import { usePecoStore } from '../store/pecoStore';
+let fontBytesCache: ArrayBuffer | null = null;
+let fontLoadPromise: Promise<ArrayBuffer | null> | null = null;
 
-export function useFontLoader() {
-  const { setFontBytes, setFontLoaded } = usePecoStore();
+/**
+ * フォントを遅延ロードする。初回呼び出し時にfetchし、以降はキャッシュを返す。
+ */
+export async function loadFontLazy(): Promise<ArrayBuffer | null> {
+  if (fontBytesCache) return fontBytesCache;
+  if (fontLoadPromise) return fontLoadPromise;
 
-  useEffect(() => {
-    async function loadFont() {
-      try {
-        const res = await fetch('/fonts/IPAexGothic.ttf');
-        if (res.ok) {
-          const bytes = await res.arrayBuffer();
-          setFontBytes(bytes);
-          console.log('[useFontLoader] Font loaded successfully');
-        } else {
-          console.error('[useFontLoader] Failed to fetch font: status', res.status);
-          setFontLoaded(false);
-        }
-      } catch (err) {
-        console.error('[useFontLoader] Error loading font:', err);
-        setFontLoaded(false);
+  fontLoadPromise = (async () => {
+    try {
+      const res = await fetch('/fonts/IPAexGothic.ttf');
+      if (res.ok) {
+        fontBytesCache = await res.arrayBuffer();
+        fontLoadPromise = null;
+        console.log('[loadFontLazy] Font loaded successfully');
+        return fontBytesCache;
+      } else {
+        console.error('[loadFontLazy] Failed to fetch font: status', res.status);
+        fontLoadPromise = null;
+        return null;
       }
+    } catch (err) {
+      console.error('[loadFontLazy] Error loading font:', err);
+      fontLoadPromise = null; // リトライ可能にする
+      return null;
     }
+  })();
 
-    loadFont();
-  }, [setFontBytes, setFontLoaded]);
+  return fontLoadPromise;
 }

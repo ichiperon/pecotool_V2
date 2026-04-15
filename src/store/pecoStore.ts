@@ -29,14 +29,10 @@ interface PecoState {
   clipboard: TextBlock[];
   undoStack: Action[];
   redoStack: Action[];
-  fontBytes: ArrayBuffer | null;
-  isFontLoaded: boolean;
   /** 復元待ちのバックアップページデータ。setDocument 内で IDB への書き込みに使われる。 */
   pendingRestoration: Record<string, Partial<PageData>> | null;
 
   // Actions
-  setFontBytes: (bytes: ArrayBuffer) => void;
-  setFontLoaded: (loaded: boolean) => void;
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
   setOriginalBytes: (bytes: Uint8Array) => void;
@@ -82,12 +78,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   clipboard: [],
   undoStack: [],
   redoStack: [],
-  fontBytes: null,
-  isFontLoaded: false,
   pendingRestoration: null,
 
-  setFontBytes: (bytes) => set({ fontBytes: bytes, isFontLoaded: true }),
-  setFontLoaded: (loaded) => set({ isFontLoaded: loaded }),
   setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
   setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
   setDocumentFilePath: (filePath) => set((state) => {

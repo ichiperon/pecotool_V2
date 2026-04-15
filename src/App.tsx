@@ -3,7 +3,7 @@ import "./App.css";
 import { usePecoStore, waitForPendingIdbSaves } from "./store/pecoStore";
 import { MousePointer2, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
-import { loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy, getCachedPageProxy, prewarmPdfjsWorker } from "./utils/pdfLoader";
+import { loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy, getCachedPageProxy } from "./utils/pdfLoader";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
@@ -14,7 +14,6 @@ import { useFileOperations } from "./hooks/useFileOperations";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useConsoleLogs } from "./hooks/useConsoleLogs";
 import { usePreviewWindow } from "./hooks/usePreviewWindow";
-import { useFontLoader } from "./hooks/useFontLoader";
 import { useOcrEngine } from "./hooks/useOcrEngine";
 import { useThumbnailPanel } from "./hooks/useThumbnailPanel";
 import { useAutoBackup, PendingBackup } from "./hooks/useAutoBackup";
@@ -57,6 +56,7 @@ function App() {
   const [showOcrSettings, setShowOcrSettings] = useState(false);
   const [pendingBackups, setPendingBackups] = useState<PendingBackup[]>([]);
   const [processingBackupPath, setProcessingBackupPath] = useState<string | null>(null);
+  const [pageLoadError, setPageLoadError] = useState<number | null>(null);
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
 
@@ -92,8 +92,6 @@ function App() {
   }, []);
 
   // --- External Hooks ---
-  useFontLoader();
-
   const { clearBackup, loadBackupData } = useAutoBackup(
     (backups) => setPendingBackups(backups),
   );
@@ -133,8 +131,8 @@ function App() {
     }
   };
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
-  const { isPreviewOpen, togglePreviewWindow, initPreviewWindow } = usePreviewWindow();
-  const { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument } = useThumbnailPanel();
+  const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
+  const { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
   const { isOcrRunning, ocrProgress, runOcrCurrentPage, runOcrAllPages, cancelOcr, checkAndPromptOcrZero } = useOcrEngine(showToast);
   const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
@@ -142,6 +140,11 @@ function App() {
   );
 
   // --- Handlers ---
+  const handleReload = useCallback(async () => {
+    if (!document?.filePath) return;
+    await handleOpen(document.filePath);
+  }, [document?.filePath, handleOpen]);
+
   const handleSaveAs = async () => {
     if (!document) return;
     await executeSaveAs();
@@ -283,30 +286,27 @@ function App() {
 
   const loadCurrentPage = useCallback(async (pageIdx: number) => {
     latestLoadRef.current = pageIdx;
-    if (latestLoadRef.current !== pageIdx) return;
 
     const doc = usePecoStore.getState().document;
     if (!doc) return;
 
     setIsLoadingPage(true);
+    setPageLoadError(null);
     try {
       const pdf = await getSharedPdfProxy(doc.filePath);
 
       if (latestLoadRef.current !== pageIdx) return;
 
       // bboxMetaが未取得の場合、1ページ目表示をブロックせずバックグラウンドで取得する。
-      // 取得完了後にキャッシュ済みでないページを再ロードしてbboxMetaを反映する。
       if (bboxMetaRef.current === undefined) {
-        bboxMetaRef.current = null; // 取得中フラグ（undefinedでなくnullにして再取得を防ぐ）
+        bboxMetaRef.current = null;
         loadPecoToolBBoxMeta(pdf).then((meta) => {
           bboxMetaRef.current = meta;
-          if (!meta) return; // PecoTool保存でなければ何もしない
-          // bboxMetaがあるファイルの場合、メモリにロード済みかつDirtyでないページのみ
-          // 再取得してbboxMetaを反映する（Dirtyページは既に編集済みのため上書き不要）
+          if (!meta) return;
           const state = usePecoStore.getState();
           if (!state.document || state.document.filePath !== doc.filePath) return;
           state.document.pages.forEach((pageData, i) => {
-            if (pageData.isDirty) return; // 編集済みページは上書きしない
+            if (pageData.isDirty) return;
             loadPage(pdf, i, doc.filePath, meta, doc.mtime)
               .then((pd) => {
                 const s = usePecoStore.getState();
@@ -318,70 +318,78 @@ function App() {
       }
 
       // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）
-      // getCachedPageProxy はキャッシュ済みなので loadPage 内の再呼び出しは無コスト
-      {
-        const qp = await getCachedPageProxy(doc.filePath, pageIdx);
-        if (latestLoadRef.current !== pageIdx) return;
-        const qv = qp.getViewport({ scale: 1.0 });
-        const pre = usePecoStore.getState().document?.pages.get(pageIdx);
-        if (!pre || pre.width === 0) {
-          updatePageData(pageIdx, {
-            pageIndex: pageIdx,
-            width: qv.width,
-            height: qv.height,
-            textBlocks: [],
-            isDirty: false,
-            thumbnail: null,
-          }, false);
-        }
+      const qp = await getCachedPageProxy(doc.filePath, pageIdx);
+      if (latestLoadRef.current !== pageIdx) return;
+      const qv = qp.getViewport({ scale: 1.0 });
+      const pre = usePecoStore.getState().document?.pages.get(pageIdx);
+      if (!pre || pre.width === 0) {
+        updatePageData(pageIdx, {
+          pageIndex: pageIdx,
+          width: qv.width,
+          height: qv.height,
+          textBlocks: [],
+          isDirty: false,
+          thumbnail: null,
+        }, false);
       }
 
-      const pageData = await loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime);
-
+      // ★ ページ寸法が確定した時点でローディング解除 → PdfCanvas が即座にレンダリング開始
       if (latestLoadRef.current === pageIdx) {
-        // ロード前にDirtyだったページ（OCR全消去など）はtextBlocksを上書きしない
-        const existing = usePecoStore.getState().document?.pages.get(pageIdx);
-        const mergedData = existing?.isDirty
-          ? { ...pageData, textBlocks: existing.textBlocks, isDirty: true }
-          : pageData;
-        updatePageData(pageIdx, mergedData, false);
+        setIsLoadingPage(false);
       }
 
-      // 隣接ページのデータをバックグラウンドでプリフェッチ（50ms遅延でメインレンダーを優先）
-      const prefetchPage = (i: number) => {
-        if (i < 0 || i >= doc.totalPages) return;
-        const existingPage = usePecoStore.getState().document?.pages.get(i);
-        // ロード済み（width>0）ならスキップ
-        if (existingPage && existingPage.width > 0) return;
-        setTimeout(() => {
+      // ★ サムネイルWorkerのPDFロードをトリガー（メインスレッドのI/O競合を回避）
+      triggerThumbnailLoad();
+
+      // テキスト抽出はバックグラウンドで実行（レンダリングをブロックしない）
+      loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime)
+        .then((pageData) => {
+          // ファイル切替チェック（ページ切替は許容: テキストデータは常に保存する）
           const currentDoc = usePecoStore.getState().document;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
-          loadPage(pdf, i, doc.filePath, bboxMetaRef.current, doc.mtime)
-            .then((pd) => {
-              const state = usePecoStore.getState();
-              if (state.document?.filePath !== doc.filePath) return;
-              const ex = state.document.pages.get(i);
-              // DirtyページはtextBlocksを上書きしない
-              const merged = ex?.isDirty
-                ? { ...pd, textBlocks: ex.textBlocks, isDirty: true }
-                : pd;
-              if (!ex || ex.width === 0) updatePageData(i, merged, false);
-            })
-            .catch(() => {});
-        }, 50);
-      };
-      prefetchPage(pageIdx - 1);
-      prefetchPage(pageIdx + 1);
+          const existing = currentDoc.pages.get(pageIdx);
+          const mergedData = existing?.isDirty
+            ? { ...pageData, textBlocks: existing.textBlocks, isDirty: true }
+            : pageData;
+          updatePageData(pageIdx, mergedData, false);
+
+          // 隣接ページのデータをバックグラウンドでプリフェッチ
+          const prefetchPage = (i: number) => {
+            if (i < 0 || i >= doc.totalPages) return;
+            const existingPage = usePecoStore.getState().document?.pages.get(i);
+            if (existingPage && existingPage.width > 0) return;
+            setTimeout(() => {
+              const currentDoc = usePecoStore.getState().document;
+              if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
+              loadPage(pdf, i, doc.filePath, bboxMetaRef.current, doc.mtime)
+                .then((pd) => {
+                  const state = usePecoStore.getState();
+                  if (state.document?.filePath !== doc.filePath) return;
+                  const ex = state.document.pages.get(i);
+                  const merged = ex?.isDirty
+                    ? { ...pd, textBlocks: ex.textBlocks, isDirty: true }
+                    : pd;
+                  if (!ex || ex.width === 0) updatePageData(i, merged, false);
+                })
+                .catch(() => {});
+            }, 50);
+          };
+          prefetchPage(pageIdx - 1);
+          prefetchPage(pageIdx + 1);
+        })
+        .catch((err) => {
+          if (latestLoadRef.current !== pageIdx) return;
+          console.error(`[loadCurrentPage] text extraction failed for page ${pageIdx}:`, err);
+        });
     } catch (err: any) {
       if (latestLoadRef.current !== pageIdx) return;
       console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
       showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
-    } finally {
-      if (latestLoadRef.current === pageIdx) {
-        setIsLoadingPage(false);
-      }
+      setPageLoadError(pageIdx);
+      triggerThumbnailLoad();
+      setIsLoadingPage(false);
     }
-  }, [updatePageData, showToast]);
+  }, [updatePageData, showToast, triggerThumbnailLoad]);
 
   // ファイルが変わったときにbboxMetaキャッシュをリセット
   const prevFilePathRef = useRef<string | undefined>(undefined);
@@ -403,11 +411,9 @@ function App() {
 
   // --- Effects ---
   useEffect(() => {
-    prewarmPdfjsWorker();
     const saved = localStorage.getItem('peco-recent-files');
     if (saved) setRecentFiles(JSON.parse(saved));
-    initPreviewWindow();
-  }, [initPreviewWindow]);
+  }, []);
 
   useEffect(() => {
     if (window.location.hash !== '#preview') {
@@ -440,6 +446,12 @@ function App() {
     const handleKeyDownGlob = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
       const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+      if (e.key === 'F5') {
+        e.preventDefault();
+        const doc = usePecoStore.getState().document;
+        if (doc?.filePath) handleOpen(doc.filePath);
+        return;
+      }
       if (e.code === 'Space' && !isEditing) { e.preventDefault(); setIsSpacePressed(true); }
     };
     const handleKeyUpGlob = (e: KeyboardEvent) => {
@@ -659,6 +671,7 @@ function App() {
         onShowShortcuts={() => setHelpModal('shortcuts')}
         onShowUsage={() => setHelpModal('usage')}
         onShowVersion={() => setHelpModal('version')}
+        onReload={handleReload}
         onShowOcrSettings={() => setShowOcrSettings(true)}
       />
 
@@ -711,6 +724,29 @@ function App() {
               <div className="loading-spinner" />
               <div className="loading-message">
                 {isLoadingFile ? 'PDFを読み込んでいます...' : 'ページを読み込んでいます...'}
+              </div>
+            </div>
+          )}
+          {pageLoadError !== null && !isLoadingPage && !isLoadingFile && (
+            <div className="loading-overlay" style={{ cursor: 'default' }}>
+              <div style={{ textAlign: 'center', color: '#e2e8f0' }}>
+                <div style={{ fontSize: 14, marginBottom: 12 }}>
+                  ページ {pageLoadError + 1} の読み込みに失敗しました
+                </div>
+                <button
+                  onClick={() => loadCurrentPage(pageLoadError)}
+                  style={{
+                    padding: '8px 20px',
+                    background: '#3b82f6',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                  }}
+                >
+                  再読み込み
+                </button>
               </div>
             </div>
           )}
