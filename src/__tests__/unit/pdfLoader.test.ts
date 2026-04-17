@@ -161,17 +161,18 @@ describe('pdfLoader / loadPage', () => {
   describe('U-L-07: Y軸反転OCRテキストの bbox 位置', () => {
     it('transform の d が負 (Y軸反転) → bbox.y がベースライン位置に正しく配置される', async () => {
       // Y軸反転: transform = [12, 0, 0, -12, 100, 700]
-      // 垂直方向ベクトルは (0, -1) = 下向き。ascent は下方向に展開されるべき。
+      // 垂直方向ベクトルは (-uy, ux) = (0, 1) で固定（旧実装に準拠）。
+      // ascent は +Y 方向に展開される。
       // viewport.height=842, convertToViewportPoint: y → 842 - y
       //   Corner 0: (100, 700) → viewport (100, 142)
-      //   Corner 2: (100, 700 + (-1)*13.92) = (100, 686.08) → viewport (100, 155.92)
-      // bbox.y = min(142, 155.92) = 142 ← ベースラインが上端
+      //   Corner 2: (100, 713.92) → viewport (100, 128.08)
+      // bbox.y = min(142, 128.08) = 128.08
       const pdf = makeMockPdf([
         { str: 'X', transform: [12, 0, 0, -12, 100, 700], width: 10, height: 12 },
       ])
       setupGetDocument(pdf)
       const page = await loadPage(pdf as any, 0, 'test.pdf')
-      expect(page.textBlocks[0].bbox.y).toBeCloseTo(142, 1)
+      expect(page.textBlocks[0].bbox.y).toBeCloseTo(128.08, 1)
       expect(page.textBlocks[0].bbox.height).toBeCloseTo(13.92, 1)
     })
 
@@ -195,17 +196,17 @@ describe('pdfLoader / loadPage', () => {
     it('0.24 0 0 -0.24 0 842 cm + 42Tf 相当の transform で正しい位置に配置される', async () => {
       // 典型的なOCR cm パターン: cm=[0.24,0,0,-0.24,0,842], Tf=42, Td=(208,58)
       // 合成 transform: [10.08, 0, 0, -10.08, 49.92, 828.08]
-      // 垂直方向: (0, -1) = 下向き
-      // ascent = 10.08 * 1.16 = 11.6928
+      // 旧実装では垂直方向ベクトルは (-uy, ux) 固定で (0, 1)。
+      // ascent = 10.08 * 1.16 = 11.6928（+Y 方向に展開）
       //   Corner 0: (49.92, 828.08) → viewport (49.92, 13.92)
-      //   Corner 2: (49.92, 828.08 - 11.6928) = (49.92, 816.39) → viewport (49.92, 25.61)
-      // bbox.y = min(13.92, 25.61) = 13.92
+      //   Corner 2: (49.92, 828.08 + 11.6928) = (49.92, 839.7728) → viewport (49.92, 2.2272)
+      // bbox.y = min(13.92, 2.2272) = 2.2272
       const pdf = makeMockPdf([
         { str: 'テスト', transform: [10.08, 0, 0, -10.08, 49.92, 828.08], width: 30.24, height: 10.08 },
       ])
       setupGetDocument(pdf)
       const page = await loadPage(pdf as any, 0, 'test.pdf')
-      expect(page.textBlocks[0].bbox.y).toBeCloseTo(13.92, 1)
+      expect(page.textBlocks[0].bbox.y).toBeCloseTo(2.2272, 1)
       expect(page.textBlocks[0].bbox.x).toBeCloseTo(49.92, 1)
     })
   })

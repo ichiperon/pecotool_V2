@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { usePecoStore } from '../store/pecoStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { logger } from '../utils/logger';
+import type { ThumbnailWorkerRequest, ThumbnailWorkerResponse } from '../utils/thumbnailWorkerTypes';
 
 // サムネイル生成を thumbnail.worker.ts (OffscreenCanvas) に委譲することで
 // メインスレッドのブロックを回避する。
@@ -42,8 +43,8 @@ export function useThumbnailPanel() {
   const isProcessingRef = useRef(false);
   // (deferred load mode廃止により未使用、削除)
 
-  // バッチ更新用
-  const pendingBatchRef = useRef<Array<[number, string]>>([]);
+  // バッチ更新用: [pageIdx, url, epoch]
+  const pendingBatchRef = useRef<Array<[number, string, number]>>([]);
   const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // サムネイルが届いたとき: refを更新し、そのアイテムのリスナーだけ呼ぶ（O(1)）
@@ -51,7 +52,12 @@ export function useThumbnailPanel() {
     batchTimerRef.current = null;
     const entries = pendingBatchRef.current.splice(0);
     if (entries.length === 0) return;
-    for (const [idx, url] of entries) {
+    for (const [idx, url, batchEpoch] of entries) {
+      // epoch 不一致 → 前ファイルの遅延応答。混入させず revoke。
+      if (batchEpoch !== epochRef.current) {
+        URL.revokeObjectURL(url);
+        continue;
+      }
       if (thumbnailsRef.current.has(idx)) {
         URL.revokeObjectURL(url);
       } else {
@@ -101,7 +107,8 @@ export function useThumbnailPanel() {
         clearTimeout(timeout);
         resolve(url);
       });
-      worker.postMessage({ type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx });
+      const req: ThumbnailWorkerRequest = { type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx };
+      worker.postMessage(req);
     });
   }, []);
 
@@ -126,7 +133,7 @@ export function useThumbnailPanel() {
             const url = await generateViaWorker(pageIdx);
             if (!url) return;
             if (epochRef.current === epoch) {
-              pendingBatchRef.current.push([pageIdx, url]);
+              pendingBatchRef.current.push([pageIdx, url, epoch]);
               if (!batchTimerRef.current) {
                 batchTimerRef.current = setTimeout(flushBatch, BATCH_FLUSH_MS);
               }
@@ -159,38 +166,51 @@ export function useThumbnailPanel() {
       );
 
       const workerIndex = wi;
-      worker.onmessage = (e: MessageEvent) => {
-        const { type, pageIndex, bytes } = e.data;
+      worker.onmessage = (e: MessageEvent<ThumbnailWorkerResponse>) => {
+        const msg = e.data;
 
-        if (type === 'LOAD_COMPLETE' || type === 'LOAD_ERROR') {
-          logger.log(`[ThumbnailPanel] Worker ${workerIndex} ${type}`);
-          if (type === 'LOAD_ERROR') {
-            console.error(`[useThumbnailPanel] Worker ${workerIndex} load error:`, e.data.message);
+        if (msg.type === 'LOAD_COMPLETE' || msg.type === 'LOAD_ERROR') {
+          logger.log(`[ThumbnailPanel] Worker ${workerIndex} ${msg.type}`);
+          if (msg.type === 'LOAD_ERROR') {
+            console.error(`[useThumbnailPanel] Worker ${workerIndex} load error:`, msg.message);
           }
           const resolve = loadResolvesRef.current[workerIndex];
           if (resolve) {
             loadResolvesRef.current[workerIndex] = null;
-            resolve(type === 'LOAD_COMPLETE');
+            resolve(msg.type === 'LOAD_COMPLETE');
           } else {
             console.warn(`[ThumbnailPanel] Worker ${workerIndex} LOAD_COMPLETE but no resolve`);
           }
           return;
         }
 
-        const resolve = myPending.get(pageIndex);
-        if (!resolve) return;
-        myPending.delete(pageIndex);
+        if (msg.type === 'THUMBNAIL_DONE') {
+          const resolve = myPending.get(msg.pageIndex);
+          if (!resolve) return;
+          myPending.delete(msg.pageIndex);
 
-        if (type === 'THUMBNAIL_DONE' && bytes instanceof Uint8Array) {
-          const blob = new Blob([bytes], { type: 'image/jpeg' });
-          resolve(URL.createObjectURL(blob));
-        } else if (type === 'THUMBNAIL_ERROR') {
-          console.error(`[ThumbnailPanel] Worker ${workerIndex} page ${pageIndex + 1} render error:`, e.data.error);
-          resolve(null);
-        } else {
-          console.warn(`[ThumbnailPanel] Worker ${workerIndex} unexpected: type=${type}, bytes instanceof Uint8Array=${bytes instanceof Uint8Array}`);
-          resolve(null);
+          if (msg.bytes instanceof Uint8Array) {
+            const blob = new Blob([msg.bytes], { type: 'image/jpeg' });
+            resolve(URL.createObjectURL(blob));
+          } else {
+            console.warn(`[ThumbnailPanel] Worker ${workerIndex} THUMBNAIL_DONE without Uint8Array`);
+            resolve(null);
+          }
+          return;
         }
+
+        if (msg.type === 'THUMBNAIL_ERROR') {
+          const resolve = myPending.get(msg.pageIndex);
+          if (!resolve) return;
+          myPending.delete(msg.pageIndex);
+          console.error(`[ThumbnailPanel] Worker ${workerIndex} page ${msg.pageIndex + 1} render error:`, msg.error);
+          resolve(null);
+          return;
+        }
+
+        // 網羅性チェック: 未知メッセージを static に検出
+        const _exhaustive: never = msg;
+        return _exhaustive;
       };
 
       worker.onerror = (ev) => {
@@ -224,6 +244,13 @@ export function useThumbnailPanel() {
       loadResolvesRef.current.forEach((r, i) => {
         if (r) { loadResolvesRef.current[i] = null; r(false); }
       });
+      // バッチタイマー・pending URL も確実に解放
+      if (batchTimerRef.current) { clearTimeout(batchTimerRef.current); batchTimerRef.current = null; }
+      pendingBatchRef.current.forEach(([, url]) => URL.revokeObjectURL(url));
+      pendingBatchRef.current = [];
+      // 保持中の ObjectURL を全て解放（リーク防止）
+      thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
+      thumbnailsRef.current = new Map();
     };
   }, []);
 
@@ -245,7 +272,8 @@ export function useThumbnailPanel() {
     });
     pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
 
-    // バッチタイマーをクリア
+    // バッチタイマーをクリアし、pending URL も revoke
+    pendingBatchRef.current.forEach(([, url]) => URL.revokeObjectURL(url));
     pendingBatchRef.current = [];
     if (batchTimerRef.current) { clearTimeout(batchTimerRef.current); batchTimerRef.current = null; }
 
@@ -284,7 +312,8 @@ export function useThumbnailPanel() {
           })
         );
         workers.forEach(worker => {
-          worker.postMessage({ type: 'LOAD_PDF', url });
+          const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', url };
+          worker.postMessage(req);
         });
         Promise.all(perWorkerPromises).then(() => {
           if (epochRef.current !== capturedEpoch) return;
@@ -305,7 +334,8 @@ export function useThumbnailPanel() {
       logger.log('[ThumbnailPanel] Posting LOAD_PDF to', workers.length, 'worker(s)');
       workers.forEach(worker => {
         // Worker が1つなのでコピー不要 — 元の ArrayBuffer を直接 transfer
-        worker.postMessage({ type: 'LOAD_PDF', bytes: pdfBytes }, [pdfBytes]);
+        const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', bytes: pdfBytes };
+        worker.postMessage(req, [pdfBytes]);
       });
 
       Promise.all(perWorkerPromises).then((results) => {

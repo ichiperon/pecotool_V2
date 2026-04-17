@@ -51,7 +51,7 @@ vi.mock('@cantoo/pdf-lib', () => ({
 vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
 
 import { loadPage, destroySharedPdfProxy, getSharedPdfProxy } from '../../utils/pdfLoader'
-import { savePDF } from '../../utils/pdfSaver'
+import { savePDF, __setSaveWorkerFactoryForTest, __resetSaveStateForTest } from '../../utils/pdfSaver'
 import { usePecoStore } from '../../store/pecoStore'
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
@@ -265,6 +265,10 @@ describe('I-05: 保存→再読み込み', () => {
 describe('I-06: 縦書きPDFの保存', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+
+    // savePDF を main thread fallback で動かす（Worker 不要）
+    __setSaveWorkerFactoryForTest(() => null)
+    __resetSaveStateForTest()
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(100)),

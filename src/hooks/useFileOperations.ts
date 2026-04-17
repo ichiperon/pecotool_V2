@@ -36,8 +36,19 @@ export function useFileOperations(
   const addToRecent = (path: string) => {
     // ファイルフルパスは機密情報のため sessionStorage に保存（ブラウザ/アプリを閉じると消去）
     const saved = sessionStorage.getItem('peco-recent-files');
-    let recent: string[] = saved ? JSON.parse(saved) : [];
-    recent = [path, ...recent.filter(p => p !== path)].slice(0, 10);
+    let recent: string[] = [];
+    if (saved) {
+      try {
+        const parsed: unknown = JSON.parse(saved);
+        // 改ざん・型不整合に備え string[] を narrow。失敗時は空配列で続行。
+        if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+          recent = parsed;
+        }
+      } catch {
+        // 不正 JSON は無視して空配列にフォールバック
+      }
+    }
+    recent = [path, ...recent.filter((p) => p !== path)].slice(0, 10);
     sessionStorage.setItem('peco-recent-files', JSON.stringify(recent));
   };
 

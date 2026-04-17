@@ -9,6 +9,7 @@ import { PecoDocument } from '../types';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { stat } from '@tauri-apps/plugin-fs';
 import { clearBitmapCache } from './bitmapCache';
+import { logger } from './logger';
 
 // 直前に生成したラッパーWorker用ObjectURLを保持し、再生成前にrevokeしてリークを防ぐ
 let lastPatchedWorkerUrl: string | null = null;
@@ -249,11 +250,21 @@ export function destroySharedPdfProxy() {
     const proxy = globalSharedPdfProxy;
     globalSharedPdfProxy = null; // 先にnullにして後続のgetSharedPdfProxy呼び出しをブロックしない
     proxy.promise.then(p => {
+      // pdfjs-dist の PDFDocumentProxy は destroy() を持つが、
+      // テストモックや中間プロキシなど一部のオブジェクトは持たない。
+      // silent catch ではなく事前チェック + 警告ログで観測可能にする。
+      if (typeof p?.destroy !== 'function') {
+        logger.warn('[pdfLoader] destroySharedPdfProxy: proxy.destroy is not a function', {
+          type: typeof p,
+          keys: p ? Object.keys(p) : null,
+        });
+        return;
+      }
       try { p.destroy(); } catch (e) {
-        console.warn('[pdfLoader] PDFDocumentProxy.destroy() 失敗:', e);
+        logger.warn('[pdfLoader] PDFDocumentProxy.destroy() 失敗:', e);
       }
     }).catch((e) => {
-      console.warn('[pdfLoader] destroySharedPdfProxy: Promiseエラー:', e);
+      logger.warn('[pdfLoader] destroySharedPdfProxy: Promiseエラー:', e);
     });
   }
   // pageProxyCacheのページも明示的にcleanupする

@@ -60,19 +60,21 @@ export function usePageNavigation({
         loadPecoToolBBoxMeta(pdf).then((meta) => {
           bboxMetaRef.current = meta;
           if (!meta) return;
+          if (signal.aborted) return;
           const state = usePecoStore.getState();
           if (!state.document || state.document.filePath !== doc.filePath) return;
-          // 現在のページのみ再ロード（他ページはナビゲーション時にon-demandで再取得）
-          const curIdx = state.currentPageIndex;
-          const curPage = state.document.pages.get(curIdx);
-          if (curPage && !curPage.isDirty) {
-            loadPage(pdf, curIdx, doc.filePath, meta, doc.mtime)
+          // bboxMeta到着後は全ページを再ロードしてOCRテキストを先行表示する
+          state.document.pages.forEach((pageData, i) => {
+            if (signal.aborted) return;
+            if (pageData.isDirty) return;
+            loadPage(pdf, i, doc.filePath, meta, doc.mtime)
               .then((pd) => {
+                if (signal.aborted) return;
                 const s = usePecoStore.getState();
-                if (s.document?.filePath === doc.filePath) updatePageData(curIdx, pd, false);
+                if (s.document?.filePath === doc.filePath) updatePageData(i, pd, false);
               })
               .catch(() => {});
-          }
+          });
         }).catch(() => {});
       }
 

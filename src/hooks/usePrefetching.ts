@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import { getCachedPageProxy } from "../utils/pdfLoader";
 import { getBitmapCache, setBitmapCache } from "../utils/bitmapCache";
@@ -72,8 +72,8 @@ export function usePrefetching() {
           const viewport = page.getViewport({ scale: capturedZoom / 100 });
           const tw = Math.floor(viewport.width);
           const th = Math.floor(viewport.height);
-          const off = new OffscreenCanvas(tw, th);
-          const offCtx = off.getContext("2d", { alpha: false });
+          let off: OffscreenCanvas | null = new OffscreenCanvas(tw, th);
+          let offCtx: OffscreenCanvasRenderingContext2D | null = off.getContext("2d", { alpha: false });
           if (!offCtx) continue;
           offCtx.fillStyle = "#ffffff";
           offCtx.fillRect(0, 0, tw, th);
@@ -117,6 +117,9 @@ export function usePrefetching() {
               } catch {
                 /* ignore */
               }
+              // OffscreenCanvas / 2D context への参照を落として GC を促す
+              offCtx = null;
+              off = null;
             }
           } catch {
             if (wrapper.timeoutId !== null) clearTimeout(wrapper.timeoutId);
@@ -137,7 +140,7 @@ export function usePrefetching() {
           if (getBitmapCache(key)) continue;
 
           try {
-            const bitmap = off.transferToImageBitmap();
+            const bitmap = off!.transferToImageBitmap();
             setBitmapCache(key, {
               bitmap,
               zoom: capturedZoom,
@@ -171,6 +174,14 @@ export function usePrefetching() {
       runPrefetch();
     });
   };
+
+  // unmount 検知: consumer が cancelAll を忘れても残存タスクを確実にキャンセル
+  useEffect(() => {
+    return () => {
+      cancelAll();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return { schedule, cancelAll };
 }

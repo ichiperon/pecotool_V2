@@ -58,7 +58,11 @@ vi.mock('pdfjs-dist', () => ({
   getDocument: m.pdfjsGetDocument,
 }))
 
-import { savePDF } from '../../utils/pdfSaver'
+import {
+  savePDF,
+  __setSaveWorkerFactoryForTest,
+  __resetSaveStateForTest,
+} from '../../utils/pdfSaver'
 
 // ── ヘルパー ──────────────────────────────────────────────────
 
@@ -100,6 +104,11 @@ const PAGE_HEIGHT = 842
 
 beforeEach(() => {
   vi.clearAllMocks()
+
+  // 既存テストは buildPdfDocument を直接検証する。worker factory を null 返却に差し替え、
+  // savePDF が main-thread fallback を取るようにする。
+  __setSaveWorkerFactoryForTest(() => null)
+  __resetSaveStateForTest()
 
   // pdf-lib mock chain
   const mockPage = {
@@ -780,4 +789,218 @@ describe('pdfSaver / savePDF', () => {
     })
   })
 
+})
+
+// ── Worker 経路テスト ─────────────────────────────────────────
+// 以下のテストでは Worker ファクトリを制御可能な MockWorker に差し替え、
+// terminate の idempotency / timeout / onerror / cleanup を検証する。
+
+/**
+ * テスト用の制御可能な MockWorker。
+ * - postMessage は自動応答しない（テストから emit* で応答を発火させる）
+ * - terminate 呼び出し回数を記録
+ * - SaveWorkerFactory 経由で生成されたインスタンスは全て instances[] に積まれる
+ */
+class ControllableMockWorker {
+  static instances: ControllableMockWorker[] = []
+  public onmessage: ((e: MessageEvent<any>) => void) | null = null
+  public onerror: ((e: any) => void) | null = null
+  public terminateCount = 0
+  public postedMessages: any[] = []
+
+  constructor() {
+    ControllableMockWorker.instances.push(this)
+  }
+
+  postMessage(data: any, _transfer?: Transferable[]) {
+    this.postedMessages.push(data)
+  }
+
+  terminate() {
+    this.terminateCount++
+  }
+
+  /** テストから成功応答を発火 */
+  emitSuccess(data: Uint8Array) {
+    if (this.onmessage) {
+      this.onmessage({ data: { type: 'SAVE_PDF_SUCCESS', data } } as MessageEvent<any>)
+    }
+  }
+
+  /** テストからエラー応答を発火 */
+  emitError(message: string) {
+    if (this.onmessage) {
+      this.onmessage({ data: { type: 'ERROR', message } } as MessageEvent<any>)
+    }
+  }
+
+  /** テストから onerror を発火 */
+  emitOnError(err: any) {
+    if (this.onerror) this.onerror(err)
+  }
+}
+
+describe('pdfSaver / Worker 経路', () => {
+  beforeEach(() => {
+    ControllableMockWorker.instances = []
+    __resetSaveStateForTest()
+    __setSaveWorkerFactoryForTest(() => new ControllableMockWorker() as unknown as Worker)
+  })
+
+  function makeSimpleDoc(): PecoDocument {
+    const page: PageData = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    }
+    return {
+      filePath: '', fileName: 'test.pdf', totalPages: 1, metadata: {},
+      pages: new Map([[0, page]]),
+    }
+  }
+
+  describe('U-W-01: terminate idempotency — 2 回連続呼び出しで前回 worker が 1 回だけ terminate される', () => {
+    it('2 回 savePDF を呼び出すと 2 つの worker が作成され、1 つめは 1 回 terminate される', async () => {
+      const doc = makeSimpleDoc()
+
+      // 1 回目: worker を作って成功応答を発火させ、 savePDF を完了させる
+      const p1 = savePDF(new Uint8Array(), doc)
+      expect(ControllableMockWorker.instances.length).toBe(1)
+      const w1 = ControllableMockWorker.instances[0]
+      w1.emitSuccess(new Uint8Array([1, 2, 3]))
+      await p1
+      expect(w1.terminateCount).toBe(1) // success cleanup で 1 回
+
+      // 2 回目: 新しい worker が作られる
+      const p2 = savePDF(new Uint8Array(), doc)
+      expect(ControllableMockWorker.instances.length).toBe(2)
+      const w2 = ControllableMockWorker.instances[1]
+      expect(w2).not.toBe(w1)
+      w2.emitSuccess(new Uint8Array([4, 5, 6]))
+      await p2
+
+      // w1 は依然として 1 回だけ terminate されている（二重 terminate なし）
+      expect(w1.terminateCount).toBe(1)
+    })
+  })
+
+  describe('U-W-02: タイムアウト経路 — 前回保存が 5 秒以内に完了しなければ stale worker として terminate', () => {
+    it('fake timers で PREVIOUS_SAVE_TIMEOUT_MS を進めると前回 worker が terminate され新 worker が作られる', async () => {
+      vi.useFakeTimers()
+      try {
+        const doc = makeSimpleDoc()
+
+        // 1 回目: 応答を発火せず hung 状態のまま置く
+        const p1 = savePDF(new Uint8Array(), doc)
+        expect(ControllableMockWorker.instances.length).toBe(1)
+        const w1 = ControllableMockWorker.instances[0]
+        expect(w1.terminateCount).toBe(0)
+
+        // 2 回目 savePDF を起動。Promise は timeout まで進まない。
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const p2 = savePDF(new Uint8Array(), doc)
+
+        // Promise.race の setTimeout(5000) が発火するまで進める
+        await vi.advanceTimersByTimeAsync(5001)
+
+        // timeout により w1 が terminate される
+        expect(w1.terminateCount).toBe(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Previous save did not complete within timeout'),
+        )
+
+        // 新 worker が作られる
+        expect(ControllableMockWorker.instances.length).toBe(2)
+        const w2 = ControllableMockWorker.instances[1]
+        w2.emitSuccess(new Uint8Array([9, 9]))
+        await p2
+
+        // hung 状態の p1 を回収（terminate 済み）
+        w1.emitSuccess(new Uint8Array([0]))
+        await p1.catch(() => {}) // 既に settled なので no-op
+
+        warnSpy.mockRestore()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  describe('U-W-03: onerror 経路 — worker の error event で Promise が reject', () => {
+    it('MockWorker.emitOnError で savePDF が reject する', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0]
+      w.emitOnError(new Error('worker crashed'))
+
+      await expect(p).rejects.toBeDefined()
+      // onerror の cleanup で 1 回 terminate される
+      expect(w.terminateCount).toBe(1)
+    })
+
+    it('Worker から ERROR message を受け取ると savePDF が reject', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0]
+      w.emitError('save failed in worker')
+
+      await expect(p).rejects.toThrow('save failed in worker')
+      expect(w.terminateCount).toBe(1)
+    })
+  })
+
+  describe('U-W-04: 二重 terminate が無害', () => {
+    it('timeout による terminate の後に遅延応答が届いても例外を投げない', async () => {
+      // 実運用の Worker.terminate は仕様上 idempotent（二重呼び出しても throw しない）だが、
+      // pdfSaver 側でも try/catch で包んでいることを担保する回帰テスト。
+      // ControllableMockWorker.terminate は単純カウンタで、複数回呼び出しでも例外は投げない。
+      vi.useFakeTimers()
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const doc = makeSimpleDoc()
+        // 1 回目を hung 状態にする
+        const p1 = savePDF(new Uint8Array(), doc)
+        const w1 = ControllableMockWorker.instances[0]
+
+        // 2 回目で timeout 経路を発火させ w1 を terminate
+        const p2 = savePDF(new Uint8Array(), doc)
+        await vi.advanceTimersByTimeAsync(5001)
+        expect(w1.terminateCount).toBe(1)
+
+        // 遅延応答が届いても throw しない（pdfSaver 側の terminate が try/catch で包まれている前提）
+        expect(() => w1.emitSuccess(new Uint8Array([7]))).not.toThrow()
+        // この時点で onmessage の cleanup が再 terminate を呼び合計 2 回になる想定。
+        // 重要なのはカウントが増えること ≠ 例外発生、という点。
+        expect(w1.terminateCount).toBeGreaterThanOrEqual(1)
+
+        await p1.catch(() => {})
+
+        const w2 = ControllableMockWorker.instances[1]
+        w2.emitSuccess(new Uint8Array([8]))
+        await p2
+      } finally {
+        warnSpy.mockRestore()
+        vi.useRealTimers()
+      }
+    })
+
+    it('worker factory が例外を投げても main thread fallback が走り reject しない', async () => {
+      __setSaveWorkerFactoryForTest(() => { throw new Error('worker ctor boom') })
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const doc = makeSimpleDoc()
+      const result = await savePDF(new Uint8Array(), doc)
+
+      // fallback で buildPdfDocument が走り、m.save のモック返却値が帰る
+      expect(result).toBeInstanceOf(Uint8Array)
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Worker creation failed'),
+        expect.any(Error),
+      )
+      warnSpy.mockRestore()
+    })
+  })
 })

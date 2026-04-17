@@ -21,7 +21,22 @@ export interface BackupData {
 /** デフォルトバックアップ間隔: 5分 */
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 
-// 改ざんされた JSON からの不正な textBlocks 注入を防ぐため、読み込み時にスキーマを検証する
+// プロトタイプ汚染攻撃を防ぐため、キー名として危険なものを拒否する
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isValidBBox(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const b = value as Record<string, unknown>;
+  return (
+    Number.isFinite(b.x) &&
+    Number.isFinite(b.y) &&
+    Number.isFinite(b.width) &&
+    Number.isFinite(b.height)
+  );
+}
+
+// 改ざんされた JSON からの不正な textBlocks 注入・プロトタイプ汚染を防ぐため、
+// 読み込み時にスキーマを詳細に検証する。
 function isValidBackupData(data: unknown): data is BackupData {
   if (typeof data !== 'object' || data === null) return false;
   const d = data as Record<string, unknown>;
@@ -29,7 +44,12 @@ function isValidBackupData(data: unknown): data is BackupData {
   if (typeof d.timestamp !== 'string') return false;
   if (typeof d.originalFilePath !== 'string') return false;
   if (typeof d.pages !== 'object' || d.pages === null) return false;
-  for (const page of Object.values(d.pages as Record<string, unknown>)) {
+  const pages = d.pages as Record<string, unknown>;
+  // プロトタイプ汚染を防止: __proto__ / constructor / prototype のキーを拒否
+  for (const key of Object.keys(pages)) {
+    if (DANGEROUS_KEYS.has(key)) return false;
+  }
+  for (const page of Object.values(pages)) {
     if (typeof page !== 'object' || page === null) return false;
     const p = page as Record<string, unknown>;
     // pages は Partial<PageData> のため全フィールドは必須ではない
@@ -39,6 +59,16 @@ function isValidBackupData(data: unknown): data is BackupData {
         if (typeof block !== 'object' || block === null) return false;
         const b = block as Record<string, unknown>;
         if (typeof b.id !== 'string' || typeof b.text !== 'string') return false;
+        // bbox は必須ではないが、存在する場合は形状を検証する
+        if (b.bbox !== undefined && !isValidBBox(b.bbox)) return false;
+        // writingMode のリテラル narrow
+        if (b.writingMode !== undefined && b.writingMode !== 'vertical' && b.writingMode !== 'horizontal') {
+          return false;
+        }
+        // order は非負整数
+        if (b.order !== undefined && (!Number.isInteger(b.order) || (b.order as number) < 0)) {
+          return false;
+        }
       }
     }
   }

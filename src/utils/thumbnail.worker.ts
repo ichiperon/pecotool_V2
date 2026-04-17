@@ -46,6 +46,7 @@ if (typeof (_globalAny as { document?: unknown }).document === 'undefined') {
 
 import * as pdfjsLib from 'pdfjs-dist';
 import type { DocumentInitParameters } from 'pdfjs-dist/types/src/display/api';
+import type { ThumbnailWorkerRequest, ThumbnailWorkerResponse } from './thumbnailWorkerTypes';
 // このWorkerはメインスレッドから ArrayBuffer を転送で受け取るため、
 // 内部で fetch を行わない → Accept-Ranges パッチ (pdfjs-worker-wrapper) は不要。
 // ラッパーを経由すると Vite の `?url` import が .ts ファイルを
@@ -58,18 +59,30 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
 let loadPromise: Promise<void> | null = null;
 
+function post(msg: ThumbnailWorkerResponse, transfer?: Transferable[]): void {
+  if (transfer && transfer.length > 0) {
+    (self.postMessage as (m: unknown, transfer: Transferable[]) => void)(msg, transfer);
+  } else {
+    self.postMessage(msg);
+  }
+}
+
 // OffscreenCanvas 同時レンダリング数を制限するセマフォ
 let activeRenders = 0;
 const MAX_CONCURRENT_RENDERS = 4;
 const renderWaitQueue: Array<() => void> = [];
 
-function handleLoadPdf(source: string | ArrayBuffer): void {
+async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
   // 新しいPDFロード時にセマフォをリセット
+  // ただし待機中の resolver は先に起こして「抜けさせる」必要がある（さもないと
+  // handleGenerateThumbnail の Promise が永久に resolve されず忘れられる）
   activeRenders = 0;
+  renderWaitQueue.forEach(r => r());
   renderWaitQueue.length = 0;
 
   if (pdfDoc) {
-    pdfDoc.destroy().catch(() => {});
+    // 既存のドキュメントが完全に破棄されてから新規ロードへ（race 防止）
+    try { await pdfDoc.destroy(); } catch { /* ignore */ }
     pdfDoc = null;
   }
   loadPromise = null;
@@ -96,16 +109,16 @@ function handleLoadPdf(source: string | ArrayBuffer): void {
 
     loadPromise = pdfjsLib.getDocument(config).promise.then(doc => {
       pdfDoc = doc;
-      self.postMessage({ type: 'LOAD_COMPLETE', numPages: doc.numPages });
+      post({ type: 'LOAD_COMPLETE', numPages: doc.numPages });
     }).catch((e) => {
       console.error('[thumbnail.worker] PDF load failed:', e);
       loadPromise = null;
-      self.postMessage({ type: 'LOAD_ERROR', message: String(e) });
+      post({ type: 'LOAD_ERROR', message: String(e) });
     });
   } catch (e) {
     console.error('[thumbnail.worker] PDF load exception:', e);
     loadPromise = null;
-    self.postMessage({ type: 'LOAD_ERROR', message: String(e) });
+    post({ type: 'LOAD_ERROR', message: String(e) });
   }
 }
 
@@ -120,7 +133,7 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     // （LOAD_PDF より先に GENERATE_THUMBNAIL が届いた場合の保護）
     if (loadPromise) await loadPromise;
     if (!pdfDoc) {
-      self.postMessage({ type: 'THUMBNAIL_ERROR', pageIndex });
+      post({ type: 'THUMBNAIL_ERROR', pageIndex });
       return;
     }
 
@@ -153,28 +166,33 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     const buf = await blob.arrayBuffer();
 
     // ArrayBuffer を Transferable として転送（零コピー）
-    // tsconfig に WebWorker lib が無いため Worker 版 postMessage 型を明示する
-    (self.postMessage as (m: unknown, transfer: Transferable[]) => void)(
-      { type: 'THUMBNAIL_DONE', pageIndex, bytes: new Uint8Array(buf) },
-      [buf]
-    );
+    post({ type: 'THUMBNAIL_DONE', pageIndex, bytes: new Uint8Array(buf) }, [buf]);
   } catch (e) {
     const errMsg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     console.error(`[thumbnail.worker] Page ${pageIndex + 1} failed:`, e);
     // エラー内容をメインスレッドへ伝搬してDevToolsで確認できるようにする
-    self.postMessage({ type: 'THUMBNAIL_ERROR', pageIndex, error: errMsg });
+    post({ type: 'THUMBNAIL_ERROR', pageIndex, error: errMsg });
   } finally {
     activeRenders--;
     renderWaitQueue.shift()?.();
   }
 }
 
-self.onmessage = (e: MessageEvent) => {
-  const { type } = e.data;
-  if (type === 'LOAD_PDF') {
-    handleLoadPdf(e.data.url ?? e.data.bytes);
-  } else if (type === 'GENERATE_THUMBNAIL') {
+self.onmessage = (e: MessageEvent<ThumbnailWorkerRequest>) => {
+  const msg = e.data;
+  if (msg.type === 'LOAD_PDF') {
+    // discriminated union で url | bytes を narrow
+    if (msg.url !== undefined) {
+      handleLoadPdf(msg.url);
+    } else {
+      handleLoadPdf(msg.bytes);
+    }
+  } else if (msg.type === 'GENERATE_THUMBNAIL') {
     // await しない → 複数ページ協調並行処理（内部で loadPromise を await）
-    handleGenerateThumbnail(e.data.pageIndex);
+    handleGenerateThumbnail(msg.pageIndex);
+  } else {
+    // 網羅性チェック
+    const _exhaustive: never = msg;
+    return _exhaustive;
   }
 };

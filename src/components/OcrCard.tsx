@@ -1,5 +1,7 @@
-import React, { useRef, useEffect, useImperativeHandle, forwardRef, memo } from "react";
+import { useRef, useEffect, useImperativeHandle, forwardRef, memo } from "react";
+import type React from "react";
 import { GripVertical } from "lucide-react";
+import type { DraggableSyntheticListeners } from "@dnd-kit/core";
 import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 
@@ -10,7 +12,7 @@ export interface OcrCardHandle {
 interface OcrCardProps {
   block: TextBlock;
   pageIndex: number;
-  dragListeners?: any;
+  dragListeners?: DraggableSyntheticListeners;
   onNavigate?: (direction: 'up' | 'down') => void;
   onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
 }
@@ -26,19 +28,43 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   const contentRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
+  // IME 変換中フラグ: composition 中の state 同期を抑制する（変換テキスト消失防止）
+  const isComposingRef = useRef(false);
+  // blur 直前のキャレット位置（restore 用）
+  const savedOffsetRef = useRef<number | null>(null);
+
+  // キャレット位置を復元（保存位置 → なければ末尾）
+  const restoreCaret = (el: HTMLDivElement) => {
+    const sel = window.getSelection();
+    if (!sel) return;
+    const range = window.document.createRange();
+    const textNode = el.firstChild;
+    const saved = savedOffsetRef.current;
+    if (textNode && textNode.nodeType === Node.TEXT_NODE && saved !== null) {
+      const len = (textNode.textContent || "").length;
+      const offset = Math.min(Math.max(0, saved), len);
+      try {
+        range.setStart(textNode, offset);
+        range.setEnd(textNode, offset);
+      } catch {
+        range.selectNodeContents(el);
+        range.collapse(false);
+      }
+    } else {
+      range.selectNodeContents(el);
+      range.collapse(false);
+    }
+    sel.removeAllRanges();
+    sel.addRange(range);
+  };
+
   // 外部からテキストエリアにフォーカスできるようにする
   useImperativeHandle(ref, () => ({
     focusContent: () => {
       const el = contentRef.current;
       if (!el) return;
       el.focus();
-      // カーソルを末尾に移動
-      const range = window.document.createRange();
-      const sel = window.getSelection();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      sel?.removeAllRanges();
-      sel?.addRange(range);
+      restoreCaret(el);
     }
   }));
 
@@ -54,13 +80,21 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
     if (!contentRef.current) return;
     // フォーカス中は同期しない(キャレット位置と選択状態を維持するため)
     if (window.document.activeElement === contentRef.current) return;
+    // IME 変換中は DOM を書き換えない（変換テキストが消えるため）
+    if (isComposingRef.current) return;
     if (contentRef.current.textContent !== block.text) {
       contentRef.current.textContent = block.text;
     }
   }, [block.text]);
 
   const handleBlur = () => {
-    const newText = contentRef.current?.innerText || "";
+    // キャレット位置を保存（次回 focus 時に復元する）
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && contentRef.current?.contains(sel.anchorNode)) {
+      savedOffsetRef.current = sel.anchorOffset;
+    }
+    // 読み書きを textContent に統一（innerText は改行扱いが環境依存）
+    const newText = contentRef.current?.textContent ?? "";
     if (newText !== block.text) {
       const page = document?.pages.get(pageIndex);
       if (page) {
@@ -70,6 +104,14 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
         updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true });
       }
     }
+  };
+
+  const handleCompositionStart = () => {
+    isComposingRef.current = true;
+  };
+
+  const handleCompositionEnd = () => {
+    isComposingRef.current = false;
   };
 
   const handleClick = (e: React.MouseEvent) => {
@@ -141,6 +183,8 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
         contentEditable
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
+        onCompositionStart={handleCompositionStart}
+        onCompositionEnd={handleCompositionEnd}
         suppressContentEditableWarning
       />
     </div>

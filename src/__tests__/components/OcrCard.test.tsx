@@ -82,11 +82,8 @@ describe('OcrCard', () => {
       const { container } = render(<OcrCard block={block} pageIndex={0} />)
       const content = container.querySelector('.ocr-card-content') as HTMLElement
 
-      // jsdom では innerText が textContent と異なる場合があるため defineProperty で上書き
-      Object.defineProperty(content, 'innerText', {
-        get: () => '新しいテキスト',
-        configurable: true,
-      })
+      // IME 統一により textContent 読取りへ変更された
+      content.textContent = '新しいテキスト'
       fireEvent.blur(content)
 
       const updated = usePecoStore.getState().document?.pages.get(0)?.textBlocks.find(b => b.id === 'block-1')
@@ -104,11 +101,8 @@ describe('OcrCard', () => {
       const { container } = render(<OcrCard block={block} pageIndex={0} />)
       const content = container.querySelector('.ocr-card-content') as HTMLElement
 
-      // innerText を block.text と同じ値にする → 変化なし
-      Object.defineProperty(content, 'innerText', {
-        get: () => 'テスト',
-        configurable: true,
-      })
+      // textContent を block.text と同じ値にする → 変化なし
+      content.textContent = 'テスト'
       fireEvent.blur(content)
 
       expect(updateSpy).not.toHaveBeenCalled()

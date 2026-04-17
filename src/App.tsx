@@ -16,6 +16,7 @@ import {
 import { Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
 import { destroySharedPdfProxy } from "./utils/pdfLoader";
+import { readReorderThreshold, writeReorderThreshold } from "./utils/reorderThreshold";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { TextBlock } from "./types";
@@ -93,13 +94,7 @@ function App() {
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
 
-  const [reorderThreshold, setReorderThreshold] = useState(() => {
-    const stored = localStorage.getItem('peco-reorder-threshold');
-    if (!stored) return 50;
-    const parsed = parseInt(stored, 10);
-    if (Number.isNaN(parsed) || parsed < 1 || parsed > 100) return 50;
-    return parsed;
-  });
+  const [reorderThreshold, setReorderThreshold] = useState(() => readReorderThreshold());
 
   // --- External Hooks ---
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
@@ -325,7 +320,7 @@ function App() {
         onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode}
         onGroup={handleGroup} onDeduplicate={handleDeduplicate} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
         onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity}
-        onSetReorderThreshold={(val) => { const clamped = Math.min(100, Math.max(1, val)); setReorderThreshold(clamped); localStorage.setItem('peco-reorder-threshold', clamped.toString()); }}
+        onSetReorderThreshold={(val) => { setReorderThreshold(writeReorderThreshold(val)); }}
         onTogglePreview={togglePreviewWindow}
         onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
         onRunOcrCurrentPage={runOcrCurrentPage}

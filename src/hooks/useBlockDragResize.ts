@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
-import { Action, PageData } from "../types";
+import { Action, BoundingBox, PageData } from "../types";
 import { classifyDirection, reorderBlocks } from "../utils/bulkReorder";
+import { readReorderThreshold } from "../utils/reorderThreshold";
 
 type DragMode = "none" | "move" | "resize-nw" | "resize-ne" | "resize-sw" | "resize-se";
 
@@ -57,7 +58,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
 
   const [dragMode, setDragMode] = useState<DragMode>("none");
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [dragStartBbox, setDragStartBbox] = useState<any>(null);
+  const [dragStartBbox, setDragStartBbox] = useState<BoundingBox | null>(null);
   const [dragStartBboxes, setDragStartBboxes] = useState<
     Map<string, { x: number; y: number; width: number; height: number }>
   >(new Map());
@@ -82,8 +83,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     if (dir) {
       const pageData = getPageData();
       if (pageData && pageData.textBlocks.length > 0) {
-        const stored = localStorage.getItem("peco-reorder-threshold");
-        const percent = stored ? parseInt(stored, 10) : 50;
+        const percent = readReorderThreshold();
         const newBlocks = reorderBlocks([...pageData.textBlocks], dir, percent);
         updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
       }
@@ -198,23 +198,25 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       });
       updatePageData(pageIndex, { textBlocks: newBlocks }, false);
     } else {
-      const newBbox = { ...dragStartBbox };
+      if (!dragStartBbox) return true;
+      const startBbox: BoundingBox = dragStartBbox;
+      const newBbox: BoundingBox = { ...startBbox };
       if (dragMode === "resize-se") {
-        newBbox.width = Math.max(1, dragStartBbox.width + dx);
-        newBbox.height = Math.max(1, dragStartBbox.height + dy);
+        newBbox.width = Math.max(1, startBbox.width + dx);
+        newBbox.height = Math.max(1, startBbox.height + dy);
       } else if (dragMode === "resize-sw") {
-        newBbox.x = Math.min(dragStartBbox.x + dragStartBbox.width - 1, dragStartBbox.x + dx);
-        newBbox.width = Math.max(1, dragStartBbox.width - dx);
-        newBbox.height = Math.max(1, dragStartBbox.height + dy);
+        newBbox.x = Math.min(startBbox.x + startBbox.width - 1, startBbox.x + dx);
+        newBbox.width = Math.max(1, startBbox.width - dx);
+        newBbox.height = Math.max(1, startBbox.height + dy);
       } else if (dragMode === "resize-ne") {
-        newBbox.y = Math.min(dragStartBbox.y + dragStartBbox.height - 1, dragStartBbox.y + dy);
-        newBbox.width = Math.max(1, dragStartBbox.width + dx);
-        newBbox.height = Math.max(1, dragStartBbox.height - dy);
+        newBbox.y = Math.min(startBbox.y + startBbox.height - 1, startBbox.y + dy);
+        newBbox.width = Math.max(1, startBbox.width + dx);
+        newBbox.height = Math.max(1, startBbox.height - dy);
       } else if (dragMode === "resize-nw") {
-        newBbox.x = Math.min(dragStartBbox.x + dragStartBbox.width - 1, dragStartBbox.x + dx);
-        newBbox.y = Math.min(dragStartBbox.y + dragStartBbox.height - 1, dragStartBbox.y + dy);
-        newBbox.width = Math.max(1, dragStartBbox.width - dx);
-        newBbox.height = Math.max(1, dragStartBbox.height - dy);
+        newBbox.x = Math.min(startBbox.x + startBbox.width - 1, startBbox.x + dx);
+        newBbox.y = Math.min(startBbox.y + startBbox.height - 1, startBbox.y + dy);
+        newBbox.width = Math.max(1, startBbox.width - dx);
+        newBbox.height = Math.max(1, startBbox.height - dy);
       }
 
       const newBlocks = pageData.textBlocks.map((b) =>

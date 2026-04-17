@@ -1,5 +1,6 @@
 import React, { useEffect, useReducer, useRef } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
+import type { PecoDocument } from '../../types';
 
 interface ThumbnailItemProps {
   index: number;
@@ -48,7 +49,7 @@ export const ThumbnailItemNode = React.memo(({
 
 interface ThumbnailPanelProps {
   width: number;
-  document: any;
+  document: Pick<PecoDocument, 'totalPages' | 'pages'> | null;
   currentPageIndex: number;
   loadEpoch: number;
   isOcrRunning: boolean;

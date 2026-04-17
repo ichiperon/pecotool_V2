@@ -4,8 +4,13 @@ import {
   PDFDict, PDFRef, PDFObject
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import { PageData, PecoDocument } from '../types';
+import { PecoDocument } from '../types';
 import { inflate } from 'pako';
+import type {
+  SavePdfWorkerRequest,
+  SavePdfWorkerResponse,
+  SerializedPageData,
+} from './pdfWorkerTypes';
 
 /**
  * Decompress a PDFRawStream's contents.
@@ -265,26 +270,42 @@ export async function buildPdfDocument(
 }
 
 
-// Worker (pdf.worker.ts) -> main thread のメッセージ契約
-type SavePdfWorkerResponse =
-  | { type: 'SAVE_PDF_SUCCESS'; data: Uint8Array }
-  | { type: 'ERROR'; message: string };
-
 let activeSaveWorker: Worker | null = null;
 let currentSaveTask: Promise<Uint8Array> | null = null;
 
 const PREVIOUS_SAVE_TIMEOUT_MS = 5000;
+
+/**
+ * Worker を生成するファクトリ。テストからの差し替えを容易にするため internal export。
+ * 本番では `new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' })` が使われる。
+ * Worker API が利用できない環境（JSDOM 等）では null を返し、呼び出し側で main thread 実行にフォールバックする。
+ */
+export type SaveWorkerFactory = () => Worker | null;
+
+let createSaveWorker: SaveWorkerFactory = () => {
+  if (typeof Worker === 'undefined') return null;
+  return new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
+};
+
+/** テスト用: Worker ファクトリを差し替える（テスト後は __resetSaveWorkerFactory で元に戻す） */
+export function __setSaveWorkerFactoryForTest(factory: SaveWorkerFactory): void {
+  createSaveWorker = factory;
+}
+
+/** テスト用: savePDF のモジュール状態（activeSaveWorker / currentSaveTask）をリセット */
+export function __resetSaveStateForTest(): void {
+  if (activeSaveWorker) {
+    try { activeSaveWorker.terminate(); } catch { /* noop */ }
+  }
+  activeSaveWorker = null;
+  currentSaveTask = null;
+}
 
 export async function savePDF(
   originalPdfBytes: Uint8Array,
   documentState: PecoDocument,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
-  // Use direct call if Worker is not available (e.g. in JSDOM tests)
-  if (typeof Worker === 'undefined' || (typeof process !== 'undefined' && process.env.NODE_ENV === 'test')) {
-    return await buildPdfDocument(originalPdfBytes, documentState, fontBytes);
-  }
-
   // 前回の保存が未完了の場合、完了 or タイムアウトまで待ってから新 worker を起動する
   if (currentSaveTask) {
     const timeoutSymbol = Symbol('timeout');
@@ -299,7 +320,7 @@ export async function savePDF(
       if (raceResult === timeoutSymbol) {
         console.warn('[savePDF] Previous save did not complete within timeout; terminating stale worker.');
         if (activeSaveWorker) {
-          activeSaveWorker.terminate();
+          try { activeSaveWorker.terminate(); } catch { /* noop: terminate の二重呼び出しは無害扱い */ }
           activeSaveWorker = null;
         }
         currentSaveTask = null;
@@ -322,16 +343,26 @@ export async function savePDF(
       reject(err instanceof Error ? err : new Error(String(err)));
     };
 
+    let worker: Worker | null = null;
     try {
-      const worker = new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
-      activeSaveWorker = worker;
+      worker = createSaveWorker();
+      if (!worker) {
+        // Worker API 不在: main thread で直接実行
+        buildPdfDocument(originalPdfBytes, documentState, fontBytes)
+          .then(settleResolve)
+          .catch(settleReject);
+        return;
+      }
+      const activeWorker = worker;
+      activeSaveWorker = activeWorker;
 
       const cleanup = () => {
-        if (activeSaveWorker === worker) activeSaveWorker = null;
-        worker.terminate();
+        if (activeSaveWorker === activeWorker) activeSaveWorker = null;
+        // terminate は idempotent: 二重呼び出しでも例外にならない。
+        try { activeWorker.terminate(); } catch { /* noop */ }
       };
 
-      worker.onmessage = (e: MessageEvent<SavePdfWorkerResponse>) => {
+      activeWorker.onmessage = (e: MessageEvent<SavePdfWorkerResponse>) => {
         if (settled) return;
         const msg = e.data;
         if (msg.type === 'SAVE_PDF_SUCCESS') {
@@ -343,13 +374,13 @@ export async function savePDF(
         }
       };
 
-      worker.onerror = (err) => {
+      activeWorker.onerror = (err) => {
         if (settled) return;
         cleanup();
         settleReject(err);
       };
 
-      const serializedPages: Record<number, Omit<PageData, 'thumbnail'>> = {};
+      const serializedPages: Record<number, SerializedPageData> = {};
       for (const [idx, page] of documentState.pages.entries()) {
         // thumbnail は Worker 内で不要な blob URL であるため除去する
         const { thumbnail: _t, ...pageWithoutThumbnail } = page;
@@ -361,19 +392,20 @@ export async function savePDF(
       const fontBytesClone = fontBytes instanceof ArrayBuffer ? fontBytes.slice(0) : undefined;
       if (fontBytesClone) transferables.push(fontBytesClone);
 
-      worker.postMessage({
+      const request: SavePdfWorkerRequest = {
         type: 'SAVE_PDF',
         data: {
           originalPdfBytes: bytesClone,
           documentState: { ...documentState, pages: serializedPages },
           fontBytes: fontBytesClone,
-        }
-      }, transferables);
+        },
+      };
+      activeWorker.postMessage(request, transferables);
     } catch (err) {
-      if (activeSaveWorker) {
-        try { activeSaveWorker.terminate(); } catch { /* noop */ }
-        activeSaveWorker = null;
+      if (worker) {
+        try { worker.terminate(); } catch { /* noop */ }
       }
+      if (activeSaveWorker === worker) activeSaveWorker = null;
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
       buildPdfDocument(originalPdfBytes, documentState, fontBytes)
         .then(settleResolve)

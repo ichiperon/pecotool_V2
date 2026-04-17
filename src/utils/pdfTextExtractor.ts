@@ -16,11 +16,7 @@ export async function loadPage(
   }>> | null,
   mtime?: number
 ): Promise<PageData> {
-  // メタデータの有無をキャッシュキーに含める。
-  // 初回ロード（bboxMeta=null）とメタデータ到着後の再ロードで
-  // 異なるキャッシュエントリを使い、古いデータが返るのを防ぐ。
-  const hasMeta = bboxMeta && bboxMeta[String(pageIndex)]?.length > 0;
-  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}${hasMeta ? ':m' : ''}`;
+  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
   const [cached, tempEdited] = await Promise.all([
     getCachedPage(cacheKey),
     getTemporaryPageData(filePath, pageIndex),
@@ -79,18 +75,9 @@ export async function loadPage(
           const mag = Math.sqrt(tx[0] * tx[0] + tx[1] * tx[1]) || 1;
           const ux = tx[0] / mag;
           const uy = tx[1] / mag;
-          // Perpendicular direction (above baseline) in PDF user space.
-          // Use the actual perpendicular column (tx[2], tx[3]) from the transform
-          // matrix instead of computing a 90° rotation from the text direction.
-          // Some OCR tools (Adobe Acrobat etc.) use Y-axis-flipped coordinate
-          // systems (negative determinant), which reverses the perpendicular
-          // direction. Using (-uy, ux) would compute the ascent in the wrong
-          // direction, shifting the bbox by ~2×ascent for those pages.
-          const perpMag = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
-          // Degenerate transform (zero perpendicular column) → fall back to
-          // 90° rotation of text direction
-          const px = perpMag > 0.001 ? tx[2] / perpMag : -uy;
-          const py = perpMag > 0.001 ? tx[3] / perpMag : ux;
+          // Perpendicular direction (above baseline) in PDF user space
+          const px = -uy;
+          const py = ux;
 
           const thickness = item.height > 0
             ? item.height

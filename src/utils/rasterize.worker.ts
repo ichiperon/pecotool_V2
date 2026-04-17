@@ -3,6 +3,15 @@ import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, StandardFonts, PDFName, PDFHexString, PDFDict, degrees, pushGraphicsState, popGraphicsState, translate, scale } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import type { PageData, PDFMetadata } from '../types';
+import type { RasterizeResponse } from './thumbnailWorkerTypes';
+
+function post(msg: RasterizeResponse, transfer?: Transferable[]): void {
+  if (transfer && transfer.length > 0) {
+    (self.postMessage as (m: unknown, transfer: Transferable[]) => void)(msg, transfer);
+  } else {
+    self.postMessage(msg);
+  }
+}
 
 // pdfjs-dist v5 では workerSrc='' がエラーになるため正規のWorker URLを指定する
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
@@ -83,7 +92,7 @@ self.onmessage = async (e: MessageEvent<RasterizeRequest>) => {
       }
 
       // 進捗通知
-      self.postMessage({ type: 'RASTERIZE_PROGRESS', current: batchEnd, total: totalPages });
+      post({ type: 'RASTERIZE_PROGRESS', current: batchEnd, total: totalPages });
     }
 
     // pdf-lib で新規PDFを構築
@@ -167,13 +176,9 @@ self.onmessage = async (e: MessageEvent<RasterizeRequest>) => {
     }
 
     const savedBytes = await newPdf.save({ useObjectStreams: true, addDefaultPage: false });
-    // tsconfig に WebWorker lib が無いため Worker 版 postMessage 型を明示する
-    (self.postMessage as (m: unknown, transfer: Transferable[]) => void)(
-      { type: 'RASTERIZE_SUCCESS', data: savedBytes },
-      [savedBytes.buffer]
-    );
+    post({ type: 'RASTERIZE_SUCCESS', data: savedBytes }, [savedBytes.buffer]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    self.postMessage({ type: 'ERROR', message });
+    post({ type: 'ERROR', message });
   }
 };

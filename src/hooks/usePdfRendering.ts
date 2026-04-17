@@ -49,8 +49,11 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
 
   // PDFページの取得
   useEffect(() => {
+    // ファイルまたはページが切り替わった瞬間に古いプロキシを即座にクリア。
+    // これにより破棄済み transport への render 呼び出しを防ぐ。
+    setPdfPage(null);
+
     if (!filePath) {
-      setPdfPage(null);
       hasCalledFirstRenderRef.current = null;
       return;
     }

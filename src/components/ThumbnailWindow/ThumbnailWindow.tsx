@@ -3,6 +3,7 @@ import { listen, emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
+import type { ThumbnailWorkerRequest, ThumbnailWorkerResponse } from '../../utils/thumbnailWorkerTypes';
 import '../../App.css';
 
 // ★ 高速化1: 3ワーカー並列
@@ -143,32 +144,46 @@ export function ThumbnailWindow() {
       );
 
       const workerIndex = wi;
-      worker.onmessage = (e: MessageEvent) => {
-        const { type, pageIndex, bytes } = e.data;
+      worker.onmessage = (e: MessageEvent<ThumbnailWorkerResponse>) => {
+        const msg = e.data;
 
-        if (type === 'LOAD_COMPLETE' || type === 'LOAD_ERROR') {
-          if (type === 'LOAD_ERROR') {
-            console.error(`[ThumbnailWindow] Worker ${workerIndex} load error:`, e.data.message);
+        if (msg.type === 'LOAD_COMPLETE' || msg.type === 'LOAD_ERROR') {
+          if (msg.type === 'LOAD_ERROR') {
+            console.error(`[ThumbnailWindow] Worker ${workerIndex} load error:`, msg.message);
           }
           // ★ per-worker resolve（古い LOAD_COMPLETE は null のため無害）
           const resolve = loadResolvesRef.current[workerIndex];
           if (resolve) {
             loadResolvesRef.current[workerIndex] = null;
-            resolve(type === 'LOAD_COMPLETE');
+            resolve(msg.type === 'LOAD_COMPLETE');
           }
           return;
         }
 
-        const resolve = myPending.get(pageIndex);
-        if (!resolve) return;
-        myPending.delete(pageIndex);
-
-        if (type === 'THUMBNAIL_DONE' && bytes instanceof Uint8Array) {
-          const blob = new Blob([bytes], { type: 'image/jpeg' });
-          resolve(URL.createObjectURL(blob));
-        } else {
-          resolve(null);
+        if (msg.type === 'THUMBNAIL_DONE') {
+          const resolve = myPending.get(msg.pageIndex);
+          if (!resolve) return;
+          myPending.delete(msg.pageIndex);
+          if (msg.bytes instanceof Uint8Array) {
+            const blob = new Blob([msg.bytes], { type: 'image/jpeg' });
+            resolve(URL.createObjectURL(blob));
+          } else {
+            resolve(null);
+          }
+          return;
         }
+
+        if (msg.type === 'THUMBNAIL_ERROR') {
+          const resolve = myPending.get(msg.pageIndex);
+          if (!resolve) return;
+          myPending.delete(msg.pageIndex);
+          resolve(null);
+          return;
+        }
+
+        // 網羅性チェック
+        const _exhaustive: never = msg;
+        return _exhaustive;
       };
 
       worker.onerror = () => {
@@ -220,7 +235,8 @@ export function ThumbnailWindow() {
         clearTimeout(timeout);
         resolve({ url, generation });
       });
-      worker.postMessage({ type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx });
+      const req: ThumbnailWorkerRequest = { type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx };
+      worker.postMessage(req);
     });
   }, []);
 
@@ -333,7 +349,8 @@ export function ThumbnailWindow() {
 
             workers.forEach((worker, i) => {
               const bytes = (i < workers.length - 1) ? buf.slice(0) : buf;
-              worker.postMessage({ type: 'LOAD_PDF', bytes }, [bytes]);
+              const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', bytes };
+              worker.postMessage(req, [bytes]);
             });
 
             // ★ 全 Worker の LOAD_COMPLETE 後に isPdfReady=true→キュー処理

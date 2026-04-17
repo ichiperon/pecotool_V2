@@ -15,41 +15,48 @@
     "core:webview:allow-create-webview-window",
     "opener:default",
     "dialog:default",
-    "fs:default",
     {
       "identifier": "fs:allow-write-file",
       "allow": [
-        { "path": "$HOME/**" },
         { "path": "$DESKTOP/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" },
-        { "path": "$APPDATA/**" },
-        { "path": "$APPCONFIG/**" },
-        { "path": "$APPLOCALDATA/**" }
+        { "path": "$APPDATA/pecotool/**" },
+        { "path": "$APPCONFIG/pecotool/**" },
+        { "path": "$APPLOCALDATA/pecotool/**" },
+        { "path": "$TEMP/**" }
       ]
     },
     {
       "identifier": "fs:allow-read-file",
       "allow": [
-        { "path": "$HOME/**" },
         { "path": "$DESKTOP/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" },
-        { "path": "$APPDATA/**" },
-        { "path": "$APPCONFIG/**" },
-        { "path": "$APPLOCALDATA/**" }
+        { "path": "$APPDATA/pecotool/**" },
+        { "path": "$APPCONFIG/pecotool/**" },
+        { "path": "$APPLOCALDATA/pecotool/**" },
+        { "path": "$TEMP/**" }
       ]
     },
     {
       "identifier": "fs:allow-stat",
       "allow": [
-        { "path": "$HOME/**" },
         { "path": "$DESKTOP/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" },
-        { "path": "$APPDATA/**" },
-        { "path": "$APPCONFIG/**" },
-        { "path": "$APPLOCALDATA/**" }
+        { "path": "$APPDATA/pecotool/**" },
+        { "path": "$APPCONFIG/pecotool/**" },
+        { "path": "$APPLOCALDATA/pecotool/**" },
+        { "path": "$TEMP/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [
+        { "path": "$TEMP/**" },
+        { "path": "$APPDATA/pecotool/**" },
+        { "path": "$APPLOCALDATA/pecotool/**" }
       ]
     }
   ]
