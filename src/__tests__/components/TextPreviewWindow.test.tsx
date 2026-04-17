@@ -132,4 +132,89 @@ describe('TextPreviewWindow', () => {
     })
   })
 
+  describe('C-PW-04: コピーボタンが2秒後にリセット', () => {
+    it('コピー後 2000ms 経過 → ボタンテキストが "全てコピー" に戻る', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+
+      let previewCallback: ((event: any) => void) | undefined
+      mockListen.mockImplementation(async (eventName: string, cb: any) => {
+        if (eventName === 'preview-update') previewCallback = cb
+        return () => {}
+      })
+
+      const mockWriteText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText: mockWriteText },
+        configurable: true,
+      })
+
+      render(<TextPreviewWindow />)
+      await waitFor(() => expect(previewCallback).toBeDefined())
+
+      act(() => { previewCallback!({ payload: 'テスト' }) })
+
+      const copyButton = screen.getByRole('button')
+
+      // click and resolve clipboard promise
+      await act(async () => {
+        fireEvent.click(copyButton)
+        await Promise.resolve()
+      })
+
+      expect(screen.getByText('コピーしました！')).toBeTruthy()
+
+      // 2秒経過
+      act(() => { vi.advanceTimersByTime(2000) })
+
+      expect(screen.getByText('全てコピー')).toBeTruthy()
+
+      vi.useRealTimers()
+    })
+  })
+
+  describe('C-PW-06: マウント時に request-preview を emit', () => {
+    it('マウント → emit("request-preview") が呼ばれる', async () => {
+      mockListen.mockImplementation(async (_eventName: string, _cb: any) => {
+        return () => {}
+      })
+
+      render(<TextPreviewWindow />)
+
+      await waitFor(() => {
+        expect(mockEmit).toHaveBeenCalledWith('request-preview')
+      })
+    })
+  })
+
+  describe('C-PW-07: アンマウント時に unlisten が呼ばれる', () => {
+    it('unmount → listen で返された unlisten 関数がすべて呼ばれる', async () => {
+      const unlistenPreview = vi.fn()
+      const unlistenClose = vi.fn()
+
+      mockListen.mockImplementation(async (eventName: string, _cb: any) => {
+        if (eventName === 'preview-update') return unlistenPreview
+        return () => {}
+      })
+
+      mockGetCurrentWindow.mockReturnValue({
+        onCloseRequested: vi.fn().mockImplementation(async (_cb: any) => {
+          return unlistenClose
+        }),
+        hide: mockHide,
+      })
+
+      const { unmount } = render(<TextPreviewWindow />)
+
+      // setup が完了するのを待つ
+      await waitFor(() => {
+        expect(mockEmit).toHaveBeenCalledWith('request-preview')
+      })
+
+      unmount()
+
+      expect(unlistenPreview).toHaveBeenCalled()
+      expect(unlistenClose).toHaveBeenCalled()
+    })
+  })
+
 })

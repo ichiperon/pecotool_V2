@@ -1,7 +1,8 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { PDFDocument, StandardFonts, PDFName, PDFHexString, degrees, pushGraphicsState, popGraphicsState, translate, scale } from '@cantoo/pdf-lib';
+import { PDFDocument, StandardFonts, PDFName, PDFHexString, PDFDict, degrees, pushGraphicsState, popGraphicsState, translate, scale } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
+import type { PageData, PDFMetadata } from '../types';
 
 // pdfjs-dist v5 では workerSrc='' がエラーになるため正規のWorker URLを指定する
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
@@ -20,7 +21,13 @@ async function renderPageToJpeg(
   const canvas = new OffscreenCanvas(Math.round(viewport.width), Math.round(viewport.height));
   const context = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D;
 
-  await jsPage.render({ canvasContext: context as any, viewport, canvas: canvas as any }).promise;
+  // pdfjs の render() 型は CanvasRenderingContext2D / HTMLCanvasElement を要求するが、
+  // Worker 内ではそれらが存在しないため OffscreenCanvas 系を unknown 経由で渡す。
+  await jsPage.render({
+    canvasContext: context as unknown as CanvasRenderingContext2D,
+    viewport,
+    canvas: canvas as unknown as HTMLCanvasElement,
+  }).promise;
 
   const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
   const arrayBuffer = await blob.arrayBuffer();
@@ -31,17 +38,22 @@ async function renderPageToJpeg(
   };
 }
 
-self.onmessage = async (e: MessageEvent) => {
+type RasterizeRequest = {
+  type: 'RASTERIZE_PDF';
+  data: {
+    originalPdfBytes: Uint8Array;
+    documentState: { pages: Record<number, Omit<PageData, 'thumbnail'>>; metadata?: PDFMetadata };
+    quality: number;
+    fontBytes?: ArrayBuffer;
+  };
+};
+
+self.onmessage = async (e: MessageEvent<RasterizeRequest>) => {
   const { type, data } = e.data;
   if (type !== 'RASTERIZE_PDF') return;
 
   try {
-    const { originalPdfBytes, documentState, quality, fontBytes } = data as {
-      originalPdfBytes: Uint8Array;
-      documentState: { pages: Record<number, any>; metadata?: any };
-      quality: number;
-      fontBytes?: ArrayBuffer;
-    };
+    const { originalPdfBytes, documentState, quality, fontBytes } = data;
 
     const renderScale = 1.0;
 
@@ -82,7 +94,13 @@ self.onmessage = async (e: MessageEvent) => {
       ? await newPdf.embedFont(fontBytes, { subset: true })
       : await newPdf.embedFont(StandardFonts.Helvetica);
 
-    const bboxMeta: Record<string, any> = {};
+    type BBoxMetaEntry = {
+      bbox: PageData['textBlocks'][number]['bbox'];
+      writingMode: PageData['textBlocks'][number]['writingMode'];
+      order: number;
+      text: string;
+    };
+    const bboxMeta: Record<string, BBoxMetaEntry[]> = {};
 
     for (let i = 0; i < totalPages; i++) {
       const { jpegBytes, width, height } = jpegResults[i];
@@ -96,8 +114,8 @@ self.onmessage = async (e: MessageEvent) => {
 
       const pageData = documentState.pages[i];
       if (pageData) {
-        const sortedBlocks = [...pageData.textBlocks].sort((a: any, b: any) => a.order - b.order);
-        bboxMeta[String(i)] = sortedBlocks.map((b: any) => ({
+        const sortedBlocks = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
+        bboxMeta[String(i)] = sortedBlocks.map((b) => ({
           bbox: b.bbox,
           writingMode: b.writingMode,
           order: b.order,
@@ -143,14 +161,19 @@ self.onmessage = async (e: MessageEvent) => {
     newPdf.setTitle(documentState.metadata?.title || 'OCR Document');
     newPdf.setCreator('PecoTool V2');
 
-    const infoDict = (newPdf as any).getInfoDict();
+    const infoDict = (newPdf as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
     if (infoDict) {
       infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
     }
 
     const savedBytes = await newPdf.save({ useObjectStreams: true, addDefaultPage: false });
-    self.postMessage({ type: 'RASTERIZE_SUCCESS', data: savedBytes }, [savedBytes.buffer] as any);
-  } catch (err: any) {
-    self.postMessage({ type: 'ERROR', message: err.message });
+    // tsconfig に WebWorker lib が無いため Worker 版 postMessage 型を明示する
+    (self.postMessage as (m: unknown, transfer: Transferable[]) => void)(
+      { type: 'RASTERIZE_SUCCESS', data: savedBytes },
+      [savedBytes.buffer]
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    self.postMessage({ type: 'ERROR', message });
   }
 };

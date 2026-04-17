@@ -34,10 +34,11 @@ export function useFileOperations(
   const { setDocument, setDocumentFilePath, resetDirty } = usePecoStore();
 
   const addToRecent = (path: string) => {
-    const saved = localStorage.getItem('peco-recent-files');
+    // ファイルフルパスは機密情報のため sessionStorage に保存（ブラウザ/アプリを閉じると消去）
+    const saved = sessionStorage.getItem('peco-recent-files');
     let recent: string[] = saved ? JSON.parse(saved) : [];
     recent = [path, ...recent.filter(p => p !== path)].slice(0, 10);
-    localStorage.setItem('peco-recent-files', JSON.stringify(recent));
+    sessionStorage.setItem('peco-recent-files', JSON.stringify(recent));
   };
 
   const handleOpen = async (explicitPath?: string): Promise<boolean> => {

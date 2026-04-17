@@ -1,16 +1,58 @@
 // =====================================================================
-// Web Worker コンテキストでは `window` が未定義。
-// pdfjs-dist が window を参照する箇所があるため globalThis で補完する。
-// ※ import は巻き上げられて先に実行されるが、getDocument() 呼び出しは
+// Web Worker コンテキストでは `window` / `document` が未定義。
+// pdfjs-dist の内部レンダリング経路 (パターンキャッシュ・画像デコード等) で
+// `document.createElement('canvas')` を呼び出す箇所があり、未定義だと
+// `Cannot read properties of undefined (reading 'createElement')` で render() が失敗する。
+// 最小限のスタブで補完する: canvas は OffscreenCanvas を返し、その他の要素は
+// 空のスタブを返してpdfjs内部のスタイル設定等で例外を出さないようにする。
+// ※ import は巻き上げられて先に実行されるが、getDocument()/render() 呼び出しは
 //    このポリフィル実行後になるため、ランタイムエラーは防げる。
 // =====================================================================
-if (typeof window === 'undefined') {
-  (globalThis as any).window = globalThis;
+// pdfjs 内部が触る window/document を最小限スタブ化する。
+// Worker コンテキストでは Window/Document 型と整合しないため unknown 経由で書き込む。
+type ElementStub = {
+  style: Record<string, string>;
+  setAttribute(): void;
+  getContext(): null;
+  appendChild(): void;
+  remove(): void;
+};
+
+const _globalAny = globalThis as unknown as Record<string, unknown>;
+if (typeof (_globalAny as { window?: unknown }).window === 'undefined') {
+  _globalAny.window = globalThis;
+}
+if (typeof (_globalAny as { document?: unknown }).document === 'undefined') {
+  const documentStub = {
+    createElement(tag: string): OffscreenCanvas | ElementStub {
+      if (typeof tag === 'string' && tag.toLowerCase() === 'canvas') {
+        return new OffscreenCanvas(1, 1);
+      }
+      // 他要素はpdfjs内部のスタイル/属性設定が落ちないようにスタブを返す
+      return {
+        style: {},
+        setAttribute() {},
+        getContext() { return null; },
+        appendChild() {},
+        remove() {},
+      };
+    },
+    createElementNS(_ns: string, tag: string): OffscreenCanvas | ElementStub {
+      return documentStub.createElement(tag);
+    },
+  };
+  _globalAny.document = documentStub;
 }
 
 import * as pdfjsLib from 'pdfjs-dist';
+import type { DocumentInitParameters } from 'pdfjs-dist/types/src/display/api';
+// このWorkerはメインスレッドから ArrayBuffer を転送で受け取るため、
+// 内部で fetch を行わない → Accept-Ranges パッチ (pdfjs-worker-wrapper) は不要。
+// ラッパーを経由すると Vite の `?url` import が .ts ファイルを
+// data:video/mp2t;base64,... として生TSのまま埋め込み、サブワーカーが
+// 起動できずに getDocument() が無期限ハングする不具合がある。
+// そのため素の pdf.worker.min.mjs を直接 workerSrc として使用する。
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 
 let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
@@ -18,7 +60,7 @@ let loadPromise: Promise<void> | null = null;
 
 // OffscreenCanvas 同時レンダリング数を制限するセマフォ
 let activeRenders = 0;
-const MAX_CONCURRENT_RENDERS = 2;
+const MAX_CONCURRENT_RENDERS = 4;
 const renderWaitQueue: Array<() => void> = [];
 
 function handleLoadPdf(source: string | ArrayBuffer): void {
@@ -36,7 +78,7 @@ function handleLoadPdf(source: string | ArrayBuffer): void {
     // Worker コンテキストでは self.location.origin で絶対 URL を構築
     // （相対パスのままだと pdfjs が window.location を参照してしまう）
     const origin = self.location.origin;
-    const config: any = {
+    const config: DocumentInitParameters = {
       cMapUrl: `${origin}/cmaps/`,
       cMapPacked: true,
       standardFontDataUrl: `${origin}/standard_fonts/`,
@@ -89,28 +131,38 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     const scale = Math.min(120 / unscaled.width, 1.0);
     const viewport = page.getViewport({ scale });
 
-    const canvas = new OffscreenCanvas(
-      Math.round(viewport.width),
-      Math.round(viewport.height)
-    );
+    const w = Math.max(1, Math.round(viewport.width));
+    const h = Math.max(1, Math.round(viewport.height));
+    const canvas = new OffscreenCanvas(w, h);
     const ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D;
     if (!ctx) throw new Error('Failed to get OffscreenCanvas context');
 
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({ canvasContext: ctx as any, viewport, canvas: canvas as any }).promise;
+    ctx.fillRect(0, 0, w, h);
+    // サムネイルはアノテーション不要 → DISABLE で内部処理を軽量化
+    // pdfjs の render() 型は CanvasRenderingContext2D / HTMLCanvasElement を要求するが、
+    // 実行時は OffscreenCanvas 系でも動く。型定義との差分のみ unknown 経由で吸収する。
+    await page.render({
+      canvasContext: ctx as unknown as CanvasRenderingContext2D,
+      viewport,
+      canvas: canvas as unknown as HTMLCanvasElement,
+      annotationMode: 0,
+    }).promise;
 
     const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.65 });
     const buf = await blob.arrayBuffer();
 
     // ArrayBuffer を Transferable として転送（零コピー）
-    self.postMessage(
+    // tsconfig に WebWorker lib が無いため Worker 版 postMessage 型を明示する
+    (self.postMessage as (m: unknown, transfer: Transferable[]) => void)(
       { type: 'THUMBNAIL_DONE', pageIndex, bytes: new Uint8Array(buf) },
-      [buf] as any
+      [buf]
     );
   } catch (e) {
+    const errMsg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     console.error(`[thumbnail.worker] Page ${pageIndex + 1} failed:`, e);
-    self.postMessage({ type: 'THUMBNAIL_ERROR', pageIndex });
+    // エラー内容をメインスレッドへ伝搬してDevToolsで確認できるようにする
+    self.postMessage({ type: 'THUMBNAIL_ERROR', pageIndex, error: errMsg });
   } finally {
     activeRenders--;
     renderWaitQueue.shift()?.();

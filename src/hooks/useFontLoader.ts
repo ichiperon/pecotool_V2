@@ -1,3 +1,5 @@
+import { logger } from '../utils/logger';
+
 let fontBytesCache: ArrayBuffer | null = null;
 let fontLoadPromise: Promise<ArrayBuffer | null> | null = null;
 
@@ -14,7 +16,7 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
       if (res.ok) {
         fontBytesCache = await res.arrayBuffer();
         fontLoadPromise = null;
-        console.log('[loadFontLazy] Font loaded successfully');
+        logger.log('[loadFontLazy] Font loaded successfully');
         return fontBytesCache;
       } else {
         console.error('[loadFontLazy] Failed to fetch font: status', res.status);

@@ -1,12 +1,71 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import PdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { PecoDocument, PageData, TextBlock, BoundingBox } from '../types';
+import type { DocumentInitParameters } from 'pdfjs-dist/types/src/display/api';
+// 注意: `./pdfjs-worker-wrapper.ts?url` は Vite が .ts ファイルを
+// `data:video/mp2t;base64,...`（生 TypeScript ソース）として埋め込むため、
+// サブワーカーが起動できず pdfjs が無期限ハングする不具合があった。
+// pdf.worker.min.mjs を直接 `?url` 指定して使用する。
+import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { PecoDocument } from '../types';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { stat } from '@tauri-apps/plugin-fs';
+import { clearBitmapCache } from './bitmapCache';
 
-// 爆速化の要：Worker を Blob URL 化して確実に別スレッドで動かす
+// 直前に生成したラッパーWorker用ObjectURLを保持し、再生成前にrevokeしてリークを防ぐ
+let lastPatchedWorkerUrl: string | null = null;
+
+function buildPatchedWorkerUrl(originalWorkerUrl: string): string {
+  const absoluteWorkerUrl = new URL(originalWorkerUrl, self.location.href).href;
+  const wrapperSrc = `
+const _origFetch = self.fetch.bind(self);
+self.fetch = function patchedFetch(input, init) {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input && input.url);
+  if (url && url.includes('asset.localhost')) {
+    return _origFetch(input, init).then(function(response) {
+      const headers = new Headers(response.headers);
+      if (!headers.has('accept-ranges')) headers.set('accept-ranges', 'bytes');
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: headers });
+    });
+  }
+  return _origFetch(input, init);
+};
+import(${JSON.stringify(absoluteWorkerUrl)});
+`;
+  const blob = new Blob([wrapperSrc], { type: 'application/javascript' });
+  if (lastPatchedWorkerUrl) {
+    try { URL.revokeObjectURL(lastPatchedWorkerUrl); } catch { /* ignore */ }
+  }
+  const url = URL.createObjectURL(blob);
+  lastPatchedWorkerUrl = url;
+  return url;
+}
+
 if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorker;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = buildPatchedWorkerUrl(PdfWorkerUrl);
+}
+
+// Tauri asset protocol は Range Request (206) を返すが Accept-Ranges ヘッダーを含めない。
+// pdfjs-dist は Accept-Ranges: bytes ヘッダーが無いと Range 非対応と判定し、
+// PDF 全体をダウンロードしてから getDocument() を解決するため 210MB で 80 秒かかる。
+// asset.localhost URL へのレスポンスに Accept-Ranges: bytes を注入して回避する。
+if (typeof window !== 'undefined') {
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function patchedFetch(input: RequestInfo | URL, init?: RequestInit) {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+    if (url.includes('asset.localhost')) {
+      return _origFetch(input, init).then(response => {
+        const headers = new Headers(response.headers);
+        if (!headers.has('accept-ranges')) {
+          headers.set('accept-ranges', 'bytes');
+        }
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      });
+    }
+    return _origFetch(input, init);
+  } as typeof fetch;
 }
 
 const CMAP_URL = '/cmaps/';
@@ -17,11 +76,11 @@ const STANDARD_FONT_DATA_URL = '/standard_fonts/';
  * Open a PDF document using a URL (convertFileSrc) to enable range requests and streaming.
  */
 function getDocumentTask(urlOrData: string | Uint8Array) {
-  const config: any = {
+  const config: DocumentInitParameters = {
     cMapUrl: CMAP_URL,
     cMapPacked: CMAP_PACKED,
     standardFontDataUrl: STANDARD_FONT_DATA_URL,
-    disableAutoFetch: false,
+    disableAutoFetch: true,
     disableStream: false,
     disableRange: false,
   };
@@ -86,8 +145,11 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
   pdf.getMetadata().then((metadata) => {
     // 既に別ファイルに切り替わっている場合は書き込まない
     if (globalSharedPdfProxy?.filePath !== capturedFilePath) return;
-    doc.metadata.title = (metadata.info as any)?.Title;
-    doc.metadata.author = (metadata.info as any)?.Author;
+    const info = metadata.info as Record<string, unknown> | undefined;
+    const title = info?.Title;
+    const author = info?.Author;
+    doc.metadata.title = typeof title === 'string' ? title : undefined;
+    doc.metadata.author = typeof author === 'string' ? author : undefined;
   }).catch(() => {});
 
   // ファイルの最終更新時刻をキャッシュキーに使うために取得（getDocumentと並列取得済み）
@@ -181,6 +243,8 @@ export async function getCachedPageProxy(filePath: string, pageIndex: number): P
 }
 
 export function destroySharedPdfProxy() {
+  // ファイル切替時にビットマップキャッシュもクリア
+  clearBitmapCache();
   if (globalSharedPdfProxy) {
     const proxy = globalSharedPdfProxy;
     globalSharedPdfProxy = null; // 先にnullにして後続のgetSharedPdfProxy呼び出しをブロックしない
@@ -209,13 +273,13 @@ export async function generateThumbnail(filePath: string, pageIndex: number): Pr
   canvas.width = viewport.width;
   canvas.height = viewport.height;
   const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false })!;
-  
+
   // 背景を白に塗る（jpegの黒背景化防止）
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   await page.render({ canvasContext: ctx, viewport, canvas }).promise;
-  
+
   // Convert to Blob instead of Base64 to save memory (Low quality JPEG for thumbnails)
   return new Promise((resolve) => {
     canvas.toBlob((blob) => {
@@ -228,323 +292,13 @@ export async function generateThumbnail(filePath: string, pageIndex: number): Pr
   });
 }
 
-/**
- * Read PecoTool bbox metadata from the PDF if it was saved by this tool.
- * Returns null if no metadata found.
- */
-export async function loadPecoToolBBoxMeta(pdf: pdfjsLib.PDFDocumentProxy): Promise<Record<string, Array<{
-  bbox: BoundingBox;
-  writingMode: string;
-  order: number;
-  text: string;
-}>> | null> {
-  try {
-    const metadata = await pdf.getMetadata();
-    const raw = (metadata.info as any)?.Custom?.PecoToolBBoxes || (metadata.info as any)?.PecoToolBBoxes;
-    if (typeof raw === 'string' && raw.length > 0) {
-      return JSON.parse(raw);
-    }
-  } catch (err) {
-    console.warn('[loadPecoToolBBoxMeta] Failed to parse metadata:', err);
-  }
-  return null;
-}
-
-// IndexedDB cache for OCR results and temporary edits
-const DB_NAME = 'peco_ocr_cache';
-const STORE_NAME = 'pages';
-const STORE_NAME_DIRTY = 'temporary_changes'; // New store for un-saved edits
-
-// DB接続を一度だけ開いて使い回す
-let dbPromise: Promise<IDBDatabase> | null = null;
-
-function openDB(): Promise<IDBDatabase> {
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 2); // Version up to 2 for new store
-      request.onupgradeneeded = (_event: any) => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME);
-        }
-        if (!db.objectStoreNames.contains(STORE_NAME_DIRTY)) {
-          db.createObjectStore(STORE_NAME_DIRTY);
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => {
-        dbPromise = null;
-        reject(request.error);
-      };
-    });
-  }
-  return dbPromise;
-}
-
-export async function getTemporaryPageData(filePath: string, pageIndex: number): Promise<Partial<PageData> | null> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME_DIRTY, 'readonly');
-    const store = tx.objectStore(STORE_NAME_DIRTY);
-    const key = `${filePath}:${pageIndex}`;
-    const request = store.get(key);
-    return new Promise((resolve) => {
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => resolve(null);
-    });
-  } catch {
-    return null;
-  }
-}
-
-export async function saveTemporaryPageData(filePath: string, pageIndex: number, data: Partial<PageData>) {
-  await saveTemporaryPageDataBatch([{ filePath, pageIndex, data }]);
-}
-
-export async function saveTemporaryPageDataBatch(
-  entries: Array<{ filePath: string; pageIndex: number; data: Partial<PageData> }>
-) {
-  if (entries.length === 0) return;
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
-    const store = tx.objectStore(STORE_NAME_DIRTY);
-    for (const { filePath, pageIndex, data } of entries) {
-      const key = `${filePath}:${pageIndex}`;
-      // Always strip thumbnails before saving to IDB to save space
-      const { thumbnail: _thumbnail, ...cleanData } = data as any;
-      store.put(cleanData, key);
-    }
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  } catch { /* ignore */ }
-}
-
-export async function clearTemporaryChanges(filePath: string) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
-    const store = tx.objectStore(STORE_NAME_DIRTY);
-    const prefix = `${filePath}:`;
-    // IDBKeyRange でfilePath配下のキーのみに絞り込む（フルスキャン回避）
-    const range = IDBKeyRange.bound(prefix, prefix + '\uFFFF', false, false);
-    const request = store.openCursor(range);
-    await new Promise<void>((resolve, reject) => {
-      request.onsuccess = (event: any) => {
-        const cursor = event.target.result;
-        if (cursor) {
-          cursor.delete();
-          cursor.continue();
-        } else {
-          resolve();
-        }
-      };
-      request.onerror = () => reject(request.error);
-    });
-  } catch { /* ignore */ }
-}
-
-export async function getAllTemporaryPageData(filePath: string): Promise<Map<number, Partial<PageData>>> {
-  const results = new Map<number, Partial<PageData>>();
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME_DIRTY, 'readonly');
-    const store = tx.objectStore(STORE_NAME_DIRTY);
-    const prefix = `${filePath}:`;
-    // IDBKeyRange でfilePath配下のキーのみに絞り込む（フルスキャン回避）
-    const range = IDBKeyRange.bound(prefix, prefix + '\uFFFF', false, false);
-    const request = store.openCursor(range);
-
-    return new Promise((resolve) => {
-      request.onsuccess = (event: any) => {
-        const cursor = event.target.result;
-        if (cursor) {
-          const key = cursor.key as string;
-          const pageIndex = parseInt(key.slice(prefix.length), 10);
-          results.set(pageIndex, cursor.value);
-          cursor.continue();
-        } else {
-          resolve(results);
-        }
-      };
-      request.onerror = () => resolve(results);
-    });
-  } catch {
-    return results;
-  }
-}
-
-async function getCachedPage(key: string): Promise<PageData | null> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.get(key);
-    return new Promise((resolve) => {
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => resolve(null);
-    });
-  } catch {
-    return null;
-  }
-}
-
-async function setCachedPage(key: string, data: PageData) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    // Remove thumbnail from cached data to save space in IndexedDB
-    const dataToCache = { ...data, thumbnail: null };
-    store.put(dataToCache, key);
-  } catch { /* ignore write errors */ }
-}
-
-export async function loadPage(
-  _pdf: pdfjsLib.PDFDocumentProxy,
-  pageIndex: number,
-  filePath: string,
-  bboxMeta?: Record<string, Array<{
-    bbox: BoundingBox;
-    writingMode: string;
-    order: number;
-    text: string;
-  }>> | null,
-  mtime?: number
-): Promise<PageData> {
-  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
-  const [cached, tempEdited] = await Promise.all([
-    getCachedPage(cacheKey),
-    getTemporaryPageData(filePath, pageIndex),
-  ]);
-
-  let pageData: PageData;
-
-  if (cached) {
-    pageData = { ...cached, pageIndex };
-  } else {
-    // キャッシュ済みプロキシを再利用して二重getPageを回避
-    const page = await getCachedPageProxy(filePath, pageIndex);
-    const viewport = page.getViewport({ scale: 1.0 });
-    const textContent = await page.getTextContent();
-
-    // pdfjs v5 mixes TextItem and TextMarkedContent in items array.
-    const allItems = textContent.items;
-    const textItems = allItems.filter((item: any) => typeof item.str === 'string');
-
-    let textBlocks: TextBlock[];
-
-    // If PecoTool-saved bbox metadata is available for this page, use it directly.
-    const savedMeta = bboxMeta?.[String(pageIndex)];
-    if (savedMeta && savedMeta.length > 0) {
-      const textByOrder = new Map(
-        textItems
-          .filter((item: any) => item.str.trim() !== '')
-          .map((item: any, idx: number) => [idx, item.str as string])
-      );
-
-      textBlocks = savedMeta.map((meta, idx) => ({
-        id: crypto.randomUUID(),
-        text: textByOrder.get(idx) ?? meta.text,
-        originalText: textByOrder.get(idx) ?? meta.text,
-        bbox: meta.bbox,
-        writingMode: meta.writingMode as 'horizontal' | 'vertical',
-        order: meta.order,
-        isNew: false,
-        isDirty: false,
-      }));
-    } else {
-      // Fallback: compute bboxes from pdfjs transform (original OCR text)
-      // Use viewport.convertToViewportPoint to correctly handle page rotation (/Rotate)
-      // and CropBox offsets set by Acrobat.
-      const pageW = viewport.width;
-      const pageH = viewport.height;
-      let order = 0;
-      textBlocks = textItems
-        .filter((item: any) => item.str.trim() !== '')
-        .map((item: any) => {
-          const tx = item.transform;
-          // Text run direction unit vector in PDF user space
-          const mag = Math.sqrt(tx[0] * tx[0] + tx[1] * tx[1]) || 1;
-          const ux = tx[0] / mag;
-          const uy = tx[1] / mag;
-          // Perpendicular direction (above baseline) in PDF user space
-          const px = -uy;
-          const py = ux;
-
-          const thickness = item.height > 0
-            ? item.height
-            : (Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]) || mag || 12);
-          const runLength = item.width || mag * item.str.length * 0.6;
-          const ascent = thickness * 1.16;
-
-          // Compute 4 corners of the text bbox in PDF user space, then transform
-          // all of them to viewport (screen) space via convertToViewportPoint.
-          // This correctly handles page rotation and CropBox offsets.
-          const corners: [number, number][] = [
-            [tx[4],                                    tx[5]],
-            [tx[4] + ux * runLength,                   tx[5] + uy * runLength],
-            [tx[4] + px * ascent,                      tx[5] + py * ascent],
-            [tx[4] + ux * runLength + px * ascent,     tx[5] + uy * runLength + py * ascent],
-          ];
-
-          const vc = corners.map(([cx, cy]) => viewport.convertToViewportPoint(cx, cy));
-          const vxs = vc.map(c => c[0]);
-          const vys = vc.map(c => c[1]);
-
-          const bbox: BoundingBox = {
-            x: Math.min(...vxs),
-            y: Math.min(...vys),
-            width: Math.max(...vxs) - Math.min(...vxs),
-            height: Math.max(...vys) - Math.min(...vys),
-          };
-
-          // Determine writing mode from screen-space text run direction.
-          // Using bbox shape would misclassify short vertical runs (e.g. single char)
-          // where ascent > run length. The direction vector is always reliable.
-          const [vDirX, vDirY] = viewport.convertToViewportPoint(tx[4] + ux, tx[5] + uy);
-          const isVertical = Math.abs(vDirY - vc[0][1]) > Math.abs(vDirX - vc[0][0]);
-
-          return {
-            id: crypto.randomUUID(),
-            text: item.str,
-            originalText: item.str,
-            bbox,
-            writingMode: isVertical ? 'vertical' : 'horizontal',
-            order: order++,
-            isNew: false,
-            isDirty: false,
-          };
-        })
-        // OCRツールがForm XObjectを複数ページで共有している場合、getTextContent()が
-        // 他ページのテキストも返すことがある。ページ範囲外のブロックを除外する。
-        .filter(block => {
-          const b = block.bbox;
-          // bboxが完全にページ範囲外なら除外（少しのはみ出しは許容）
-          const margin = Math.max(pageW, pageH) * 0.05;
-          return b.x + b.width > -margin && b.x < pageW + margin
-              && b.y + b.height > -margin && b.y < pageH + margin;
-        });
-    }
-
-    pageData = {
-      pageIndex,
-      width: viewport.width,
-      height: viewport.height,
-      textBlocks,
-      isDirty: false,
-      thumbnail: null,
-    };
-    await setCachedPage(cacheKey, pageData);
-  }
-
-  // If there are temporary (un-saved) edits, merge them
-  if (tempEdited) {
-    pageData = { ...pageData, ...tempEdited, isDirty: true };
-  }
-
-  return pageData;
-}
-
+// 責務分離後の後方互換 re-export: 既存 import 文を一切変更しないため pdfLoader から透過的に公開する
+export { loadPecoToolBBoxMeta } from './pdfMetadataLoader';
+export {
+  getTemporaryPageData,
+  saveTemporaryPageData,
+  saveTemporaryPageDataBatch,
+  clearTemporaryChanges,
+  getAllTemporaryPageData,
+} from './pdfTemporaryStorage';
+export { loadPage } from './pdfTextExtractor';

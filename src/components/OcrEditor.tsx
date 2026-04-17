@@ -28,7 +28,13 @@ interface OcrEditorProps {
 }
 
 export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
-  const { document, currentPageIndex, updatePageData, toggleSelection, selectedIds, lastSelectedId, setSelectedIds } = usePecoStore();
+  const document = usePecoStore(s => s.document);
+  const currentPageIndex = usePecoStore(s => s.currentPageIndex);
+  const selectedIds = usePecoStore(s => s.selectedIds);
+  const lastSelectedId = usePecoStore(s => s.lastSelectedId);
+  const updatePageData = usePecoStore(s => s.updatePageData);
+  const toggleSelection = usePecoStore(s => s.toggleSelection);
+  const setSelectedIds = usePecoStore(s => s.setSelectedIds);
   const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -55,6 +61,8 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     setActiveId(null);
     const { active, over } = event;
     if (!over || active.id === over.id || !currentPage) return;
+    // 検索フィルタ適用中はDnDを無効化（フィルタ外ブロックの順序破壊を防ぐ）
+    if (searchTerm) return;
 
     const blocks = currentPage.textBlocks;
     const activeIsSelected = selectedIds.has(active.id as string);

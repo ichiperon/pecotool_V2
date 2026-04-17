@@ -1,12 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { usePecoStore } from '../store/pecoStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { logger } from '../utils/logger';
 
 // サムネイル生成を thumbnail.worker.ts (OffscreenCanvas) に委譲することで
 // メインスレッドのブロックを回避する。
 // ThumbnailWindow.tsx と同じ Worker プール方式を採用。
 
-const NUM_WORKERS = 2;
+const NUM_WORKERS = 1;
 const CONCURRENCY = 4;
 const BATCH_FLUSH_MS = 50;
 
@@ -39,7 +40,7 @@ export function useThumbnailPanel() {
   const isPdfReadyRef = useRef(false);
   const queueRef = useRef<number[]>([]);
   const isProcessingRef = useRef(false);
-  const deferredLoadRef = useRef<(() => void) | null>(null);
+  // (deferred load mode廃止により未使用、削除)
 
   // バッチ更新用
   const pendingBatchRef = useRef<Array<[number, string]>>([]);
@@ -106,7 +107,7 @@ export function useThumbnailPanel() {
 
   // キュー処理
   const processThumbnailQueue = useCallback(async (epoch: number) => {
-    console.log(`[ThumbnailPanel] processThumbnailQueue epoch=${epoch}, isPdfReady=${isPdfReadyRef.current}, isProcessing=${isProcessingRef.current}, queueLen=${queueRef.current.length}`);
+    logger.log(`[ThumbnailPanel] processThumbnailQueue epoch=${epoch}, isPdfReady=${isPdfReadyRef.current}, isProcessing=${isProcessingRef.current}, queueLen=${queueRef.current.length}`);
     if (!isPdfReadyRef.current) return;
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
@@ -162,7 +163,7 @@ export function useThumbnailPanel() {
         const { type, pageIndex, bytes } = e.data;
 
         if (type === 'LOAD_COMPLETE' || type === 'LOAD_ERROR') {
-          console.log(`[ThumbnailPanel] Worker ${workerIndex} ${type}`);
+          logger.log(`[ThumbnailPanel] Worker ${workerIndex} ${type}`);
           if (type === 'LOAD_ERROR') {
             console.error(`[useThumbnailPanel] Worker ${workerIndex} load error:`, e.data.message);
           }
@@ -181,17 +182,32 @@ export function useThumbnailPanel() {
         myPending.delete(pageIndex);
 
         if (type === 'THUMBNAIL_DONE' && bytes instanceof Uint8Array) {
-          const blob = new Blob([bytes as any], { type: 'image/jpeg' });
+          const blob = new Blob([bytes], { type: 'image/jpeg' });
           resolve(URL.createObjectURL(blob));
+        } else if (type === 'THUMBNAIL_ERROR') {
+          console.error(`[ThumbnailPanel] Worker ${workerIndex} page ${pageIndex + 1} render error:`, e.data.error);
+          resolve(null);
         } else {
           console.warn(`[ThumbnailPanel] Worker ${workerIndex} unexpected: type=${type}, bytes instanceof Uint8Array=${bytes instanceof Uint8Array}`);
           resolve(null);
         }
       };
 
-      worker.onerror = () => {
+      worker.onerror = (ev) => {
+        console.error(`[useThumbnailPanel] Worker ${workerIndex} onerror:`, ev);
+        // 未完了のサムネイル要求を全て null で解決
         myPending.forEach(r => r(null));
         myPending.clear();
+        // LOAD_PDF 応答待ちのプロミスも false で解決しないと isPdfReadyRef が
+        // 永久に false のまま → 以降全てのサムネイル要求が処理されなくなる。
+        const loadResolve = loadResolvesRef.current[workerIndex];
+        if (loadResolve) {
+          loadResolvesRef.current[workerIndex] = null;
+          loadResolve(false);
+        }
+      };
+      worker.onmessageerror = (ev) => {
+        console.error(`[useThumbnailPanel] Worker ${workerIndex} onmessageerror:`, ev);
       };
 
       workers.push(worker);
@@ -246,11 +262,39 @@ export function useThumbnailPanel() {
     const capturedFilePath = document.filePath;
     const capturedEpoch = epoch;
 
-    const startWorkerLoad = () => {
+    const startWorkerLoad = async () => {
       if (epochRef.current !== capturedEpoch) return;
-      // URL を直接 Worker に渡す（pdfjs が range request でストリーミング取得）
       const url = toAssetUrl(capturedFilePath);
       const workers = workersRef.current;
+
+      // メインスレッドで1回だけfetchし、WorkerにはArrayBufferを渡す（重複ネットワークアクセス回避）
+      let pdfBytes: ArrayBuffer;
+      try {
+        logger.log('[ThumbnailPanel] Fetching PDF for thumbnails:', url);
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+        pdfBytes = await response.arrayBuffer();
+        logger.log('[ThumbnailPanel] PDF bytes loaded:', pdfBytes.byteLength, 'bytes');
+      } catch (e) {
+        console.error('[useThumbnailPanel] PDF fetch failed:', e);
+        // フォールバック: 従来通りURLを渡す
+        const perWorkerPromises = workers.map((_, i) =>
+          new Promise<boolean>(resolve => {
+            loadResolvesRef.current[i] = resolve;
+          })
+        );
+        workers.forEach(worker => {
+          worker.postMessage({ type: 'LOAD_PDF', url });
+        });
+        Promise.all(perWorkerPromises).then(() => {
+          if (epochRef.current !== capturedEpoch) return;
+          isPdfReadyRef.current = true;
+          processThumbnailQueue(capturedEpoch);
+        });
+        return;
+      }
+
+      if (epochRef.current !== capturedEpoch) return;
 
       const perWorkerPromises = workers.map((_, i) =>
         new Promise<boolean>(resolve => {
@@ -258,20 +302,23 @@ export function useThumbnailPanel() {
         })
       );
 
+      logger.log('[ThumbnailPanel] Posting LOAD_PDF to', workers.length, 'worker(s)');
       workers.forEach(worker => {
-        worker.postMessage({ type: 'LOAD_PDF', url });
+        // Worker が1つなのでコピー不要 — 元の ArrayBuffer を直接 transfer
+        worker.postMessage({ type: 'LOAD_PDF', bytes: pdfBytes }, [pdfBytes]);
       });
 
       Promise.all(perWorkerPromises).then((results) => {
-        console.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
+        logger.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
         if (epochRef.current !== capturedEpoch) return;
         isPdfReadyRef.current = true;
         processThumbnailQueue(capturedEpoch);
       });
     };
 
-    // 遅延ロードモード: triggerThumbnailLoad() が呼ばれるまで Worker への LOAD_PDF を保留
-    deferredLoadRef.current = startWorkerLoad;
+    // ファイル切替直後に即時ロード開始（deferred mode廃止: race condition排除）
+    logger.log(`[ThumbnailPanel] Starting worker load for ${capturedFilePath}`);
+    startWorkerLoad();
   }, [document?.filePath, processThumbnailQueue]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
@@ -283,12 +330,10 @@ export function useThumbnailPanel() {
     setTimeout(() => processThumbnailQueue(epoch), 0);
   }, [processThumbnailQueue]);
 
+  // 後方互換のためno-op (旧APIシグネチャを保つ)
   const triggerThumbnailLoad = useCallback(() => {
-    const fn = deferredLoadRef.current;
-    if (fn) {
-      deferredLoadRef.current = null;
-      fn();
-    }
+    // deferred load mode廃止により、現在は何もしない。
+    // App.tsx 等の呼び出し側互換のために関数だけ残す。
   }, []);
 
   const handleSelectPage = useCallback((pageIndex: number) => {

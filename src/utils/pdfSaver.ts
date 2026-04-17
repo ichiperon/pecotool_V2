@@ -1,9 +1,10 @@
 import {
   PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState,
-  translate, scale, PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray
+  translate, scale, PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray,
+  PDFDict, PDFRef, PDFObject
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import { PecoDocument } from '../types';
+import { PageData, PecoDocument } from '../types';
 import { inflate } from 'pako';
 
 /**
@@ -25,7 +26,8 @@ function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
     filterNames = [filter.asString()];
   } else if (filter instanceof PDFArray) {
     // Use .asArray() — PDFArray does NOT expose a .array property
-    filterNames = filter.asArray().map((f: any) => f.asString());
+    // asArray() が返すのは PDFObject[] だが Filter 配列の実体は PDFName のみ
+    filterNames = filter.asArray().map((f) => (f as PDFName).asString());
   } else if (!filter) {
     // No filter — raw bytes are already plain content operators
     return raw;
@@ -130,8 +132,9 @@ export async function buildPdfDocument(
         : await pdfDoc.embedFont(StandardFonts.Helvetica))
     : null;
 
-  const infoDict = (pdfDoc as any).getInfoDict();
-  let existingBBoxMeta: Record<string, any> = {};
+  // getInfoDict() は pdf-lib の public API には無いため、型アサーションで呼び出す
+  const infoDict = (pdfDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
+  let existingBBoxMeta: Record<string, unknown> = {};
 
   if (infoDict) {
     try {
@@ -163,16 +166,17 @@ export async function buildPdfDocument(
     const { height } = page.getSize();
 
     // --- Surgical Text Stripping ---
-    const contentStreamsRef = (page.node as any).Contents();
+    // page.node の Contents() は pdf-lib の public API に型定義が無い
+    const contentStreamsRef = (page.node as unknown as { Contents(): PDFObject | PDFRef | undefined }).Contents();
     if (contentStreamsRef) {
       const resolved = pdfDoc.context.lookup(contentStreamsRef);
-      let streams: any[] = [];
+      let streams: PDFObject[] = [];
       if (resolved instanceof PDFArray) {
         streams = resolved.asArray();
       } else {
         streams = [contentStreamsRef];
       }
-      const newStreams = [];
+      const newStreams: PDFObject[] = [];
       for (const streamRef of streams) {
         const stream = pdfDoc.context.lookup(streamRef);
         if (stream instanceof PDFRawStream) {
@@ -250,16 +254,26 @@ export async function buildPdfDocument(
   // update: true = incremental update: original PDF bytes are preserved at the
   // front of the output, so the original PDF version and structure are retained as-is.
   // This ensures compatibility with older viewers such as Acrobat 7 (supports up to PDF 1.6).
-  const savedBytes = await pdfDoc.save({
+  // update:true は @cantoo/pdf-lib の拡張オプション（型定義には無いが実装側で受理される）
+  const saveOptions: Parameters<typeof pdfDoc.save>[0] & { update?: boolean } = {
     useObjectStreams: false,
     addDefaultPage: false,
     update: true,
-  } as any);
+  };
+  const savedBytes = await pdfDoc.save(saveOptions);
   return savedBytes;
 }
 
 
+// Worker (pdf.worker.ts) -> main thread のメッセージ契約
+type SavePdfWorkerResponse =
+  | { type: 'SAVE_PDF_SUCCESS'; data: Uint8Array }
+  | { type: 'ERROR'; message: string };
+
 let activeSaveWorker: Worker | null = null;
+let currentSaveTask: Promise<Uint8Array> | null = null;
+
+const PREVIOUS_SAVE_TIMEOUT_MS = 5000;
 
 export async function savePDF(
   originalPdfBytes: Uint8Array,
@@ -271,13 +285,43 @@ export async function savePDF(
     return await buildPdfDocument(originalPdfBytes, documentState, fontBytes);
   }
 
-  // 前回の保存が完了していない場合は強制終了して新しい保存を優先する
-  if (activeSaveWorker) {
-    activeSaveWorker.terminate();
-    activeSaveWorker = null;
+  // 前回の保存が未完了の場合、完了 or タイムアウトまで待ってから新 worker を起動する
+  if (currentSaveTask) {
+    const timeoutSymbol = Symbol('timeout');
+    const timeoutPromise = new Promise<typeof timeoutSymbol>((resolve) => {
+      setTimeout(() => resolve(timeoutSymbol), PREVIOUS_SAVE_TIMEOUT_MS);
+    });
+    try {
+      const raceResult = await Promise.race([
+        currentSaveTask.then(() => 'done' as const, () => 'done' as const),
+        timeoutPromise,
+      ]);
+      if (raceResult === timeoutSymbol) {
+        console.warn('[savePDF] Previous save did not complete within timeout; terminating stale worker.');
+        if (activeSaveWorker) {
+          activeSaveWorker.terminate();
+          activeSaveWorker = null;
+        }
+        currentSaveTask = null;
+      }
+    } catch {
+      // 前回タスクの reject は無視（既に解決済み扱い）
+    }
   }
 
-  return new Promise((resolve, reject) => {
+  const task = new Promise<Uint8Array>((resolve, reject) => {
+    let settled = false;
+    const settleResolve = (value: Uint8Array) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const settleReject = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+
     try {
       const worker = new Worker(new URL('./pdf.worker.ts', import.meta.url), { type: 'module' });
       activeSaveWorker = worker;
@@ -287,34 +331,31 @@ export async function savePDF(
         worker.terminate();
       };
 
-      worker.onmessage = (e) => {
-        const { type, data, message } = e.data;
-        if (type === 'SAVE_PDF_SUCCESS') {
+      worker.onmessage = (e: MessageEvent<SavePdfWorkerResponse>) => {
+        if (settled) return;
+        const msg = e.data;
+        if (msg.type === 'SAVE_PDF_SUCCESS') {
           cleanup();
-          resolve(data);
-        } else if (type === 'ERROR') {
+          settleResolve(msg.data);
+        } else if (msg.type === 'ERROR') {
           cleanup();
-          reject(new Error(message));
+          settleReject(new Error(msg.message));
         }
       };
 
       worker.onerror = (err) => {
+        if (settled) return;
         cleanup();
-        reject(err);
+        settleReject(err);
       };
 
-      const serializedPages: Record<number, any> = {};
+      const serializedPages: Record<number, Omit<PageData, 'thumbnail'>> = {};
       for (const [idx, page] of documentState.pages.entries()) {
         // thumbnail は Worker 内で不要な blob URL であるため除去する
-        // (structured clone でエラーになる可能性があり、転送コスト削減にもなる)
-        const { thumbnail: _t, ...pageWithoutThumbnail } = page as any;
+        const { thumbnail: _t, ...pageWithoutThumbnail } = page;
         serializedPages[idx] = pageWithoutThumbnail;
       }
 
-      // Transfer the buffer directly if possible to avoid copying large files
-      // Note: We slice() here because pdf-lib's load() might be affected if we transfer the underlying buffer
-      // But actually originalPdfBytes is a Uint8Array, so originalPdfBytes.buffer is the ArrayBuffer.
-      // To keep it in main thread, we MUST copy.
       const bytesClone = originalPdfBytes.slice();
       const transferables: Transferable[] = [bytesClone.buffer];
       const fontBytesClone = fontBytes instanceof ArrayBuffer ? fontBytes.slice(0) : undefined;
@@ -329,10 +370,22 @@ export async function savePDF(
         }
       }, transferables);
     } catch (err) {
-      activeSaveWorker = null;
+      if (activeSaveWorker) {
+        try { activeSaveWorker.terminate(); } catch { /* noop */ }
+        activeSaveWorker = null;
+      }
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
-      buildPdfDocument(originalPdfBytes, documentState, fontBytes).then(resolve).catch(reject);
+      buildPdfDocument(originalPdfBytes, documentState, fontBytes)
+        .then(settleResolve)
+        .catch(settleReject);
     }
   });
+
+  currentSaveTask = task;
+  try {
+    return await task;
+  } finally {
+    if (currentSaveTask === task) currentSaveTask = null;
+  }
 }
 

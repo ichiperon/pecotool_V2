@@ -2,28 +2,44 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
 // ── hoisted mocks ──────────────────────────────────────────────
-const m = vi.hoisted(() => ({
-  drawText:            vi.fn(),
-  drawImage:           vi.fn(),
-  removePage:          vi.fn(),
-  insertPage:          vi.fn(),
-  pushOperators:       vi.fn(),
-  embedJpg:            vi.fn(),
-  save:                vi.fn(),
-  embedFont:           vi.fn(),
-  registerFontkit:     vi.fn(),
-  pdfLoad:             vi.fn(),
-  pdfjsGetDocument:    vi.fn(),
-  translateFn:         vi.fn((...args: any[]) => ({ type: 'translate', args })),
-  scaleFn:             vi.fn((...args: any[]) => ({ type: 'scale', args })),
-  pushGsFn:            vi.fn(() => ({ type: 'pushGs' })),
-  popGsFn:             vi.fn(() => ({ type: 'popGs' })),
-}))
+const m = vi.hoisted(() => {
+  // Minimal class stubs so `instanceof` checks in pdfSaver.ts work
+  class PDFRawStreamStub {
+    dict: any
+    _contents: Uint8Array
+    constructor(dict: any, contents: Uint8Array) { this.dict = dict; this._contents = contents }
+    getContents() { return this._contents }
+  }
+  class PDFArrayStub {
+    _arr: any[]
+    constructor(arr: any[]) { this._arr = arr }
+    asArray() { return this._arr }
+  }
+  return {
+    drawText:            vi.fn(),
+    drawImage:           vi.fn(),
+    removePage:          vi.fn(),
+    insertPage:          vi.fn(),
+    pushOperators:       vi.fn(),
+    embedJpg:            vi.fn(),
+    save:                vi.fn(),
+    embedFont:           vi.fn(),
+    registerFontkit:     vi.fn(),
+    pdfLoad:             vi.fn(),
+    pdfjsGetDocument:    vi.fn(),
+    translateFn:         vi.fn((...args: any[]) => ({ type: 'translate', args })),
+    scaleFn:             vi.fn((...args: any[]) => ({ type: 'scale', args })),
+    pushGsFn:            vi.fn(() => ({ type: 'pushGs' })),
+    popGsFn:             vi.fn(() => ({ type: 'popGs' })),
+    PDFRawStream:        PDFRawStreamStub,
+    PDFArray:            PDFArrayStub,
+  }
+})
 
 vi.mock('@cantoo/pdf-lib', () => ({
   PDFDocument:      { load: m.pdfLoad },
   degrees:          (n: number) => ({ type: 'degrees', angle: n }),
-  PDFName:          { of: vi.fn((s: string) => s) },
+  PDFName:          Object.assign(function PDFName() {}, { of: vi.fn((s: string) => s) }),
   PDFString:        { of: vi.fn((s: string) => s), fromText: vi.fn((s: string) => s) },
   PDFHexString:     { of: vi.fn((s: string) => s), fromText: vi.fn((s: string) => s) },
   StandardFonts:    { Helvetica: 'Helvetica' },
@@ -31,6 +47,8 @@ vi.mock('@cantoo/pdf-lib', () => ({
   popGraphicsState:  m.popGsFn,
   translate:         m.translateFn,
   scale:             m.scaleFn,
+  PDFRawStream:     m.PDFRawStream,
+  PDFArray:         m.PDFArray,
 }))
 
 vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
@@ -267,6 +285,498 @@ describe('pdfSaver / savePDF', () => {
       expect(m.drawText).toHaveBeenCalledTimes(2)
 
       warnSpy.mockRestore()
+    })
+  })
+
+  describe('U-SV-18: Only dirty pages are processed', () => {
+    it('drawText is only called for dirty page blocks', async () => {
+      const page0: PageData = {
+        pageIndex: 0, width: 595, height: 842, isDirty: false, thumbnail: null,
+        textBlocks: [{
+          id: 'b0', text: 'Page0', originalText: 'Page0', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: false,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const page1: PageData = {
+        pageIndex: 1, width: 595, height: 842, isDirty: true, thumbnail: null,
+        textBlocks: [{
+          id: 'b1', text: 'Page1', originalText: 'Page1', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const page2: PageData = {
+        pageIndex: 2, width: 595, height: 842, isDirty: false, thumbnail: null,
+        textBlocks: [{
+          id: 'b2', text: 'Page2', originalText: 'Page2', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: false,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'test.pdf', totalPages: 3, metadata: {},
+        pages: new Map([[0, page0], [1, page1], [2, page2]]),
+      }
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.drawText).toHaveBeenCalledTimes(1)
+      expect(m.drawText.mock.calls[0][0]).toBe('Page1')
+    })
+  })
+
+  describe('U-SV-19: Non-dirty pages remain untouched', () => {
+    it('pages 0 and 2 have no drawText calls when only page 1 is dirty', async () => {
+      const page0: PageData = {
+        pageIndex: 0, width: 595, height: 842, isDirty: false, thumbnail: null,
+        textBlocks: [{
+          id: 'b0', text: 'Untouched0', originalText: 'Untouched0', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: false,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const page1: PageData = {
+        pageIndex: 1, width: 595, height: 842, isDirty: true, thumbnail: null,
+        textBlocks: [{
+          id: 'b1', text: 'Dirty1', originalText: 'Dirty1', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const page2: PageData = {
+        pageIndex: 2, width: 595, height: 842, isDirty: false, thumbnail: null,
+        textBlocks: [{
+          id: 'b2', text: 'Untouched2', originalText: 'Untouched2', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: false,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'test.pdf', totalPages: 3, metadata: {},
+        pages: new Map([[0, page0], [1, page1], [2, page2]]),
+      }
+      await savePDF(new Uint8Array(), doc)
+
+      const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
+      expect(drawnTexts).not.toContain('Untouched0')
+      expect(drawnTexts).not.toContain('Untouched2')
+    })
+  })
+
+  describe('U-SV-20: Empty text block is skipped', () => {
+    it('block with text="" produces no drawText call', async () => {
+      const doc = makeDoc([{ text: '', writingMode: 'horizontal' }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.drawText).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('U-SV-21: Zero textWidth warning', () => {
+    it('font.widthOfTextAtSize returning 0 → console.warn called, block skipped', async () => {
+      m.embedFont.mockResolvedValue({
+        widthOfTextAtSize: vi.fn().mockReturnValue(0),
+        heightAtSize: vi.fn().mockReturnValue(1.448),
+      })
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.drawText).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('zero font metrics'),
+      )
+      warnSpy.mockRestore()
+    })
+  })
+
+  describe('U-SV-22: Non-finite scale warning', () => {
+    it('NaN font metrics causing non-finite scale → console.warn, block skipped', async () => {
+      // widthOfTextAtSize returns NaN (not 0, which is caught earlier)
+      // This causes sx = bbox.width / NaN = NaN → non-finite
+      m.embedFont.mockResolvedValue({
+        widthOfTextAtSize: vi.fn().mockReturnValue(NaN),
+        heightAtSize: vi.fn().mockReturnValue(1.448),
+      })
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.drawText).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('non-finite scale'),
+      )
+      warnSpy.mockRestore()
+    })
+  })
+
+  describe('U-SV-23: No font embedded if dirty pages have no text blocks with text', () => {
+    it('embedFont is NOT called when all text blocks have empty text', async () => {
+      const doc = makeDoc([{
+        text: '',
+        writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.embedFont).not.toHaveBeenCalled()
+    })
+
+    it('embedFont is NOT called when text blocks have only whitespace', async () => {
+      const doc = makeDoc([{
+        text: '   ',
+        writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.embedFont).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('U-SV-24: BBox metadata written to info dict', () => {
+    it('mockInfoDict.set is called with PecoToolBBoxes key', async () => {
+      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      m.pdfLoad.mockResolvedValue({
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        insertPage:      m.insertPage,
+        getPage:         vi.fn().mockReturnValue({
+          drawImage:    m.drawImage,
+          drawText:     m.drawText,
+          pushOperators: m.pushOperators,
+          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          getWidth: () => 595,
+          getHeight: () => 842,
+          getSize: () => ({ width: 595, height: 842 }),
+        }),
+        embedJpg:        m.embedJpg,
+        save:            m.save,
+        context: { lookup: vi.fn() },
+        getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
+      })
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(mockInfoDict.set).toHaveBeenCalledWith(
+        'PecoToolBBoxes',
+        expect.anything(),
+      )
+    })
+  })
+
+  describe('U-SV-25: Existing BBox metadata merged with new', () => {
+    it('set is called with JSON containing both existing and new page data', async () => {
+      const existingMeta = { '0': [{ bbox: { x: 0, y: 0, width: 50, height: 50 }, writingMode: 'horizontal', order: 0, text: 'Existing' }] }
+      // Mock PDFHexString instance with decodeText
+      const mockExistingValue = {
+        decodeText: () => JSON.stringify(existingMeta),
+      }
+      // Make it look like a PDFHexString to instanceof check — we rely on the mock's PDFHexString
+      const mockInfoDict = {
+        get: vi.fn().mockReturnValue(mockExistingValue),
+        set: vi.fn(),
+        lookup: vi.fn(),
+      }
+      m.pdfLoad.mockResolvedValue({
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        insertPage:      m.insertPage,
+        getPage:         vi.fn().mockReturnValue({
+          drawImage:    m.drawImage,
+          drawText:     m.drawText,
+          pushOperators: m.pushOperators,
+          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          getWidth: () => 595,
+          getHeight: () => 842,
+          getSize: () => ({ width: 595, height: 842 }),
+        }),
+        embedJpg:        m.embedJpg,
+        save:            m.save,
+        context: { lookup: vi.fn() },
+        getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
+      })
+
+      // Dirty page 1 (page 0 is not dirty, so existing meta for page 0 should be preserved)
+      const page1: PageData = {
+        pageIndex: 1, width: 595, height: 842, isDirty: true, thumbnail: null,
+        textBlocks: [{
+          id: 'b1', text: 'NewText', originalText: 'NewText', writingMode: 'horizontal' as WritingMode,
+          order: 0, isNew: false, isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'test.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[1, page1]]),
+      }
+      await savePDF(new Uint8Array(), doc)
+
+      // infoDict.set should be called
+      expect(mockInfoDict.set).toHaveBeenCalled()
+      // The value passed to set should be a JSON string containing page 1 data
+      const setCall = mockInfoDict.set.mock.calls[0]
+      expect(setCall[0]).toBe('PecoToolBBoxes')
+      // The second arg is the result of PDFHexString.fromText(jsonString)
+      // Our mock makes PDFHexString.fromText return the string directly
+      const jsonStr = setCall[1]
+      // Since our PDFHexString.fromText mock just returns the string,
+      // jsonStr IS the JSON string
+      const parsed = JSON.parse(jsonStr as string)
+      // Page 1 data should exist
+      expect(parsed['1']).toBeDefined()
+      expect(parsed['1'][0].text).toBe('NewText')
+    })
+  })
+
+  describe('U-SV-08: Non-text operators preserved', () => {
+    it('page.node.set is called to update Contents (text stripping occurred)', async () => {
+      // Mock a page with existing content stream that contains BT..ET
+      const mockPageNode = {
+        Contents: vi.fn().mockReturnValue('stream-ref'),
+        set: vi.fn(),
+      }
+      const mockPage = {
+        drawImage:     m.drawImage,
+        drawText:      m.drawText,
+        pushOperators: m.pushOperators,
+        node: mockPageNode,
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+      }
+
+      // Create a real _PDFRawStream instance so instanceof works
+      const fakeStream = new m.PDFRawStream(
+        { lookup: vi.fn().mockReturnValue(null) },
+        new TextEncoder().encode('q 1 0 0 1 0 0 cm Q\nBT /F1 12 Tf (Hello) Tj ET\nq 0.5 0 0 0.5 0 0 cm Q')
+      )
+
+      const mockFlateStream = { type: 'flateStream' }
+      const mockStreamRef = { type: 'streamRef' }
+
+      m.pdfLoad.mockResolvedValue({
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        insertPage:      m.insertPage,
+        getPage:         vi.fn().mockReturnValue(mockPage),
+        embedJpg:        m.embedJpg,
+        save:            m.save,
+        context: {
+          lookup: vi.fn().mockReturnValue(fakeStream),
+          flateStream: vi.fn().mockReturnValue(mockFlateStream),
+          register: vi.fn().mockReturnValue(mockStreamRef),
+          obj: vi.fn().mockImplementation((arr: any[]) => arr),
+        },
+        getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), lookup: vi.fn() }),
+      })
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      // page.node.set should be called to replace Contents
+      expect(mockPageNode.set).toHaveBeenCalledWith(
+        'Contents',
+        expect.anything(),
+      )
+    })
+  })
+
+  describe('U-SV-09: Multiple BT..ET blocks removed', () => {
+    it('page with content streams is processed and Contents is replaced', async () => {
+      const mockPageNode = {
+        Contents: vi.fn().mockReturnValue('stream-ref'),
+        set: vi.fn(),
+      }
+      const mockPage = {
+        drawImage:     m.drawImage,
+        drawText:      m.drawText,
+        pushOperators: m.pushOperators,
+        node: mockPageNode,
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+      }
+
+      // Content with multiple BT..ET blocks
+      const fakeStream = new m.PDFRawStream(
+        { lookup: vi.fn().mockReturnValue(null) },
+        new TextEncoder().encode(
+          'q 1 0 0 1 0 0 cm Q\nBT /F1 12 Tf (Hello) Tj ET\nq 0.5 0 0 0.5 0 0 cm Q\nBT /F2 10 Tf (World) Tj ET\nq 1 0 0 1 100 100 cm Q'
+        )
+      )
+
+      const mockFlateStream = { type: 'flateStream' }
+      const mockStreamRef = { type: 'streamRef' }
+      const mockFlateStreamFn = vi.fn().mockReturnValue(mockFlateStream)
+
+      m.pdfLoad.mockResolvedValue({
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        insertPage:      m.insertPage,
+        getPage:         vi.fn().mockReturnValue(mockPage),
+        embedJpg:        m.embedJpg,
+        save:            m.save,
+        context: {
+          lookup: vi.fn().mockReturnValue(fakeStream),
+          flateStream: mockFlateStreamFn,
+          register: vi.fn().mockReturnValue(mockStreamRef),
+          obj: vi.fn().mockImplementation((arr: any[]) => arr),
+        },
+        getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), lookup: vi.fn() }),
+      })
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      // flateStream should have been called with cleaned content (BT..ET removed)
+      expect(mockFlateStreamFn).toHaveBeenCalled()
+      // page.node.set should be called to replace Contents
+      expect(mockPageNode.set).toHaveBeenCalledWith('Contents', expect.anything())
+    })
+  })
+
+  describe('U-SV-26: save returns Uint8Array', () => {
+    it('savePDF resolves to Uint8Array', async () => {
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      const result = await savePDF(new Uint8Array(), doc)
+      expect(result).toBeInstanceOf(Uint8Array)
+    })
+  })
+
+  describe('U-SV-27: Multiple dirty pages each get drawText calls', () => {
+    it('all blocks across multiple dirty pages are drawn', async () => {
+      const page0: PageData = {
+        pageIndex: 0, width: 595, height: 842, isDirty: true, thumbnail: null,
+        textBlocks: [{
+          id: 'b0', text: 'PageZero', originalText: 'PageZero', writingMode: 'horizontal' as WritingMode,
+          order: 0, isNew: false, isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const page1: PageData = {
+        pageIndex: 1, width: 595, height: 842, isDirty: true, thumbnail: null,
+        textBlocks: [{
+          id: 'b1', text: 'PageOne', originalText: 'PageOne', writingMode: 'horizontal' as WritingMode,
+          order: 0, isNew: false, isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'test.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[0, page0], [1, page1]]),
+      }
+      await savePDF(new Uint8Array(), doc)
+
+      const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
+      expect(drawnTexts).toContain('PageZero')
+      expect(drawnTexts).toContain('PageOne')
+      expect(m.drawText).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  describe('U-SV-28: BBox metadata contains correct structure', () => {
+    it('metadata entry has bbox, writingMode, order, text fields', async () => {
+      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      m.pdfLoad.mockResolvedValue({
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        insertPage:      m.insertPage,
+        getPage:         vi.fn().mockReturnValue({
+          drawImage:    m.drawImage,
+          drawText:     m.drawText,
+          pushOperators: m.pushOperators,
+          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          getWidth: () => 595,
+          getHeight: () => 842,
+          getSize: () => ({ width: 595, height: 842 }),
+        }),
+        embedJpg:        m.embedJpg,
+        save:            m.save,
+        context: { lookup: vi.fn() },
+        getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
+      })
+
+      const doc = makeDoc([{
+        text: 'メタテスト', writingMode: 'vertical' as WritingMode,
+        bbox: { x: 50, y: 60, width: 15, height: 200 },
+        order: 3,
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(mockInfoDict.set).toHaveBeenCalled()
+      const jsonStr = mockInfoDict.set.mock.calls[0][1]
+      const parsed = JSON.parse(jsonStr as string)
+      const pageEntry = parsed['0']
+      expect(pageEntry).toBeDefined()
+      expect(pageEntry[0]).toMatchObject({
+        bbox: { x: 50, y: 60, width: 15, height: 200 },
+        writingMode: 'vertical',
+        text: 'メタテスト',
+      })
+      expect(pageEntry[0]).toHaveProperty('order')
+    })
+  })
+
+  describe('U-SV-29: Blocks sorted by order in metadata', () => {
+    it('metadata entries are ordered by block.order', async () => {
+      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      m.pdfLoad.mockResolvedValue({
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        insertPage:      m.insertPage,
+        getPage:         vi.fn().mockReturnValue({
+          drawImage:    m.drawImage,
+          drawText:     m.drawText,
+          pushOperators: m.pushOperators,
+          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          getWidth: () => 595,
+          getHeight: () => 842,
+          getSize: () => ({ width: 595, height: 842 }),
+        }),
+        embedJpg:        m.embedJpg,
+        save:            m.save,
+        context: { lookup: vi.fn() },
+        getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
+      })
+
+      const doc = makeDoc([
+        { text: 'Second', order: 2, writingMode: 'horizontal' as WritingMode, bbox: { x: 10, y: 20, width: 100, height: 30 } },
+        { text: 'First', order: 1, writingMode: 'horizontal' as WritingMode, bbox: { x: 10, y: 60, width: 100, height: 30 } },
+      ])
+      await savePDF(new Uint8Array(), doc)
+
+      const jsonStr = mockInfoDict.set.mock.calls[0][1]
+      const parsed = JSON.parse(jsonStr as string)
+      expect(parsed['0'][0].text).toBe('First')
+      expect(parsed['0'][1].text).toBe('Second')
     })
   })
 

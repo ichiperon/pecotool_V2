@@ -4,6 +4,15 @@ import { OcrCard } from '../../components/OcrCard'
 import { usePecoStore } from '../../store/pecoStore'
 import type { TextBlock, PageData, PecoDocument } from '../../types'
 
+vi.mock('../../utils/pdfLoader', () => ({
+  saveTemporaryPageDataBatch: vi.fn(),
+  clearTemporaryChanges: vi.fn(),
+  loadPage: vi.fn(),
+  destroySharedPdfProxy: vi.fn(),
+  getSharedPdfProxy: vi.fn(),
+  getCachedPageProxy: vi.fn(),
+}))
+
 vi.mock('lucide-react', () => ({
   GripVertical: () => null,
 }))
@@ -194,6 +203,75 @@ describe('OcrCard', () => {
       const ids = usePecoStore.getState().selectedIds
       expect(ids.has('block-1')).toBe(true)
       expect(ids.has('other-block')).toBe(true)
+    })
+  })
+
+  describe('C-OC-10: Ctrl+ArrowDown で次カードへナビゲート', () => {
+    it('Ctrl+ArrowDown → onNavigate("down") が呼ばれる', () => {
+      const onNavigate = vi.fn()
+      const { container } = render(
+        <OcrCard block={makeBlock()} pageIndex={0} onNavigate={onNavigate} />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowDown', ctrlKey: true })
+
+      expect(onNavigate).toHaveBeenCalledWith('down')
+    })
+  })
+
+  describe('C-OC-11: Ctrl+ArrowUp で前カードへナビゲート', () => {
+    it('Ctrl+ArrowUp → onNavigate("up") が呼ばれる', () => {
+      const onNavigate = vi.fn()
+      const { container } = render(
+        <OcrCard block={makeBlock()} pageIndex={0} onNavigate={onNavigate} />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowUp', ctrlKey: true })
+
+      expect(onNavigate).toHaveBeenCalledWith('up')
+    })
+  })
+
+  describe('C-OC-12: Ctrl なしの矢印キーではナビゲートしない', () => {
+    it('ArrowDown (Ctrl なし) → onNavigate が呼ばれない', () => {
+      const onNavigate = vi.fn()
+      const { container } = render(
+        <OcrCard block={makeBlock()} pageIndex={0} onNavigate={onNavigate} />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowDown' })
+
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
+    it('ArrowUp (Ctrl なし) → onNavigate が呼ばれない', () => {
+      const onNavigate = vi.fn()
+      const { container } = render(
+        <OcrCard block={makeBlock()} pageIndex={0} onNavigate={onNavigate} />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowUp' })
+
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('C-OC-16: 未選択カードの右クリックで選択', () => {
+    it('selectedIds が空の状態で contextMenu → block.id が selectedIds に含まれる', () => {
+      usePecoStore.setState({ selectedIds: new Set<string>() })
+      const { container } = render(<OcrCard block={makeBlock()} pageIndex={0} />)
+
+      const card = container.querySelector('.ocr-card') as HTMLElement
+      fireEvent.contextMenu(card)
+
+      expect(usePecoStore.getState().selectedIds.has('block-1')).toBe(true)
+    })
+  })
+
+  describe('C-OC-17: order 番号の表示', () => {
+    it('block.order=5 → "#6" が表示される', () => {
+      render(<OcrCard block={makeBlock({ order: 5 })} pageIndex={0} />)
+      expect(screen.getByText('#6')).toBeTruthy()
     })
   })
 

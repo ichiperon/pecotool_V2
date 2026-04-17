@@ -19,7 +19,10 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   function OcrCard({ block, pageIndex, dragListeners, onNavigate, onSelect }, ref) {
   // selectedIds全体ではなく、このブロックのisSelectedのみ購読（200回の再レンダリングを防ぐ）
   const isSelected = usePecoStore(state => state.selectedIds.has(block.id));
-  const { updatePageData, document, toggleSelection } = usePecoStore();
+  // 細粒度selectorで購読: action参照は不変、document参照は handleBlur で必要なため個別購読
+  const updatePageData = usePecoStore(s => s.updatePageData);
+  const toggleSelection = usePecoStore(s => s.toggleSelection);
+  const document = usePecoStore(s => s.document);
   const contentRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
@@ -48,7 +51,10 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
 
   // contentEditable の内容は React children ではなく DOM API で同期する
   useEffect(() => {
-    if (contentRef.current && contentRef.current.textContent !== block.text) {
+    if (!contentRef.current) return;
+    // フォーカス中は同期しない(キャレット位置と選択状態を維持するため)
+    if (window.document.activeElement === contentRef.current) return;
+    if (contentRef.current.textContent !== block.text) {
       contentRef.current.textContent = block.text;
     }
   }, [block.text]);

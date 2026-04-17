@@ -82,6 +82,10 @@ export function ThumbnailWindow() {
   // サムネイルデータはRefで保持（Reactの外）
   const thumbnailsRef = useRef<Map<number, string>>(new Map());
   const itemListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
+  // ページごとの最新生成番号。古いレスポンスを判別してrevokeするために使う
+  const pageGenerationRef = useRef<Map<number, number>>(new Map());
+  // Map に格納した URL の生成番号（新旧どちらが最新か比較用）
+  const storedGenerationRef = useRef<Map<number, number>>(new Map());
 
   // ★ Worker プール
   const workersRef = useRef<Worker[]>([]);
@@ -190,28 +194,31 @@ export function ThumbnailWindow() {
   }, []);
 
   // ---- ページをワーカーに分散してサムネイル生成 ----
-  const generateViaWorker = useCallback((pageIdx: number): Promise<string | null> => {
+  // このリクエストの生成番号を返り値に含め、呼び出し側で古い応答を判定できるようにする
+  const generateViaWorker = useCallback((pageIdx: number): Promise<{ url: string | null; generation: number }> => {
+    const generation = (pageGenerationRef.current.get(pageIdx) ?? 0) + 1;
+    pageGenerationRef.current.set(pageIdx, generation);
     return new Promise(resolve => {
       const workers = workersRef.current;
       const pendingsByWorker = pendingsByWorkerRef.current;
-      if (workers.length === 0) { resolve(null); return; }
+      if (workers.length === 0) { resolve({ url: null, generation }); return; }
 
       const workerIdx = pageIdx % workers.length;
       const worker = workers[workerIdx];
       const myPending = pendingsByWorker[workerIdx];
 
-      if (myPending.has(pageIdx)) { resolve(null); return; }
+      if (myPending.has(pageIdx)) { resolve({ url: null, generation }); return; }
 
       const timeout = setTimeout(() => {
         if (myPending.has(pageIdx)) {
           myPending.delete(pageIdx);
-          resolve(null);
+          resolve({ url: null, generation });
         }
       }, 15000);
 
       myPending.set(pageIdx, (url: string | null) => {
         clearTimeout(timeout);
-        resolve(url);
+        resolve({ url, generation });
       });
       worker.postMessage({ type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx });
     });
@@ -233,18 +240,27 @@ export function ThumbnailWindow() {
 
         await Promise.allSettled(
           batch.map(async (pageIdx) => {
-            const url = await generateViaWorker(pageIdx);
+            const { url, generation } = await generateViaWorker(pageIdx);
             if (!url) return;
-            if (epochRef.current === epoch) {
-              if (!thumbnailsRef.current.has(pageIdx)) {
-                thumbnailsRef.current.set(pageIdx, url);
-                itemListenersRef.current.get(pageIdx)?.forEach(cb => cb());
-              } else {
-                URL.revokeObjectURL(url);
-              }
-            } else {
+            // epoch が進んでいる or このページに対してより新しいリクエストが発行済みなら古い
+            const latestGen = pageGenerationRef.current.get(pageIdx) ?? 0;
+            if (epochRef.current !== epoch || generation !== latestGen) {
               URL.revokeObjectURL(url);
+              return;
             }
+            const storedGen = storedGenerationRef.current.get(pageIdx) ?? 0;
+            if (generation < storedGen) {
+              // 既により新しい生成のURLが保存済み → 新規URLを捨てる
+              URL.revokeObjectURL(url);
+              return;
+            }
+            const prev = thumbnailsRef.current.get(pageIdx);
+            if (prev && prev !== url) {
+              URL.revokeObjectURL(prev);
+            }
+            thumbnailsRef.current.set(pageIdx, url);
+            storedGenerationRef.current.set(pageIdx, generation);
+            itemListenersRef.current.get(pageIdx)?.forEach(cb => cb());
           })
         );
       }
@@ -288,6 +304,8 @@ export function ThumbnailWindow() {
         // サムネイルrefをクリアし、全登録アイテムに通知（プレースホルダー表示へ）
         thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
         thumbnailsRef.current = new Map();
+        pageGenerationRef.current = new Map();
+        storedGenerationRef.current = new Map();
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
 
         setTotalPages(total);
@@ -343,6 +361,8 @@ export function ThumbnailWindow() {
         pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
         thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
         thumbnailsRef.current = new Map();
+        pageGenerationRef.current = new Map();
+        storedGenerationRef.current = new Map();
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
         setTotalPages(0);
         setCurrentPageIndex(0);

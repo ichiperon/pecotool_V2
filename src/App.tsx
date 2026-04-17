@@ -1,12 +1,23 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
-import { usePecoStore, waitForPendingIdbSaves } from "./store/pecoStore";
-import { MousePointer2, Terminal } from "lucide-react";
+import {
+  usePecoStore,
+  selectDocument,
+  selectCurrentPageIndex,
+  selectShowOcr,
+  selectOcrOpacity,
+  selectSelectedIds,
+  selectIsDrawingMode,
+  selectIsSplitMode,
+  selectIsDirty,
+  selectUndoStack,
+  selectRedoStack,
+} from "./store/pecoStore";
+import { Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
-import { loadPecoToolBBoxMeta, loadPage, getSharedPdfProxy, destroySharedPdfProxy, getCachedPageProxy } from "./utils/pdfLoader";
+import { destroySharedPdfProxy } from "./utils/pdfLoader";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
-import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
 import { TextBlock } from "./types";
 
 // Hooks
@@ -16,7 +27,14 @@ import { useConsoleLogs } from "./hooks/useConsoleLogs";
 import { usePreviewWindow } from "./hooks/usePreviewWindow";
 import { useOcrEngine } from "./hooks/useOcrEngine";
 import { useThumbnailPanel } from "./hooks/useThumbnailPanel";
-import { useAutoBackup, PendingBackup } from "./hooks/useAutoBackup";
+import { useBackupManagement } from "./hooks/useBackupManagement";
+import { usePdfViewerState } from "./hooks/usePdfViewerState";
+import { usePageNavigation } from "./hooks/usePageNavigation";
+import { useDialogState } from "./hooks/useDialogState";
+import { useLayoutPanels } from "./hooks/useLayoutPanels";
+import { useViewerPan } from "./hooks/useViewerPan";
+import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
+import { useRecentFiles } from "./hooks/useRecentFiles";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
@@ -25,111 +43,65 @@ import { MenuBar } from "./components/MenuBar/MenuBar";
 import { ConsolePanel } from "./components/Console/ConsolePanel";
 import { OcrSettingsModal } from "./components/OcrSettingsModal";
 import { BackupRestoreDialog } from "./components/BackupRestoreDialog";
+import { HelpMenu } from "./components/HelpMenu";
+import { HelpModal } from "./components/HelpModal";
 
 function App() {
-  const { 
-    document, currentPageIndex, zoom, setZoom,
-    setCurrentPage, updatePageData, selectedIds, showOcr, toggleShowOcr,
-    ocrOpacity, setOcrOpacity, undo, redo, undoStack, redoStack,
-    isDrawingMode, toggleDrawingMode, isSplitMode, toggleSplitMode,
-    isDirty, copySelected, pasteClipboard,
-    clearOcrCurrentPage, clearOcrAllPages
-  } = usePecoStore();
+  // 細粒度selectorで購読: 各state変化が独立してComponentに伝わる
+  const document = usePecoStore(selectDocument);
+  const currentPageIndex = usePecoStore(selectCurrentPageIndex);
+  const selectedIds = usePecoStore(selectSelectedIds);
+  const showOcr = usePecoStore(selectShowOcr);
+  const ocrOpacity = usePecoStore(selectOcrOpacity);
+  const isDrawingMode = usePecoStore(selectIsDrawingMode);
+  const isSplitMode = usePecoStore(selectIsSplitMode);
+  const isDirty = usePecoStore(selectIsDirty);
+  const undoStack = usePecoStore(selectUndoStack);
+  const redoStack = usePecoStore(selectRedoStack);
+  // Actions
+  const updatePageData = usePecoStore(s => s.updatePageData);
+  const toggleShowOcr = usePecoStore(s => s.toggleShowOcr);
+  const setOcrOpacity = usePecoStore(s => s.setOcrOpacity);
+  const undo = usePecoStore(s => s.undo);
+  const redo = usePecoStore(s => s.redo);
+  const toggleDrawingMode = usePecoStore(s => s.toggleDrawingMode);
+  const toggleSplitMode = usePecoStore(s => s.toggleSplitMode);
+  const copySelected = usePecoStore(s => s.copySelected);
+  const pasteClipboard = usePecoStore(s => s.pasteClipboard);
+  const clearOcrCurrentPage = usePecoStore(s => s.clearOcrCurrentPage);
+  const clearOcrAllPages = usePecoStore(s => s.clearOcrAllPages);
 
   const currentPage = document?.pages.get(currentPageIndex);
 
-  const [leftWidth, setLeftWidth] = useState(220);
-  const [rightWidth, setRightWidth] = useState(400);
-  const [isAutoFit, setIsAutoFit] = useState(true);
-  
-  const [isSpacePressed, setIsSpacePressed] = useState(false);
-  const [isPanning, setIsPanning] = useState(false);
-  const [panStart, setPanStart] = useState({ x: 0, y: 0, scrollX: 0, scrollY: 0 });
-  const [notification, setNotification] = useState<{ message: string; isError: boolean } | null>(null);
+  // --- 分割された責務（フック群） ---
+  const { leftWidth, rightWidth, startResizeLeft, startResizeRight } = useLayoutPanels();
+  const {
+    notification, helpMenu, setHelpMenu,
+    showSettingsDropdown, setShowSettingsDropdown,
+    helpModal, setHelpModal,
+    showOcrSettings, setShowOcrSettings,
+    showToast,
+  } = useDialogState();
+  const { zoom, setZoom, isAutoFit, setIsAutoFit, viewerRef, fitToScreen } =
+    usePdfViewerState(document, currentPageIndex);
+  const { isSpacePressed, isPanning, handleViewerMouseDown, handleViewerMouseMove, stopPanning } =
+    useViewerPan(viewerRef);
+
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
-  const [isLoadingPage, setIsLoadingPage] = useState(false);
-  const [helpMenu, setHelpMenu] = useState<{ x: number, y: number, visible: boolean }>({ x: 0, y: 0, visible: false });
-  const [recentFiles, setRecentFiles] = useState<string[]>([]);
-  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
-  const [helpModal, setHelpModal] = useState<'shortcuts' | 'usage' | 'version' | null>(null);
-  const [showOcrSettings, setShowOcrSettings] = useState(false);
-  const [pendingBackups, setPendingBackups] = useState<PendingBackup[]>([]);
-  const [processingBackupPath, setProcessingBackupPath] = useState<string | null>(null);
-  const [pageLoadError, setPageLoadError] = useState<number | null>(null);
+  const { recentFiles } = useRecentFiles();
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
 
   const [reorderThreshold, setReorderThreshold] = useState(() => {
     const stored = localStorage.getItem('peco-reorder-threshold');
-    return stored ? parseInt(stored, 10) : 50;
+    if (!stored) return 50;
+    const parsed = parseInt(stored, 10);
+    if (Number.isNaN(parsed) || parsed < 1 || parsed > 100) return 50;
+    return parsed;
   });
 
-  const [pageInputValue, setPageInputValue] = useState<string | null>(null);
-
-  const handlePageInputCommit = () => {
-    if (pageInputValue !== null && document) {
-      const pageNum = parseInt(pageInputValue, 10);
-      if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= document.totalPages) {
-        setCurrentPage(pageNum - 1);
-      }
-    }
-    setPageInputValue(null);
-  };
-
-  const handlePageInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.currentTarget.blur();
-    } else if (e.key === 'Escape') {
-      setPageInputValue(null);
-      e.currentTarget.blur();
-    }
-  };
-
-  const showToast = useCallback((message: string, isError = false) => {
-    setNotification({ message, isError });
-    setTimeout(() => setNotification(null), 3000);
-  }, []);
-
   // --- External Hooks ---
-  const { clearBackup, loadBackupData } = useAutoBackup(
-    (backups) => setPendingBackups(backups),
-  );
-
-  const handleRestoreBackup = async (backup: PendingBackup) => {
-    if (processingBackupPath) return;
-    const data = await loadBackupData(backup.file_path);
-    if (!data?.pages) {
-      showToast('バックアップデータの読み込みに失敗しました。', true);
-      return;
-    }
-    setProcessingBackupPath(backup.file_path);
-    try {
-      usePecoStore.getState().setPendingRestoration(data.pages);
-      const success = await handleOpen(backup.file_path);
-      if (!success) {
-        usePecoStore.getState().setPendingRestoration(null);
-        return;
-      }
-      // IDB への復元書き込みが完了してからバックアップファイルを削除する
-      await waitForPendingIdbSaves();
-      await clearBackup(backup.file_path);
-      setPendingBackups((prev) => prev.filter((b) => b.file_path !== backup.file_path));
-    } finally {
-      setProcessingBackupPath(null);
-    }
-  };
-
-  const handleDiscardBackup = async (backup: PendingBackup) => {
-    if (processingBackupPath) return;
-    setProcessingBackupPath(backup.file_path);
-    try {
-      await clearBackup(backup.file_path);
-      setPendingBackups((prev) => prev.filter((b) => b.file_path !== backup.file_path));
-    } finally {
-      setProcessingBackupPath(null);
-    }
-  };
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
   const { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
@@ -138,6 +110,29 @@ function App() {
     showToast, setIsSaving, setIsLoadingFile,
     (doc) => { checkAndPromptOcrZero(doc); }
   );
+
+  const {
+    pendingBackups,
+    setPendingBackups,
+    processingBackupPath,
+    handleRestoreBackup,
+    handleDiscardBackup,
+  } = useBackupManagement({ showToast, handleOpen });
+
+  const {
+    isLoadingPage,
+    pageLoadError,
+    pageInputValue,
+    setPageInputValue,
+    loadCurrentPage,
+    handlePageInputCommit,
+    handlePageInputKeyDown,
+  } = usePageNavigation({
+    document,
+    currentPageIndex,
+    showToast,
+    triggerThumbnailLoad,
+  });
 
   // --- Handlers ---
   const handleReload = useCallback(async () => {
@@ -162,23 +157,7 @@ function App() {
     usePecoStore.getState().setDocument(null);
   }, [document, isDirty]);
 
-  const viewerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-
-  const fitToScreen = (keepAutoFitState = false) => {
-    if (!keepAutoFitState) setIsAutoFit(true);
-    const container = viewerRef.current;
-    const pageData = document?.pages.get(currentPageIndex);
-    if (container && pageData) {
-      // padding: 24px (上下左右計48px) + 余裕 12px = 60px
-      // さらにスクロールバー出現によるガタつきを防ぐため少し余裕(buffer)を持たせる
-      const margin = 64;
-      const ratioH = (container.clientHeight - margin) / pageData.height;
-      const ratioW = (container.clientWidth - margin) / pageData.width;
-      const newZoom = Math.floor(Math.min(ratioH, ratioW) * 100);
-      setZoom(Math.max(25, newZoom));
-    }
-  };
 
   const handleDelete = () => {
     if (selectedIds.size === 0 || !currentPage) return;
@@ -212,7 +191,7 @@ function App() {
   const handleGroup = () => {
     if (selectedIds.size < 2 || !currentPage) return;
     const selectedBlocks = currentPage.textBlocks.filter(b => selectedIds.has(b.id));
-    
+
     const minX = Math.min(...selectedBlocks.map(b => b.bbox.x));
     const minY = Math.min(...selectedBlocks.map(b => b.bbox.y));
     const maxX = Math.max(...selectedBlocks.map(b => b.bbox.x + b.bbox.width));
@@ -275,254 +254,23 @@ function App() {
     handleOpen,
   });
 
-  const latestLoadRef = useRef<number>(-1);
-  const bboxMetaRef = useRef<Record<string, Array<{
-    bbox: import('./types').BoundingBox;
-    writingMode: string;
-    order: number;
-    text: string;
-  }>> | null | undefined>(undefined);
-
-
-  const loadCurrentPage = useCallback(async (pageIdx: number) => {
-    latestLoadRef.current = pageIdx;
-
-    const doc = usePecoStore.getState().document;
-    if (!doc) return;
-
-    setIsLoadingPage(true);
-    setPageLoadError(null);
-    try {
-      const pdf = await getSharedPdfProxy(doc.filePath);
-
-      if (latestLoadRef.current !== pageIdx) return;
-
-      // bboxMetaが未取得の場合、1ページ目表示をブロックせずバックグラウンドで取得する。
-      if (bboxMetaRef.current === undefined) {
-        bboxMetaRef.current = null;
-        loadPecoToolBBoxMeta(pdf).then((meta) => {
-          bboxMetaRef.current = meta;
-          if (!meta) return;
-          const state = usePecoStore.getState();
-          if (!state.document || state.document.filePath !== doc.filePath) return;
-          state.document.pages.forEach((pageData, i) => {
-            if (pageData.isDirty) return;
-            loadPage(pdf, i, doc.filePath, meta, doc.mtime)
-              .then((pd) => {
-                const s = usePecoStore.getState();
-                if (s.document?.filePath === doc.filePath) updatePageData(i, pd, false);
-              })
-              .catch(() => {});
-          });
-        }).catch(() => {});
-      }
-
-      // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）
-      const qp = await getCachedPageProxy(doc.filePath, pageIdx);
-      if (latestLoadRef.current !== pageIdx) return;
-      const qv = qp.getViewport({ scale: 1.0 });
-      const pre = usePecoStore.getState().document?.pages.get(pageIdx);
-      if (!pre || pre.width === 0) {
-        updatePageData(pageIdx, {
-          pageIndex: pageIdx,
-          width: qv.width,
-          height: qv.height,
-          textBlocks: [],
-          isDirty: false,
-          thumbnail: null,
-        }, false);
-      }
-
-      // ★ ページ寸法が確定した時点でローディング解除 → PdfCanvas が即座にレンダリング開始
-      if (latestLoadRef.current === pageIdx) {
-        setIsLoadingPage(false);
-      }
-
-      // ★ サムネイルWorkerのPDFロードをトリガー（メインスレッドのI/O競合を回避）
-      triggerThumbnailLoad();
-
-      // テキスト抽出はバックグラウンドで実行（レンダリングをブロックしない）
-      loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime)
-        .then((pageData) => {
-          // ファイル切替チェック（ページ切替は許容: テキストデータは常に保存する）
-          const currentDoc = usePecoStore.getState().document;
-          if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
-          const existing = currentDoc.pages.get(pageIdx);
-          const mergedData = existing?.isDirty
-            ? { ...pageData, textBlocks: existing.textBlocks, isDirty: true }
-            : pageData;
-          updatePageData(pageIdx, mergedData, false);
-
-          // 隣接ページのデータをバックグラウンドでプリフェッチ
-          const prefetchPage = (i: number) => {
-            if (i < 0 || i >= doc.totalPages) return;
-            const existingPage = usePecoStore.getState().document?.pages.get(i);
-            if (existingPage && existingPage.width > 0) return;
-            setTimeout(() => {
-              const currentDoc = usePecoStore.getState().document;
-              if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
-              loadPage(pdf, i, doc.filePath, bboxMetaRef.current, doc.mtime)
-                .then((pd) => {
-                  const state = usePecoStore.getState();
-                  if (state.document?.filePath !== doc.filePath) return;
-                  const ex = state.document.pages.get(i);
-                  const merged = ex?.isDirty
-                    ? { ...pd, textBlocks: ex.textBlocks, isDirty: true }
-                    : pd;
-                  if (!ex || ex.width === 0) updatePageData(i, merged, false);
-                })
-                .catch(() => {});
-            }, 50);
-          };
-          prefetchPage(pageIdx - 1);
-          prefetchPage(pageIdx + 1);
-        })
-        .catch((err) => {
-          if (latestLoadRef.current !== pageIdx) return;
-          console.error(`[loadCurrentPage] text extraction failed for page ${pageIdx}:`, err);
-        });
-    } catch (err: any) {
-      if (latestLoadRef.current !== pageIdx) return;
-      console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
-      showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
-      setPageLoadError(pageIdx);
-      triggerThumbnailLoad();
-      setIsLoadingPage(false);
-    }
-  }, [updatePageData, showToast, triggerThumbnailLoad]);
-
-  // ファイルが変わったときにbboxMetaキャッシュをリセット
-  const prevFilePathRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (document?.filePath !== prevFilePathRef.current) {
-      bboxMetaRef.current = undefined;
-      prevFilePathRef.current = document?.filePath;
-    }
-  }, [document?.filePath]);
-
-  useEffect(() => {
-    if (!document) return;
-    const pageData = document.pages.get(currentPageIndex);
-    // 未ロード、またはOCR全消去で作られたダミー（width===0）の場合はロードする
-    if (!pageData || pageData.width === 0) {
-      loadCurrentPage(currentPageIndex);
-    }
-  }, [document?.filePath, document?.pages, currentPageIndex, loadCurrentPage]);
-
   // --- Effects ---
-  useEffect(() => {
-    const saved = localStorage.getItem('peco-recent-files');
-    if (saved) setRecentFiles(JSON.parse(saved));
-  }, []);
+  useTauriCloseGuard();
 
   useEffect(() => {
-    if (window.location.hash !== '#preview') {
-      const currentWindow = getCurrentWindow();
-      const setupCloseListener = async () => {
-        await currentWindow.onCloseRequested(async (event) => {
-          event.preventDefault();
-          const state = usePecoStore.getState();
-          const hasDirtyPages = Array.from(state.document?.pages.values() || []).some(p => p.isDirty);
-          if (state.isDirty || hasDirtyPages) {
-            const confirmed = await ask('未保存の変更があります。終了してもよろしいですか？', {
-              title: '終了の確認', kind: 'warning'
-            });
-            if (!confirmed) return;
-          }
-          const windows = await getAllWindows();
-          for (const w of windows) {
-            if (w.label !== currentWindow.label) {
-              await w.destroy();
-            }
-          }
-          await currentWindow.destroy();
-        });
-      };
-      setupCloseListener();
-    }
-  }, []);
-
-  useEffect(() => {
-    const handleKeyDownGlob = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+    const handleF5 = (e: KeyboardEvent) => {
       if (e.key === 'F5') {
         e.preventDefault();
         const doc = usePecoStore.getState().document;
         if (doc?.filePath) handleOpen(doc.filePath);
-        return;
       }
-      if (e.code === 'Space' && !isEditing) { e.preventDefault(); setIsSpacePressed(true); }
     };
-    const handleKeyUpGlob = (e: KeyboardEvent) => {
-      if (e.code === 'Space') { setIsSpacePressed(false); setIsPanning(false); }
-    };
-    window.addEventListener('keydown', handleKeyDownGlob);
-    window.addEventListener('keyup', handleKeyUpGlob);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDownGlob);
-      window.removeEventListener('keyup', handleKeyUpGlob);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!isAutoFit || !document) return;
-    const container = viewerRef.current;
-    if (!container) return;
-    let rafId: number;
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        if (isAutoFit) fitToScreen(true);
-      });
-    });
-    observer.observe(container);
-    return () => { observer.disconnect(); cancelAnimationFrame(rafId); };
-  }, [document, currentPageIndex, isAutoFit]);
-
-  // --- Resizing ---
-  const startResizeLeft = (e: React.MouseEvent) => {
-    const startX = e.clientX;
-    const startWidth = leftWidth;
-    const onMouseMove = (moveEvent: MouseEvent) => setLeftWidth(Math.max(150, Math.min(400, startWidth + (moveEvent.clientX - startX))));
-    const onMouseUp = () => { window.removeEventListener('mouseup', onMouseUp); window.removeEventListener('mousemove', onMouseMove); };
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
-
-  const startResizeRight = (e: React.MouseEvent) => {
-    const startX = e.clientX;
-    const startWidth = rightWidth;
-    const onMouseMove = (moveEvent: MouseEvent) => setRightWidth(Math.max(200, Math.min(800, startWidth - (moveEvent.clientX - startX))));
-    const onMouseUp = () => { window.removeEventListener('mouseup', onMouseUp); window.removeEventListener('mousemove', onMouseMove); };
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
-
-  const handleViewerMouseDown = (e: React.MouseEvent) => {
-    if (isSpacePressed) {
-      e.stopPropagation(); e.preventDefault();
-      setIsPanning(true);
-      const container = viewerRef.current;
-      if (container) setPanStart({ x: e.clientX, y: e.clientY, scrollX: container.scrollLeft, scrollY: container.scrollTop });
-    }
-  };
-
-  const handleViewerMouseMove = (e: React.MouseEvent) => {
-    if (isPanning && isSpacePressed) {
-      e.preventDefault();
-      const container = viewerRef.current;
-      if (container) {
-        const dx = e.clientX - panStart.x;
-        const dy = e.clientY - panStart.y;
-        container.scrollLeft = panStart.scrollX - dx;
-        container.scrollTop = panStart.scrollY - dy;
-      }
-    }
-  };
+    window.addEventListener('keydown', handleF5);
+    return () => window.removeEventListener('keydown', handleF5);
+  }, [handleOpen]);
 
   return (
-    <div 
+    <div
       className="app-container"
       onContextMenu={(e) => { e.preventDefault(); setHelpMenu({ x: e.clientX, y: e.clientY, visible: true }); }}
       onClick={() => {
@@ -530,31 +278,7 @@ function App() {
         if (showSettingsDropdown) setShowSettingsDropdown(false);
       }}
     >
-      {/* 右クリックショートカットヘルプ（既存機能を維持） */}
-      {helpMenu.visible && (
-        <div className="help-context-menu" style={{ top: helpMenu.y, left: helpMenu.x }} onClick={(e) => e.stopPropagation()}>
-          <div className="help-header"><MousePointer2 size={14} />ショートカットヘルプ</div>
-          <div className="help-grid">
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>O</kbd><span>開く</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>S</kbd><span>保存</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd><span>別名保存</span></div>
-            <div className="help-divider" />
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd><span>元に戻す</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd><span>やり直し</span></div>
-            <div className="help-divider" />
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F10</kbd><span>追加</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F11</kbd><span>分割</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F12</kbd><span>グループ化</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd><span>スペース削除</span></div>
-            <div className="help-divider" />
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>C</kbd><span>コピー</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>V</kbd><span>貼り付け</span></div>
-            <div className="help-item"><kbd>Delete</kbd><span>BB削除</span></div>
-            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>フィット</span></div>
-            <div className="help-item"><kbd>Space</kbd>+<span>ドラッグで画面移動</span></div>
-          </div>
-        </div>
-      )}
+      <HelpMenu helpMenu={helpMenu} />
 
       {/* バックアップ復元ダイアログ */}
       {pendingBackups.length > 0 && (
@@ -570,94 +294,7 @@ function App() {
       {/* ヘルプモーダル */}
       {showOcrSettings && <OcrSettingsModal onClose={() => setShowOcrSettings(false)} />}
 
-      {helpModal && (
-        <div className="modal-backdrop" onClick={() => setHelpModal(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              {helpModal === 'shortcuts' && 'ショートカットキー一覧'}
-              {helpModal === 'usage' && 'ツールの使い方'}
-              {helpModal === 'version' && 'バージョン情報'}
-              <button className="modal-close" onClick={() => setHelpModal(null)}>✕</button>
-            </div>
-            <div className="modal-body">
-              {helpModal === 'shortcuts' && (
-                <div className="help-grid">
-                  <div className="modal-section-title">ファイル操作</div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>O</kbd><span>開く</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>S</kbd><span>保存</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd><span>別名で保存</span></div>
-                  <div className="help-divider" />
-                  <div className="modal-section-title">編集</div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd><span>元に戻す</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd><span>やり直し</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>C</kbd><span>BBをコピー（非編集時）</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>V</kbd><span>BBを貼り付け（非編集時）</span></div>
-                  <div className="help-item"><kbd>Delete</kbd><span>選択BBを削除（非編集時）</span></div>
-                  <div className="help-divider" />
-                  <div className="modal-section-title">BB操作</div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F10</kbd><span>BB追加モード</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F11</kbd><span>BB分割モード</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F12</kbd><span>選択BBをグループ化</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd><span>選択BB内のスペース削除</span></div>
-                  <div className="help-divider" />
-                  <div className="modal-section-title">表示</div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>画面にフィット</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>/<kbd>Alt</kbd>+<kbd>ホイール</kbd><span>ズーム</span></div>
-                  <div className="help-item"><kbd>Space</kbd>+<span>ドラッグ 画面移動（パン）</span></div>
-                  <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F</kbd><span>テキスト検索</span></div>
-                </div>
-              )}
-              {helpModal === 'usage' && (
-                <div className="usage-guide">
-                  <div className="usage-section">
-                    <div className="usage-title">基本的な流れ</div>
-                    <ol className="usage-list">
-                      <li>「ファイル → 開く」からPDFを読み込む</li>
-                      <li>サムネイルウィンドウ（自動表示）でページを選択</li>
-                      <li>PDFビュー上でBB（テキストブロック）を確認・編集</li>
-                      <li>右パネルでBBのテキストを直接編集</li>
-                      <li>「ファイル → 保存」で保存</li>
-                    </ol>
-                  </div>
-                  <div className="usage-section">
-                    <div className="usage-title">BBの選択</div>
-                    <ul className="usage-list">
-                      <li>PDFビューまたは右パネルのBBをクリックで選択</li>
-                      <li><kbd>Ctrl</kbd>+クリック で複数選択</li>
-                      <li><kbd>Shift</kbd>+クリック で範囲選択（右パネルのみ）</li>
-                    </ul>
-                  </div>
-                  <div className="usage-section">
-                    <div className="usage-title">BB操作</div>
-                    <ul className="usage-list">
-                      <li><b>追加：</b> Ctrl+F10 で追加モード → PDFビュー上をドラッグ</li>
-                      <li><b>移動・リサイズ：</b> 選択後にPDFビュー上でドラッグ</li>
-                      <li><b>分割：</b> Ctrl+F11 で分割モード → BBをクリック</li>
-                      <li><b>グループ化：</b> 複数選択して Ctrl+F12</li>
-                      <li><b>並び順修正：</b> <kbd>Alt</kbd>+ドラッグで位置を移動して序列を更新</li>
-                    </ul>
-                  </div>
-                  <div className="usage-section">
-                    <div className="usage-title">テキスト編集</div>
-                    <ul className="usage-list">
-                      <li>右パネルのBBカードをクリックして直接入力</li>
-                      <li>OCRの誤認識スペースは「スペース削除」ボタンまたは Ctrl+Shift+Space で一括削除</li>
-                      <li>Ctrl+↑↓ でBB間を移動</li>
-                    </ul>
-                  </div>
-                </div>
-              )}
-              {helpModal === 'version' && (
-                <div className="version-info">
-                  <div className="version-logo">PecoTool V2</div>
-                  <div className="version-number">バージョン 1.5.1</div>
-                  <div className="version-desc">PDF OCR 手動編集ツール</div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <HelpModal helpModal={helpModal} onClose={() => setHelpModal(null)} />
 
       <MenuBar
         document={document}
@@ -688,7 +325,7 @@ function App() {
         onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode}
         onGroup={handleGroup} onDeduplicate={handleDeduplicate} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
         onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity}
-        onSetReorderThreshold={(val) => { setReorderThreshold(val); localStorage.setItem('peco-reorder-threshold', val.toString()); }}
+        onSetReorderThreshold={(val) => { const clamped = Math.min(100, Math.max(1, val)); setReorderThreshold(clamped); localStorage.setItem('peco-reorder-threshold', clamped.toString()); }}
         onTogglePreview={togglePreviewWindow}
         onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
         onRunOcrCurrentPage={runOcrCurrentPage}
@@ -714,10 +351,10 @@ function App() {
         <section
           ref={viewerRef}
           className={`pdf-viewer-panel ${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : ''}`}
-          onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={() => setIsPanning(false)} onMouseLeave={() => setIsPanning(false)}
+          onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={stopPanning} onMouseLeave={stopPanning}
         >
           <div className="pdf-canvas-container">
-            {document ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
+            {document ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
           {(isLoadingFile || isLoadingPage) && (
             <div className="loading-overlay">

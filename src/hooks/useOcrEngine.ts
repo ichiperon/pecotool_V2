@@ -9,6 +9,7 @@ import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc } from '../utils
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
+import { logger } from '../utils/logger';
 
 const RENDER_SCALE = 2.0;
 
@@ -57,7 +58,7 @@ function toTextBlocks(blocks: OcrResultBlock[], settings: OcrSortSettings): Text
 
 async function runOcrForPage(
   ocrPdf: pdfjsLib.PDFDocumentProxy,
-  filePath: string,
+  _filePath: string,
   pageIndex: number,
   pageWidth: number,
   pageHeight: number,
@@ -125,7 +126,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     setIsOcrRunning(true);
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
-      console.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
+      logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
       const result = await runOcrForPage(ocrPdf, doc.filePath, pageIdx, pageData.width, pageData.height);
 
       if (result.status === 'error') {
@@ -178,7 +179,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
         if (cancelTokenRef.current) break;
 
         setOcrProgress({ current: i + 1, total: doc.totalPages });
-        console.log(`[OCR] 処理中: ${i + 1} / ${doc.totalPages} ページ`);
+        logger.log(`[OCR] 処理中: ${i + 1} / ${doc.totalPages} ページ`);
 
         // ページデータがロード済みならそのサイズを使用。未ロードの場合は ocrPdf から取得
         const pageData = usePecoStore.getState().document?.pages.get(i);
@@ -233,7 +234,11 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
       const pdf = await getSharedPdfProxy(doc.filePath);
       const page0 = await pdf.getPage(1);
       const content = await page0.getTextContent();
-      const hasText = content.items.some((item: any) => item.str?.trim() !== '');
+      // pdfjs v5 では items が TextItem | TextMarkedContent の混在配列。str を持つのは TextItem のみ。
+      const hasText = content.items.some((item) => {
+        const maybeStr = (item as { str?: unknown }).str;
+        return typeof maybeStr === 'string' && maybeStr.trim() !== '';
+      });
 
       if (!hasText) {
         const confirmed = await ask(

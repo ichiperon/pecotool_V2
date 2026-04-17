@@ -1,6 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { usePecoStore } from '../../store/pecoStore'
-import type { PecoDocument, PageData, Action } from '../../types'
+import type { PecoDocument, PageData, Action, TextBlock } from '../../types'
+
+vi.mock('../../utils/pdfLoader', () => ({
+  saveTemporaryPageDataBatch: vi.fn().mockResolvedValue(undefined),
+  clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+}))
 
 // ── ヘルパー ──────────────────────────────────────────────────
 
@@ -16,9 +21,23 @@ function makePage(overrides: Partial<PageData> = {}): PageData {
   }
 }
 
+function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
+  return {
+    id: crypto.randomUUID(),
+    text: 'test',
+    originalText: 'test',
+    bbox: { x: 0, y: 0, width: 100, height: 20 },
+    writingMode: 'horizontal',
+    order: 0,
+    isNew: false,
+    isDirty: false,
+    ...overrides,
+  }
+}
+
 function makeDoc(pages: Map<number, PageData> = new Map([[0, makePage()]])): PecoDocument {
   return {
-    filePath: '',
+    filePath: 'test.pdf',
     fileName: 'test.pdf',
     totalPages: pages.size,
     metadata: {},
@@ -207,6 +226,551 @@ describe('pecoStore', () => {
       usePecoStore.getState().clearSelection()
 
       expect(usePecoStore.getState().selectedIds.size).toBe(0)
+    })
+  })
+
+  // ── Undo/Redo edge cases ──────────────────────────────────────
+
+  describe('U-PS-06: undo sets isDirty=true', () => {
+    it('undo 後に isDirty が true になる', () => {
+      const before = makePage({ isDirty: false })
+      const after = makePage({ isDirty: true })
+      const doc = makeDoc(new Map([[0, after]]))
+      const action: Action = { type: 'update_page', pageIndex: 0, before, after }
+
+      usePecoStore.setState({ document: doc, undoStack: [action], isDirty: false })
+      usePecoStore.getState().undo()
+
+      expect(usePecoStore.getState().isDirty).toBe(true)
+    })
+  })
+
+  describe('U-PS-13: undo→redo round-trip preserves data', () => {
+    it('undo して redo すると元のデータに戻る', () => {
+      const before = makePage({ pageIndex: 0, isDirty: false })
+      const after = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock()] })
+      const doc = makeDoc(new Map([[0, after]]))
+      const action: Action = { type: 'update_page', pageIndex: 0, before, after }
+
+      usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [] })
+
+      usePecoStore.getState().undo()
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(before)
+
+      usePecoStore.getState().redo()
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(after)
+    })
+  })
+
+  // ── updatePageData ─────────────────────────────────────────────
+
+  describe('updatePageData (U-PS-14 ~ U-PS-26)', () => {
+    it('U-PS-14: デフォルトで isDirty=true になる', () => {
+      usePecoStore.setState({ document: makeDoc(), isDirty: false })
+      usePecoStore.getState().updatePageData(0, { textBlocks: [] })
+
+      expect(usePecoStore.getState().isDirty).toBe(true)
+    })
+
+    it('U-PS-15: isDirty:false を渡すとグローバル isDirty を設定しない', () => {
+      usePecoStore.setState({ document: makeDoc(), isDirty: false })
+      usePecoStore.getState().updatePageData(0, { isDirty: false })
+
+      expect(usePecoStore.getState().isDirty).toBe(false)
+    })
+
+    it('U-PS-16: 部分更新で既存フィールドが保持される', () => {
+      const block = makeBlock({ text: 'keep me' })
+      const page = makePage({ textBlocks: [block], width: 100 })
+      usePecoStore.setState({ document: makeDoc(new Map([[0, page]])) })
+
+      usePecoStore.getState().updatePageData(0, { height: 999 })
+
+      const updated = usePecoStore.getState().document!.pages.get(0)!
+      expect(updated.textBlocks).toHaveLength(1)
+      expect(updated.textBlocks[0].text).toBe('keep me')
+      expect(updated.width).toBe(100)
+      expect(updated.height).toBe(999)
+    })
+
+    it('U-PS-17: 存在しないページは data をそのまま PageData として作成する', () => {
+      usePecoStore.setState({ document: makeDoc() })
+      const newPage = makePage({ pageIndex: 5, width: 200 })
+      usePecoStore.getState().updatePageData(5, newPage as Partial<PageData>)
+
+      const created = usePecoStore.getState().document!.pages.get(5)
+      expect(created).toBeDefined()
+      expect(created!.pageIndex).toBe(5)
+      expect(created!.width).toBe(200)
+    })
+
+    it('U-PS-18: undoable=true (デフォルト) で undo アクションが生成される', () => {
+      const page = makePage()
+      usePecoStore.setState({ document: makeDoc(new Map([[0, page]])), undoStack: [] })
+
+      usePecoStore.getState().updatePageData(0, { isDirty: true })
+
+      const stack = usePecoStore.getState().undoStack
+      expect(stack).toHaveLength(1)
+      expect(stack[0].before).toEqual(page)
+      expect(stack[0].after.isDirty).toBe(true)
+    })
+
+    it('U-PS-19: undoable=false で undo 記録がスキップされる', () => {
+      usePecoStore.setState({ document: makeDoc(), undoStack: [] })
+      usePecoStore.getState().updatePageData(0, { isDirty: true }, false)
+
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
+
+    it('U-PS-20: oldPage が存在しない場合 undo は記録されない', () => {
+      usePecoStore.setState({ document: makeDoc(), undoStack: [] })
+      // page index 99 doesn't exist
+      usePecoStore.getState().updatePageData(99, makePage({ pageIndex: 99 }) as Partial<PageData>)
+
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
+
+    it('U-PS-22: undoable な更新で redoStack がクリアされる', () => {
+      const action: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      usePecoStore.setState({ document: makeDoc(), redoStack: [action] })
+
+      usePecoStore.getState().updatePageData(0, { isDirty: true })
+
+      expect(usePecoStore.getState().redoStack).toHaveLength(0)
+    })
+
+    it('U-PS-26: pageAccessOrder が更新される', () => {
+      const pages = new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]])
+      usePecoStore.setState({ document: makeDoc(pages), pageAccessOrder: [1, 0] })
+
+      usePecoStore.getState().updatePageData(0, { isDirty: true })
+
+      const order = usePecoStore.getState().pageAccessOrder
+      expect(order[0]).toBe(0) // updated page moves to front
+    })
+  })
+
+  // ── Selection (extended) ──────────────────────────────────────
+
+  describe('Selection (U-PS-30 ~ U-PS-34)', () => {
+    it('U-PS-30: toggleSelection で lastSelectedId が更新される', () => {
+      usePecoStore.setState({ selectedIds: new Set(), lastSelectedId: null })
+      usePecoStore.getState().toggleSelection('x', false)
+
+      expect(usePecoStore.getState().lastSelectedId).toBe('x')
+    })
+
+    it('U-PS-31: lastSelectedId を deselect すると null になる', () => {
+      usePecoStore.setState({ selectedIds: new Set(['x']), lastSelectedId: 'x' })
+      usePecoStore.getState().toggleSelection('x', true)
+
+      expect(usePecoStore.getState().lastSelectedId).toBeNull()
+    })
+
+    it('U-PS-32: setSelectedIds で選択が置き換わり lastSelectedId = 末尾要素', () => {
+      usePecoStore.setState({ selectedIds: new Set(['old']) })
+      usePecoStore.getState().setSelectedIds(['a', 'b', 'c'])
+
+      expect(usePecoStore.getState().selectedIds).toEqual(new Set(['a', 'b', 'c']))
+      expect(usePecoStore.getState().lastSelectedId).toBe('c')
+    })
+
+    it('U-PS-33: setSelectedIds([]) で全クリアされる', () => {
+      usePecoStore.setState({ selectedIds: new Set(['a']), lastSelectedId: 'a' })
+      usePecoStore.getState().setSelectedIds([])
+
+      expect(usePecoStore.getState().selectedIds.size).toBe(0)
+      expect(usePecoStore.getState().lastSelectedId).toBeNull()
+    })
+
+    it('U-PS-34: clearSelection で lastSelectedId もリセットされる', () => {
+      usePecoStore.setState({ selectedIds: new Set(['a']), lastSelectedId: 'a' })
+      usePecoStore.getState().clearSelection()
+
+      expect(usePecoStore.getState().selectedIds.size).toBe(0)
+      expect(usePecoStore.getState().lastSelectedId).toBeNull()
+    })
+  })
+
+  // ── Clipboard ─────────────────────────────────────────────────
+
+  describe('Clipboard (U-PS-35 ~ U-PS-45)', () => {
+    it('U-PS-35: copySelected でマッチするブロックがコピーされる', () => {
+      const b1 = makeBlock({ id: 'b1' })
+      const b2 = makeBlock({ id: 'b2' })
+      const page = makePage({ textBlocks: [b1, b2] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        selectedIds: new Set(['b1']),
+      })
+
+      usePecoStore.getState().copySelected()
+
+      const clip = usePecoStore.getState().clipboard
+      expect(clip).toHaveLength(1)
+      expect(clip[0].id).toBe('b1')
+    })
+
+    it('U-PS-36: deep copy (参照が共有されない)', () => {
+      const b1 = makeBlock({ id: 'b1' })
+      const page = makePage({ textBlocks: [b1] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        selectedIds: new Set(['b1']),
+      })
+
+      usePecoStore.getState().copySelected()
+
+      const clip = usePecoStore.getState().clipboard
+      expect(clip[0]).not.toBe(b1)
+      expect(clip[0]).toEqual(b1)
+    })
+
+    it('U-PS-37: 選択なしで copySelected は no-op', () => {
+      usePecoStore.setState({
+        document: makeDoc(),
+        currentPageIndex: 0,
+        selectedIds: new Set(),
+        clipboard: [],
+      })
+
+      usePecoStore.getState().copySelected()
+
+      expect(usePecoStore.getState().clipboard).toHaveLength(0)
+    })
+
+    it('U-PS-38: document=null で copySelected は no-op', () => {
+      usePecoStore.setState({
+        document: null,
+        selectedIds: new Set(['a']),
+        clipboard: [],
+      })
+
+      usePecoStore.getState().copySelected()
+
+      expect(usePecoStore.getState().clipboard).toHaveLength(0)
+    })
+
+    it('U-PS-39: pasteClipboard で新しい UUID が生成される', () => {
+      const b1 = makeBlock({ id: 'original-id' })
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [b1],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].id).not.toBe('original-id')
+    })
+
+    it('U-PS-40: paste で bbox が +10, +10 オフセットされる', () => {
+      const b1 = makeBlock({ bbox: { x: 50, y: 60, width: 100, height: 20 } })
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [b1],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].bbox.x).toBe(60)
+      expect(blocks[0].bbox.y).toBe(70)
+    })
+
+    it('U-PS-41: paste で isNew=true, isDirty=true が設定される', () => {
+      const b1 = makeBlock({ isNew: false, isDirty: false })
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [b1],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].isNew).toBe(true)
+      expect(blocks[0].isDirty).toBe(true)
+    })
+
+    it('U-PS-42: paste で selectedIds が新しい ID に更新される', () => {
+      const b1 = makeBlock({ id: 'old' })
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [b1],
+        selectedIds: new Set(['something-else']),
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const ids = usePecoStore.getState().selectedIds
+      expect(ids.size).toBe(1)
+      expect(ids.has('old')).toBe(false)
+    })
+
+    it('U-PS-43: paste で既存ブロックに追加される', () => {
+      const existing = makeBlock({ id: 'existing' })
+      const toPaste = makeBlock({ id: 'clip' })
+      const page = makePage({ textBlocks: [existing] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [toPaste],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks).toHaveLength(2)
+      expect(blocks[0].id).toBe('existing')
+    })
+
+    it('U-PS-44: paste の order は既存ブロック数からの連番', () => {
+      const e1 = makeBlock({ order: 0 })
+      const e2 = makeBlock({ order: 1 })
+      const c1 = makeBlock()
+      const c2 = makeBlock()
+      const page = makePage({ textBlocks: [e1, e2] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [c1, c2],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[2].order).toBe(2)
+      expect(blocks[3].order).toBe(3)
+    })
+
+    it('U-PS-45: clipboard が空なら pasteClipboard は no-op', () => {
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks).toHaveLength(0)
+    })
+  })
+
+  // ── clearOcr ──────────────────────────────────────────────────
+
+  describe('clearOcr (U-PS-46 ~ U-PS-52)', () => {
+    it('U-PS-46: clearOcrCurrentPage で現在ページの textBlocks が空になり isDirty=true', () => {
+      const page = makePage({ textBlocks: [makeBlock()], isDirty: false })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        isDirty: false,
+      })
+
+      usePecoStore.getState().clearOcrCurrentPage()
+
+      const state = usePecoStore.getState()
+      expect(state.document!.pages.get(0)!.textBlocks).toHaveLength(0)
+      expect(state.document!.pages.get(0)!.isDirty).toBe(true)
+      expect(state.isDirty).toBe(true)
+    })
+
+    it('U-PS-47: clearOcrCurrentPage は他のページに影響しない', () => {
+      const block = makeBlock()
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock()] })
+      const page1 = makePage({ pageIndex: 1, textBlocks: [block] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page0], [1, page1]])),
+        currentPageIndex: 0,
+      })
+
+      usePecoStore.getState().clearOcrCurrentPage()
+
+      expect(usePecoStore.getState().document!.pages.get(1)!.textBlocks).toHaveLength(1)
+    })
+
+    it('U-PS-48: document=null で clearOcrCurrentPage はエラーにならない', () => {
+      usePecoStore.setState({ document: null })
+      expect(() => usePecoStore.getState().clearOcrCurrentPage()).not.toThrow()
+    })
+
+    it('U-PS-49: clearOcrAllPages で全ロード済みページの textBlocks が空になる', () => {
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock()] })
+      const page1 = makePage({ pageIndex: 1, textBlocks: [makeBlock()] })
+      const doc = makeDoc(new Map([[0, page0], [1, page1]]))
+      usePecoStore.setState({ document: doc })
+
+      usePecoStore.getState().clearOcrAllPages()
+
+      const state = usePecoStore.getState()
+      expect(state.document!.pages.get(0)!.textBlocks).toHaveLength(0)
+      expect(state.document!.pages.get(1)!.textBlocks).toHaveLength(0)
+    })
+
+    it('U-PS-50: 未ロードページ用にスタブが作成される (totalPages=5, loaded=2)', () => {
+      const page0 = makePage({ pageIndex: 0 })
+      const page2 = makePage({ pageIndex: 2 })
+      const doc: PecoDocument = {
+        filePath: 'test.pdf',
+        fileName: 'test.pdf',
+        totalPages: 5,
+        metadata: {},
+        pages: new Map([[0, page0], [2, page2]]),
+      }
+      usePecoStore.setState({ document: doc })
+
+      usePecoStore.getState().clearOcrAllPages()
+
+      const pages = usePecoStore.getState().document!.pages
+      expect(pages.size).toBe(5)
+      for (let i = 0; i < 5; i++) {
+        expect(pages.has(i)).toBe(true)
+        expect(pages.get(i)!.textBlocks).toHaveLength(0)
+        expect(pages.get(i)!.isDirty).toBe(true)
+      }
+    })
+
+    it('U-PS-51: clearOcrAllPages で undo/redo スタックがクリアされる', () => {
+      const action: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      usePecoStore.setState({
+        document: makeDoc(),
+        undoStack: [action],
+        redoStack: [action],
+      })
+
+      usePecoStore.getState().clearOcrAllPages()
+
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+      expect(usePecoStore.getState().redoStack).toHaveLength(0)
+    })
+
+    it('U-PS-52: clearOcrAllPages でグローバル isDirty=true になる', () => {
+      usePecoStore.setState({ document: makeDoc(), isDirty: false })
+
+      usePecoStore.getState().clearOcrAllPages()
+
+      expect(usePecoStore.getState().isDirty).toBe(true)
+    })
+  })
+
+  // ── setCurrentPage ────────────────────────────────────────────
+
+  describe('setCurrentPage (U-PS-53 ~ U-PS-56)', () => {
+    it('U-PS-53: currentPageIndex が更新される', () => {
+      usePecoStore.setState({ currentPageIndex: 0 })
+      usePecoStore.getState().setCurrentPage(3)
+
+      expect(usePecoStore.getState().currentPageIndex).toBe(3)
+    })
+
+    it('U-PS-54: ページが pageAccessOrder の先頭に移動する', () => {
+      usePecoStore.setState({ pageAccessOrder: [1, 2, 3] })
+      usePecoStore.getState().setCurrentPage(3)
+
+      expect(usePecoStore.getState().pageAccessOrder[0]).toBe(3)
+    })
+
+    it('U-PS-55: pageAccessOrder 内で重複が除去される', () => {
+      usePecoStore.setState({ pageAccessOrder: [1, 2, 3] })
+      usePecoStore.getState().setCurrentPage(2)
+
+      const order = usePecoStore.getState().pageAccessOrder
+      expect(order).toEqual([2, 1, 3])
+      expect(order.filter(i => i === 2)).toHaveLength(1)
+    })
+
+    it('U-PS-56: 選択がクリアされる', () => {
+      usePecoStore.setState({ selectedIds: new Set(['a', 'b']), lastSelectedId: 'b' })
+      usePecoStore.getState().setCurrentPage(1)
+
+      expect(usePecoStore.getState().selectedIds.size).toBe(0)
+      expect(usePecoStore.getState().lastSelectedId).toBeNull()
+    })
+  })
+
+  // ── setDocument ───────────────────────────────────────────────
+
+  describe('setDocument (U-PS-57 ~ U-PS-62)', () => {
+    it('U-PS-57: 全一時状態がリセットされる', () => {
+      const action: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      usePecoStore.setState({
+        selectedIds: new Set(['x']),
+        lastSelectedId: 'x',
+        clipboard: [makeBlock()],
+        undoStack: [action],
+        redoStack: [action],
+        isDrawingMode: true,
+        isSplitMode: true,
+        showTextPreview: true,
+        pageAccessOrder: [0, 1],
+      })
+
+      usePecoStore.getState().setDocument(makeDoc())
+
+      const s = usePecoStore.getState()
+      expect(s.selectedIds.size).toBe(0)
+      expect(s.lastSelectedId).toBeNull()
+      expect(s.clipboard).toHaveLength(0)
+      expect(s.undoStack).toHaveLength(0)
+      expect(s.redoStack).toHaveLength(0)
+      expect(s.isDrawingMode).toBe(false)
+      expect(s.isSplitMode).toBe(false)
+      expect(s.showTextPreview).toBe(false)
+      expect(s.pageAccessOrder).toHaveLength(0)
+      expect(s.currentPageIndex).toBe(0)
+      expect(s.showOcr).toBe(true)
+    })
+
+    it('U-PS-58: pendingRestoration がある場合 isDirty=true', () => {
+      usePecoStore.setState({ pendingRestoration: { '0': { isDirty: true } } })
+
+      usePecoStore.getState().setDocument(makeDoc())
+
+      expect(usePecoStore.getState().isDirty).toBe(true)
+    })
+
+    it('U-PS-59: pendingRestoration がない場合 isDirty=false', () => {
+      usePecoStore.setState({ pendingRestoration: null, isDirty: true })
+
+      usePecoStore.getState().setDocument(makeDoc())
+
+      expect(usePecoStore.getState().isDirty).toBe(false)
+    })
+
+    it('U-PS-60: setDocument(null) で document がクリアされる', () => {
+      usePecoStore.setState({ document: makeDoc() })
+
+      usePecoStore.getState().setDocument(null)
+
+      expect(usePecoStore.getState().document).toBeNull()
+    })
+
+    it('U-PS-61: originalBytes が保存される', () => {
+      const bytes = new Uint8Array([1, 2, 3])
+      usePecoStore.getState().setDocument(makeDoc(), bytes)
+
+      expect(usePecoStore.getState().originalBytes).toBe(bytes)
+    })
+
+    it('U-PS-62: pendingRestoration がクリアされる', () => {
+      usePecoStore.setState({ pendingRestoration: { '0': { isDirty: true } } })
+
+      usePecoStore.getState().setDocument(makeDoc())
+
+      expect(usePecoStore.getState().pendingRestoration).toBeNull()
     })
   })
 

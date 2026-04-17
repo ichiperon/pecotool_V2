@@ -31,6 +31,8 @@ interface PecoState {
   redoStack: Action[];
   /** 復元待ちのバックアップページデータ。setDocument 内で IDB への書き込みに使われる。 */
   pendingRestoration: Record<string, Partial<PageData>> | null;
+  /** 直近の IDB 保存失敗エラー。UI から subscribe してユーザーに通知できる。 */
+  lastIdbError: Error | null;
 
   // Actions
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
@@ -57,6 +59,7 @@ interface PecoState {
   redo: () => void;
   clearOcrCurrentPage: () => void;
   clearOcrAllPages: () => void;
+  clearLastIdbError: () => void;
 }
 
 const MAX_CACHED_PAGES = 50;
@@ -79,6 +82,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   undoStack: [],
   redoStack: [],
   pendingRestoration: null,
+  lastIdbError: null,
 
   setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
   setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
@@ -114,7 +118,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // IDB一時データのクリアをset()外でawaitして確実に完了させる。
     // 復元データがある場合はクリア完了後に IDB へ書き込む（順序保証）。
     if (doc) {
-      const restorationPromise = clearTemporaryChanges(doc.filePath)
+      const work = clearTemporaryChanges(doc.filePath)
         .then(async () => {
           if (!restoration || Object.keys(restoration).length === 0) return;
           const entries = Object.entries(restoration).map(([idx, data]) => ({
@@ -124,15 +128,21 @@ export const usePecoStore = create<PecoState>((set, get) => ({
           }));
           await saveTemporaryPageDataBatch(entries);
         })
-        .catch((e) => {
-          console.warn('[Store] clearTemporaryChanges失敗:', e);
+        .then(() => {
+          // 成功時のみ過去のエラーをクリア（他タスクのエラーを潰さないため既存がある時だけtouchしない方針も検討したが、保存成功=回復とみなす）
+          if (get().lastIdbError) set({ lastIdbError: null });
+        })
+        .catch((e: unknown) => {
+          const err = e instanceof Error ? e : new Error(String(e));
+          console.error('[Store] clearTemporaryChanges/復元書き込み失敗:', err);
+          set({ lastIdbError: err });
         });
 
-      // 復元書き込みも pendingIdbSaves で追跡し、呼び出し元が完了を待機できるようにする
-      if (restoration && Object.keys(restoration).length > 0) {
-        pendingIdbSaves.add(restorationPromise);
-        restorationPromise.finally(() => pendingIdbSaves.delete(restorationPromise));
-      }
+      // finally で自身を Set から除去するため、tracked 変数を先に宣言してから add する
+      const tracked: Promise<void> = work.finally(() => {
+        pendingIdbSaves.delete(tracked);
+      });
+      pendingIdbSaves.add(tracked);
     }
   },
 
@@ -214,13 +224,34 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // set()外でIndexedDB保存をバッチ実行（1トランザクションでまとめて書き込み）
     // pendingIdbSaves に登録して保存処理が完了を待機できるようにする
     if (pendingSaves.length > 0) {
-      const savePromise = saveTemporaryPageDataBatch(
+      const work = saveTemporaryPageDataBatch(
         pendingSaves.map(({ filePath, idx, page }) => ({ filePath, pageIndex: idx, data: page }))
-      ).catch((e) => {
-        console.warn('[Store] IndexedDB バッチ保存失敗:', e);
+      )
+        .then(() => {
+          if (get().lastIdbError) set({ lastIdbError: null });
+        })
+        .catch((e: unknown) => {
+          const err = e instanceof Error ? e : new Error(String(e));
+          console.error('[Store] IndexedDB バッチ保存失敗:', err);
+          // 保存失敗時は退避していたページをメモリに戻してデータロストを防ぐ（ロールバック）
+          set((state) => {
+            if (!state.document) return { lastIdbError: err };
+            const restored = new Map(state.document.pages);
+            for (const { idx, page } of pendingSaves) {
+              if (!restored.has(idx)) restored.set(idx, page);
+            }
+            return {
+              document: { ...state.document, pages: restored },
+              lastIdbError: err,
+            };
+          });
+        });
+
+      // finally で自身を Set から除去するため、tracked 変数を先に宣言してから add する
+      const tracked: Promise<void> = work.finally(() => {
+        pendingIdbSaves.delete(tracked);
       });
-      pendingIdbSaves.add(savePromise);
-      savePromise.finally(() => pendingIdbSaves.delete(savePromise));
+      pendingIdbSaves.add(tracked);
     }
   },
 
@@ -349,6 +380,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     updatePageData(currentPageIndex, { textBlocks: [], isDirty: true });
   },
 
+  clearLastIdbError: () => set({ lastIdbError: null }),
+
   clearOcrAllPages: () => {
     const { document } = get();
     if (!document) return;
@@ -381,3 +414,19 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
   },
 }));
+
+// ─── Selectors ─── (細粒度購読でApp全体の再レンダリング波及を防ぐ)
+export const selectDocument = (s: PecoState) => s.document;
+export const selectCurrentPageIndex = (s: PecoState) => s.currentPageIndex;
+export const selectZoom = (s: PecoState) => s.zoom;
+export const selectShowOcr = (s: PecoState) => s.showOcr;
+export const selectOcrOpacity = (s: PecoState) => s.ocrOpacity;
+export const selectSelectedIds = (s: PecoState) => s.selectedIds;
+export const selectIsDrawingMode = (s: PecoState) => s.isDrawingMode;
+export const selectIsSplitMode = (s: PecoState) => s.isSplitMode;
+export const selectIsDirty = (s: PecoState) => s.isDirty;
+export const selectUndoStack = (s: PecoState) => s.undoStack;
+export const selectRedoStack = (s: PecoState) => s.redoStack;
+export const selectCurrentPage = (s: PecoState) =>
+  s.document?.pages.get(s.currentPageIndex) ?? null;
+export const selectLastIdbError = (s: PecoState) => s.lastIdbError;

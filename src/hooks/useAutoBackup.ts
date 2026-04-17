@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
 import { PageData } from '../types';
+import { logger } from '../utils/logger';
 
 export interface PendingBackup {
   file_path: string;
@@ -19,6 +20,30 @@ export interface BackupData {
 
 /** デフォルトバックアップ間隔: 5分 */
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
+
+// 改ざんされた JSON からの不正な textBlocks 注入を防ぐため、読み込み時にスキーマを検証する
+function isValidBackupData(data: unknown): data is BackupData {
+  if (typeof data !== 'object' || data === null) return false;
+  const d = data as Record<string, unknown>;
+  if (typeof d.version !== 'number') return false;
+  if (typeof d.timestamp !== 'string') return false;
+  if (typeof d.originalFilePath !== 'string') return false;
+  if (typeof d.pages !== 'object' || d.pages === null) return false;
+  for (const page of Object.values(d.pages as Record<string, unknown>)) {
+    if (typeof page !== 'object' || page === null) return false;
+    const p = page as Record<string, unknown>;
+    // pages は Partial<PageData> のため全フィールドは必須ではない
+    if (p.textBlocks !== undefined) {
+      if (!Array.isArray(p.textBlocks)) return false;
+      for (const block of p.textBlocks) {
+        if (typeof block !== 'object' || block === null) return false;
+        const b = block as Record<string, unknown>;
+        if (typeof b.id !== 'string' || typeof b.text !== 'string') return false;
+      }
+    }
+  }
+  return true;
+}
 
 /**
  * 自動バックアップフック。
@@ -76,8 +101,10 @@ export function useAutoBackup(
       for (const [idx, page] of idbDirtyPages.entries()) {
         const key = String(idx);
         if (!dirtyPages[key]) {
-          const { thumbnail: _t, ...cleanPage } = page as any;
-          dirtyPages[key] = cleanPage;
+          const { thumbnail: _t, ...cleanPage } = page;
+          // cleanPage は Partial のため PageData に満たない可能性があるが
+          // バックアップ形式としては Partial 相当で許容する。
+          dirtyPages[key] = cleanPage as Omit<PageData, 'thumbnail'>;
         }
       }
 
@@ -91,7 +118,7 @@ export function useAutoBackup(
         pagesJson: JSON.stringify(dirtyPages),
       });
 
-      console.log(`[AutoBackup] バックアップ完了 (${Object.keys(dirtyPages).length}ページ): ${timestamp}`);
+      logger.log(`[AutoBackup] バックアップ完了 (${Object.keys(dirtyPages).length}ページ): ${timestamp}`);
     } catch (e) {
       console.warn('[AutoBackup] バックアップ失敗:', e);
     } finally {
@@ -130,7 +157,12 @@ export function useAutoBackup(
   const loadBackupData = useCallback(async (filePath: string): Promise<BackupData | null> => {
     try {
       const json = await invoke<string>('load_backup', { filePath });
-      return JSON.parse(json) as BackupData;
+      const parsed: unknown = JSON.parse(json);
+      if (!isValidBackupData(parsed)) {
+        console.warn('[AutoBackup] バックアップ JSON のスキーマ検証に失敗しました');
+        return null;
+      }
+      return parsed;
     } catch (e) {
       console.warn('[AutoBackup] バックアップ読み込み失敗:', e);
       return null;

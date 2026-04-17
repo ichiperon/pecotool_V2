@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyDirection, reorderBlocks } from '../../utils/bulkReorder';
+import { classifyDirection, reorderBlocks, getDirectionLabel } from '../../utils/bulkReorder';
 import { TextBlock } from '../../types';
 
 describe('bulkReorder - classifyDirection', () => {
@@ -99,5 +99,91 @@ describe('bulkReorder - reorderBlocks', () => {
     const result = reorderBlocks(overlappingBlocks, 'up-down', 50);
     expect(result[0].text).toBe('A');
     expect(result[1].text).toBe('B');
+  });
+});
+
+describe('bulkReorder - classifyDirection (additional)', () => {
+  it('U-BR-10: Exactly distance=5 is valid', () => {
+    expect(classifyDirection(5, 0)).toBe('left-right');
+  });
+
+  it('U-BR-11: Angle boundary ~22.4° stays left-right', () => {
+    // atan2(41, 100) ≈ 22.28°, which is < 22.5° → left-right
+    // Note: classifyDirection uses atan2(-dy, dx), so dy=-(-41)=41 maps to angle ≈ 22.28°
+    expect(classifyDirection(100, -41)).toBe('left-right');
+  });
+
+  it('U-BR-12: Angle boundary ~23.3° becomes diagonal', () => {
+    // atan2(43, 100) ≈ 23.27°, which is >= 22.5° → bottomleft-topright
+    expect(classifyDirection(100, -43)).toBe('bottomleft-topright');
+  });
+});
+
+describe('bulkReorder - reorderBlocks (additional)', () => {
+  const mockBlocks: TextBlock[] = [
+    { id: '1', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 0, isNew: false, isDirty: false },
+    { id: '2', bbox: { x: 200, y: 100, width: 50, height: 20 }, text: 'B', originalText: 'B', writingMode: 'horizontal', order: 1, isNew: false, isDirty: false },
+    { id: '3', bbox: { x: 100, y: 150, width: 50, height: 20 }, text: 'C', originalText: 'C', writingMode: 'horizontal', order: 2, isNew: false, isDirty: false },
+  ];
+
+  it('U-BR-17: All output blocks have isDirty=true', () => {
+    const result = reorderBlocks(mockBlocks, 'left-right', 50);
+    for (const block of result) {
+      expect(block.isDirty).toBe(true);
+    }
+  });
+
+  it('U-BR-18: All output blocks have sequential order (0,1,2...)', () => {
+    const result = reorderBlocks(mockBlocks, 'up-down', 50);
+    result.forEach((block, i) => {
+      expect(block.order).toBe(i);
+    });
+  });
+
+  it('U-BR-19: Empty input → empty array', () => {
+    const result = reorderBlocks([], 'left-right', 50);
+    expect(result).toEqual([]);
+  });
+
+  it('U-BR-20: Single block → order=0, isDirty=true', () => {
+    const single: TextBlock[] = [
+      { id: '1', bbox: { x: 0, y: 0, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 5, isNew: false, isDirty: false },
+    ];
+    const result = reorderBlocks(single, 'left-right', 50);
+    expect(result).toHaveLength(1);
+    expect(result[0].order).toBe(0);
+    expect(result[0].isDirty).toBe(true);
+  });
+
+  it('U-BR-21: topright-bottomleft direction (Y asc, X desc within threshold)', () => {
+    const blocks: TextBlock[] = [
+      { id: '1', bbox: { x: 200, y: 0, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 0, isNew: false, isDirty: false },
+      { id: '2', bbox: { x: 100, y: 100, width: 50, height: 20 }, text: 'B', originalText: 'B', writingMode: 'horizontal', order: 1, isNew: false, isDirty: false },
+      { id: '3', bbox: { x: 0, y: 200, width: 50, height: 20 }, text: 'C', originalText: 'C', writingMode: 'horizontal', order: 2, isNew: false, isDirty: false },
+    ];
+    // topright-bottomleft: primary Y asc (dir=1), secondary X desc (dir=-1)
+    // Y values are well separated, so primary Y ordering: A(y=10), B(y=110), C(y=210)
+    const result = reorderBlocks(blocks, 'topright-bottomleft', 50);
+    expect(result.map(b => b.text)).toEqual(['A', 'B', 'C']);
+  });
+});
+
+describe('bulkReorder - getDirectionLabel', () => {
+  it('U-BR-22: All 8 directions return non-empty string with arrow character', () => {
+    const directions = [
+      'up-down', 'down-up', 'left-right', 'right-left',
+      'topleft-bottomright', 'bottomright-topleft',
+      'topright-bottomleft', 'bottomleft-topright',
+    ] as const;
+    for (const dir of directions) {
+      const label = getDirectionLabel(dir);
+      expect(label.length).toBeGreaterThan(0);
+      // Check that it contains an arrow character (Unicode arrows: ←→↑↓↗↘↙↖)
+      expect(label).toMatch(/[←→↑↓↗↘↙↖]/);
+    }
+  });
+
+  it('U-BR-23: null → empty string', () => {
+    expect(getDirectionLabel(null)).toBe('');
   });
 });
