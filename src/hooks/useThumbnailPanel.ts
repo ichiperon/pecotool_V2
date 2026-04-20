@@ -290,32 +290,62 @@ export function useThumbnailPanel() {
     const capturedFilePath = document.filePath;
     const capturedEpoch = epoch;
 
+    /**
+     * pecoStore.originalBytes を最大 timeoutMs 待機する。
+     * - 既に到着していれば即解決
+     * - 未到着なら subscribe して到着 or タイムアウトを待つ
+     * - ファイル切替（epoch ミスマッチ）が起きた場合は null で解決して呼び出し側に中断させる
+     */
+    const waitForOriginalBytes = (timeoutMs: number): Promise<Uint8Array | null> => {
+      return new Promise((resolve) => {
+        const initial = usePecoStore.getState().originalBytes;
+        if (initial) { resolve(initial); return; }
+
+        const timer = setTimeout(() => { unsubscribe(); resolve(null); }, timeoutMs);
+        const unsubscribe = usePecoStore.subscribe((state) => {
+          // ファイル切替で epoch がズレた場合は待機を打ち切る
+          if (epochRef.current !== capturedEpoch) {
+            clearTimeout(timer);
+            unsubscribe();
+            resolve(null);
+            return;
+          }
+          if (state.originalBytes) {
+            clearTimeout(timer);
+            unsubscribe();
+            resolve(state.originalBytes);
+          }
+        });
+      });
+    };
+
     const startWorkerLoad = async () => {
       if (epochRef.current !== capturedEpoch) return;
-      const url = toAssetUrl(capturedFilePath);
       const workers = workersRef.current;
 
-      // メインスレッドで1回だけfetchし、WorkerにはArrayBufferを渡す（重複ネットワークアクセス回避）
-      let pdfBytes: ArrayBuffer;
-      try {
-        logger.log('[ThumbnailPanel] Fetching PDF for thumbnails:', url);
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
-        pdfBytes = await response.arrayBuffer();
-        logger.log('[ThumbnailPanel] PDF bytes loaded:', pdfBytes.byteLength, 'bytes');
-      } catch (e) {
-        console.error('[useThumbnailPanel] PDF fetch failed:', e);
-        // フォールバック: 従来通りURLを渡す
+      // pecoStore.originalBytes を再利用して二重 fetch を回避する。
+      // handleOpen がバックグラウンドで readFile 中の場合は subscribe で到着を待つ（最大 5 秒）。
+      const original = await waitForOriginalBytes(5000);
+      if (epochRef.current !== capturedEpoch) return;
+
+      if (original) {
+        // 重要: originalBytes 自体は保存処理で再利用するため、必ず slice() で複製してから transfer する
+        const pdfBytes = original.slice().buffer;
+
         const perWorkerPromises = workers.map((_, i) =>
           new Promise<boolean>(resolve => {
             loadResolvesRef.current[i] = resolve;
           })
         );
+
+        logger.log('[ThumbnailPanel] Posting LOAD_PDF (from originalBytes) to', workers.length, 'worker(s)');
         workers.forEach(worker => {
-          const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', url };
-          worker.postMessage(req);
+          const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', bytes: pdfBytes };
+          worker.postMessage(req, [pdfBytes]);
         });
-        Promise.all(perWorkerPromises).then(() => {
+
+        Promise.all(perWorkerPromises).then((results) => {
+          logger.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
           if (epochRef.current !== capturedEpoch) return;
           isPdfReadyRef.current = true;
           processThumbnailQueue(capturedEpoch);
@@ -323,44 +353,28 @@ export function useThumbnailPanel() {
         return;
       }
 
-      if (epochRef.current !== capturedEpoch) return;
-
+      // フォールバック: originalBytes が timeoutMs 内に到着しなかった場合は
+      // 従来通り URL を渡して Worker 側で fetch させる
+      console.warn('[useThumbnailPanel] originalBytes not ready within timeout, falling back to URL');
+      const url = toAssetUrl(capturedFilePath);
       const perWorkerPromises = workers.map((_, i) =>
         new Promise<boolean>(resolve => {
           loadResolvesRef.current[i] = resolve;
         })
       );
-
-      logger.log('[ThumbnailPanel] Posting LOAD_PDF to', workers.length, 'worker(s)');
       workers.forEach(worker => {
-        // Worker が1つなのでコピー不要 — 元の ArrayBuffer を直接 transfer
-        const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', bytes: pdfBytes };
-        worker.postMessage(req, [pdfBytes]);
+        const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', url };
+        worker.postMessage(req);
       });
-
-      Promise.all(perWorkerPromises).then((results) => {
-        logger.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
+      Promise.all(perWorkerPromises).then(() => {
         if (epochRef.current !== capturedEpoch) return;
         isPdfReadyRef.current = true;
         processThumbnailQueue(capturedEpoch);
       });
     };
 
-    // メインスレッドの1ページ目レンダ + テキスト抽出が落ち着いてから
-    // LOAD_PDF を送る。初期の asset protocol I/O + CPU 競合を避け、
-    // 「編集可能」までの体感時間を短縮する。
-    // タイムアウトを 2000ms に設定: アイドルが来なければ必ず実行。
-    logger.log(`[ThumbnailPanel] Scheduling worker load for ${capturedFilePath}`);
-    const runDeferredLoad = () => {
-      if (epochRef.current !== capturedEpoch) return;
-      if (prevFilePathRef.current !== capturedFilePath) return;
-      startWorkerLoad();
-    };
-    if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(runDeferredLoad, { timeout: 2000 });
-    } else {
-      setTimeout(runDeferredLoad, 1500);
-    }
+    logger.log(`[ThumbnailPanel] Starting worker load for ${capturedFilePath}`);
+    startWorkerLoad();
   }, [document?.filePath, processThumbnailQueue]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {

@@ -519,8 +519,13 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     }))
 
     // pecoStore を初期化（前テストの状態を引きずらない）
+    // hotfix: useThumbnailPanel は originalBytes 経路を使うので、ダミーバイトを設定しておく
     const { usePecoStore } = await import('../../store/pecoStore')
-    usePecoStore.setState({ document: null, currentPageIndex: 0 })
+    usePecoStore.setState({
+      document: null,
+      currentPageIndex: 0,
+      originalBytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]), // "%PDF"
+    })
   })
 
   afterEach(() => {
@@ -546,6 +551,8 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
         metadata: { title: undefined, author: undefined },
         pages: new Map(),
       } as any,
+      // hotfix: useThumbnailPanel が originalBytes 経路を使うため、毎回新しい dummy bytes を供給
+      originalBytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
     })
   }
 
