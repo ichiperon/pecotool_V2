@@ -22,7 +22,7 @@ import type { PecoDocument, PageData, TextBlock } from '../../types'
 
 const FONT_PATH = path.resolve(
   process.cwd(),
-  'public/fonts/IPAexGothic.ttf',
+  'public/fonts/IPAexGothic.woff2',
 )
 const FONT_EXISTS = fs.existsSync(FONT_PATH)
 

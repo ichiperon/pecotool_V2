@@ -93,7 +93,12 @@ export function useFileOperations(
             showToast('ファイルバイナリの読み込みに失敗しました。保存できない場合があります。', true);
           });
 
-        loadFontLazy();
+        // サムネ初回描画との帯域競合を避けるため、アイドル時間に暖機（保存時は await で再利用）
+        if (typeof requestIdleCallback === 'function') {
+          requestIdleCallback(() => { loadFontLazy(); }, { timeout: 3000 });
+        } else {
+          setTimeout(() => { loadFontLazy(); }, 1000);
+        }
         return true;
       }
       return false;

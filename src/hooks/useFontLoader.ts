@@ -12,7 +12,7 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
 
   fontLoadPromise = (async () => {
     try {
-      const res = await fetch('/fonts/IPAexGothic.ttf');
+      const res = await fetch('/fonts/IPAexGothic.woff2');
       if (res.ok) {
         fontBytesCache = await res.arrayBuffer();
         fontLoadPromise = null;

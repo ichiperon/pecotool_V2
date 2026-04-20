@@ -11,18 +11,3 @@ export type ThumbnailWorkerResponse =
   | { type: 'LOAD_ERROR'; message: string }
   | { type: 'THUMBNAIL_DONE'; pageIndex: number; bytes: Uint8Array }
   | { type: 'THUMBNAIL_ERROR'; pageIndex: number; error?: string };
-
-export type RasterizeRequest = {
-  type: 'RASTERIZE_PDF';
-  data: {
-    originalPdfBytes: Uint8Array;
-    documentState: unknown;
-    quality: number;
-    fontBytes?: ArrayBuffer;
-  };
-};
-
-export type RasterizeResponse =
-  | { type: 'RASTERIZE_PROGRESS'; current: number; total: number }
-  | { type: 'RASTERIZE_SUCCESS'; data: Uint8Array }
-  | { type: 'ERROR'; message: string };
