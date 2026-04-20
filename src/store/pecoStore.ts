@@ -392,19 +392,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       for (const [idx, page] of newPages.entries()) {
         newPages.set(idx, { ...page, textBlocks: [], isDirty: true });
       }
-      // 未ロードページ用にdocumentのtotalPagesを参照してダミーPageDataを作成
-      for (let i = 0; i < state.document.totalPages; i++) {
-        if (!newPages.has(i)) {
-          newPages.set(i, {
-            pageIndex: i,
-            width: 0,
-            height: 0,
-            textBlocks: [],
-            isDirty: true,
-            thumbnail: null,
-          });
-        }
-      }
+      // 未ロードページに対しては stub を撒かない。
+      // width:0 + isDirty:true のダミーを事前に作ると、後から loadPage が返した
+      // 実 OCR データが usePageNavigation の merge で空に塗り潰される恐れがある。
+      // 保存時はロード済みページのみ反映し、未ロードページは必要に応じて
+      // ユーザーが明示的に各ページを開いてから再度クリアする前提とする。
       return {
         document: { ...state.document, pages: newPages },
         isDirty: true,

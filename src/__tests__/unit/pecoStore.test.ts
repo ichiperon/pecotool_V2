@@ -621,7 +621,10 @@ describe('pecoStore', () => {
       expect(state.document!.pages.get(1)!.textBlocks).toHaveLength(0)
     })
 
-    it('U-PS-50: 未ロードページ用にスタブが作成される (totalPages=5, loaded=2)', () => {
+    it('U-PS-50: 未ロードページにはスタブを撒かない (totalPages=5, loaded=2)', () => {
+      // 旧挙動は未ロード全ページに width:0 + isDirty:true のダミーを撒いていたが、
+      // その空ダミーが後の loadPage 結果を usePageNavigation の merge で潰すため、
+      // 未ロードページはそのまま未ロードのままにする仕様へ変更した。
       const page0 = makePage({ pageIndex: 0 })
       const page2 = makePage({ pageIndex: 2 })
       const doc: PecoDocument = {
@@ -636,12 +639,14 @@ describe('pecoStore', () => {
       usePecoStore.getState().clearOcrAllPages()
 
       const pages = usePecoStore.getState().document!.pages
-      expect(pages.size).toBe(5)
-      for (let i = 0; i < 5; i++) {
-        expect(pages.has(i)).toBe(true)
-        expect(pages.get(i)!.textBlocks).toHaveLength(0)
-        expect(pages.get(i)!.isDirty).toBe(true)
-      }
+      expect(pages.size).toBe(2)
+      expect(pages.has(0)).toBe(true)
+      expect(pages.has(2)).toBe(true)
+      expect(pages.has(1)).toBe(false)
+      expect(pages.get(0)!.textBlocks).toHaveLength(0)
+      expect(pages.get(0)!.isDirty).toBe(true)
+      expect(pages.get(2)!.textBlocks).toHaveLength(0)
+      expect(pages.get(2)!.isDirty).toBe(true)
     })
 
     it('U-PS-51: clearOcrAllPages で undo/redo スタックがクリアされる', () => {

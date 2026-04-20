@@ -111,8 +111,12 @@ export function usePageNavigation({
           const currentDoc = usePecoStore.getState().document;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
           const existing = currentDoc.pages.get(pageIdx);
-          const mergedData = existing?.isDirty
-            ? { ...pageData, textBlocks: existing.textBlocks, isDirty: true }
+          // isDirty だけで保持すると、clearOcrAllPages の stub や width===0 の未ロード
+          // ダミーが空 textBlocks を抱えたまま loadPage の実データを破棄してしまう。
+          // 実ユーザー編集は textBlocks が非空である前提のため、ここで絞る。
+          const hasUserEdits = !!existing && existing.isDirty && existing.textBlocks.length > 0;
+          const mergedData = hasUserEdits
+            ? { ...pageData, textBlocks: existing!.textBlocks, isDirty: true }
             : pageData;
           updatePageData(pageIdx, mergedData, false);
 
@@ -150,7 +154,8 @@ export function usePageNavigation({
                   const st = usePecoStore.getState();
                   if (st.document?.filePath !== doc.filePath) return;
                   const ex = st.document.pages.get(i);
-                  const merged = ex?.isDirty ? { ...pd, textBlocks: ex.textBlocks, isDirty: true } : pd;
+                  const exHasUserEdits = !!ex && ex.isDirty && ex.textBlocks.length > 0;
+                  const merged = exHasUserEdits ? { ...pd, textBlocks: ex!.textBlocks, isDirty: true } : pd;
                   if (!ex || ex.width === 0) updatePageData(i, merged, false);
                 })
                 .catch(() => {});
@@ -196,7 +201,12 @@ export function usePageNavigation({
       // ページ切替・アンマウント時は進行中ロードを中止
       currentLoadAbortRef.current?.abort();
     };
-  }, [document?.filePath, document?.pages, currentPageIndex, loadCurrentPage]);
+    // document?.pages を依存から除外する理由:
+    // updatePageData が set() で新しい Map を生成する度に
+    // この effect が再実行され、cleanup の abort() が自分自身のロードを
+    // 毎回キャンセルするため、実データが updatePageData に到達しない。
+    // ページ読み込みトリガーは filePath と currentPageIndex の変化で十分。
+  }, [document?.filePath, currentPageIndex, loadCurrentPage]);
 
   const handlePageInputCommit = useCallback(() => {
     if (pageInputValue !== null && document) {
