@@ -1,5 +1,118 @@
 mod backup;
 
+/// PDF の /MediaBox (or /CropBox) を直接パースし、全ページの論理寸法を返す。
+/// pdfjs の getPage().getViewport() と比較して10倍以上高速。
+/// 各タプルは (width_pt, height_pt)。/Rotate 90/270 は swap 済み。
+/// パース不能ページは (0.0, 0.0) を返す。load 失敗時のみ Err を返す。
+#[tauri::command]
+async fn get_pdf_page_dimensions(file_path: String) -> Result<Vec<(f64, f64)>, String> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<(f64, f64)>, String> {
+        use lopdf::{Document, Object, ObjectId};
+
+        let doc = Document::load(&file_path)
+            .map_err(|e| format!("PDF load failed: {}", e))?;
+
+        // Page object から /MediaBox (fallback: /CropBox) を親 Pages ツリーに
+        // 遡って取得する。見つからなければ None。
+        fn find_box(doc: &Document, page_id: ObjectId) -> Option<[f64; 4]> {
+            let mut current = page_id;
+            // 循環参照対策に上限を設定
+            for _ in 0..32 {
+                let dict = match doc.get_object(current).and_then(|o| o.as_dict()) {
+                    Ok(d) => d,
+                    Err(_) => return None,
+                };
+                for key in ["MediaBox", "CropBox"] {
+                    if let Ok(obj) = dict.get(key.as_bytes()) {
+                        let resolved = match obj {
+                            Object::Reference(id) => doc.get_object(*id).ok(),
+                            other => Some(other),
+                        };
+                        if let Some(arr_obj) = resolved {
+                            if let Ok(arr) = arr_obj.as_array() {
+                                if arr.len() == 4 {
+                                    let parse = |o: &Object| -> Option<f64> {
+                                        match o {
+                                            Object::Integer(i) => Some(*i as f64),
+                                            Object::Real(r) => Some(*r as f64),
+                                            _ => None,
+                                        }
+                                    };
+                                    if let (Some(a), Some(b), Some(c), Some(d)) =
+                                        (parse(&arr[0]), parse(&arr[1]), parse(&arr[2]), parse(&arr[3]))
+                                    {
+                                        return Some([a, b, c, d]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 親へ遡る
+                match dict.get(b"Parent") {
+                    Ok(Object::Reference(parent_id)) => current = *parent_id,
+                    _ => return None,
+                }
+            }
+            None
+        }
+
+        // /Rotate を親ツリーに遡って取得。見つからなければ 0。
+        fn find_rotate(doc: &Document, page_id: ObjectId) -> i64 {
+            let mut current = page_id;
+            for _ in 0..32 {
+                let dict = match doc.get_object(current).and_then(|o| o.as_dict()) {
+                    Ok(d) => d,
+                    Err(_) => return 0,
+                };
+                if let Ok(obj) = dict.get(b"Rotate") {
+                    let resolved = match obj {
+                        Object::Reference(id) => doc.get_object(*id).ok(),
+                        other => Some(other),
+                    };
+                    if let Some(r) = resolved {
+                        match r {
+                            Object::Integer(i) => return *i,
+                            Object::Real(f) => return *f as i64,
+                            _ => {}
+                        }
+                    }
+                }
+                match dict.get(b"Parent") {
+                    Ok(Object::Reference(parent_id)) => current = *parent_id,
+                    _ => return 0,
+                }
+            }
+            0
+        }
+
+        let pages = doc.get_pages();
+        let mut dims: Vec<(f64, f64)> = Vec::with_capacity(pages.len());
+        // get_pages() は BTreeMap<u32, ObjectId> でページ番号順にソート済み
+        for (_page_no, page_id) in pages.iter() {
+            let bbox = match find_box(&doc, *page_id) {
+                Some(b) => b,
+                None => {
+                    dims.push((0.0, 0.0));
+                    continue;
+                }
+            };
+            let width = (bbox[2] - bbox[0]).abs();
+            let height = (bbox[3] - bbox[1]).abs();
+            let rotate = ((find_rotate(&doc, *page_id) % 360) + 360) % 360;
+            let (w, h) = if rotate == 90 || rotate == 270 {
+                (height, width)
+            } else {
+                (width, height)
+            };
+            dims.push((w, h));
+        }
+        Ok(dims)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
 #[tauri::command]
 async fn run_ocr(
     image_path: String,
@@ -171,6 +284,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             run_ocr,
+            get_pdf_page_dimensions,
             backup::save_backup,
             backup::check_pending_backups,
             backup::clear_backup,

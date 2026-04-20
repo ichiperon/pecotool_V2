@@ -30,14 +30,6 @@ vi.mock('../../utils/bitmapCache', () => ({
   clearBitmapCache: vi.fn(),
 }))
 
-// ── Mock usePrefetching: render 内で副作用を起こさない ──────────
-vi.mock('../../hooks/usePrefetching', () => ({
-  usePrefetching: () => ({
-    schedule: vi.fn(),
-    cancelAll: vi.fn(),
-  }),
-}))
-
 import { usePdfRendering } from '../../hooks/usePdfRendering'
 
 // ── Test helpers ───────────────────────────────────────────────

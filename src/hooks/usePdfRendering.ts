@@ -2,7 +2,6 @@ import { RefObject, useEffect, useRef, useState, MutableRefObject } from "react"
 import * as pdfjsLib from "pdfjs-dist";
 import { getCachedPageProxy } from "../utils/pdfLoader";
 import { getBitmapCache, setBitmapCache } from "../utils/bitmapCache";
-import { usePrefetching } from "./usePrefetching";
 
 interface UsePdfRenderingParams {
   pdfCanvasRef: RefObject<HTMLCanvasElement | null>;
@@ -30,7 +29,6 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     overlayCanvasRef,
     wrapperRef,
     filePath,
-    totalPages,
     pageIndex,
     zoom,
     onFirstRender,
@@ -44,8 +42,6 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-
-  const prefetch = usePrefetching();
 
   // PDFページの取得
   useEffect(() => {
@@ -81,8 +77,6 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   // PDFレンダリング
   useEffect(() => {
     if (!pdfPage || !pdfCanvasRef.current) return;
-
-    let cancelled = false;
 
     const renderPdf = async () => {
       const canvas = pdfCanvasRef.current!;
@@ -162,14 +156,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       }
 
       renderOverlaysRef.current?.();
-
-      prefetch.schedule({
-        filePath,
-        totalPages,
-        pageIndex,
-        zoom,
-        isCancelled: () => cancelled,
-      });
+      // prefetch は pdfjs worker のタスクキューを占有して現在ページ描画を遅延させるため廃止
     };
 
     const isPageChange = prevPdfPageRef.current !== pdfPage;
@@ -185,10 +172,8 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     }
 
     return () => {
-      cancelled = true;
       if (renderDebounceRef.current) clearTimeout(renderDebounceRef.current);
       renderTaskRef.current?.cancel();
-      prefetch.cancelAll();
     };
   }, [pdfPage, zoom]);
 

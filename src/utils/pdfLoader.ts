@@ -44,6 +44,8 @@ if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = buildPatchedWorkerUrl(PdfWorkerUrl);
 }
 
+// 主 pdfjs は bytes 直接渡し経路へ移行済み（`loadPDF(filePath, bytes)` 参照）。
+// この wrapper は URL fallback 経路および pdfjs 内部の font/cmap fetch で使用する。
 // Tauri asset protocol は Range Request (206) を返すが Accept-Ranges ヘッダーを含めない。
 // pdfjs-dist は Accept-Ranges: bytes ヘッダーが無いと Range 非対応と判定し、
 // PDF 全体をダウンロードしてから getDocument() を解決するため 210MB で 80 秒かかる。
@@ -104,19 +106,27 @@ export function prewarmPdfjsWorker(): void {
   task.promise.catch(() => {});
 }
 
-export async function loadPDF(filePath: string): Promise<PecoDocument> {
-  let url = convertFileSrc(filePath);
-  // Tauri v2 (Windows) は https://asset.localhost を使う。
-  // CSP で https も許可したが、古い環境との互換性のために startsWith チェックを維持。
-  if (url.startsWith('asset.localhost')) {
-    url = 'http://' + url;
+export async function loadPDF(filePath: string, bytes?: Uint8Array): Promise<PecoDocument> {
+  // bytes が渡された場合は asset protocol をバイパスして data ベースで開く（安定・高速）。
+  // bytes が無ければ従来の URL ベース（後方互換）にフォールバックする。
+  let source: string | Uint8Array;
+  if (bytes) {
+    source = bytes;
+  } else {
+    let url = convertFileSrc(filePath);
+    // Tauri v2 (Windows) は https://asset.localhost を使う。
+    // CSP で https も許可したが、古い環境との互換性のために startsWith チェックを維持。
+    if (url.startsWith('asset.localhost')) {
+      url = 'http://' + url;
+    }
+    source = url;
   }
 
   // getDocument の結果を globalSharedPdfProxy に直接格納することで
   // 後続の getSharedPdfProxy が2回目の getDocument を呼ばないようにする
   destroySharedPdfProxy();
   const loadId = ++globalLoadId;
-  const promise = getDocumentTask(url).promise;
+  const promise = getDocumentTask(source).promise;
   globalSharedPdfProxy = { filePath, promise, loadId };
 
   // stat と getDocument を並列実行（statは通常先に完了する）
@@ -178,7 +188,10 @@ export async function openPDF(filePath: string): Promise<pdfjsLib.PDFDocumentPro
  * so concurrent renders in PdfCanvas will not conflict.
  * Caller is responsible for calling pdf.destroy() when done.
  */
-export async function openFreshPdfDoc(filePath: string): Promise<pdfjsLib.PDFDocumentProxy> {
+export async function openFreshPdfDoc(filePath: string, bytes?: Uint8Array): Promise<pdfjsLib.PDFDocumentProxy> {
+  if (bytes) {
+    return getDocumentTask(bytes).promise;
+  }
   let url = convertFileSrc(filePath);
   if (url.startsWith('asset.localhost')) {
     url = 'http://' + url;
@@ -206,17 +219,23 @@ function evictPageProxyCache() {
   }
 }
 
-export async function getSharedPdfProxy(filePath: string): Promise<pdfjsLib.PDFDocumentProxy> {
+export async function getSharedPdfProxy(filePath: string, bytes?: Uint8Array): Promise<pdfjsLib.PDFDocumentProxy> {
   if (globalSharedPdfProxy?.filePath === filePath) {
     return globalSharedPdfProxy.promise;
   }
   destroySharedPdfProxy();
   const loadId = ++globalLoadId;
-  let url = convertFileSrc(filePath);
-  if (url.startsWith('asset.localhost')) {
-    url = 'http://' + url;
+  let source: string | Uint8Array;
+  if (bytes) {
+    source = bytes;
+  } else {
+    let url = convertFileSrc(filePath);
+    if (url.startsWith('asset.localhost')) {
+      url = 'http://' + url;
+    }
+    source = url;
   }
-  const promise = getDocumentTask(url).promise;
+  const promise = getDocumentTask(source).promise;
   globalSharedPdfProxy = { filePath, promise, loadId };
   return promise;
 }

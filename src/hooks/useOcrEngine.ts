@@ -124,7 +124,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     }
 
     setIsOcrRunning(true);
-    const ocrPdf = await openFreshPdfDoc(doc.filePath);
+    const ocrPdf = await openFreshPdfDoc(doc.filePath, usePecoStore.getState().originalBytes ?? undefined);
     try {
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
       const result = await runOcrForPage(ocrPdf, doc.filePath, pageIdx, pageData.width, pageData.height);
@@ -173,7 +173,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     setIsOcrRunning(true);
     setOcrProgress({ current: 0, total: doc.totalPages });
 
-    const ocrPdf = await openFreshPdfDoc(doc.filePath);
+    const ocrPdf = await openFreshPdfDoc(doc.filePath, usePecoStore.getState().originalBytes ?? undefined);
     try {
       for (let i = 0; i < doc.totalPages; i++) {
         if (cancelTokenRef.current) break;

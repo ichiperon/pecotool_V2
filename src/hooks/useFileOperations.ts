@@ -65,33 +65,23 @@ export function useFileOperations(
       if (selected && typeof selected === 'string') {
         setIsLoadingFile?.(true);
 
-        // readFile（保存用バイナリ）はバックグラウンドで開始。表示には不要なので待たない。
-        const readFilePromise = readFile(selected);
-
         try {
-          // loadPDF が完了した時点で即座に表示開始
-          const doc = await loadPDF(selected);
-          setDocument(doc); // bytes なしで表示 → UIが即座に反応する
+          // bytes ベース読み込み: readFile を先に完了させてから pdfjs に data 直接渡し。
+          // asset protocol の I/O を完全バイパスし、Range fetch や Accept-Ranges 補正も不要。
+          // 200p (~100MB) で readFile は 500ms-1s 程度の追加時間だが pdfjs パースが高速化される。
+          const content = await readFile(selected);
+          const bytes = new Uint8Array(content);
+
+          // originalBytes を setDocument 前に書き込んでおく。保存パスが参照可能になる。
+          usePecoStore.getState().setOriginalBytes(bytes);
+
+          const doc = await loadPDF(selected, bytes);
+          setDocument(doc);
           addToRecent(selected);
           onOpenComplete?.(doc);
         } finally {
           setIsLoadingFile?.(false);
         }
-
-        // readFile はバックグラウンドで継続し、完了後に originalBytes を更新
-        // capturedPath で「このファイルが今も表示中か」を確認してから書き込む（競合防止）
-        const capturedPath = selected;
-        readFilePromise
-          .then(content => {
-            const state = usePecoStore.getState();
-            if (state.document?.filePath === capturedPath) {
-              state.setOriginalBytes(new Uint8Array(content));
-            }
-          })
-          .catch(err => {
-            console.error('[handleOpen] readFile failed:', err);
-            showToast('ファイルバイナリの読み込みに失敗しました。保存できない場合があります。', true);
-          });
 
         // サムネ初回描画との帯域競合を避けるため、アイドル時間に暖機（保存時は await で再利用）
         if (typeof requestIdleCallback === 'function') {

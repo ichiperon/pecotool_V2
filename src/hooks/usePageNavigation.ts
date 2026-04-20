@@ -95,6 +95,8 @@ export function usePageNavigation({
       triggerThumbnailLoad();
 
       // テキスト抽出はバックグラウンドで実行（レンダリングをブロックしない）
+      // prefetch (±1/±2 ページの proxy 取得・loadPage) は pdfjs worker のタスクキューを
+      // 占有して現在ページの描画/テキスト抽出を遅延させるため廃止。現在ページのみロードする。
       loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime)
         .then((pageData) => {
           if (signal.aborted) return;
@@ -110,53 +112,6 @@ export function usePageNavigation({
             ? { ...pageData, textBlocks: existing!.textBlocks, isDirty: true }
             : pageData;
           updatePageData(pageIdx, mergedData, false);
-
-          // ページプロキシ＋データを段階的にプリフェッチ（Worker飽和回避）
-          // Step 1: ±1ページのプロキシのみ即座にキャッシュ
-          for (const offset of [1, -1]) {
-            if (signal.aborted) return;
-            const i = pageIdx + offset;
-            if (i >= 0 && i < doc.totalPages) {
-              getCachedPageProxy(doc.filePath, i).catch(() => {});
-            }
-          }
-          // Step 2: idle時に±3プロキシ + ±2ページデータをプリフェッチ
-          const idleCb = () => {
-            if (signal.aborted) return;
-            const s = usePecoStore.getState();
-            if (!s.document || s.document.filePath !== doc.filePath) return;
-            for (let offset = -3; offset <= 3; offset++) {
-              if (signal.aborted) return;
-              const i = pageIdx + offset;
-              if (i >= 0 && i < doc.totalPages && Math.abs(offset) > 1) {
-                getCachedPageProxy(doc.filePath, i).catch(() => {});
-              }
-            }
-            // ±2ページデータのプリフェッチ（未ロードのみ）
-            for (const offset of [1, -1, 2, -2]) {
-              if (signal.aborted) return;
-              const i = pageIdx + offset;
-              if (i < 0 || i >= doc.totalPages) continue;
-              const existing = s.document?.pages.get(i);
-              if (existing && existing.width > 0) continue;
-              loadPage(pdf, i, doc.filePath, bboxMetaRef.current, doc.mtime)
-                .then((pd) => {
-                  if (signal.aborted) return;
-                  const st = usePecoStore.getState();
-                  if (st.document?.filePath !== doc.filePath) return;
-                  const ex = st.document.pages.get(i);
-                  const exHasUserEdits = !!ex && ex.isDirty && ex.textBlocks.length > 0;
-                  const merged = exHasUserEdits ? { ...pd, textBlocks: ex!.textBlocks, isDirty: true } : pd;
-                  if (!ex || ex.width === 0) updatePageData(i, merged, false);
-                })
-                .catch(() => {});
-            }
-          };
-          if ('requestIdleCallback' in window) {
-            requestIdleCallback(idleCb);
-          } else {
-            setTimeout(idleCb, 200);
-          }
         })
         .catch((err) => {
           if (signal.aborted) return;
