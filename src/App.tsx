@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 import {
   usePecoStore,
@@ -41,11 +41,21 @@ import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 // Components
 import { Toolbar } from "./components/Toolbar/Toolbar";
 import { MenuBar } from "./components/MenuBar/MenuBar";
-import { ConsolePanel } from "./components/Console/ConsolePanel";
-import { OcrSettingsModal } from "./components/OcrSettingsModal";
-import { BackupRestoreDialog } from "./components/BackupRestoreDialog";
 import { HelpMenu } from "./components/HelpMenu";
-import { HelpModal } from "./components/HelpModal";
+
+// Lazy-loaded modal/dialog components: 初回描画に不要なため code-split
+const OcrSettingsModal = lazy(() =>
+  import("./components/OcrSettingsModal").then(m => ({ default: m.OcrSettingsModal }))
+);
+const BackupRestoreDialog = lazy(() =>
+  import("./components/BackupRestoreDialog").then(m => ({ default: m.BackupRestoreDialog }))
+);
+const HelpModal = lazy(() =>
+  import("./components/HelpModal").then(m => ({ default: m.HelpModal }))
+);
+const ConsolePanel = lazy(() =>
+  import("./components/Console/ConsolePanel").then(m => ({ default: m.ConsolePanel }))
+);
 
 function App() {
   // 細粒度selectorで購読: 各state変化が独立してComponentに伝わる
@@ -277,19 +287,29 @@ function App() {
 
       {/* バックアップ復元ダイアログ */}
       {pendingBackups.length > 0 && (
-        <BackupRestoreDialog
-          backups={pendingBackups}
-          onRestore={handleRestoreBackup}
-          onDiscard={handleDiscardBackup}
-          onClose={() => setPendingBackups([])}
-          processingFilePath={processingBackupPath}
-        />
+        <Suspense fallback={null}>
+          <BackupRestoreDialog
+            backups={pendingBackups}
+            onRestore={handleRestoreBackup}
+            onDiscard={handleDiscardBackup}
+            onClose={() => setPendingBackups([])}
+            processingFilePath={processingBackupPath}
+          />
+        </Suspense>
       )}
 
       {/* ヘルプモーダル */}
-      {showOcrSettings && <OcrSettingsModal onClose={() => setShowOcrSettings(false)} />}
+      {showOcrSettings && (
+        <Suspense fallback={null}>
+          <OcrSettingsModal onClose={() => setShowOcrSettings(false)} />
+        </Suspense>
+      )}
 
-      <HelpModal helpModal={helpModal} onClose={() => setHelpModal(null)} />
+      {helpModal && (
+        <Suspense fallback={null}>
+          <HelpModal helpModal={helpModal} onClose={() => setHelpModal(null)} />
+        </Suspense>
+      )}
 
       <MenuBar
         document={document}
@@ -396,7 +416,9 @@ function App() {
       </main>
 
       {showConsole && (
-        <ConsolePanel logs={logs} onClear={clearLogs} onClose={() => setShowConsole(false)} endRef={consoleEndRef} />
+        <Suspense fallback={null}>
+          <ConsolePanel logs={logs} onClear={clearLogs} onClose={() => setShowConsole(false)} endRef={consoleEndRef} />
+        </Suspense>
       )}
 
       <footer className="status-bar">

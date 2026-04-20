@@ -8,7 +8,7 @@ import type { ThumbnailWorkerRequest, ThumbnailWorkerResponse } from '../utils/t
 // メインスレッドのブロックを回避する。
 // ThumbnailWindow.tsx と同じ Worker プール方式を採用。
 
-const NUM_WORKERS = 1;
+const NUM_WORKERS = 2;
 const CONCURRENCY = 4;
 const BATCH_FLUSH_MS = 50;
 
@@ -329,9 +329,6 @@ export function useThumbnailPanel() {
       if (epochRef.current !== capturedEpoch) return;
 
       if (original) {
-        // 重要: originalBytes 自体は保存処理で再利用するため、必ず slice() で複製してから transfer する
-        const pdfBytes = original.slice().buffer;
-
         const perWorkerPromises = workers.map((_, i) =>
           new Promise<boolean>(resolve => {
             loadResolvesRef.current[i] = resolve;
@@ -340,6 +337,9 @@ export function useThumbnailPanel() {
 
         logger.log('[ThumbnailPanel] Posting LOAD_PDF (from originalBytes) to', workers.length, 'worker(s)');
         workers.forEach(worker => {
+          // 重要: originalBytes 自体は保存処理で再利用するため、必ず slice() で複製してから transfer する。
+          // さらに transfer は所有権移転のため、worker 1 台につき 1 回 slice() で独立した ArrayBuffer を生成する。
+          const pdfBytes = original.slice().buffer;
           const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', bytes: pdfBytes };
           worker.postMessage(req, [pdfBytes]);
         });

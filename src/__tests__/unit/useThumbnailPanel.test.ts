@@ -625,9 +625,9 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
       result.current.requestThumbnail(2)
     })
     await flush()
-    const w0 = createdWorkers[0]
+    // NUM_WORKERS=2 では pageIndex % workers.length で分散されるため全 worker を flush する
     act(() => {
-      w0.flushAllThumbnails()
+      createdWorkers.forEach(w => w.flushAllThumbnails())
     })
     await flush()
 
@@ -668,14 +668,14 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     await setDoc('/path/B.pdf', 5)
     await flush()
 
-    const wB = createdWorkers[createdWorkers.length - 1]
     // B でページ 0 をリクエストして即応答
     act(() => {
       result.current.requestThumbnail(0)
     })
     await flush()
+    // NUM_WORKERS=2 では pageIndex で分散されるため全 worker を flush する
     act(() => {
-      wB.flushAllThumbnails()
+      createdWorkers.forEach(w => w.flushAllThumbnails())
     })
     await flush()
 

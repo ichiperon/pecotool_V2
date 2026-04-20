@@ -5,6 +5,17 @@ import { prewarmPdfjsWorker } from "./utils/pdfLoader";
 // PDF.js Worker を React レンダー前に起動（初回ファイル読込の高速化）
 prewarmPdfjsWorker();
 
+// pdf-lib chunk を idle 時間に先読みし、保存時の初動を速くする
+// (vite.config の manualChunks で別 chunk 化されているため、dynamic import で
+//  バンドルキャッシュに載せておくと、後続の pdfSaver からの読み込みが即時解決される)
+if (typeof requestIdleCallback === 'function') {
+  requestIdleCallback(() => {
+    import('@cantoo/pdf-lib').catch(() => {});
+  }, { timeout: 5000 });
+} else {
+  setTimeout(() => { import('@cantoo/pdf-lib').catch(() => {}); }, 2000);
+}
+
 const hash = window.location.hash;
 
 const LazyApp = React.lazy(() => import("./App"));
