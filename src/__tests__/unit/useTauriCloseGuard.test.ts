@@ -96,4 +96,63 @@ describe('useTauriCloseGuard', () => {
       expect(waitSpy).toBeDefined() // sanity: spy は機能している
     })
   })
+
+  describe('堅牢化: × 閉じ不能防止フロー', () => {
+    it('ask が 8 秒以上返らなくても main destroy が呼ばれる (タイムアウト → close 続行)', async () => {
+      vi.useFakeTimers()
+      try {
+        pecoStoreModule.usePecoStore.setState({ isDirty: true, document: null })
+
+        // ask は永遠に解決しない
+        m.ask.mockImplementationOnce(() => new Promise(() => {}))
+        // getAllWindows は main のみ返す (子 destroy ループはスキップ)
+        m.getAllWindows.mockResolvedValueOnce([{ label: 'main', destroy: m.destroyWindow }])
+
+        renderHook(() => useTauriCloseGuard())
+        await Promise.resolve()
+        await Promise.resolve()
+        await Promise.resolve()
+
+        const closeHandler = m.onCloseRequested.mock.calls[0]?.[0]
+        expect(typeof closeHandler).toBe('function')
+
+        const fakeEvent = { preventDefault: vi.fn() }
+        const handlerPromise = (closeHandler as any)(fakeEvent)
+
+        // ask の 8 秒タイムアウト + main destroy の 1 秒タイムアウト枠を進める
+        await vi.advanceTimersByTimeAsync(8000)
+        await vi.advanceTimersByTimeAsync(1000)
+        await handlerPromise
+
+        expect(fakeEvent.preventDefault).toHaveBeenCalled()
+        // ask タイムアウトは「閉じてよい」扱いで main destroy に到達する
+        expect(m.destroyWindow).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('ユーザーが cancel したら main destroy は呼ばれない', async () => {
+      // このテストは real timers で動かす (ask が同期的に false を返すので timers 不要)
+      pecoStoreModule.usePecoStore.setState({ isDirty: true, document: null })
+
+      m.ask.mockResolvedValueOnce(false)
+
+      renderHook(() => useTauriCloseGuard())
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      const closeHandler = m.onCloseRequested.mock.calls[0]?.[0]
+      expect(typeof closeHandler).toBe('function')
+
+      const fakeEvent = { preventDefault: vi.fn() }
+      await (closeHandler as any)(fakeEvent)
+
+      expect(fakeEvent.preventDefault).toHaveBeenCalled()
+      expect(m.ask).toHaveBeenCalled()
+      // cancel 時は main destroy も子 destroy も発生しない
+      expect(m.destroyWindow).not.toHaveBeenCalled()
+    })
+  })
 })
