@@ -476,6 +476,7 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
   let originalCreate: any
   let originalRevoke: any
   let originalFetch: any
+  let originalRequestIdleCallback: any
 
   beforeEach(async () => {
     createdWorkers.length = 0
@@ -486,6 +487,14 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     // Worker をモックで差し替え
     originalWorker = (globalThis as any).Worker
     ;(globalThis as any).Worker = MockThumbnailWorker
+
+    // LOAD_PDF は requestIdleCallback 経由で遅延されるため、
+    // テストでは即時実行するモックを差し込む。
+    originalRequestIdleCallback = (globalThis as any).requestIdleCallback
+    ;(globalThis as any).requestIdleCallback = (cb: () => void) => {
+      queueMicrotask(() => cb())
+      return 0 as any
+    }
 
     // URL.createObjectURL / revokeObjectURL を spy
     originalCreate = (URL as any).createObjectURL
@@ -519,6 +528,11 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     ;(URL as any).createObjectURL = originalCreate
     ;(URL as any).revokeObjectURL = originalRevoke
     ;(globalThis as any).fetch = originalFetch
+    if (originalRequestIdleCallback === undefined) {
+      delete (globalThis as any).requestIdleCallback
+    } else {
+      ;(globalThis as any).requestIdleCallback = originalRequestIdleCallback
+    }
   })
 
   /** ストアにダミードキュメントを設定する */

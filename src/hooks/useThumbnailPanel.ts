@@ -346,9 +346,21 @@ export function useThumbnailPanel() {
       });
     };
 
-    // ファイル切替直後に即時ロード開始（deferred mode廃止: race condition排除）
-    logger.log(`[ThumbnailPanel] Starting worker load for ${capturedFilePath}`);
-    startWorkerLoad();
+    // メインスレッドの1ページ目レンダ + テキスト抽出が落ち着いてから
+    // LOAD_PDF を送る。初期の asset protocol I/O + CPU 競合を避け、
+    // 「編集可能」までの体感時間を短縮する。
+    // タイムアウトを 2000ms に設定: アイドルが来なければ必ず実行。
+    logger.log(`[ThumbnailPanel] Scheduling worker load for ${capturedFilePath}`);
+    const runDeferredLoad = () => {
+      if (epochRef.current !== capturedEpoch) return;
+      if (prevFilePathRef.current !== capturedFilePath) return;
+      startWorkerLoad();
+    };
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(runDeferredLoad, { timeout: 2000 });
+    } else {
+      setTimeout(runDeferredLoad, 1500);
+    }
   }, [document?.filePath, processThumbnailQueue]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {

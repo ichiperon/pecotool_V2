@@ -55,26 +55,17 @@ export function usePageNavigation({
       if (signal.aborted) return;
 
       // bboxMetaが未取得の場合、1ページ目表示をブロックせずバックグラウンドで取得する。
+      // 取得した meta は bboxMetaRef.current に保持し、以降の loadPage 呼び出し
+      // (行 107, 151) で利用する。
+      // 注意: 200 ページ級 PDF で全ページ loadPage を forEach で発火すると
+      //       getTextContent() が単一 pdfjs worker に 200 件同時投入され、
+      //       現在ページ含む全 getTextContent が順番待ちで詰まる。
+      //       そのため先行一括ロードは行わず、実際にそのページを表示・プリフェッチ
+      //       する時 (ナビゲーション時の ±1/±2 プリフェッチ経由) に限定する。
       if (bboxMetaRef.current === undefined) {
         bboxMetaRef.current = null;
         loadPecoToolBBoxMeta(pdf).then((meta) => {
           bboxMetaRef.current = meta;
-          if (!meta) return;
-          if (signal.aborted) return;
-          const state = usePecoStore.getState();
-          if (!state.document || state.document.filePath !== doc.filePath) return;
-          // bboxMeta到着後は全ページを再ロードしてOCRテキストを先行表示する
-          state.document.pages.forEach((pageData, i) => {
-            if (signal.aborted) return;
-            if (pageData.isDirty) return;
-            loadPage(pdf, i, doc.filePath, meta, doc.mtime)
-              .then((pd) => {
-                if (signal.aborted) return;
-                const s = usePecoStore.getState();
-                if (s.document?.filePath === doc.filePath) updatePageData(i, pd, false);
-              })
-              .catch(() => {});
-          });
         }).catch(() => {});
       }
 

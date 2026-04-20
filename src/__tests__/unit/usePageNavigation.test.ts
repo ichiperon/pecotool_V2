@@ -1,14 +1,17 @@
 /**
- * S-01-04 / S-01-05: usePageNavigation の bboxMeta 全ページ再ロード回帰テスト
+ * S-01-04 / S-01-05: usePageNavigation の bboxMeta 全ページ先行ロード「廃止」検証
+ *
+ * 背景:
+ *  200 ページ級 PDF で bboxMeta 取得直後に forEach で全ページ loadPage を発火すると
+ *  getTextContent() が単一 pdfjs worker に同時投入され、現在ページ含む全ての
+ *  getTextContent が順番待ちで詰まり「編集可能になるまで / 次ページ遷移」が遅延する。
+ *  修正により bboxMeta 取得後の全ページ一括 loadPage は廃止され、ページテキスト抽出は
+ *  実際にそのページを表示する時 (currentPage 初回 + ±1/±2 プリフェッチ) に限定される。
  *
  * 検証対象:
- *  - bboxMeta 取得後に document.pages.size 回 loadPage が forEach で発火されること
- *  - 途中で signal.aborted=true になったら以降の loadPage が skip されること
- *
- * 注意: ページ寸法プリフェッチや requestIdleCallback 内のプリフェッチも loadPage を
- *       呼ぶため、本テストでは「初回 currentPage の loadPage」と「全ページ再ロードの
- *       loadPage」を pdf 引数の identity で見分ける。pageNavigation の loadPage は
- *       常に同じ pdf proxy を渡すので、pageIndex の集合で検証する。
+ *  - bboxMeta 取得後に「全ページ」への loadPage 発火が起きないこと
+ *  - bboxMetaRef は後続 loadPage 呼び出しで使えるよう保持されること
+ *  - unmount 後の bboxMeta resolve で追加 loadPage が発火しないこと (既存挙動維持)
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
@@ -75,10 +78,10 @@ beforeEach(() => {
   }
 })
 
-describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火', () => {
-  it('document.pages.size === 5 のとき loadPage が ≥5 回呼ばれ、全 pageIndex を網羅', async () => {
+describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火しないこと (バルク pre-load 廃止)', () => {
+  it('document.pages.size === 5 のとき bboxMeta 取得後も全ページ loadPage は起きない', async () => {
     const TOTAL = 5
-    // 全ページを width=0 ダミーで populate（forEach 対象 + loadCurrentPage 発火条件）
+    // 全ページを width=0 ダミーで populate（かつてのバルク forEach 対象）
     const pages = new Map<number, PageData>()
     for (let i = 0; i < TOTAL; i++) pages.set(i, makeDummyPage(i))
     const doc: PecoDocument = {
@@ -117,25 +120,34 @@ describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火', () => 
       })
     )
 
-    // bboxMeta forEach が走るまで待機（全ページ 0..4 が呼ばれること）
+    // 初回 currentPage(0) の loadPage が呼ばれることを待つ
     await waitFor(() => {
-      const calledIdxs = new Set(
-        loadPageMock.mock.calls.map((c) => c[1] as number)
-      )
-      for (let i = 0; i < TOTAL; i++) {
-        expect(calledIdxs.has(i)).toBe(true)
-      }
+      const calledIdxs = loadPageMock.mock.calls.map((c) => c[1] as number)
+      expect(calledIdxs).toContain(0)
     })
 
-    // currentPage(0) の初回 loadPage と forEach の 5 ページ分で
-    // pageIndex 0 への loadPage は複数回呼ばれる可能性がある。
-    // forEach での全ページ網羅が満たせていれば S-01-04 は成立。
+    // bboxMeta resolve 完了を待つために microtask を複数進める
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // requestIdleCallback は削除済みなので ±2 プリフェッチ (setTimeout 200ms) も
+    // 走らない。よって呼ばれる loadPage は currentPage(0) のみとなるはず。
+    // 旧挙動のバルク forEach があれば idx=1,2,3,4 も呼ばれるが、それを起こさないのが本修正。
+    const calledIdxs = new Set(
+      loadPageMock.mock.calls.map((c) => c[1] as number)
+    )
+    expect(calledIdxs.has(0)).toBe(true)
+    // 全ページ一括ロードは発生しない: 2,3,4 は currentPage でも ±1 プリフェッチでもない
+    expect(calledIdxs.has(2)).toBe(false)
+    expect(calledIdxs.has(3)).toBe(false)
+    expect(calledIdxs.has(4)).toBe(false)
   })
 
-  it('isDirty=true なページは forEach 内で skip される', async () => {
+  it('bboxMeta 取得後も isDirty=true なページ / 未ナビゲートページへの loadPage は発火しない', async () => {
     const TOTAL = 3
     // currentPage(0) は width=0 ダミーで loadCurrentPage 発火条件を満たす。
-    // 1 番ページは isDirty=true → forEach で skip されること。
+    // 1 番ページは isDirty=true → バルク廃止後はいずれにせよ触らない。
     const doc: PecoDocument = {
       filePath: 'test.pdf',
       fileName: 'test.pdf',
@@ -144,7 +156,7 @@ describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火', () => 
       mtime: 1234,
       pages: new Map<number, PageData>([
         [0, makeDummyPage(0, false)],
-        [1, makePage(1, true)], // dirty → forEach で skip
+        [1, makePage(1, true)], // dirty: バルク廃止後も当然 skip
         [2, makeDummyPage(2, false)],
       ]),
     }
@@ -169,25 +181,26 @@ describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火', () => 
       })
     )
 
-    // forEach での dirty スキップを観察するため少し待機
+    // 初回 currentPage(0) のロードのみ観察
     await waitFor(() => {
-      // 初回 currentPage(0) の loadPage は呼ばれている
       const calledIdxs = loadPageMock.mock.calls.map((c) => c[1] as number)
       expect(calledIdxs).toContain(0)
-      expect(calledIdxs).toContain(2)
     })
 
-    // forEach 内で pageIndex=1 (isDirty=true) は呼ばれない。
-    // ただし currentPage 初回ロード(0) と forEach の 0,2 だけが想定。
-    // 1 が forEach で呼ばれないことを確認。
-    // (currentPage が 1 ではないため、初回 currentPage ロードでも 1 は呼ばれない)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
     const calledIdxs = loadPageMock.mock.calls.map((c) => c[1] as number)
+    // バルク廃止後: currentPage=0 だけが loadPage される
+    // （dirty の 1 も、未ナビゲートの 2 も対象外）
     expect(calledIdxs).not.toContain(1)
+    expect(calledIdxs).not.toContain(2)
   })
 })
 
-describe('S-01-05: signal.aborted で以降の loadPage が skip', () => {
-  it('bboxMeta resolve 前にアンマウント → forEach 内 loadPage が呼ばれない', async () => {
+describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage は発火しない', () => {
+  it('bboxMeta resolve 前にアンマウント → 追加 loadPage が呼ばれない', async () => {
     const TOTAL = 4
     const pages = new Map<number, PageData>()
     for (let i = 0; i < TOTAL; i++) pages.set(i, makeDummyPage(i))
@@ -235,14 +248,14 @@ describe('S-01-05: signal.aborted で以降の loadPage が skip', () => {
     // アンマウント → controller.abort() がクリーンアップで呼ばれる
     unmount()
 
-    // bboxMeta を後から resolve しても forEach 内の loadPage は signal.aborted で全て skip される
+    // bboxMeta を後から resolve しても、バルク廃止により追加 loadPage は起こらない
     resolveMeta({ '0': [], '1': [], '2': [], '3': [] })
     // promise 連鎖を解消するため複数 microtask を進める
     await Promise.resolve()
     await Promise.resolve()
     await Promise.resolve()
 
-    // forEach の loadPage は1度も追加で呼ばれていないこと
+    // 追加 loadPage は 1 度も呼ばれていないこと
     expect(loadPageMock.mock.calls.length).toBe(callsBeforeAbort)
   })
 })
