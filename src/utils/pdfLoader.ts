@@ -82,7 +82,9 @@ function getDocumentTask(urlOrData: string | Uint8Array) {
     cMapPacked: CMAP_PACKED,
     standardFontDataUrl: STANDARD_FONT_DATA_URL,
     disableAutoFetch: true,
-    disableStream: false,
+    // Tauri asset protocol の background stream 占有を避けるため true。
+    // Range は patch/wrapper で Accept-Ranges を注入しているので on-demand でも動作する。
+    disableStream: true,
     disableRange: false,
   };
 
