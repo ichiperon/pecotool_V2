@@ -44,6 +44,33 @@ if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = buildPatchedWorkerUrl(PdfWorkerUrl);
 }
 
+// getDocument() は毎回 PDFWorker を新規 spawn する仕様のため、ファイル切替の
+// たびに WebView2 のワーカーハンドル / Blob URL / asset protocol 接続が累積する。
+// 数十回の開閉後に新規 Worker の import が破綻して PDF が開けなくなる症状を避けるため、
+// モジュールレベルで単一の PDFWorker を保持し全 getDocument で共有する。
+// destroySharedPdfProxy() は PDFDocumentProxy のみ destroy し、この Worker は破棄しない。
+let sharedPdfWorker: pdfjsLib.PDFWorker | null = null;
+function getSharedPdfWorker(): pdfjsLib.PDFWorker | undefined {
+  if (sharedPdfWorker && !sharedPdfWorker.destroyed) return sharedPdfWorker;
+  // テスト環境 (vi.mock) では PDFWorker プロパティが存在せず、アクセス自体で
+  // vitest が throw する。try/catch 内で参照 + 型チェックすることで安全に
+  // 「モック環境 = 共有 Worker 不使用 = getDocument に auto-spawn させる」に倒す。
+  try {
+    const PDFWorkerCtor = (pdfjsLib as { PDFWorker?: typeof pdfjsLib.PDFWorker }).PDFWorker;
+    if (typeof PDFWorkerCtor !== 'function') return undefined;
+    // pdfjs-dist の .d.ts が JSDoc 由来のバグで `name?: null | undefined` と
+    // 過剰に狭く型付けされているため、実行時にはサポートされている string を
+    // 渡すために一段緩めてキャストする。
+    const params = { name: 'peco-shared-pdf-worker' } as unknown as ConstructorParameters<typeof PDFWorkerCtor>[0];
+    sharedPdfWorker = new PDFWorkerCtor(params);
+    return sharedPdfWorker;
+  } catch (e) {
+    logger.warn('[pdfLoader] PDFWorker 参照/生成失敗。auto-spawn にフォールバック:', e);
+    sharedPdfWorker = null;
+    return undefined;
+  }
+}
+
 // Tauri asset protocol は Range Request (206) を返すが Accept-Ranges ヘッダーを含めない。
 // pdfjs-dist は Accept-Ranges: bytes ヘッダーが無いと Range 非対応と判定し、
 // PDF 全体をダウンロードしてから getDocument() を解決するため 210MB で 80 秒かかる。
@@ -94,13 +121,21 @@ function getDocumentTask(urlOrData: string | Uint8Array) {
     config.data = urlOrData.slice();
   }
 
+  // 共有 Worker を渡せた場合のみ worker オプションを設定（テスト環境では undefined）
+  const worker = getSharedPdfWorker();
+  if (worker) config.worker = worker;
+
   return pdfjsLib.getDocument(config);
 }
 
 // アプリ起動直後にworkerを起動しておく（初回PDF読込を高速化）
 // 不正なPDFデータで呼ぶためworker側でエラーになるが、プロセス起動は完了する
 export function prewarmPdfjsWorker(): void {
-  const task = pdfjsLib.getDocument({ data: new Uint8Array([0x25, 0x50, 0x44, 0x46]) }); // "%PDF"
+  // 共有 Worker を早期に起動してハンドシェイクを完了させる
+  const worker = getSharedPdfWorker();
+  const config: DocumentInitParameters = { data: new Uint8Array([0x25, 0x50, 0x44, 0x46]) }; // "%PDF"
+  if (worker) config.worker = worker;
+  const task = pdfjsLib.getDocument(config);
   task.promise.catch(() => {});
 }
 

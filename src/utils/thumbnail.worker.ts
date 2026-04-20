@@ -58,6 +58,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 
 let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
 let loadPromise: Promise<void> | null = null;
+// 進行中の getDocument タスク。新 LOAD_PDF 到着時に前回タスクを destroy() して
+// 未解決 promise の孤立と pdfDoc の古いまま上書きを防ぐ。
+let currentLoadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
 
 function post(msg: ThumbnailWorkerResponse, transfer?: Transferable[]): void {
   if (transfer && transfer.length > 0) {
@@ -80,6 +83,13 @@ async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
   renderWaitQueue.forEach(r => r());
   renderWaitQueue.length = 0;
 
+  // 進行中の getDocument タスクがあれば先に destroy() して未解決 promise を確実に
+  // 終端化する（destroy 後の .promise は reject される）。そうしないと、前回の
+  // loadPromise が後から resolve して古い pdfDoc を代入し race になる。
+  if (currentLoadingTask) {
+    try { await currentLoadingTask.destroy(); } catch { /* ignore */ }
+    currentLoadingTask = null;
+  }
   if (pdfDoc) {
     // 既存のドキュメントが完全に破棄されてから新規ロードへ（race 防止）
     try { await pdfDoc.destroy(); } catch { /* ignore */ }
@@ -107,13 +117,25 @@ async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
       config.data = new Uint8Array(source);
     }
 
-    loadPromise = pdfjsLib.getDocument(config).promise.then(doc => {
+    const task = pdfjsLib.getDocument(config);
+    currentLoadingTask = task;
+    loadPromise = task.promise.then(doc => {
+      // この解決時点で別 LOAD_PDF により currentLoadingTask が差し替わっていたら
+      // 古い doc を採用しない（destroy して破棄）。
+      if (currentLoadingTask !== task) {
+        try { doc.destroy(); } catch { /* ignore */ }
+        return;
+      }
       pdfDoc = doc;
       post({ type: 'LOAD_COMPLETE', numPages: doc.numPages });
     }).catch((e) => {
+      if (currentLoadingTask === task) {
+        currentLoadingTask = null;
+        loadPromise = null;
+        post({ type: 'LOAD_ERROR', message: String(e) });
+      }
+      // 別タスクに差し替え済みの場合はキャンセルによる reject なのでログのみ
       console.error('[thumbnail.worker] PDF load failed:', e);
-      loadPromise = null;
-      post({ type: 'LOAD_ERROR', message: String(e) });
     });
   } catch (e) {
     console.error('[thumbnail.worker] PDF load exception:', e);
