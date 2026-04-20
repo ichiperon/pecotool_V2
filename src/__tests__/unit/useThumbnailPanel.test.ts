@@ -5,7 +5,15 @@
  * ステートマシンのパターン（遅延ロード、キュー管理、購読、epoch 無効化）を
  * 同等のロジックで検証する。
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { renderHook, act } from '@testing-library/react'
+
+// pdfjs-dist は jsdom 環境で DOMMatrix 等を要求しロード時に失敗する。
+// useThumbnailPanel は pdfjs を直接呼ばないため、依存解決のみで足りる。
+vi.mock('pdfjs-dist', () => ({
+  GlobalWorkerOptions: { workerSrc: '' },
+  getDocument: vi.fn(() => ({ promise: Promise.resolve({ numPages: 0, destroy: vi.fn() }) })),
+}))
 
 // ---------------------------------------------------------------------------
 // 1. triggerThumbnailLoad の冪等性（deferred load pattern）
@@ -380,5 +388,287 @@ describe('flushBatch logic', () => {
     expect(thumbnailsRef.current.size).toBe(2)
     expect(cb0).toHaveBeenCalledTimes(1)
     expect(cb1).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S-07: 実 hook でファイル切替時の世代管理（epoch / URL revoke / unmount cleanup）
+// ---------------------------------------------------------------------------
+describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
+  // テスト中に生成された Worker を全て参照できるようにする
+  const createdWorkers: Array<MockThumbnailWorker> = []
+  // URL.createObjectURL の連番カウンタ
+  let urlCounter = 0
+  // 生成された Blob URL を全て記録（revoke の照合用）
+  let createdUrls: string[] = []
+  let revokedUrls: string[] = []
+
+  /**
+   * thumbnail.worker.ts と同等の最小モック。
+   * - LOAD_PDF を受け取ったら LOAD_COMPLETE を返す。
+   * - GENERATE_THUMBNAIL を受け取ったら THUMBNAIL_DONE を返すが、
+   *   テストから明示的に `respond()` を呼ぶまで送信を保留できる。
+   */
+  class MockThumbnailWorker {
+    onmessage: ((e: MessageEvent<any>) => void) | null = null
+    onerror: ((e: any) => void) | null = null
+    onmessageerror: ((e: any) => void) | null = null
+    listeners: Array<{ type: string; cb: any }> = []
+    /** GENERATE_THUMBNAIL 受信時に保留した解決関数 */
+    pendingGenerates: Array<{ pageIndex: number; resolve: () => void }> = []
+    terminated = false
+
+    constructor() {
+      createdWorkers.push(this)
+    }
+
+    postMessage(req: any, _transfer?: any) {
+      if (req?.type === 'LOAD_PDF') {
+        // 即座に LOAD_COMPLETE を返す
+        queueMicrotask(() => {
+          this.deliver({ type: 'LOAD_COMPLETE', numPages: 10 })
+        })
+        return
+      }
+      if (req?.type === 'GENERATE_THUMBNAIL') {
+        const pageIndex = req.pageIndex
+        // テスト側で明示的に呼ばれるまで保留する
+        this.pendingGenerates.push({
+          pageIndex,
+          resolve: () => {
+            this.deliver({
+              type: 'THUMBNAIL_DONE',
+              pageIndex,
+              bytes: new Uint8Array([1, 2, 3]),
+            })
+          },
+        })
+        return
+      }
+    }
+
+    /** 全ての保留中 GENERATE_THUMBNAIL を THUMBNAIL_DONE で応答する */
+    flushAllThumbnails() {
+      const pending = this.pendingGenerates.splice(0)
+      for (const p of pending) p.resolve()
+    }
+
+    private deliver(msg: any) {
+      const ev = { data: msg } as MessageEvent<any>
+      if (this.onmessage) this.onmessage(ev)
+      this.listeners.forEach(l => {
+        if (l.type === 'message') l.cb(ev)
+      })
+    }
+
+    addEventListener(type: string, cb: any) {
+      this.listeners.push({ type, cb })
+    }
+    removeEventListener(_type: string, cb: any) {
+      this.listeners = this.listeners.filter(l => l.cb !== cb)
+    }
+    terminate() {
+      this.terminated = true
+    }
+  }
+
+  let originalWorker: any
+  let originalCreate: any
+  let originalRevoke: any
+  let originalFetch: any
+
+  beforeEach(async () => {
+    createdWorkers.length = 0
+    urlCounter = 0
+    createdUrls = []
+    revokedUrls = []
+
+    // Worker をモックで差し替え
+    originalWorker = (globalThis as any).Worker
+    ;(globalThis as any).Worker = MockThumbnailWorker
+
+    // URL.createObjectURL / revokeObjectURL を spy
+    originalCreate = (URL as any).createObjectURL
+    originalRevoke = (URL as any).revokeObjectURL
+    ;(URL as any).createObjectURL = vi.fn((blob: Blob) => {
+      const u = `blob:mock-${++urlCounter}`
+      // サムネイル由来の URL のみ追跡（pdfLoader の workerSrc 用 URL は除外）
+      if (blob && (blob as any).type === 'image/jpeg') {
+        createdUrls.push(u)
+      }
+      return u
+    })
+    ;(URL as any).revokeObjectURL = vi.fn((u: string) => {
+      revokedUrls.push(u)
+    })
+
+    // fetch をモック（hook がメインスレッドで PDF を取得する）
+    originalFetch = (globalThis as any).fetch
+    ;(globalThis as any).fetch = vi.fn(async (_url: string) => ({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    }))
+
+    // pecoStore を初期化（前テストの状態を引きずらない）
+    const { usePecoStore } = await import('../../store/pecoStore')
+    usePecoStore.setState({ document: null, currentPageIndex: 0 })
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).Worker = originalWorker
+    ;(URL as any).createObjectURL = originalCreate
+    ;(URL as any).revokeObjectURL = originalRevoke
+    ;(globalThis as any).fetch = originalFetch
+  })
+
+  /** ストアにダミードキュメントを設定する */
+  async function setDoc(filePath: string, totalPages = 5) {
+    const { usePecoStore } = await import('../../store/pecoStore')
+    usePecoStore.setState({
+      document: {
+        filePath,
+        fileName: filePath,
+        totalPages,
+        metadata: { title: undefined, author: undefined },
+        pages: new Map(),
+      } as any,
+    })
+  }
+
+  /** マイクロタスク + マクロタスクを掃く */
+  async function flush() {
+    // microtasks
+    await Promise.resolve()
+    await Promise.resolve()
+    // batch flush timer (50ms)
+    await new Promise(r => setTimeout(r, 60))
+    await Promise.resolve()
+  }
+
+  it('S-07-01: stale epoch URL is revoked and not stored on file switch mid-flight', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    await setDoc('/path/A.pdf', 5)
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+
+    // Worker 初期化と LOAD_COMPLETE を待つ
+    await flush()
+    expect(createdWorkers.length).toBeGreaterThan(0)
+
+    // ページ 0 をリクエスト → Worker が GENERATE を保留
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    const w0 = createdWorkers[0]
+    expect(w0.pendingGenerates.length).toBe(1)
+
+    // Worker から THUMBNAIL_DONE を返す → pendingBatchRef に積まれる
+    act(() => {
+      w0.flushAllThumbnails()
+    })
+    // microtask だけ進めて batch timer は未発火の状態にする
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // この時点で createObjectURL は呼ばれているはず
+    expect(createdUrls.length).toBe(1)
+    const staleUrl = createdUrls[0]
+
+    // バッチ flush 前にファイル切替（epoch++）
+    await setDoc('/path/B.pdf', 5)
+    await Promise.resolve()
+    await Promise.resolve()
+    // batch timer 発火を待つ
+    await new Promise(r => setTimeout(r, 60))
+
+    // 旧 epoch の URL は revoke され、thumbnailsRef には残っていない
+    expect(revokedUrls).toContain(staleUrl)
+    expect(result.current.getThumbnail(0)).toBeUndefined()
+
+    unmount()
+  })
+
+  it('S-07-02: unmount revokes all retained thumbnail URLs', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    await setDoc('/path/A.pdf', 5)
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    // 3 ページ分 retain
+    act(() => {
+      result.current.requestThumbnail(0)
+      result.current.requestThumbnail(1)
+      result.current.requestThumbnail(2)
+    })
+    await flush()
+    const w0 = createdWorkers[0]
+    act(() => {
+      w0.flushAllThumbnails()
+    })
+    await flush()
+
+    // thumbnailsRef に 3 件入っているはず
+    expect(result.current.getThumbnail(0)).toBeDefined()
+    expect(result.current.getThumbnail(1)).toBeDefined()
+    expect(result.current.getThumbnail(2)).toBeDefined()
+
+    const retainedUrls = [
+      result.current.getThumbnail(0)!,
+      result.current.getThumbnail(1)!,
+      result.current.getThumbnail(2)!,
+    ]
+
+    revokedUrls = []
+    unmount()
+
+    // unmount cleanup で全ての URL が revoke されている
+    for (const u of retainedUrls) {
+      expect(revokedUrls).toContain(u)
+    }
+  })
+
+  it('S-07-03: rapid file switch A→B→A does not leak B thumbnails into A view', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    await setDoc('/path/A.pdf', 5)
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    // A: ページ 0 をリクエスト
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    // B に切替（A の pending は破棄される）
+    await setDoc('/path/B.pdf', 5)
+    await flush()
+
+    const wB = createdWorkers[createdWorkers.length - 1]
+    // B でページ 0 をリクエストして即応答
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+    act(() => {
+      wB.flushAllThumbnails()
+    })
+    await flush()
+
+    const bThumb = result.current.getThumbnail(0)
+    expect(bThumb).toBeDefined()
+
+    // A に戻す → thumbnailsRef はクリアされ、B のサムネイルは消える
+    await setDoc('/path/A.pdf', 5)
+    await flush()
+
+    expect(result.current.getThumbnail(0)).toBeUndefined()
+    // B のサムネイル URL は revoke されている
+    expect(revokedUrls).toContain(bThumb!)
+
+    unmount()
   })
 })

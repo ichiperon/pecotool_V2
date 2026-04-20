@@ -53,6 +53,7 @@ vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
 import { loadPage, destroySharedPdfProxy, getSharedPdfProxy } from '../../utils/pdfLoader'
 import { savePDF, __setSaveWorkerFactoryForTest, __resetSaveStateForTest } from '../../utils/pdfSaver'
 import { usePecoStore } from '../../store/pecoStore'
+import { logger } from '../../utils/logger'
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
 // ── ヘルパー ──────────────────────────────────────────────────
@@ -251,6 +252,65 @@ describe('I-04: Undo/Redo サイクル', () => {
 
     usePecoStore.getState().undo()
     expect(usePecoStore.getState().document?.pages.get(0)?.textBlocks[0].text).toBe('v0')
+  })
+})
+
+// ── S-09: Undo/Redo サイクル後の destroy 警告 ────────────────
+
+describe('S-09: Undo/Redo サイクル後の destroy 警告', () => {
+  beforeEach(() => {
+    usePecoStore.setState({
+      document: null,
+      selectedIds: new Set<string>(),
+      undoStack: [],
+      redoStack: [],
+      isDirty: false,
+    } as any)
+  })
+
+  it('S-09-01: 編集→Undo→Redo を 5 サイクル繰り返し、destroySharedPdfProxy で proxy.destroy 不在を logger.warn が観測できる', async () => {
+    // proxy が destroy を持たないモック (= 既存テストと同じ簡易 mockPdf) をシード
+    const items: FakeItem[] = [
+      { str: 'A', transform: [12, 0, 0, 12, 72, 700], width: 12, height: 12 },
+    ]
+    await setupGetDocument(items)
+
+    // 編集対象の document を作って Undo/Redo サイクルを回す
+    const block = makeBlock({ id: 'b1', text: 'v0', isDirty: false })
+    const doc = makeDoc(new Map([[0, makePage([block], false)]]))
+    usePecoStore.setState({ document: doc })
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      // 5 サイクル: 編集 → undo → redo
+      for (let i = 0; i < 5; i++) {
+        usePecoStore.getState().updatePageData(0, {
+          textBlocks: [{ ...block, text: `v${i + 1}` }],
+        })
+        usePecoStore.getState().undo()
+        usePecoStore.getState().redo()
+      }
+
+      // 5 サイクル後の状態は v5 (最後の編集後)
+      expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe('v5')
+
+      // destroySharedPdfProxy を呼ぶと、proxy.destroy が無いため logger.warn が走る
+      destroySharedPdfProxy()
+      // proxy.promise.then(...) 内の警告は microtask で発火するため待機
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // logger.warn は silent ではなく観測可能に呼ばれている
+      const warnCalls = warnSpy.mock.calls
+      const matched = warnCalls.find((c) =>
+        typeof c[0] === 'string' &&
+        c[0].includes('destroySharedPdfProxy: proxy.destroy is not a function')
+      )
+      expect(matched).toBeDefined()
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })
 

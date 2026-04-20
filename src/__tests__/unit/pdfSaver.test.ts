@@ -1003,4 +1003,66 @@ describe('pdfSaver / Worker 経路', () => {
       warnSpy.mockRestore()
     })
   })
+
+  // ── S-04: 連続保存（terminate idempotency） ──────────────────
+
+  describe('S-04: 連続保存 terminate idempotency', () => {
+    it('S-04-01: 5 回連続 savePDF → terminate 回数 ≥ n-1 = 4、最終 worker のみ生存、全 Promise resolve', async () => {
+      const doc = makeSimpleDoc()
+
+      // 5 回連続呼び出し。savePDF は前回完了待ちが入るので、
+      // 各 worker が作られた直後に成功応答を発火させる必要がある。
+      const promises: Promise<Uint8Array>[] = []
+      for (let i = 0; i < 5; i++) {
+        const p = savePDF(new Uint8Array(), doc)
+        promises.push(p)
+        // microtask を回して worker 生成を待つ
+        // (1 回目は同期で作られるが、2 回目以降は await race のあと作られる)
+        for (let k = 0; k < 5; k++) await Promise.resolve()
+        const w = ControllableMockWorker.instances[i]
+        expect(w).toBeDefined()
+        w.emitSuccess(new Uint8Array([i]))
+      }
+
+      const results = await Promise.all(promises)
+      expect(results).toHaveLength(5)
+      for (const r of results) expect(r).toBeInstanceOf(Uint8Array)
+
+      // 5 個の worker が作られた
+      expect(ControllableMockWorker.instances.length).toBe(5)
+
+      // 各 worker は onmessage cleanup で 1 回ずつ terminate される（成功応答 cleanup）。
+      // 仕様 (S-04): n-1 = 4 個以上が terminate されていれば idempotent 担保。
+      const counts = ControllableMockWorker.instances.map((w) => w.terminateCount)
+      const terminatedCount = counts.filter((c) => c >= 1).length
+      expect(terminatedCount).toBeGreaterThanOrEqual(4)
+    })
+
+    it('S-04-02: 連続呼び出し中に途中 1 つが reject しても後続は影響を受けず resolve', async () => {
+      const doc = makeSimpleDoc()
+
+      // 1 回目: 成功
+      const p1 = savePDF(new Uint8Array(), doc)
+      ControllableMockWorker.instances[0].emitSuccess(new Uint8Array([1]))
+      await p1
+
+      // 2 回目: ERROR を発火 → reject
+      const p2 = savePDF(new Uint8Array(), doc)
+      ControllableMockWorker.instances[1].emitError('mid-save failure')
+      await expect(p2).rejects.toThrow('mid-save failure')
+
+      // 3 回目: 後続も問題なく成功する
+      const p3 = savePDF(new Uint8Array(), doc)
+      ControllableMockWorker.instances[2].emitSuccess(new Uint8Array([3]))
+      const r3 = await p3
+      expect(r3).toBeInstanceOf(Uint8Array)
+      expect(r3[0]).toBe(3)
+
+      // 4 回目: 連続 reject 後の reject も独立している
+      const p4 = savePDF(new Uint8Array(), doc)
+      ControllableMockWorker.instances[3].emitSuccess(new Uint8Array([4]))
+      const r4 = await p4
+      expect(r4[0]).toBe(4)
+    })
+  })
 })

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { OcrEditor } from '../../components/OcrEditor'
@@ -15,8 +15,14 @@ vi.mock('../../utils/pdfLoader', () => ({
 }))
 
 // DnD kit をスタブ化（検索フィルターテストに不要）
+// onDragEnd / onDragStart を window 経由で捕捉し、テストから手動発火できるようにする
 vi.mock('@dnd-kit/core', () => ({
-  DndContext: ({ children }: any) => <>{children}</>,
+  DndContext: ({ children, onDragEnd, onDragStart }: any) => {
+    ;(globalThis as any).__lastDndOnDragEnd = onDragEnd
+    ;(globalThis as any).__lastDndOnDragStart = onDragStart
+    return <>{children}</>
+  },
+  DragOverlay: ({ children }: any) => <>{children}</>,
   closestCenter: null,
   KeyboardSensor: class {},
   PointerSensor: class {},
@@ -28,7 +34,13 @@ vi.mock('@dnd-kit/sortable', () => ({
   SortableContext: ({ children }: any) => <>{children}</>,
   sortableKeyboardCoordinates: vi.fn(),
   verticalListSortingStrategy: vi.fn(),
-  arrayMove: vi.fn(),
+  // 実装と同等の挙動: from→to に移動した新配列を返す
+  arrayMove: (arr: any[], from: number, to: number) => {
+    const next = arr.slice()
+    const [item] = next.splice(from, 1)
+    next.splice(to, 0, item)
+    return next
+  },
   useSortable: vi.fn().mockReturnValue({
     attributes: {},
     listeners: {},
@@ -255,6 +267,69 @@ describe('OcrEditor', () => {
       // 代わりに検索中のフィルタが正しく動作していることを確認
       const cards = document.querySelectorAll('.ocr-card-content')
       expect(cards.length).toBe(1) // "cherry" のみマッチ
+    })
+  })
+
+  // ── S-08: 検索フィルタ中の DnD 抑止 ─────────────────────────────
+  describe('S-08: 検索フィルタ中の DnD reorder 抑止', () => {
+    // 二重防御の片翼（handleDragEnd 内 searchTerm ガード）を検証する
+    // もう片翼（PointerSensor distance:Infinity）は C-ED-10 で間接検証済
+
+    it('S-08-01: 検索ワード入力中は handleDragEnd の reorder が呼ばれない', async () => {
+      const user = userEvent.setup()
+      setup()
+
+      // updatePageData を spy
+      const updateSpy = vi.spyOn(usePecoStore.getState(), 'updatePageData')
+
+      // 検索語を入力（フィルタ中）
+      await user.type(screen.getByPlaceholderText('検索...'), 'fruit')
+
+      // 捕捉した onDragEnd を取得
+      const onDragEnd = (globalThis as any).__lastDndOnDragEnd as
+        | ((e: any) => void)
+        | undefined
+      expect(typeof onDragEnd).toBe('function')
+
+      updateSpy.mockClear()
+
+      // ドラッグ終了イベントを擬似発火（b1 を b2 にドロップ）
+      act(() => {
+        onDragEnd!({ active: { id: 'b1' }, over: { id: 'b2' } })
+      })
+
+      // searchTerm ガードにより updatePageData は呼ばれない
+      expect(updateSpy).not.toHaveBeenCalled()
+    })
+
+    it('S-08-02: 検索ワードを空に戻すと DnD reorder が再度有効になる', async () => {
+      const user = userEvent.setup()
+      setup()
+
+      const searchBox = screen.getByPlaceholderText('検索...')
+      // 一度入力 → クリア
+      await user.type(searchBox, 'fruit')
+      await user.clear(searchBox)
+
+      const updateSpy = vi.spyOn(usePecoStore.getState(), 'updatePageData')
+
+      // 再捕捉した onDragEnd（クリア後の最新クロージャ）
+      const onDragEnd = (globalThis as any).__lastDndOnDragEnd as
+        | ((e: any) => void)
+        | undefined
+      expect(typeof onDragEnd).toBe('function')
+
+      // ドラッグ終了イベント
+      act(() => {
+        onDragEnd!({ active: { id: 'b1' }, over: { id: 'b2' } })
+      })
+
+      // searchTerm が空のため reorder は走り updatePageData が呼ばれる
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      const [pageIdx, patch] = updateSpy.mock.calls[0]
+      expect(pageIdx).toBe(0)
+      expect(patch.isDirty).toBe(true)
+      expect(Array.isArray(patch.textBlocks)).toBe(true)
     })
   })
 
