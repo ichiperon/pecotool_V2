@@ -5,6 +5,8 @@ import {
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { inflate } from 'pako';
+import { stripTextBlocks } from './pdfContentStream';
+import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
 import type { TextBlock } from '../types';
 import type {
   SavePdfWorkerRequest,
@@ -17,23 +19,6 @@ import type {
  * Handles FlateDecode (the overwhelmingly common case in modern PDFs).
  * Falls back to returning the raw bytes for unrecognized or absent filters.
  */
-function extractPdfVersion(bytes: Uint8Array): string | null {
-  const header = new TextDecoder('latin1').decode(bytes.slice(0, 16));
-  const m = header.match(/%PDF-(\d+\.\d+)/);
-  return m ? m[1] : null;
-}
-
-function restorePdfVersion(savedBytes: Uint8Array, version: string): void {
-  const target = `%PDF-${version}`;
-  const current = new TextDecoder('latin1').decode(savedBytes.slice(0, 16));
-  const m = current.match(/%PDF-\d+\.\d+/);
-  if (!m || current.startsWith(target)) return;
-  const patch = new TextEncoder().encode(target);
-  for (let i = 0; i < patch.length && i < m[0].length; i++) {
-    savedBytes[m.index! + i] = patch[i];
-  }
-}
-
 function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
   const filter = stream.dict.lookup(PDFName.of('Filter'));
   const raw = stream.getContents();
@@ -66,46 +51,6 @@ function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
 
   // Unsupported filter (LZW, ASCII85, multi-filter chain, etc.) — skip modification
   return null;
-}
-
-/**
- * Strips all text blocks (BT...ET) from a decoded (uncompressed) content stream.
- * Optimized to work directly on Uint8Array to avoid expensive string conversions and regex.
- */
-function stripTextBlocks(decoded: Uint8Array): Uint8Array {
-  const result = new Uint8Array(decoded.length);
-  let resultIdx = 0;
-  let i = 0;
-  const len = decoded.length;
-
-  while (i < len) {
-    // Look for "BT" (Begin Text)
-    // Must be preceded by delimiter (space, tab, newline) or start of stream
-    // and followed by delimiter.
-    if (
-      decoded[i] === 0x42 && decoded[i+1] === 0x54 && // 'BT'
-      (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) &&
-      (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
-    ) {
-      // Found BT, skip until "ET" (End Text)
-      i += 2;
-      while (i < len) {
-        if (
-          decoded[i] === 0x45 && decoded[i+1] === 0x54 && // 'ET'
-          (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) &&
-          (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
-        ) {
-          i += 2;
-          break;
-        }
-        i++;
-      }
-    } else {
-      result[resultIdx++] = decoded[i++];
-    }
-  }
-
-  return result.slice(0, resultIdx);
 }
 
 async function handleSavePdf(
@@ -246,11 +191,12 @@ async function handleSavePdf(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
-  // update:true は @cantoo/pdf-lib の拡張オプション（型定義には無いが実装側で受理される）
-  const saveOptions: Parameters<typeof pdfDoc.save>[0] & { update?: boolean } = {
+  // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
+  // 旧実装には update:true が残っていたが、@cantoo/pdf-lib v2.6.5 は受理しないため削除。
+  // version は restorePdfVersion で補正する。
+  const saveOptions: Parameters<typeof pdfDoc.save>[0] = {
     useObjectStreams: false,
     addDefaultPage: false,
-    update: true,
   };
   const savedBytes = await pdfDoc.save(saveOptions);
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);

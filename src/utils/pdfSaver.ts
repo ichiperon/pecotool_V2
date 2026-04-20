@@ -6,11 +6,16 @@ import {
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import { inflate } from 'pako';
+import { stripTextBlocks } from './pdfContentStream';
+import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
 import type {
   SavePdfWorkerRequest,
   SavePdfWorkerResponse,
   SerializedPageData,
 } from './pdfWorkerTypes';
+
+// テスト互換のため再輸出（src/__tests__/unit/pdfSaver.stripTextBlocks.repro.test.ts 等）
+export { stripTextBlocks };
 
 /**
  * Decompress a PDFRawStream's contents.
@@ -57,53 +62,6 @@ function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
 }
 
 /**
- * Strips all text blocks (BT...ET) from a decoded (uncompressed) content stream.
- * BT and ET must appear as standalone tokens (surrounded by whitespace or line boundaries)
- * to avoid accidentally matching binary data that happens to contain those byte sequences.
- * The input MUST be already decoded bytes — do NOT pass raw/compressed stream contents.
- * We use 'latin1' so each byte maps 1:1 to a character, avoiding UTF-8 corruption.
- */
-/**
- * Strips all text blocks (BT...ET) from a decoded (uncompressed) content stream.
- * Optimized to work directly on Uint8Array to avoid expensive string conversions and regex.
- */
-function stripTextBlocks(decoded: Uint8Array): Uint8Array {
-  const result = new Uint8Array(decoded.length);
-  let resultIdx = 0;
-  let i = 0;
-  const len = decoded.length;
-
-  while (i < len) {
-    // Look for "BT" (Begin Text)
-    // Must be preceded by delimiter (space, tab, newline, (, [, <, /, %) or start of stream
-    // and followed by delimiter.
-    if (
-      decoded[i] === 0x42 && decoded[i+1] === 0x54 && // 'BT'
-      (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) && 
-      (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
-    ) {
-      // Found BT, skip until "ET" (End Text)
-      i += 2;
-      while (i < len) {
-        if (
-          decoded[i] === 0x45 && decoded[i+1] === 0x54 && // 'ET'
-          (i === 0 || decoded[i-1] <= 0x20 || decoded[i-1] === 0x28 || decoded[i-1] === 0x5b || decoded[i-1] === 0x3c || decoded[i-1] === 0x2f || decoded[i-1] === 0x25) &&
-          (i + 2 === len || decoded[i+2] <= 0x20 || decoded[i+2] === 0x28 || decoded[i+2] === 0x5b || decoded[i+2] === 0x3c || decoded[i+2] === 0x2f || decoded[i+2] === 0x25)
-        ) {
-          i += 2;
-          break;
-        }
-        i++;
-      }
-    } else {
-      result[resultIdx++] = decoded[i++];
-    }
-  }
-
-  return result.slice(0, resultIdx);
-}
-
-/**
  * Common PDF building logic.
  * Uses incremental update to only write changed pages.
  * Performs surgical removal of old text layers to prevent "Double OCR".
@@ -115,6 +73,7 @@ export async function buildPdfDocument(
   documentState: PecoDocument,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
+  const originalVersion = extractPdfVersion(originalPdfBytes);
   // throwOnInvalidObject:false → 不正オブジェクトの回復試行をスキップして高速化
   // updateMetadata:false → 更新日時の自動書き換えを抑制
   const pdfDoc = await PDFDocument.load(originalPdfBytes, {
@@ -256,16 +215,15 @@ export async function buildPdfDocument(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
-  // update: true = incremental update: original PDF bytes are preserved at the
-  // front of the output, so the original PDF version and structure are retained as-is.
-  // This ensures compatibility with older viewers such as Acrobat 7 (supports up to PDF 1.6).
-  // update:true は @cantoo/pdf-lib の拡張オプション（型定義には無いが実装側で受理される）
-  const saveOptions: Parameters<typeof pdfDoc.save>[0] & { update?: boolean } = {
+  // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
+  // 旧実装には update:true が残っていたが、@cantoo/pdf-lib v2.6.5 は受理しないため削除。
+  // version は restorePdfVersion で補正する。
+  const saveOptions: Parameters<typeof pdfDoc.save>[0] = {
     useObjectStreams: false,
     addDefaultPage: false,
-    update: true,
   };
   const savedBytes = await pdfDoc.save(saveOptions);
+  if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
   return savedBytes;
 }
 
