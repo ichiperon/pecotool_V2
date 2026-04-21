@@ -301,6 +301,91 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
     Ok(serde_json::json!({ "status": "ok", "blocks": blocks }).to_string())
 }
 
+/// PDF bytes チャンクを指定パスに書き込む。
+///
+/// Tauri plugin-fs の writeFile や通常の `#[tauri::command]` with `Vec<u8>` では
+/// 100MB の一括転送が IPC レイヤで hang する事例が観測された。
+/// このコマンドは `tauri::ipc::Request` の **raw body** を直接受け、
+/// JSON シリアライズを完全回避する。
+///
+/// プロトコル:
+/// - HTTP-like headers でメタ情報を受け渡し: `x-path` (URL-encoded path), `x-offset` (bytes)
+/// - 最初のチャンクは offset=0 → ファイルを truncate
+/// - 後続は offset 指定で追記
+///
+/// フロント側はバイナリを Uint8Array のまま `invoke(cmd, bytes, { headers })` で渡す。
+#[tauri::command]
+async fn write_pdf_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::fs::OpenOptions;
+
+    let headers = request.headers();
+    let path_raw = headers
+        .get("x-path")
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| "missing x-path header".to_string())?;
+    let path = percent_decode(path_raw);
+    let offset: u64 = headers
+        .get("x-offset")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let bytes: Vec<u8> = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.clone(),
+        _ => return Err("[write_pdf_chunk] expected raw body".to_string()),
+    };
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        // 最初のチャンク (offset==0) は create + truncate、後続は create 無しで open
+        let mut opts = OpenOptions::new();
+        opts.write(true);
+        if offset == 0 {
+            opts.create(true).truncate(true);
+        } else {
+            opts.create(false).truncate(false);
+        }
+        let mut f = opts
+            .open(&path)
+            .map_err(|e| format!("open failed: {} ({})", e, path))?;
+        if offset > 0 {
+            f.seek(SeekFrom::Start(offset))
+                .map_err(|e| format!("seek failed: {}", e))?;
+        }
+        f.write_all(&bytes).map_err(|e| format!("write failed: {}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
+/// `x-path` header は percent-encoded で受け取るため簡易デコード。
+fn percent_decode(s: &str) -> String {
+    let mut out = Vec::with_capacity(s.len());
+    let mut chars = s.as_bytes().iter().copied().peekable();
+    while let Some(c) = chars.next() {
+        if c == b'%' {
+            let hi = chars.next().and_then(|c| hex_value(c));
+            let lo = chars.next().and_then(|c| hex_value(c));
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push(h * 16 + l);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -320,6 +405,7 @@ pub fn run() {
             run_ocr,
             get_pdf_page_dimensions,
             write_perf_log,
+            write_pdf_chunk,
             backup::save_backup,
             backup::check_pending_backups,
             backup::clear_backup,

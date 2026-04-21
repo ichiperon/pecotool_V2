@@ -29,3 +29,5 @@ playwright-report/
 test-results/
 test*.pdf
 test-scratch/
+# 機密 PDF 置き場 — 絶対にコミットしない (本 git リポジトリ直下の test/ のみ)
+/test/

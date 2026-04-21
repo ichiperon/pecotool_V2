@@ -66,8 +66,18 @@ export async function saveTemporaryPageDataBatch(
       store.put(cleanData, key);
     }
     await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      let settled = false;
+      const done = (err?: unknown) => {
+        if (settled) return;
+        settled = true;
+        if (err !== undefined) reject(err); else resolve();
+      };
+      tx.oncomplete = () => done();
+      tx.onerror = () => done(tx.error);
+      tx.onabort = () => done(tx.error);
+      // tx.oncomplete が一度も発火しない edge case (IDB スタック) 対策として
+      // 10 秒でタイムアウトさせ、waitForPendingIdbSaves が永久 hang しないようにする。
+      setTimeout(() => done(new Error('[saveTemporaryPageDataBatch] tx timeout')), 10_000);
     });
   } catch { /* ignore */ }
 }
@@ -81,17 +91,26 @@ export async function clearTemporaryChanges(filePath: string) {
     // IDBKeyRange でfilePath配下のキーのみに絞り込む（フルスキャン回避）
     const range = IDBKeyRange.bound(prefix, prefix + '\uFFFF', false, false);
     const request = store.openCursor(range);
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((resolve) => {
       request.onsuccess = () => {
-        const cursor = request.result;
-        if (cursor) {
-          cursor.delete();
-          cursor.continue();
-        } else {
+        try {
+          const cursor = request.result;
+          if (cursor) {
+            cursor.delete();
+            cursor.continue();
+          } else {
+            resolve();
+          }
+        } catch (e) {
+          console.warn('[clearTemporaryChanges] cursor iteration failed:', e);
           resolve();
         }
       };
-      request.onerror = () => reject(request.error);
+      request.onerror = () => resolve();
+      // transaction 完了を fallback として拾い、永久 hang を防ぐ
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
     });
   } catch { /* ignore */ }
 }
@@ -108,18 +127,31 @@ export async function getAllTemporaryPageData(filePath: string): Promise<Map<num
     const request = store.openCursor(range);
 
     return new Promise((resolve) => {
+      // cursor.continue() や parseInt で例外が throw されると onsuccess が
+      // 途中終了し、resolve に到達せず Promise が永久停止する。try-catch で
+      // 既集約分を返して保存経路をブロックしないようにする。
       request.onsuccess = () => {
-        const cursor = request.result;
-        if (cursor) {
-          const key = cursor.key as string;
-          const pageIndex = parseInt(key.slice(prefix.length), 10);
-          results.set(pageIndex, cursor.value as Partial<PageData>);
-          cursor.continue();
-        } else {
+        try {
+          const cursor = request.result;
+          if (cursor) {
+            const key = cursor.key as string;
+            const pageIndex = parseInt(key.slice(prefix.length), 10);
+            results.set(pageIndex, cursor.value as Partial<PageData>);
+            cursor.continue();
+          } else {
+            resolve(results);
+          }
+        } catch (e) {
+          console.warn('[getAllTemporaryPageData] cursor iteration failed:', e);
           resolve(results);
         }
       };
       request.onerror = () => resolve(results);
+      // transaction 自体の終了もフォールバックとして拾う (onsuccess が
+      // 一度も呼ばれないケースで永久 hang しないため)
+      tx.oncomplete = () => resolve(results);
+      tx.onerror = () => resolve(results);
+      tx.onabort = () => resolve(results);
     });
   } catch {
     return results;

@@ -12,7 +12,10 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
 
   fontLoadPromise = (async () => {
     try {
-      const res = await fetch('/fonts/IPAexGothic.woff2');
+      // pdf-lib/fontkit は WOFF2 を直接食わせると loca/glyf 出力が破損するため、
+      // ビルド時に decompress しておいた TTF を使う。
+      // public/fonts/IPAexGothic.ttf は wawoff2 で生成 (test-scratch/decompress_font.mjs)。
+      const res = await fetch('/fonts/IPAexGothic.ttf');
       if (res.ok) {
         fontBytesCache = await res.arrayBuffer();
         fontLoadPromise = null;

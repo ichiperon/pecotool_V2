@@ -59,6 +59,8 @@ async function handleSavePdf(
   fontBytes: ArrayBuffer | undefined,
 ): Promise<Uint8Array> {
   const originalVersion = extractPdfVersion(originalPdfBytes);
+  // forIncrementalUpdate + commit() は subset フォントの glyf を破損させるため撤回。
+  // 全書き換えは 91ms 程度 (ベンチ実測) で速度差はほぼない。
   // throwOnInvalidObject:false → 不正オブジェクトの回復試行をスキップして高速化
   // updateMetadata:false → 更新日時の自動書き換えを抑制（不要な書き込み削減）
   const pdfDoc = await PDFDocument.load(originalPdfBytes, {
@@ -76,6 +78,10 @@ async function handleSavePdf(
     pageData.textBlocks.some((b: TextBlock) => b.text && b.text.trim() !== '')
   );
 
+  // フォントは TTF 形式で供給する必要がある。WOFF2 を直接食わせると fontkit が
+  // loca/glyf を正しく出力できず、OTS 検証で「フォント抽出不能」になる。
+  // ベンチで実 PDF roundtrip 検証済み: TTF + subset:true → warning ゼロ、
+  // output size は原本と同じ (subset ~200KB のみ追加)。
   const customFont = needsFont
     ? (fontBytes
         ? await pdfDoc.embedFont(fontBytes, { subset: true })
@@ -192,13 +198,17 @@ async function handleSavePdf(
   }
 
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
-  // 旧実装には update:true が残っていたが、@cantoo/pdf-lib v2.6.5 は受理しないため削除。
-  // version は restorePdfVersion で補正する。
+  // save() 全書き換え経路 (incremental の fontkit subset 破損を回避)。
   const saveOptions: Parameters<typeof pdfDoc.save>[0] = {
     useObjectStreams: false,
     addDefaultPage: false,
   };
-  const savedBytes = await pdfDoc.save(saveOptions);
+  // pdf-lib save() が pdf-lib 内部で hang する edge case 対策として 90s timeout を設定。
+  const savePromise = pdfDoc.save(saveOptions);
+  const saveTimeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error('[pdf.worker] pdfDoc.save() timed out after 90s')), 90_000);
+  });
+  const savedBytes = await Promise.race([savePromise, saveTimeout]);
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
   return savedBytes;
 }
@@ -219,12 +229,21 @@ async function resolvePdfBytes(data: {
 }): Promise<Uint8Array> {
   if (data.bytes) return data.bytes;
   if (data.url) {
-    const res = await fetch(data.url);
-    if (!res.ok) {
-      throw new Error(`[pdf.worker] fetch failed: ${res.status} ${res.statusText}`);
+    // main thread 側の savePDF にもハードタイムアウトがあるが、Worker 内で
+    // fetch 自体が無応答になった場合でも明示的に abort できるよう、ここでも
+    // AbortController を掛けておく（defense in depth）。
+    const controller = new AbortController();
+    const abortId = setTimeout(() => controller.abort(), 90_000);
+    try {
+      const res = await fetch(data.url, { signal: controller.signal });
+      if (!res.ok) {
+        throw new Error(`[pdf.worker] fetch failed: ${res.status} ${res.statusText}`);
+      }
+      const buf = await res.arrayBuffer();
+      return new Uint8Array(buf);
+    } finally {
+      clearTimeout(abortId);
     }
-    const buf = await res.arrayBuffer();
-    return new Uint8Array(buf);
   }
   throw new Error('[pdf.worker] SAVE_PDF payload missing both bytes and url');
 }

@@ -135,6 +135,7 @@ beforeEach(() => {
     getPage:         vi.fn().mockReturnValue(mockPage),
     embedJpg:        m.embedJpg,
     save:            m.save,
+    commit:            m.save,
     context: { lookup: vi.fn() },
     getInfoDict:     vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
   })
@@ -470,6 +471,7 @@ describe('pdfSaver / savePDF', () => {
         }),
         embedJpg:        m.embedJpg,
         save:            m.save,
+    commit:            m.save,
         context: { lookup: vi.fn() },
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
@@ -516,6 +518,7 @@ describe('pdfSaver / savePDF', () => {
         }),
         embedJpg:        m.embedJpg,
         save:            m.save,
+    commit:            m.save,
         context: { lookup: vi.fn() },
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
@@ -586,6 +589,7 @@ describe('pdfSaver / savePDF', () => {
         getPage:         vi.fn().mockReturnValue(mockPage),
         embedJpg:        m.embedJpg,
         save:            m.save,
+    commit:            m.save,
         context: {
           lookup: vi.fn().mockReturnValue(fakeStream),
           flateStream: vi.fn().mockReturnValue(mockFlateStream),
@@ -645,6 +649,7 @@ describe('pdfSaver / savePDF', () => {
         getPage:         vi.fn().mockReturnValue(mockPage),
         embedJpg:        m.embedJpg,
         save:            m.save,
+    commit:            m.save,
         context: {
           lookup: vi.fn().mockReturnValue(fakeStream),
           flateStream: mockFlateStreamFn,
@@ -728,6 +733,7 @@ describe('pdfSaver / savePDF', () => {
         }),
         embedJpg:        m.embedJpg,
         save:            m.save,
+    commit:            m.save,
         context: { lookup: vi.fn() },
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
@@ -772,6 +778,7 @@ describe('pdfSaver / savePDF', () => {
         }),
         embedJpg:        m.embedJpg,
         save:            m.save,
+    commit:            m.save,
         context: { lookup: vi.fn() },
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })

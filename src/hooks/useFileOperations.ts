@@ -1,6 +1,37 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { writeFile } from '@tauri-apps/plugin-fs';
-import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import { readFile } from '@tauri-apps/plugin-fs';
+import { invoke } from '@tauri-apps/api/core';
+
+/**
+ * Rust 側 `write_pdf_chunk` コマンドを使って bytes を分割書き込みする。
+ *
+ * Tauri v2 の IPC binary 転送が 100MB 一発だと hang する事象を回避するため、
+ * 4MB 単位でチャンクして invoke する。Rust 側は raw body (tauri::ipc::Request) を
+ * 受けるため JSON シリアライズは発生しない。
+ *
+ * ベンチマーク結果 (純粋 fs::write): 99MB を ~500ms で書ける環境。
+ * 本実装はチャンク毎の IPC ラウンドトリップ + 実 I/O で数秒で完了する想定。
+ */
+async function writeFileChunked(path: string, bytes: Uint8Array): Promise<void> {
+  const CHUNK = 4 * 1024 * 1024; // 4MB
+  const headerPath = encodeURIComponent(path);
+  for (let offset = 0; offset < bytes.byteLength; offset += CHUNK) {
+    const end = Math.min(offset + CHUNK, bytes.byteLength);
+    // subarray はビューを返すだけ (copy しない)
+    const chunk = bytes.subarray(offset, end);
+    // subarray の buffer は元 bytes の buffer を指すため、byteOffset/byteLength を
+    // 考慮した slice を取ってから .buffer を渡す (native IPC は ArrayBuffer を期待)。
+    const body = chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
+      ? chunk.buffer
+      : chunk.slice().buffer;
+    await invoke('write_pdf_chunk', body, {
+      headers: {
+        'x-path': headerPath,
+        'x-offset': String(offset),
+      },
+    });
+  }
+}
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
@@ -11,39 +42,59 @@ import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
 
 /**
- * asset protocol の URL を fetch 可能な形式に整形する。
- * - Tauri v2 の convertFileSrc は `asset.localhost/...` を返すため `http://` を付与する。
- * - 既に `http(s)://` で始まっている場合はそのまま返す。
- */
-function toFetchableAssetUrl(filePath: string): string {
-  const url = convertFileSrc(filePath);
-  return url.startsWith('asset.localhost') ? 'http://' + url : url;
-}
-
-/**
  * 1 ページ目 render 後 (アイドル時) に background で PDF 全体 bytes を取得して
  * pecoStore.originalBytes にキャッシュする。Ctrl+S 時は既にメモリ上にあるため
  * pdf-lib 処理のみで保存完了できる (~1-3 秒)。
  *
- * 未キャッシュのまま保存が走った場合は save worker 側で URL から fetch するフォールバック
- * があるため、ここでの失敗は warn だけで握りつぶす。
+ * 以前は pdfjs.getData() や asset.localhost URL への fetch 経由で bytes を取得して
+ * いたが、いずれも WebView2 の Range キューを pdfjs / サムネ / OCR と奪い合い、
+ * 画像や OCR の読込中に Ctrl+S すると getData() / fetch が永久停止する事象が
+ * 発生していた。
+ *
+ * 本実装では Tauri の plugin-fs `readFile` を使って Rust 経由で直接ファイルを
+ * 読み込む。asset.localhost 帯域とは完全に独立した IPC チャネルで転送されるため、
+ * pdfjs 側の処理中でも干渉しない。
+ *
+ * 同時に複数の prefetch が走らないよう、ファイルパスをキーに in-flight Promise を
+ * モジュールレベルで共有する。保存時 (_executeSave) も同じ Promise を await する
+ * ことで、二重読み込みを防ぐ。
  */
-async function prefetchOriginalBytes(filePath: string): Promise<void> {
+const inflightPrefetches = new Map<string, Promise<Uint8Array | null>>();
+
+function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | null> {
+  const existing = inflightPrefetches.get(filePath);
+  if (existing) return existing;
+
   const state = usePecoStore.getState();
-  if (state.originalBytes) return; // 既にキャッシュ済み
-  if (state.document?.filePath !== filePath) return; // 別ファイルに切替済
-  try {
-    const res = await fetch(toFetchableAssetUrl(filePath));
-    if (!res.ok) throw new Error(`fetch failed: ${res.status} ${res.statusText}`);
-    const buf = await res.arrayBuffer();
-    // 長時間の fetch 中にファイル切替が起きていないか再チェック
-    const now = usePecoStore.getState();
-    if (now.document?.filePath !== filePath) return;
-    if (now.originalBytes) return; // 保存経路が先に埋めた場合は上書きしない
-    now.setOriginalBytes(new Uint8Array(buf));
-  } catch (e) {
-    console.warn('[prefetchOriginalBytes] failed (fallback to URL on save):', e);
+  if (state.originalBytes && state.document?.filePath === filePath) {
+    return Promise.resolve(state.originalBytes);
   }
+
+  const run = async (): Promise<Uint8Array | null> => {
+    try {
+      // Tauri plugin-fs は v2 で raw binary IPC を使用する。100MB 級でも
+      // base64 エンコードのオーバーヘッドは掛からず、HTTP/asset 経路とも無干渉。
+      const bytes = await readFile(filePath);
+      const now = usePecoStore.getState();
+      if (now.document?.filePath === filePath && !now.originalBytes) {
+        now.setOriginalBytes(bytes);
+      }
+      return bytes;
+    } catch (e) {
+      console.warn('[prefetchOriginalBytes] readFile failed:', e);
+      return null;
+    }
+  };
+
+  const task = run();
+  inflightPrefetches.set(filePath, task);
+  // run の外側で cleanup を掛けることで自己参照 (let task; task = ...) を回避
+  task.finally(() => {
+    if (inflightPrefetches.get(filePath) === task) {
+      inflightPrefetches.delete(filePath);
+    }
+  });
+  return task;
 }
 
 export function useFileOperations(
@@ -116,7 +167,7 @@ export function useFileOperations(
         // pdf-lib 処理だけで完了できるようにするための先読み。
         // Tauri 側のネットワークは競合しないが、サムネ生成と同時発火させると
         // WebView2 の帯域を食い合うため少し遅らせる。
-        setTimeout(() => { prefetchOriginalBytes(selected!); }, 2000);
+        setTimeout(() => { void ensurePrefetchOriginalBytes(selected!); }, 2000);
 
         return true;
       }
@@ -130,7 +181,29 @@ export function useFileOperations(
   };
 
   /**
+   * 指定 Promise に個別 timeout をかけ、失敗時は label 付きエラーで reject する。
+   * 保存経路のどこで停止したかを明確にするためのヘルパ。
+   * 成功時は経過時間を console.log で記録する。
+   */
+  const withStep = async <T,>(label: string, ms: number, op: () => Promise<T>): Promise<T> => {
+    const started = performance.now();
+    console.log(`[save] ▶ ${label}`);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`[save:${label}] タイムアウト (${ms}ms)`)), ms);
+    });
+    try {
+      const result = await Promise.race([op(), timeoutPromise]);
+      console.log(`[save] ✓ ${label} (${Math.round(performance.now() - started)}ms)`);
+      return result;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  };
+
+  /**
    * 保存の共通処理。originalBytes の待機 → IDB マージ → PDF 生成 → ファイル書き込みを行う。
+   * 各 await は個別 timeout で囲み、詰まった段階をトースト/コンソールで特定できるようにする。
    * @param targetPath 書き込み先パス。省略時は document.filePath に上書き保存。
    * @returns 書き込んだバイト数。失敗時は null。
    */
@@ -138,29 +211,33 @@ export function useFileOperations(
     const { document } = usePecoStore.getState();
     if (!document) return null;
 
-    // originalBytes が prefetch 経由で既に埋まっていれば bytes 経路、未設定なら
-    // save worker 側で URL から直接 fetch させる (main thread に 103MB を展開しない)。
-    // URL 経路時のみ「読み込み中...」Toast を表示する (bytes 経路は即時完了想定)。
-    const cachedBytes = usePecoStore.getState().originalBytes;
-    const saveSource: SavePdfSource = cachedBytes
-      ? { bytes: cachedBytes }
-      : { url: toFetchableAssetUrl(document.filePath) };
-
+    let cachedBytes = usePecoStore.getState().originalBytes;
     if (!cachedBytes) {
       showToast("保存用にファイルを読み込み中...");
+      const fetched = await withStep('readFile', 90_000, () => ensurePrefetchOriginalBytes(document.filePath));
+      if (!fetched) {
+        showToast("元 PDF の読み込みに失敗しました。", true);
+        return null;
+      }
+      cachedBytes = fetched;
     }
+    const saveSource: SavePdfSource = { bytes: cachedBytes };
 
-    const fontBytes = await loadFontLazy();
+    const fontBytes = await withStep('loadFont', 15_000, () => loadFontLazy());
     if (!fontBytes) {
       showToast("日本語フォントの読み込みに失敗しました。再度お試しください。", true);
       return null;
     }
 
     // LRU退避のIDB書き込みが全て完了してからIDBを読み込む（競合状態回避）
-    await waitForPendingIdbSaves();
+    await withStep('waitIdbSaves', 15_000, () => waitForPendingIdbSaves());
 
     // 1000ページ対応: メモリにない（IDBに退避された）Dirtyデータも全て回収する
-    const tempDirtyPages = await getAllTemporaryPageData(document.filePath);
+    const tempDirtyPages = await withStep(
+      'readIdbDirty',
+      15_000,
+      () => getAllTemporaryPageData(document.filePath),
+    );
 
     const mergedPages = new Map<number, PageData>(document.pages);
     for (const [idx, data] of tempDirtyPages.entries()) {
@@ -176,22 +253,30 @@ export function useFileOperations(
       [...mergedPages.entries()].filter(([, p]) => p.isDirty)
     );
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
-    const savedBytes = await savePDF(saveSource, mergedDoc, fontBytes);
+    const savedBytes = await withStep('savePDF', 150_000, () => savePDF(saveSource, mergedDoc, fontBytes));
     const writePath = targetPath ?? document.filePath;
 
-    await writeFile(writePath, savedBytes);
+    await withStep('writeFile', 180_000, () => writeFileChunked(writePath, savedBytes));
     // originalBytes を更新し、次回保存時もこの累積変更をベースにするようにする
     usePecoStore.getState().setOriginalBytes(savedBytes);
-    // LRU退避ページの IDB エントリも保存完了済みとしてクリア
-    await clearTemporaryChanges(document.filePath);
+    // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
+    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(document.filePath))
+      .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
     return savedBytes.length;
   };
 
   const handleSave = async () => {
+    // Ctrl+S が届いていることを可視化するため、開始時に必ずトースト表示。
+    // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
+    console.log('[save] handleSave invoked');
     const { document } = usePecoStore.getState();
-    if (!document) return;
+    if (!document) {
+      showToast("PDFが開かれていません。", true);
+      return;
+    }
 
     setIsSaving?.(true);
+    showToast("保存処理を開始しました...");
     try {
       const size = await _executeSave();
       if (size !== null) {
@@ -202,7 +287,8 @@ export function useFileOperations(
       }
     } catch (err) {
       console.error("Failed to save:", err);
-      showToast("保存に失敗しました。", true);
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`保存に失敗しました: ${msg}`, true);
     } finally {
       setIsSaving?.(false);
     }

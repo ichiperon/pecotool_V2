@@ -354,6 +354,7 @@ describe('I-06: 縦書きPDFの保存', () => {
       getPage:     vi.fn().mockReturnValue(mockPage),
       embedJpg:    m.embedJpg,
       save:        m.save,
+    commit:        m.save,
       context: { lookup: vi.fn() },
       getInfoDict: vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
     }
