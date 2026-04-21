@@ -42,10 +42,17 @@ describe('useTauriCloseGuard', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     // window.location.hash を main ウィンドウとして設定
-    Object.defineProperty(window, 'location', {
-      value: { hash: '' },
-      writable: true,
-    })
+    // vmThreads pool では location は既存プロパティで redefine 不可のため、hash のみ書き換える。
+    try {
+      window.location.hash = ''
+    } catch {
+      // location が完全に readonly な環境ではフルオブジェクトを differ する
+      Object.defineProperty(window, 'location', {
+        value: { hash: '' },
+        writable: true,
+        configurable: true,
+      })
+    }
   })
 
   afterEach(() => {

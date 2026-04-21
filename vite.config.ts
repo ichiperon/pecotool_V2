@@ -12,6 +12,9 @@ export default defineConfig(async () => ({
     environment: 'jsdom',
     setupFiles: ['./src/__tests__/setup.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/src/__tests__/e2e/**'],
+    // vitest 4.1.2 + Windows の既定 pool 'forks' には "Cannot read properties of undefined (reading 'config')"
+    // が発生する既知の問題 (getRunner() 未初期化) があるため、安定する vmThreads を明示指定する。
+    pool: 'vmThreads',
   },
 
   build: {

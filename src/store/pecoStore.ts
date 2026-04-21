@@ -49,7 +49,7 @@ interface PecoState {
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
-  setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
+  setDocument: (doc: PecoDocument | null) => void;
   setOriginalBytes: (bytes: Uint8Array) => void;
   setDocumentFilePath: (filePath: string) => void;
   setCurrentPage: (index: number) => void;
@@ -112,13 +112,14 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     return { document: { ...state.document, filePath, fileName } };
   }),
 
-  setDocument: (doc, bytes) => {
+  setDocument: (doc) => {
     // pendingRestoration を取り出してから state をリセットする
     const restoration = get().pendingRestoration;
 
     set({
       document: doc,
-      originalBytes: bytes || null,
+      // originalBytes は保存時に lazy fetch するため、ファイル切替時は null にリセット
+      originalBytes: null,
       pageAccessOrder: [],
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく

@@ -764,11 +764,12 @@ describe('pecoStore', () => {
       expect(usePecoStore.getState().document).toBeNull()
     })
 
-    it('U-PS-61: originalBytes が保存される', () => {
+    it('U-PS-61: setDocument は originalBytes を null にリセットする (保存時 lazy fetch)', () => {
       const bytes = new Uint8Array([1, 2, 3])
-      usePecoStore.getState().setDocument(makeDoc(), bytes)
+      usePecoStore.setState({ originalBytes: bytes })
+      usePecoStore.getState().setDocument(makeDoc())
 
-      expect(usePecoStore.getState().originalBytes).toBe(bytes)
+      expect(usePecoStore.getState().originalBytes).toBeNull()
     })
 
     it('U-PS-62: pendingRestoration がクリアされる', () => {

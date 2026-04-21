@@ -19,15 +19,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
   stat: vi.fn().mockResolvedValue({ mtime: new Date('2024-01-01') }),
 }));
 vi.mock('@tauri-apps/api/core', () => ({
-  // fast_read_file は Rust 側で tauri::ipc::Response を返すため、
-  // JS 側には ArrayBuffer が届く。その他コマンドは undefined。
-  invoke: vi.fn((cmd: string) => {
-    if (cmd === 'fast_read_file') {
-      const u8 = new Uint8Array([1, 2, 3]);
-      return Promise.resolve(u8.buffer);
-    }
-    return Promise.resolve(undefined);
-  }),
+  invoke: vi.fn(() => Promise.resolve(undefined)),
   convertFileSrc: (p: string) => p,
 }));
 vi.mock('../../utils/pdfLoader', () => ({
