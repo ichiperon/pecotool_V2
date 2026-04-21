@@ -1,10 +1,11 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { readFile, writeFile } from '@tauri-apps/plugin-fs';
+import { writeFile } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
+import { fastReadFile } from '../utils/fastFs';
 import { loadFontLazy } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
@@ -70,11 +71,11 @@ export function useFileOperations(
         try {
           // bytes を先に取得してから pdfjs に渡す（主 pdfjs を asset protocol から切り離す）。
           // WebView2 asset protocol は Range 6 本キューイング + 都度 open/close で
-          // ボトルネックになるため、readFile で一括取得してから bytes 直接渡しにする。
-          // 初回 ~1s の遅延は許容範囲（処理全体の安定性を優先）。
+          // ボトルネックになるため、一括取得してから bytes 直接渡しにする。
+          // @tauri-apps/plugin-fs の readFile は WebView2 経由で ~1MB/s しか出ない問題が
+          // あるため、Rust 側 std::fs::read を spawn_blocking で呼ぶ fastReadFile を使う。
           perf.mark('open.readFileStart');
-          const content = await readFile(selected);
-          const bytes = new Uint8Array(content);
+          const bytes = await fastReadFile(selected);
           perf.mark('open.readFileDone', { bytes: bytes.length });
           setOriginalBytes(bytes);
           perf.mark('open.loadPdfStart');

@@ -131,7 +131,12 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       const cacheKey = `${pageIndex}:${zoom}`;
       const cached = getBitmapCache(cacheKey);
       if (cached && cached.width === w && cached.height === h) {
-        // キャッシュヒット: サイズ適用 + 即時描画してちらつきゼロで差し替え
+        // キャッシュヒット: 進行中の古い render があればキャンセルしてから
+        // サイズ適用 + 即時描画することでチラつきゼロで差し替える。
+        if (renderTaskRef.current) {
+          renderTaskRef.current.cancel();
+          renderTaskRef.current = null;
+        }
         canvas.width = w;
         canvas.height = h;
         if (overlayCanvasRef.current) {
@@ -239,18 +244,29 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     const isPageChange = prevPdfPageRef.current !== pdfPage;
     prevPdfPageRef.current = pdfPage;
 
+    // ページ切替直後は isAutoFit 有効時に fitToScreen が ResizeObserver 経由で
+    // 後続して zoom を確定させる (最大 ~50ms 程度)。この間に古い zoom で
+    // render を開始すると pdfjs worker が無駄に占有され、確定 zoom の
+    // render 開始が遅延する。そのため page 切替時は 50ms 待って zoom が
+    // 確定してから 1 回だけ render する (50ms 以内に zoom が再変更されたら
+    // 新しい zoom で再スタートする: effect の再実行がそれを担う)。
+    //
+    // 通常の zoom 操作 (wheel / button) も 30ms の短 debounce で連続入力を
+    // 束ねて 1 回の render にする。
     if (renderDebounceRef.current) clearTimeout(renderDebounceRef.current);
-    if (isPageChange) {
+    const delay = isPageChange ? 50 : 30;
+    renderDebounceRef.current = setTimeout(() => {
+      renderDebounceRef.current = null;
+      if (!active) return;
       renderPdf();
-    } else {
-      renderDebounceRef.current = setTimeout(() => {
-        renderPdf();
-      }, 30);
-    }
+    }, delay);
 
     return () => {
       active = false;
-      if (renderDebounceRef.current) clearTimeout(renderDebounceRef.current);
+      if (renderDebounceRef.current) {
+        clearTimeout(renderDebounceRef.current);
+        renderDebounceRef.current = null;
+      }
       renderTaskRef.current?.cancel();
     };
   }, [pdfPage, zoom]);

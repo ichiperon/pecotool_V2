@@ -1,5 +1,18 @@
 mod backup;
 
+/// Tauri plugin-fs の readFile が WebView2 経由で異常に低速 (~1MB/s) な問題を回避し、
+/// std::fs::read を spawn_blocking で直接呼んでファイル全体を読み込む。
+/// 100MB クラスの PDF で 50-200 倍の高速化を見込む。
+/// Vec<u8> は Tauri v2 の IPC 層でバイナリとして転送される。
+#[tauri::command]
+async fn fast_read_file(file_path: String) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::read(&file_path).map_err(|e| format!("read failed: {}", e))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
 /// PDF の /MediaBox (or /CropBox) を直接パースし、全ページの論理寸法を返す。
 /// pdfjs の getPage().getViewport() と比較して10倍以上高速。
 /// 各タプルは (width_pt, height_pt)。/Rotate 90/270 は swap 済み。
@@ -319,6 +332,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             run_ocr,
             get_pdf_page_dimensions,
+            fast_read_file,
             write_perf_log,
             backup::save_backup,
             backup::check_pending_backups,
