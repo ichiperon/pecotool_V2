@@ -120,6 +120,10 @@ function getDocumentTask(urlOrData: string | Uint8Array) {
 }
 
 export async function loadPDF(filePath: string, bytes?: Uint8Array): Promise<PecoDocument> {
+  // bytes 引数は現状未使用。Tauri v2 の IPC 経由で 100MB 級のバイナリを転送すると
+  // ~700KB/s しか出ず pdfjs の Range fetch (数 MB) より遅いため、通常経路は
+  // URL (asset protocol) ベースに統一している。
+  // 将来より小さい payload での利用に備えて引数自体は残してある。
   // bytes が渡された場合は asset protocol をバイパスして data ベースで開く（安定・高速）。
   // bytes が無ければ従来の URL ベース（後方互換）にフォールバックする。
   let source: string | Uint8Array;
@@ -202,6 +206,8 @@ export async function openPDF(filePath: string): Promise<pdfjsLib.PDFDocumentPro
  * Caller is responsible for calling pdf.destroy() when done.
  */
 export async function openFreshPdfDoc(filePath: string, bytes?: Uint8Array): Promise<pdfjsLib.PDFDocumentProxy> {
+  // bytes 引数は現状未使用（IPC 経由の bytes 転送は Tauri v2 で遅いため通常経路では渡さない）。
+  // 将来の再活用に備えて引数自体は残してある。
   if (bytes) {
     return getDocumentTask(bytes).promise;
   }

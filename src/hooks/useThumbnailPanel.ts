@@ -303,83 +303,27 @@ export function useThumbnailPanel() {
     const capturedFilePath = document.filePath;
     const capturedEpoch = epoch;
 
-    /**
-     * pecoStore.originalBytes を最大 timeoutMs 待機する。
-     * - 既に到着していれば即解決
-     * - 未到着なら subscribe して到着 or タイムアウトを待つ
-     * - ファイル切替（epoch ミスマッチ）が起きた場合は null で解決して呼び出し側に中断させる
-     */
-    const waitForOriginalBytes = (timeoutMs: number): Promise<Uint8Array | null> => {
-      return new Promise((resolve) => {
-        const initial = usePecoStore.getState().originalBytes;
-        if (initial) { resolve(initial); return; }
-
-        const timer = setTimeout(() => { unsubscribe(); resolve(null); }, timeoutMs);
-        const unsubscribe = usePecoStore.subscribe((state) => {
-          // ファイル切替で epoch がズレた場合は待機を打ち切る
-          if (epochRef.current !== capturedEpoch) {
-            clearTimeout(timer);
-            unsubscribe();
-            resolve(null);
-            return;
-          }
-          if (state.originalBytes) {
-            clearTimeout(timer);
-            unsubscribe();
-            resolve(state.originalBytes);
-          }
-        });
-      });
-    };
-
     const startWorkerLoad = async () => {
       if (epochRef.current !== capturedEpoch) return;
       const workers = workersRef.current;
 
-      // pecoStore.originalBytes を再利用して二重 fetch を回避する。
-      // handleOpen がバックグラウンドで readFile 中の場合は subscribe で到着を待つ（最大 5 秒）。
-      const original = await waitForOriginalBytes(5000);
-      if (epochRef.current !== capturedEpoch) return;
-
-      if (original) {
-        const perWorkerPromises = workers.map((_, i) =>
-          new Promise<boolean>(resolve => {
-            loadResolvesRef.current[i] = resolve;
-          })
-        );
-
-        logger.log('[ThumbnailPanel] Posting LOAD_PDF (from originalBytes) to', workers.length, 'worker(s)');
-        workers.forEach(worker => {
-          // 重要: originalBytes 自体は保存処理で再利用するため、必ず slice() で複製してから transfer する。
-          // さらに transfer は所有権移転のため、worker 1 台につき 1 回 slice() で独立した ArrayBuffer を生成する。
-          const pdfBytes = original.slice().buffer;
-          const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', bytes: pdfBytes };
-          worker.postMessage(req, [pdfBytes]);
-        });
-
-        Promise.all(perWorkerPromises).then((results) => {
-          logger.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
-          if (epochRef.current !== capturedEpoch) return;
-          isPdfReadyRef.current = true;
-          processThumbnailQueue(capturedEpoch);
-        });
-        return;
-      }
-
-      // フォールバック: originalBytes が timeoutMs 内に到着しなかった場合は
-      // 従来通り URL を渡して Worker 側で fetch させる
-      console.warn('[useThumbnailPanel] originalBytes not ready within timeout, falling back to URL');
+      // bytes IPC 転送経路は Tauri v2 で低速のため廃止。
+      // URL (asset protocol) を直接 Worker に渡し、Worker 側 pdfjs の Range fetch に任せる。
       const url = toAssetUrl(capturedFilePath);
       const perWorkerPromises = workers.map((_, i) =>
         new Promise<boolean>(resolve => {
           loadResolvesRef.current[i] = resolve;
         })
       );
+
+      logger.log('[ThumbnailPanel] Posting LOAD_PDF (URL) to', workers.length, 'worker(s)');
       workers.forEach(worker => {
         const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', url };
         worker.postMessage(req);
       });
-      Promise.all(perWorkerPromises).then(() => {
+
+      Promise.all(perWorkerPromises).then((results) => {
+        logger.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
         if (epochRef.current !== capturedEpoch) return;
         isPdfReadyRef.current = true;
         processThumbnailQueue(capturedEpoch);

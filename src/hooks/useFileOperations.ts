@@ -1,31 +1,13 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { writeFile } from '@tauri-apps/plugin-fs';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
-import { fastReadFile } from '../utils/fastFs';
 import { loadFontLazy } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
-
-/** originalBytes が設定されるまで最大 timeoutMs 待機する（subscribe ベース） */
-function waitForOriginalBytes(timeoutMs = 10000): Promise<Uint8Array | null> {
-  return new Promise((resolve) => {
-    const current = usePecoStore.getState().originalBytes;
-    if (current) { resolve(current); return; }
-
-    const timer = setTimeout(() => { unsubscribe(); resolve(null); }, timeoutMs);
-    const unsubscribe = usePecoStore.subscribe((state) => {
-      if (state.originalBytes) {
-        clearTimeout(timer);
-        unsubscribe();
-        resolve(state.originalBytes);
-      }
-    });
-  });
-}
 
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean) => void,
@@ -33,7 +15,7 @@ export function useFileOperations(
   setIsLoadingFile?: (v: boolean) => void,
   onOpenComplete?: (doc: import('../types').PecoDocument) => void,
 ) {
-  const { setDocument, setDocumentFilePath, resetDirty, setOriginalBytes } = usePecoStore();
+  const { setDocument, setDocumentFilePath, resetDirty } = usePecoStore();
 
   const addToRecent = (path: string) => {
     // ファイルフルパスは機密情報のため sessionStorage に保存（ブラウザ/アプリを閉じると消去）
@@ -69,17 +51,13 @@ export function useFileOperations(
         setIsLoadingFile?.(true);
 
         try {
-          // bytes を先に取得してから pdfjs に渡す（主 pdfjs を asset protocol から切り離す）。
-          // WebView2 asset protocol は Range 6 本キューイング + 都度 open/close で
-          // ボトルネックになるため、一括取得してから bytes 直接渡しにする。
-          // @tauri-apps/plugin-fs の readFile は WebView2 経由で ~1MB/s しか出ない問題が
-          // あるため、Rust 側 std::fs::read を spawn_blocking で呼ぶ fastReadFile を使う。
-          perf.mark('open.readFileStart');
-          const bytes = await fastReadFile(selected);
-          perf.mark('open.readFileDone', { bytes: bytes.length });
-          setOriginalBytes(bytes);
+          // URL (asset protocol) で直接 pdfjs に開かせる。初回ページは Range fetch で
+          // 数 MB だけ取ってくるので瞬時に表示される。prefetch 廃止済みのため
+          // WebView2 の Range 6 本キューイング問題も発生しない。
+          // Tauri v2 の IPC 経由で 100MB 級のバイナリを転送すると ~700KB/s しか出ない
+          // ため、bytes 直接渡し経路は廃止した (fastReadFile も含む)。
           perf.mark('open.loadPdfStart');
-          const doc = await loadPDF(selected, bytes);
+          const doc = await loadPDF(selected);
           perf.mark('open.loadPdfDone', { totalPages: doc.totalPages });
           setDocument(doc);
           perf.mark('open.setDoc');
@@ -117,10 +95,25 @@ export function useFileOperations(
 
     let originalBytes = usePecoStore.getState().originalBytes;
     if (!originalBytes) {
-      showToast("ファイルを準備中です。しばらくお待ちください...");
-      originalBytes = await waitForOriginalBytes();
-      if (!originalBytes) {
-        showToast("ファイルの読み込みが完了していません。再度お試しください。", true);
+      // bytes 直接渡し経路を廃止したため、保存時に asset protocol 経由で lazy fetch する。
+      // 初回は 100MB 級ファイルの場合 1〜3 分かかる可能性があるため toast で通知。
+      showToast("保存用にファイルを読み込み中...");
+      try {
+        let url = convertFileSrc(document.filePath);
+        if (url.startsWith('asset.localhost')) {
+          url = 'http://' + url;
+        }
+        const res = await fetch(url);
+        if (!res.ok) {
+          showToast("ファイルの読み込みに失敗しました。再度お試しください。", true);
+          return null;
+        }
+        const buf = await res.arrayBuffer();
+        originalBytes = new Uint8Array(buf);
+        usePecoStore.getState().setOriginalBytes(originalBytes);
+      } catch (e) {
+        console.error('[_executeSave] originalBytes lazy fetch failed:', e);
+        showToast("ファイルの読み込みに失敗しました。再度お試しください。", true);
         return null;
       }
     }
