@@ -10,6 +10,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { stat } from '@tauri-apps/plugin-fs';
 import { clearBitmapCache } from './bitmapCache';
 import { logger } from './logger';
+import { perf } from './perfLogger';
 
 // 直前に生成したラッパーWorker用ObjectURLを保持し、再生成前にrevokeしてリークを防ぐ
 let lastPatchedWorkerUrl: string | null = null;
@@ -55,7 +56,9 @@ if (typeof window !== 'undefined') {
   window.fetch = function patchedFetch(input: RequestInfo | URL, init?: RequestInit) {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
     if (url.includes('asset.localhost')) {
+      perf.mark('net.fetch', { url, phase: 'start' });
       return _origFetch(input, init).then(response => {
+        perf.mark('net.fetch', { url, phase: 'end', status: response.status });
         const headers = new Headers(response.headers);
         if (!headers.has('accept-ranges')) {
           headers.set('accept-ranges', 'bytes');

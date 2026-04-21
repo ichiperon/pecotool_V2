@@ -1,6 +1,15 @@
 import React, { Suspense, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 
+// 計測モード (perfLogger) を起動時に初期化。
+// URL hash '#perf' / localStorage.pecoPerf='1' のいずれかで有効化される。
+// 無効時は副作用なし (enabled=false で全 API が早期 return)。
+import { perf } from "./utils/perfLogger";
+if (perf.enabled) {
+  // boot ポイントを記録しておく。以降の全 label はこの t=0 を基準に比較できる。
+  perf.mark('boot.main');
+}
+
 // pdf-lib chunk を idle 時間に先読みし、保存時の初動を速くする
 // (vite.config の manualChunks で別 chunk 化されているため、dynamic import で
 //  バンドルキャッシュに載せておくと、後続の pdfSaver からの読み込みが即時解決される)

@@ -20,6 +20,7 @@ import { readReorderThreshold, writeReorderThreshold } from "./utils/reorderThre
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
 import { TextBlock } from "./types";
+import { perf } from "./utils/perfLogger";
 
 // Hooks
 import { useFileOperations } from "./hooks/useFileOperations";
@@ -279,6 +280,54 @@ function App() {
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
   }, [handleOpen]);
+
+  // ──────────── 計測モード (perfLogger) ────────────
+  // Ctrl+Shift+P: localStorage.pecoPerf='1' をトグル + 再読込
+  // F10:          有効時のみ、ndjson をダウンロード & Tauri 経由で appdata に保存
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Ctrl+Shift+P: 有効/無効トグル → 再読込
+      if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
+        e.preventDefault();
+        try {
+          const cur = localStorage.getItem('pecoPerf');
+          if (cur === '1' || cur === 'verbose') {
+            localStorage.removeItem('pecoPerf');
+            showToast('計測モードを無効化します。再読込中...');
+          } else {
+            localStorage.setItem('pecoPerf', '1');
+            showToast('計測モードを有効化します。再読込中...');
+          }
+          setTimeout(() => location.reload(), 400);
+        } catch (err) {
+          console.error('[perf] toggle failed:', err);
+        }
+        return;
+      }
+      // F10: 計測結果書き出し
+      if (e.key === 'F10') {
+        if (!perf.enabled) return;
+        e.preventDefault();
+        // Tauri 環境では appdata に書き込み → パスを Toast 表示
+        perf.sendToTauri(`perf-${Date.now()}`).then((path) => {
+          if (path) {
+            showToast(`計測ログを保存しました: ${path}`);
+          } else {
+            showToast('計測ログの保存に失敗しました（有効化されていない可能性）', true);
+          }
+        }).catch((err) => {
+          console.error('[perf] sendToTauri failed:', err);
+          showToast(`計測ログの Tauri 保存に失敗: ${err}`, true);
+        });
+        // 同時に Blob ダウンロード (ユーザー環境で動く方を使える)
+        perf.download().catch((err) => {
+          console.error('[perf] download failed:', err);
+        });
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [showToast]);
 
   return (
     <div

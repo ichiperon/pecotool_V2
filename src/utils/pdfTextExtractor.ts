@@ -3,6 +3,7 @@ import type { TextItem, TextMarkedContent } from 'pdfjs-dist/types/src/display/a
 import { PageData, TextBlock, BoundingBox } from '../types';
 import { getCachedPageProxy } from './pdfLoader';
 import { getCachedPage, setCachedPage, getTemporaryPageData } from './pdfTemporaryStorage';
+import { perf } from './perfLogger';
 
 export async function loadPage(
   _pdf: pdfjsLib.PDFDocumentProxy,
@@ -30,7 +31,9 @@ export async function loadPage(
     // キャッシュ済みプロキシを再利用して二重getPageを回避
     const page = await getCachedPageProxy(filePath, pageIndex);
     const viewport = page.getViewport({ scale: 1.0 });
+    perf.mark('text.getTextStart', { page: pageIndex });
     const textContent = await page.getTextContent();
+    perf.mark('text.getTextDone', { page: pageIndex, items: textContent.items.length });
 
     // pdfjs v5 mixes TextItem and TextMarkedContent in items array.
     const allItems: Array<TextItem | TextMarkedContent> = textContent.items;

@@ -7,7 +7,7 @@ export type ThumbnailWorkerRequest =
   | { type: 'GENERATE_THUMBNAIL'; pageIndex: number };
 
 export type ThumbnailWorkerResponse =
-  | { type: 'LOAD_COMPLETE'; numPages: number }
+  | { type: 'LOAD_COMPLETE'; numPages: number; workerPerfNow?: number }
   | { type: 'LOAD_ERROR'; message: string }
-  | { type: 'THUMBNAIL_DONE'; pageIndex: number; bytes: Uint8Array }
+  | { type: 'THUMBNAIL_DONE'; pageIndex: number; bytes: Uint8Array; workerGenStart?: number; workerGenDone?: number }
   | { type: 'THUMBNAIL_ERROR'; pageIndex: number; error?: string };

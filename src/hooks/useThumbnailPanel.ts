@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { usePecoStore } from '../store/pecoStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { logger } from '../utils/logger';
+import { perf } from '../utils/perfLogger';
 import type { ThumbnailWorkerRequest, ThumbnailWorkerResponse } from '../utils/thumbnailWorkerTypes';
 
 // サムネイル生成を thumbnail.worker.ts (OffscreenCanvas) に委譲することで
@@ -108,6 +109,7 @@ export function useThumbnailPanel() {
         resolve(url);
       });
       const req: ThumbnailWorkerRequest = { type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx };
+      perf.mark('thumb.genStart', { page: pageIdx, workerIdx });
       worker.postMessage(req);
     });
   }, []);
@@ -170,6 +172,9 @@ export function useThumbnailPanel() {
         const msg = e.data;
 
         if (msg.type === 'LOAD_COMPLETE' || msg.type === 'LOAD_ERROR') {
+          if (msg.type === 'LOAD_COMPLETE') {
+            perf.mark('thumb.loadComplete', { workerIdx: workerIndex, numPages: msg.numPages, workerPerfNow: msg.workerPerfNow });
+          }
           logger.log(`[ThumbnailPanel] Worker ${workerIndex} ${msg.type}`);
           if (msg.type === 'LOAD_ERROR') {
             console.error(`[useThumbnailPanel] Worker ${workerIndex} load error:`, msg.message);
@@ -185,6 +190,14 @@ export function useThumbnailPanel() {
         }
 
         if (msg.type === 'THUMBNAIL_DONE') {
+          perf.mark('thumb.genDone', {
+            page: msg.pageIndex,
+            workerGenStart: msg.workerGenStart,
+            workerGenDone: msg.workerGenDone,
+            workerMs: msg.workerGenStart != null && msg.workerGenDone != null
+              ? Math.round((msg.workerGenDone - msg.workerGenStart) * 1000) / 1000
+              : undefined,
+          });
           const resolve = myPending.get(msg.pageIndex);
           if (!resolve) return;
           myPending.delete(msg.pageIndex);

@@ -4,6 +4,7 @@ import { GripVertical } from "lucide-react";
 import type { DraggableSyntheticListeners } from "@dnd-kit/core";
 import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
+import { perf } from "../utils/perfLogger";
 
 export interface OcrCardHandle {
   focusContent: () => void;
@@ -89,6 +90,7 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   }, [block.text]);
 
   const handleBlur = () => {
+    perf.mark('edit.blur', { page: pageIndex, blockId: block.id });
     // キャレット位置を保存（次回 focus 時に復元する）
     const sel = window.getSelection();
     if (sel && sel.rangeCount > 0 && contentRef.current?.contains(sel.anchorNode)) {

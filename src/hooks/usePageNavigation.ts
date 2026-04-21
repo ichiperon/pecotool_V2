@@ -6,6 +6,7 @@ import {
   getSharedPdfProxy,
   getCachedPageProxy,
 } from '../utils/pdfLoader';
+import { perf } from '../utils/perfLogger';
 import type { BoundingBox } from '../types';
 
 interface UsePageNavigationOptions {
@@ -51,6 +52,7 @@ export function usePageNavigation({
   }>> | null | undefined>(undefined);
 
   const loadCurrentPage = useCallback(async (pageIdx: number) => {
+    perf.mark('nav.loadEntry', { page: pageIdx });
     // 前回の読み込みをキャンセルし、新しい AbortController を発行
     currentLoadAbortRef.current?.abort();
     const controller = new AbortController();
@@ -66,7 +68,9 @@ export function usePageNavigation({
     setIsLoadingPageRender(true);
     setPageLoadError(null);
     try {
+      perf.mark('nav.sharedStart', { page: pageIdx });
       const pdf = await getSharedPdfProxy(doc.filePath);
+      perf.mark('nav.sharedDone', { page: pageIdx });
 
       if (signal.aborted) return;
 
@@ -88,9 +92,12 @@ export function usePageNavigation({
       // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）
       // 取得した PDFPageProxy は store に publish して usePdfRendering が
       // 二重 getCachedPageProxy を避けられるようにする。
+      perf.mark('nav.pageProxyStart', { page: pageIdx });
       const qp = await getCachedPageProxy(doc.filePath, pageIdx);
+      perf.mark('nav.pageProxyDone', { page: pageIdx });
       if (signal.aborted) return;
       const qv = qp.getViewport({ scale: 1.0 });
+      perf.mark('nav.viewport', { page: pageIdx, w: Math.round(qv.width), h: Math.round(qv.height) });
 
       // currentPageIndex がまだ pageIdx のうちに proxy を共有
       const liveState = usePecoStore.getState();
@@ -118,6 +125,7 @@ export function usePageNavigation({
       // → PdfCanvas が即座にレンダリング開始。
       // render 完了までは isLoadingPageRender が true のまま。
       if (!signal.aborted) {
+        perf.mark('nav.metaDone', { page: pageIdx });
         setIsLoadingPageMeta(false);
       }
 
@@ -127,6 +135,7 @@ export function usePageNavigation({
       // テキスト抽出はバックグラウンドで実行（レンダリングをブロックしない）
       // prefetch (±1/±2 ページの proxy 取得・loadPage) は pdfjs worker のタスクキューを
       // 占有して現在ページの描画/テキスト抽出を遅延させるため廃止。現在ページのみロードする。
+      perf.mark('text.loadStart', { page: pageIdx });
       loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime)
         .then((pageData) => {
           if (signal.aborted) return;
@@ -141,7 +150,9 @@ export function usePageNavigation({
           const mergedData = hasUserEdits
             ? { ...pageData, textBlocks: existing!.textBlocks, isDirty: true, isTextExtracted: true }
             : { ...pageData, isTextExtracted: true };
+          perf.mark('text.updateStoreStart', { page: pageIdx, blocks: mergedData.textBlocks?.length ?? 0 });
           updatePageData(pageIdx, mergedData, false);
+          perf.mark('text.updateStoreDone', { page: pageIdx });
         })
         .catch((err) => {
           if (signal.aborted) return;

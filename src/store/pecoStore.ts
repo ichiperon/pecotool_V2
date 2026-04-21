@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument, PageData, Action, TextBlock } from '../types';
 import { saveTemporaryPageDataBatch, clearTemporaryChanges } from '../utils/pdfLoader';
+import { perf } from '../utils/perfLogger';
 
 // 進行中のLRU退避IDB書き込みPromiseを追跡する。
 // 保存処理はこれらが完了してからIDBを読み込む必要がある。
@@ -168,10 +169,13 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     }
   },
 
-  setCurrentPage: (index) => set((state) => {
-    const newOrder = [index, ...state.pageAccessOrder.filter(i => i !== index)];
-    return { currentPageIndex: index, selectedIds: new Set(), lastSelectedId: null, pageAccessOrder: newOrder };
-  }),
+  setCurrentPage: (index) => {
+    perf.mark('nav.click', { to: index });
+    set((state) => {
+      const newOrder = [index, ...state.pageAccessOrder.filter(i => i !== index)];
+      return { currentPageIndex: index, selectedIds: new Set(), lastSelectedId: null, pageAccessOrder: newOrder };
+    });
+  },
 
   setZoom: (zoom) => set({ zoom }),
 
@@ -186,6 +190,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false })),
 
   updatePageData: (pageIndex, data, undoable = true) => {
+    perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
     // LRU退避時のIndexedDB保存をset()の外で非同期実行するためペンディングリストを収集
     const pendingSaves: Array<{ filePath: string; idx: number; page: PageData }> = [];
 
@@ -275,6 +280,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
       pendingIdbSaves.add(tracked);
     }
+    perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
   },
 
   resetDirty: () => set((state) => {

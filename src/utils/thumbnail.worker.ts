@@ -124,7 +124,7 @@ async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
         return;
       }
       pdfDoc = doc;
-      post({ type: 'LOAD_COMPLETE', numPages: doc.numPages });
+      post({ type: 'LOAD_COMPLETE', numPages: doc.numPages, workerPerfNow: performance.now() });
     }).catch((e) => {
       if (currentLoadingTask === task) {
         currentLoadingTask = null;
@@ -147,6 +147,7 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     await new Promise<void>(resolve => renderWaitQueue.push(resolve));
   }
   activeRenders++;
+  const workerGenStart = performance.now();
   try {
     // loadPromise が設定されている場合は PDF ロード完了を待つ
     // （LOAD_PDF より先に GENERATE_THUMBNAIL が届いた場合の保護）
@@ -185,7 +186,16 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     const buf = await blob.arrayBuffer();
 
     // ArrayBuffer を Transferable として転送（零コピー）
-    post({ type: 'THUMBNAIL_DONE', pageIndex, bytes: new Uint8Array(buf) }, [buf]);
+    post(
+      {
+        type: 'THUMBNAIL_DONE',
+        pageIndex,
+        bytes: new Uint8Array(buf),
+        workerGenStart,
+        workerGenDone: performance.now(),
+      },
+      [buf],
+    );
   } catch (e) {
     const errMsg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     console.error(`[thumbnail.worker] Page ${pageIndex + 1} failed:`, e);

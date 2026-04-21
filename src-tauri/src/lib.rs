@@ -113,6 +113,40 @@ async fn get_pdf_page_dimensions(file_path: String) -> Result<Vec<(f64, f64)>, S
     .map_err(|e| format!("spawn_blocking error: {}", e))?
 }
 
+/// 計測ログを appLocalData/perf/<safe_name>.ndjson に書き出す。
+/// name はファイル名衝突 / path traversal 対策として ASCII 英数字と '-', '_' のみを許可。
+/// 返値は書き込み先の絶対パス文字列。
+#[tauri::command]
+async fn write_perf_log(
+    app: tauri::AppHandle,
+    name: String,
+    body: String,
+) -> Result<String, String> {
+    use std::fs;
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    let perf_dir = dir.join("perf");
+    fs::create_dir_all(&perf_dir).map_err(|e| format!("create_dir: {e}"))?;
+    let safe_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let safe_name = if safe_name.is_empty() {
+        format!("perf-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0))
+    } else {
+        safe_name
+    };
+    let path = perf_dir.join(format!("{}.ndjson", safe_name));
+    fs::write(&path, body).map_err(|e| format!("write: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 async fn run_ocr(
     image_path: String,
@@ -285,6 +319,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             run_ocr,
             get_pdf_page_dimensions,
+            write_perf_log,
             backup::save_backup,
             backup::check_pending_backups,
             backup::clear_backup,

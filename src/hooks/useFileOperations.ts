@@ -7,6 +7,7 @@ import { savePDF } from '../utils/pdfSaver';
 import { formatFileSize } from '../utils/format';
 import { loadFontLazy } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
+import { perf } from '../utils/perfLogger';
 
 /** originalBytes が設定されるまで最大 timeoutMs 待機する（subscribe ベース） */
 function waitForOriginalBytes(timeoutMs = 10000): Promise<Uint8Array | null> {
@@ -53,6 +54,7 @@ export function useFileOperations(
   };
 
   const handleOpen = async (explicitPath?: string): Promise<boolean> => {
+    perf.mark('open.start', { explicit: !!explicitPath });
     try {
       let selected = explicitPath;
       if (!selected) {
@@ -70,11 +72,16 @@ export function useFileOperations(
           // WebView2 asset protocol は Range 6 本キューイング + 都度 open/close で
           // ボトルネックになるため、readFile で一括取得してから bytes 直接渡しにする。
           // 初回 ~1s の遅延は許容範囲（処理全体の安定性を優先）。
+          perf.mark('open.readFileStart');
           const content = await readFile(selected);
           const bytes = new Uint8Array(content);
+          perf.mark('open.readFileDone', { bytes: bytes.length });
           setOriginalBytes(bytes);
+          perf.mark('open.loadPdfStart');
           const doc = await loadPDF(selected, bytes);
+          perf.mark('open.loadPdfDone', { totalPages: doc.totalPages });
           setDocument(doc);
+          perf.mark('open.setDoc');
           addToRecent(selected);
           onOpenComplete?.(doc);
         } finally {
