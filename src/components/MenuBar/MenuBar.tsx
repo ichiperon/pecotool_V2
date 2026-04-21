@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight } from 'lucide-react';
-import { PecoDocument } from '../../types';
 
 type ActiveMenu = 'file' | 'settings' | 'help' | null;
 
 interface MenuBarProps {
-  document: PecoDocument | null;
+  isFileLoaded: boolean;
   isDirty: boolean;
   currentPageIsDirty: boolean;
   recentFiles: string[];
@@ -51,7 +50,7 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
     fn();
   };
 
-  const canSave = !!props.document && (props.isDirty || props.currentPageIsDirty);
+  const canSave = props.isFileLoaded && (props.isDirty || props.currentPageIsDirty);
 
   return (
     <div className="menubar" ref={barRef}>
@@ -99,15 +98,15 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
             </div>
 
             <div
-              className={`menu-dropdown-item ${!props.document ? 'disabled' : ''}`}
-              onClick={() => props.document && run(props.onReload)}
+              className={`menu-dropdown-item ${!props.isFileLoaded ? 'disabled' : ''}`}
+              onClick={() => props.isFileLoaded && run(props.onReload)}
             >
               再読み込み<span className="menu-shortcut">F5</span>
             </div>
             <div className="menu-separator" />
             <div
-              className={`menu-dropdown-item ${!props.document ? 'disabled' : ''}`}
-              onClick={() => props.document && run(props.onClose)}
+              className={`menu-dropdown-item ${!props.isFileLoaded ? 'disabled' : ''}`}
+              onClick={() => props.isFileLoaded && run(props.onClose)}
             >
               閉じる
             </div>
@@ -119,8 +118,8 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
               保存<span className="menu-shortcut">Ctrl+S</span>
             </div>
             <div
-              className={`menu-dropdown-item ${!props.document ? 'disabled' : ''}`}
-              onClick={() => props.document && run(props.onSaveAs)}
+              className={`menu-dropdown-item ${!props.isFileLoaded ? 'disabled' : ''}`}
+              onClick={() => props.isFileLoaded && run(props.onSaveAs)}
             >
               別名で保存<span className="menu-shortcut">Ctrl+Shift+S</span>
             </div>

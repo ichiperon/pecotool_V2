@@ -1,9 +1,5 @@
 import React, { Suspense, useEffect } from "react";
 import ReactDOM from "react-dom/client";
-import { prewarmPdfjsWorker } from "./utils/pdfLoader";
-
-// PDF.js Worker を React レンダー前に起動（初回ファイル読込の高速化）
-prewarmPdfjsWorker();
 
 // pdf-lib chunk を idle 時間に先読みし、保存時の初動を速くする
 // (vite.config の manualChunks で別 chunk 化されているため、dynamic import で

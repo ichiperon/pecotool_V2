@@ -75,19 +75,36 @@ const CMAP_URL = '/cmaps/';
 const CMAP_PACKED = true;
 const STANDARD_FONT_DATA_URL = '/standard_fonts/';
 
+// モジュールレベルの PDFWorker シングルトン。
+// 各 getDocument 呼び出しごとに worker を spawn すると初期化コスト/メモリが嵩むため、
+// 単一 worker を使い回す。destroy は（アプリ終了以外では）しない。
+let sharedPdfWorker: pdfjsLib.PDFWorker | null = null;
+function getSharedPdfWorker(): pdfjsLib.PDFWorker | undefined {
+  if (sharedPdfWorker && !sharedPdfWorker.destroyed) return sharedPdfWorker;
+  try {
+    const PDFWorkerCtor = (pdfjsLib as unknown as { PDFWorker?: unknown }).PDFWorker;
+    if (typeof PDFWorkerCtor !== 'function') return undefined;
+    sharedPdfWorker = new (PDFWorkerCtor as new (opts: { name: string }) => pdfjsLib.PDFWorker)({ name: 'peco-shared-pdf-worker' });
+    return sharedPdfWorker;
+  } catch (e) {
+    console.warn('[pdfLoader] PDFWorker instantiation failed, fallback to auto-spawn:', e);
+    sharedPdfWorker = null;
+    return undefined;
+  }
+}
+
 /**
  * Open a PDF document using a URL (convertFileSrc) to enable range requests and streaming.
+ * bytes 経路ではネットワーク関連フラグ (disableAutoFetch / disableStream / disableRange) は
+ * pdfjs 内部で無視されるので、デフォルト値に任せる。URL 経路でも
+ * pdfjs のデフォルトで安定動作するため明示指定は不要。
  */
 function getDocumentTask(urlOrData: string | Uint8Array) {
   const config: DocumentInitParameters = {
     cMapUrl: CMAP_URL,
     cMapPacked: CMAP_PACKED,
     standardFontDataUrl: STANDARD_FONT_DATA_URL,
-    disableAutoFetch: true,
-    // Tauri asset protocol の background stream 占有を避けるため true。
-    // Range は patch/wrapper で Accept-Ranges を注入しているので on-demand でも動作する。
-    disableStream: true,
-    disableRange: false,
+    worker: getSharedPdfWorker(),
   };
 
   if (typeof urlOrData === 'string') {
@@ -97,13 +114,6 @@ function getDocumentTask(urlOrData: string | Uint8Array) {
   }
 
   return pdfjsLib.getDocument(config);
-}
-
-// アプリ起動直後にworkerを起動しておく（初回PDF読込を高速化）
-// 不正なPDFデータで呼ぶためworker側でエラーになるが、プロセス起動は完了する
-export function prewarmPdfjsWorker(): void {
-  const task = pdfjsLib.getDocument({ data: new Uint8Array([0x25, 0x50, 0x44, 0x46]) }); // "%PDF"
-  task.promise.catch(() => {});
 }
 
 export async function loadPDF(filePath: string, bytes?: Uint8Array): Promise<PecoDocument> {

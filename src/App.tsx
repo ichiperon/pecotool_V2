@@ -2,7 +2,6 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import "./App.css";
 import {
   usePecoStore,
-  selectDocument,
   selectCurrentPageIndex,
   selectShowOcr,
   selectOcrOpacity,
@@ -12,6 +11,7 @@ import {
   selectIsDirty,
   selectUndoStack,
   selectRedoStack,
+  selectCurrentPage,
 } from "./store/pecoStore";
 import { Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
@@ -58,9 +58,14 @@ const ConsolePanel = lazy(() =>
 );
 
 function App() {
-  // 細粒度selectorで購読: 各state変化が独立してComponentに伝わる
-  const document = usePecoStore(selectDocument);
+  // 細粒度selectorで購読: 各state変化が独立してComponentに伝わる。
+  // document 全体は購読せず、UI で実際に使う primitive のみを個別 selector で取る。
+  // これにより updatePageData (pages Map 差し替え) で App 全体が再レンダされない。
+  const filePath = usePecoStore(s => s.document?.filePath);
+  const totalPages = usePecoStore(s => s.document?.totalPages ?? 0);
+  const isFileLoaded = usePecoStore(s => s.document !== null);
   const currentPageIndex = usePecoStore(selectCurrentPageIndex);
+  const currentPage = usePecoStore(selectCurrentPage);
   const selectedIds = usePecoStore(selectSelectedIds);
   const showOcr = usePecoStore(selectShowOcr);
   const ocrOpacity = usePecoStore(selectOcrOpacity);
@@ -82,8 +87,6 @@ function App() {
   const clearOcrCurrentPage = usePecoStore(s => s.clearOcrCurrentPage);
   const clearOcrAllPages = usePecoStore(s => s.clearOcrAllPages);
 
-  const currentPage = document?.pages.get(currentPageIndex);
-
   // --- 分割された責務（フック群） ---
   const { leftWidth, rightWidth, startResizeLeft, startResizeRight } = useLayoutPanels();
   const {
@@ -94,7 +97,7 @@ function App() {
     showToast,
   } = useDialogState();
   const { zoom, setZoom, isAutoFit, setIsAutoFit, viewerRef, fitToScreen } =
-    usePdfViewerState(document, currentPageIndex);
+    usePdfViewerState(currentPageIndex);
   const { isSpacePressed, isPanning, handleViewerMouseDown, handleViewerMouseMove, stopPanning } =
     useViewerPan(viewerRef);
 
@@ -135,7 +138,6 @@ function App() {
     handlePageInputKeyDown,
     markRenderComplete,
   } = usePageNavigation({
-    document,
     currentPageIndex,
     showToast,
     triggerThumbnailLoad,
@@ -143,17 +145,19 @@ function App() {
 
   // --- Handlers ---
   const handleReload = useCallback(async () => {
-    if (!document?.filePath) return;
-    await handleOpen(document.filePath);
-  }, [document?.filePath, handleOpen]);
+    if (!filePath) return;
+    await handleOpen(filePath);
+  }, [filePath, handleOpen]);
 
   const handleSaveAs = async () => {
-    if (!document) return;
+    if (!isFileLoaded) return;
     await executeSaveAs();
   };
 
   const handleClose = useCallback(async () => {
-    if (isDirty || Array.from(document?.pages.values() || []).some(p => p.isDirty)) {
+    // pages の iteration は subscribe せず getState() で実行 (再レンダトリガーにしない)
+    const doc = usePecoStore.getState().document;
+    if (isDirty || Array.from(doc?.pages.values() || []).some(p => p.isDirty)) {
       const confirmed = await ask('未保存の変更があります。閉じてもよろしいですか？', {
         title: '閉じる確認',
         kind: 'warning'
@@ -162,7 +166,7 @@ function App() {
     }
     destroySharedPdfProxy();
     usePecoStore.getState().setDocument(null);
-  }, [document, isDirty]);
+  }, [isDirty]);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -314,7 +318,7 @@ function App() {
       )}
 
       <MenuBar
-        document={document}
+        isFileLoaded={isFileLoaded}
         isDirty={isDirty}
         currentPageIsDirty={currentPage?.isDirty ?? false}
         recentFiles={recentFiles}
@@ -330,7 +334,7 @@ function App() {
       />
 
       <Toolbar
-        document={document} currentPage={currentPage} isDirty={isDirty}
+        isFileLoaded={isFileLoaded} currentPage={currentPage ?? undefined} isDirty={isDirty}
         undoStackLength={undoStack.length} redoStackLength={redoStack.length}
         zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode}
         selectedIdsCount={selectedIds.size} showOcr={showOcr} ocrOpacity={ocrOpacity}
@@ -371,7 +375,7 @@ function App() {
           onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={stopPanning} onMouseLeave={stopPanning}
         >
           <div className="pdf-canvas-container">
-            {document ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
+            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
           {(isLoadingFile || isLoadingPageMeta) && (
             <div className="loading-overlay">
@@ -433,14 +437,14 @@ function App() {
             <input
               type="text"
               className="page-input"
-              value={pageInputValue !== null ? pageInputValue : String(document ? currentPageIndex + 1 : 0)}
-              onFocus={() => setPageInputValue(String(document ? currentPageIndex + 1 : 0))}
+              value={pageInputValue !== null ? pageInputValue : String(isFileLoaded ? currentPageIndex + 1 : 0)}
+              onFocus={() => setPageInputValue(String(isFileLoaded ? currentPageIndex + 1 : 0))}
               onChange={(e) => setPageInputValue(e.target.value)}
               onBlur={handlePageInputCommit}
               onKeyDown={handlePageInputKeyDown}
-              disabled={!document}
+              disabled={!isFileLoaded}
             />
-            <span>/ {document ? document.totalPages : 0}</span>
+            <span>/ {isFileLoaded ? totalPages : 0}</span>
           </div>
         </div>
         <div className="status-right">

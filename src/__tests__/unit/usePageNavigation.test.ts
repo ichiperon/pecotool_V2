@@ -113,7 +113,6 @@ describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火しない
 
     renderHook(() =>
       usePageNavigation({
-        document: doc,
         currentPageIndex: 0,
         showToast,
         triggerThumbnailLoad,
@@ -174,7 +173,6 @@ describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火しない
 
     renderHook(() =>
       usePageNavigation({
-        document: doc,
         currentPageIndex: 0,
         showToast: vi.fn(),
         triggerThumbnailLoad: vi.fn(),
@@ -231,7 +229,6 @@ describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage 
 
     const { unmount } = renderHook(() =>
       usePageNavigation({
-        document: doc,
         currentPageIndex: 0,
         showToast: vi.fn(),
         triggerThumbnailLoad: vi.fn(),

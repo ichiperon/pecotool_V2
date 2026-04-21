@@ -8,7 +8,7 @@ import type { ThumbnailWorkerRequest, ThumbnailWorkerResponse } from '../utils/t
 // メインスレッドのブロックを回避する。
 // ThumbnailWindow.tsx と同じ Worker プール方式を採用。
 
-const NUM_WORKERS = 2;
+const NUM_WORKERS = 1;
 const CONCURRENCY = 4;
 const BATCH_FLUSH_MS = 50;
 

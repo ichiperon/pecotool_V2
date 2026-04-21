@@ -6,10 +6,9 @@ import {
   getSharedPdfProxy,
   getCachedPageProxy,
 } from '../utils/pdfLoader';
-import type { PecoDocument, BoundingBox } from '../types';
+import type { BoundingBox } from '../types';
 
 interface UsePageNavigationOptions {
-  document: PecoDocument | null | undefined;
   currentPageIndex: number;
   showToast: (message: string, isError?: boolean) => void;
   triggerThumbnailLoad: () => void;
@@ -23,7 +22,6 @@ interface UsePageNavigationOptions {
 //   - isLoadingPageRender: 実 render() 完了まで true (usePdfRendering からコールバックで更新)
 // 後方互換のため isLoadingPage = isLoadingPageMeta || isLoadingPageRender も返す。
 export function usePageNavigation({
-  document,
   currentPageIndex,
   showToast,
   triggerThumbnailLoad,
@@ -31,6 +29,13 @@ export function usePageNavigation({
   const setCurrentPage = usePecoStore((s) => s.setCurrentPage);
   const updatePageData = usePecoStore((s) => s.updatePageData);
   const setCurrentPageProxy = usePecoStore((s) => s.setCurrentPageProxy);
+  // document 全体ではなく primitives のみ購読
+  // (updatePageData 毎の document 参照差し替えで再レンダが起きないようにするため)
+  const filePath = usePecoStore((s) => s.document?.filePath);
+  const totalPages = usePecoStore((s) => s.document?.totalPages);
+  // 現在ページの width のみ購読 (未ロード判定用。textBlocks 等には反応しない)
+  const currentPageWidth = usePecoStore((s) => s.document?.pages.get(currentPageIndex)?.width);
+  const currentPageExists = usePecoStore((s) => s.document?.pages.has(currentPageIndex) ?? false);
 
   const [isLoadingPageMeta, setIsLoadingPageMeta] = useState(false);
   const [isLoadingPageRender, setIsLoadingPageRender] = useState(false);
@@ -156,17 +161,16 @@ export function usePageNavigation({
   // ファイルが変わったときにbboxMetaキャッシュをリセット
   const prevFilePathRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (document?.filePath !== prevFilePathRef.current) {
+    if (filePath !== prevFilePathRef.current) {
       bboxMetaRef.current = undefined;
-      prevFilePathRef.current = document?.filePath;
+      prevFilePathRef.current = filePath;
     }
-  }, [document?.filePath]);
+  }, [filePath]);
 
   useEffect(() => {
-    if (!document) return;
-    const pageData = document.pages.get(currentPageIndex);
+    if (!filePath) return;
     // 未ロード、またはOCR全消去で作られたダミー（width===0）の場合はロードする
-    if (!pageData || pageData.width === 0) {
+    if (!currentPageExists || currentPageWidth === 0) {
       loadCurrentPage(currentPageIndex);
     } else {
       // 既に viewport 寸法が取れているページでも、新ページに移った瞬間は
@@ -180,11 +184,11 @@ export function usePageNavigation({
       // 既存ページの proxy も共有しておく (キャッシュヒットなら即時同期)
       void (async () => {
         try {
-          const qp = await getCachedPageProxy(document.filePath, currentPageIndex);
+          const qp = await getCachedPageProxy(filePath, currentPageIndex);
           // レースチェック: 現在もこのページが選択されているか
           const live = usePecoStore.getState();
-          if (live.document?.filePath === document.filePath && live.currentPageIndex === currentPageIndex) {
-            setCurrentPageProxy(document.filePath, currentPageIndex, qp);
+          if (live.document?.filePath === filePath && live.currentPageIndex === currentPageIndex) {
+            setCurrentPageProxy(filePath, currentPageIndex, qp);
           }
         } catch {
           /* ignore: filePath switched など */
@@ -195,22 +199,22 @@ export function usePageNavigation({
       // ページ切替・アンマウント時は進行中ロードを中止
       currentLoadAbortRef.current?.abort();
     };
-    // document?.pages を依存から除外する理由:
-    // updatePageData が set() で新しい Map を生成する度に
-    // この effect が再実行され、cleanup の abort() が自分自身のロードを
-    // 毎回キャンセルするため、実データが updatePageData に到達しない。
-    // ページ読み込みトリガーは filePath と currentPageIndex の変化で十分。
-  }, [document?.filePath, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
+    // currentPageWidth/currentPageExists は loadCurrentPage 後の
+    // updatePageData で変化するが、依存に含めると「ロード直後に effect 再実行 →
+    // cleanup で自分の abort」のループになる。filePath + currentPageIndex の
+    // 変化トリガーで十分 (ロード判定は最初の run だけで良い)。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filePath, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
 
   const handlePageInputCommit = useCallback(() => {
-    if (pageInputValue !== null && document) {
+    if (pageInputValue !== null && filePath && totalPages) {
       const pageNum = parseInt(pageInputValue, 10);
-      if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= document.totalPages) {
+      if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= totalPages) {
         setCurrentPage(pageNum - 1);
       }
     }
     setPageInputValue(null);
-  }, [pageInputValue, document, setCurrentPage]);
+  }, [pageInputValue, filePath, totalPages, setCurrentPage]);
 
   const handlePageInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {

@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { Toolbar } from '../../components/Toolbar/Toolbar'
-import type { PecoDocument, PageData } from '../../types'
+import type { PageData } from '../../types'
 
 vi.mock('lucide-react', () => {
   const s = (name: string) => (props: any) => <span data-icon={name} {...props} />
@@ -39,17 +39,9 @@ const dummyPage: PageData = {
   thumbnail: null,
 }
 
-const dummyDocument: PecoDocument = {
-  filePath: '/test.pdf',
-  fileName: 'test.pdf',
-  totalPages: 1,
-  metadata: {},
-  pages: new Map([[0, dummyPage]]),
-}
-
 function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> = {}) {
   return {
-    document: dummyDocument,
+    isFileLoaded: true,
     currentPage: dummyPage,
     isDirty: false,
     undoStackLength: 0,
@@ -170,8 +162,8 @@ describe('Toolbar', () => {
     expect(screen.getByText('キャンセル')).toBeTruthy()
   })
 
-  it('C-TB-14: add/split disabled when document=null', () => {
-    renderToolbar({ document: null })
+  it('C-TB-14: add/split disabled when isFileLoaded=false', () => {
+    renderToolbar({ isFileLoaded: false })
     expect(getButton('BB追加').disabled).toBe(true)
     expect(getButton('BB分割').disabled).toBe(true)
   })

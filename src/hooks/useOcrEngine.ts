@@ -28,7 +28,6 @@ async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   await page.render({ canvasContext: ctx, viewport, canvas }).promise;
-  page.cleanup();
 
   const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
   const arrayBuffer = await blob.arrayBuffer();
@@ -192,7 +191,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
             const viewport = page.getViewport({ scale: 1.0 });
             pageWidth = viewport.width;
             pageHeight = viewport.height;
-            page.cleanup();
+            // 直後に renderPageToTempFile が同じページを再取得するため cleanup しない
           } catch (e) {
             console.warn(`[OCR] ページ ${i + 1}: サイズ取得失敗、スキップします`, e);
             continue;

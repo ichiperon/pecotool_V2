@@ -21,10 +21,11 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   function OcrCard({ block, pageIndex, dragListeners, onNavigate, onSelect }, ref) {
   // selectedIds全体ではなく、このブロックのisSelectedのみ購読（200回の再レンダリングを防ぐ）
   const isSelected = usePecoStore(state => state.selectedIds.has(block.id));
-  // 細粒度selectorで購読: action参照は不変、document参照は handleBlur で必要なため個別購読
+  // 細粒度selectorで購読: action参照は不変。
+  // document 全体は購読せず handleBlur/toggleWritingMode 内で getState() から直接読むことで、
+  // どのページのどの編集でも全 200 枚の OcrCard が再評価されるのを防ぐ。
   const updatePageData = usePecoStore(s => s.updatePageData);
   const toggleSelection = usePecoStore(s => s.toggleSelection);
-  const document = usePecoStore(s => s.document);
   const contentRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
@@ -96,7 +97,8 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
     // 読み書きを textContent に統一（innerText は改行扱いが環境依存）
     const newText = contentRef.current?.textContent ?? "";
     if (newText !== block.text) {
-      const page = document?.pages.get(pageIndex);
+      // subscribe せず getState() で最新ページを取る: 編集時に他カードが再評価されない
+      const page = usePecoStore.getState().document?.pages.get(pageIndex);
       if (page) {
         const newBlocks = page.textBlocks.map(b =>
           b.id === block.id ? { ...b, text: newText, isDirty: true } : b
@@ -134,7 +136,8 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   const toggleWritingMode = (e: React.MouseEvent) => {
     e.stopPropagation();
     const newMode: WritingMode = block.writingMode === 'vertical' ? 'horizontal' : 'vertical';
-    const page = document?.pages.get(pageIndex);
+    // subscribe せず getState() で最新ページを取る: 編集時に他カードが再評価されない
+    const page = usePecoStore.getState().document?.pages.get(pageIndex);
     if (page) {
       const newBlocks = page.textBlocks.map(b =>
         b.id === block.id ? { ...b, writingMode: newMode, isDirty: true } : b

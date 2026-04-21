@@ -109,9 +109,6 @@ async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
 
     if (typeof source === 'string') {
       config.url = source;
-      config.disableAutoFetch = true;
-      config.disableStream = false;
-      config.disableRange = false;
     } else {
       // ArrayBuffer 転送（メインスレッドで fetch 済み → ネットワーク不要）
       config.data = new Uint8Array(source);

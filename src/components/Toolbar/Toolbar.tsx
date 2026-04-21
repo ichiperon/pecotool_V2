@@ -4,10 +4,10 @@ import {
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
   ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX
 } from "lucide-react";
-import { PageData, PecoDocument } from '../../types';
+import { PageData } from '../../types';
 
 interface ToolbarProps {
-  document: PecoDocument | null;
+  isFileLoaded: boolean;
   currentPage: PageData | undefined;
   isDirty: boolean;
   undoStackLength: number;
@@ -84,8 +84,8 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
       <div className="divider" />
       
       <div className="toolbar-group">
-        <button onClick={props.onToggleDrawing} title="BB追加" className={props.isDrawingMode ? "active" : ""} disabled={!props.document}><Plus size={18} /><span>追加</span></button>
-        <button onClick={props.onToggleSplit} title="BB分割" className={props.isSplitMode ? "active" : ""} disabled={!props.document}><Scissors size={18} /><span>分割</span></button>
+        <button onClick={props.onToggleDrawing} title="BB追加" className={props.isDrawingMode ? "active" : ""} disabled={!props.isFileLoaded}><Plus size={18} /><span>追加</span></button>
+        <button onClick={props.onToggleSplit} title="BB分割" className={props.isSplitMode ? "active" : ""} disabled={!props.isFileLoaded}><Scissors size={18} /><span>分割</span></button>
         <button onClick={props.onGroup} title="グループ化" disabled={props.selectedIdsCount < 2}><Group size={18} /><span>グループ化</span></button>
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>
         <button onClick={props.onRemoveSpaces} title="スペース削除 (Ctrl+Shift+Space)" disabled={props.selectedIdsCount === 0}><RemoveFormatting size={18} /><span>スペース削除</span></button>
@@ -122,7 +122,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
           )}
         </div>
         
-        <button onClick={props.onTogglePreview} title="プレビュー" className={`feature-btn ${props.isPreviewOpen ? 'active' : ''}`} disabled={!props.document}><ClipboardList size={18} /><span>テキスト確認</span></button>
+        <button onClick={props.onTogglePreview} title="プレビュー" className={`feature-btn ${props.isPreviewOpen ? 'active' : ''}`} disabled={!props.isFileLoaded}><ClipboardList size={18} /><span>テキスト確認</span></button>
       </div>
 
       <div className="divider" />
@@ -132,7 +132,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
           <button
             className={`dropdown-btn ${showOcrDropdown ? 'active' : ''}`}
             onClick={(e) => { e.stopPropagation(); setShowOcrDropdown(!showOcrDropdown); }}
-            disabled={!props.document || props.isOcrRunning}
+            disabled={!props.isFileLoaded || props.isOcrRunning}
             title="OCR実行"
             style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
           >
@@ -174,7 +174,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
           <button
             className={`dropdown-btn ${showClearOcrDropdown ? 'active' : ''}`}
             onClick={(e) => { e.stopPropagation(); setShowClearOcrDropdown(!showClearOcrDropdown); }}
-            disabled={!props.document}
+            disabled={!props.isFileLoaded}
             title="OCRテキストを消去"
             style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
           >
