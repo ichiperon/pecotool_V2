@@ -532,6 +532,26 @@ body, #root {
   color: #f59e0b;
 }
 
+.ocr-loading-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 40px;
+  color: #9ca3af;
+}
+
+.ocr-loading-placeholder .loading-spinner {
+  width: 28px;
+  height: 28px;
+}
+
+.ocr-loading-placeholder .loading-message {
+  font-size: 13px;
+  color: #9ca3af;
+}
+
 /* PDF Canvas */
 .pdf-canvas-container {
   display: flex;

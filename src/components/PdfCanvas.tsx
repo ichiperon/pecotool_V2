@@ -18,9 +18,10 @@ interface PdfCanvasProps {
   pageIndex: number;
   disableDrawing?: boolean;
   onFirstRender?: () => void;
+  onRenderComplete?: () => void;
 }
 
-export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender }: PdfCanvasProps) {
+export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, onRenderComplete }: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -51,6 +52,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender }: 
     pageIndex,
     zoom,
     onFirstRender,
+    onRenderComplete,
     renderOverlaysRef,
   });
 

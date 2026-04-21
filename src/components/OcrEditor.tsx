@@ -129,9 +129,14 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     }
   };
 
-  const filteredBlocks = currentPage?.textBlocks.filter(b =>
-    b.text.toLowerCase().includes(searchTerm.toLowerCase())
-  ) || [];
+  // 抽出完了前 (isTextExtracted !== true) は textBlocks がプレースホルダの空配列か
+   // 古いデータの可能性があるため、検索 filter を走らせない。
+  const isExtracting = !!currentPage && currentPage.isTextExtracted !== true;
+  const filteredBlocks = (!isExtracting && currentPage?.textBlocks
+    ? currentPage.textBlocks.filter(b =>
+        b.text.toLowerCase().includes(searchTerm.toLowerCase())
+      )
+    : []);
 
   // ↑↓キーナビゲーション：選択 + フォーカス移動
   const handleNavigate = (currentBlockId: string, direction: 'up' | 'down') => {
@@ -193,6 +198,11 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
           <div className="placeholder">データなし</div>
         ) : !currentPage ? (
           <div className="placeholder">読み込み中...</div>
+        ) : isExtracting ? (
+          <div className="ocr-loading-placeholder">
+            <div className="loading-spinner" />
+            <div className="loading-message">テキスト抽出中...</div>
+          </div>
         ) : currentPage.textBlocks.length === 0 ? (
           <div className="placeholder placeholder--no-ocr">OCRテキストなし</div>
         ) : (

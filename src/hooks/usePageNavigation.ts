@@ -17,6 +17,11 @@ interface UsePageNavigationOptions {
 
 // ページ読み込み・プリフェッチ・ページ番号入力を担当
 // AbortController ベースのレース修正 (Tier 1-D) を内包
+//
+// isLoadingPage は以下の 2 段階に分割されている:
+//   - isLoadingPageMeta: viewport 寸法が取れるまで true (UI スピナー表示)
+//   - isLoadingPageRender: 実 render() 完了まで true (usePdfRendering からコールバックで更新)
+// 後方互換のため isLoadingPage = isLoadingPageMeta || isLoadingPageRender も返す。
 export function usePageNavigation({
   document,
   currentPageIndex,
@@ -25,8 +30,10 @@ export function usePageNavigation({
 }: UsePageNavigationOptions) {
   const setCurrentPage = usePecoStore((s) => s.setCurrentPage);
   const updatePageData = usePecoStore((s) => s.updatePageData);
+  const setCurrentPageProxy = usePecoStore((s) => s.setCurrentPageProxy);
 
-  const [isLoadingPage, setIsLoadingPage] = useState(false);
+  const [isLoadingPageMeta, setIsLoadingPageMeta] = useState(false);
+  const [isLoadingPageRender, setIsLoadingPageRender] = useState(false);
   const [pageLoadError, setPageLoadError] = useState<number | null>(null);
   const [pageInputValue, setPageInputValue] = useState<string | null>(null);
 
@@ -47,7 +54,11 @@ export function usePageNavigation({
 
     const doc = usePecoStore.getState().document;
     if (!doc) return;
-    setIsLoadingPage(true);
+    setIsLoadingPageMeta(true);
+    // 新ページの render がまだ開始していない状態。後段で usePdfRendering が
+    // コールバックで false にする。ここで先行 true にしておくことで
+    // 「meta 完了 → render 進行中」という中間状態を App.tsx が検出できる。
+    setIsLoadingPageRender(true);
     setPageLoadError(null);
     try {
       const pdf = await getSharedPdfProxy(doc.filePath);
@@ -70,12 +81,23 @@ export function usePageNavigation({
       }
 
       // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）
+      // 取得した PDFPageProxy は store に publish して usePdfRendering が
+      // 二重 getCachedPageProxy を避けられるようにする。
       const qp = await getCachedPageProxy(doc.filePath, pageIdx);
       if (signal.aborted) return;
       const qv = qp.getViewport({ scale: 1.0 });
+
+      // currentPageIndex がまだ pageIdx のうちに proxy を共有
+      const liveState = usePecoStore.getState();
+      if (liveState.document?.filePath === doc.filePath && liveState.currentPageIndex === pageIdx) {
+        setCurrentPageProxy(doc.filePath, pageIdx, qp);
+      }
+
       const pre = usePecoStore.getState().document?.pages.get(pageIdx);
       if (signal.aborted) return;
       if (!pre || pre.width === 0) {
+        // isTextExtracted: false で明示的にプレースホルダとしてマーク。
+        // textBlocks=[] だが本当に空かどうかはこのフラグで判別する。
         updatePageData(pageIdx, {
           pageIndex: pageIdx,
           width: qv.width,
@@ -83,12 +105,15 @@ export function usePageNavigation({
           textBlocks: [],
           isDirty: false,
           thumbnail: null,
+          isTextExtracted: false,
         }, false);
       }
 
-      // ページ寸法が確定した時点でローディング解除 → PdfCanvas が即座にレンダリング開始
+      // ページ寸法が確定した時点で meta ローディング解除
+      // → PdfCanvas が即座にレンダリング開始。
+      // render 完了までは isLoadingPageRender が true のまま。
       if (!signal.aborted) {
-        setIsLoadingPage(false);
+        setIsLoadingPageMeta(false);
       }
 
       // サムネイルWorkerのPDFロードをトリガー（冪等）
@@ -109,8 +134,8 @@ export function usePageNavigation({
           // 実ユーザー編集は textBlocks が非空である前提のため、ここで絞る。
           const hasUserEdits = !!existing && existing.isDirty && existing.textBlocks.length > 0;
           const mergedData = hasUserEdits
-            ? { ...pageData, textBlocks: existing!.textBlocks, isDirty: true }
-            : pageData;
+            ? { ...pageData, textBlocks: existing!.textBlocks, isDirty: true, isTextExtracted: true }
+            : { ...pageData, isTextExtracted: true };
           updatePageData(pageIdx, mergedData, false);
         })
         .catch((err) => {
@@ -123,9 +148,10 @@ export function usePageNavigation({
       showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
       setPageLoadError(pageIdx);
       triggerThumbnailLoad();
-      setIsLoadingPage(false);
+      setIsLoadingPageMeta(false);
+      setIsLoadingPageRender(false);
     }
-  }, [updatePageData, showToast, triggerThumbnailLoad]);
+  }, [updatePageData, showToast, triggerThumbnailLoad, setCurrentPageProxy]);
 
   // ファイルが変わったときにbboxMetaキャッシュをリセット
   const prevFilePathRef = useRef<string | undefined>(undefined);
@@ -142,6 +168,28 @@ export function usePageNavigation({
     // 未ロード、またはOCR全消去で作られたダミー（width===0）の場合はロードする
     if (!pageData || pageData.width === 0) {
       loadCurrentPage(currentPageIndex);
+    } else {
+      // 既に viewport 寸法が取れているページでも、新ページに移った瞬間は
+      // usePdfRendering の render() がまだ流れていないため、render 完了待ち状態
+      // (isLoadingPageRender=true) を復元する。render 完了後に usePdfRendering が
+      // markRenderComplete() でクリアする。
+      // meta は既に揃っているので false。
+      setIsLoadingPageMeta(false);
+      setIsLoadingPageRender(true);
+
+      // 既存ページの proxy も共有しておく (キャッシュヒットなら即時同期)
+      void (async () => {
+        try {
+          const qp = await getCachedPageProxy(document.filePath, currentPageIndex);
+          // レースチェック: 現在もこのページが選択されているか
+          const live = usePecoStore.getState();
+          if (live.document?.filePath === document.filePath && live.currentPageIndex === currentPageIndex) {
+            setCurrentPageProxy(document.filePath, currentPageIndex, qp);
+          }
+        } catch {
+          /* ignore: filePath switched など */
+        }
+      })();
     }
     return () => {
       // ページ切替・アンマウント時は進行中ロードを中止
@@ -152,7 +200,7 @@ export function usePageNavigation({
     // この effect が再実行され、cleanup の abort() が自分自身のロードを
     // 毎回キャンセルするため、実データが updatePageData に到達しない。
     // ページ読み込みトリガーは filePath と currentPageIndex の変化で十分。
-  }, [document?.filePath, currentPageIndex, loadCurrentPage]);
+  }, [document?.filePath, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
 
   const handlePageInputCommit = useCallback(() => {
     if (pageInputValue !== null && document) {
@@ -173,13 +221,23 @@ export function usePageNavigation({
     }
   }, []);
 
+  // usePdfRendering から呼ばれる: render 完了時に isLoadingPageRender を解除する
+  const markRenderComplete = useCallback(() => {
+    setIsLoadingPageRender(false);
+  }, []);
+
+  const isLoadingPage = isLoadingPageMeta || isLoadingPageRender;
+
   return {
     isLoadingPage,
+    isLoadingPageMeta,
+    isLoadingPageRender,
     pageLoadError,
     pageInputValue,
     setPageInputValue,
     loadCurrentPage,
     handlePageInputCommit,
     handlePageInputKeyDown,
+    markRenderComplete,
   };
 }

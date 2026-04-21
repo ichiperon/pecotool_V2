@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument, PageData, Action, TextBlock } from '../types';
 import { saveTemporaryPageDataBatch, clearTemporaryChanges } from '../utils/pdfLoader';
 
@@ -34,8 +35,19 @@ interface PecoState {
   /** 直近の IDB 保存失敗エラー。UI から subscribe してユーザーに通知できる。 */
   lastIdbError: Error | null;
 
+  /**
+   * 現在表示中 (もしくは表示開始中) ページの PDFPageProxy。
+   * usePageNavigation が viewport 取得時に set し、usePdfRendering が subscribe して
+   * 二重 getCachedPageProxy を避けるための共有チャネル。
+   * ファイル/ページ切替時の race 防止のため expectedKey (filePath:pageIndex) も持つ。
+   */
+  currentPageProxy: pdfjsLib.PDFPageProxy | null;
+  currentPageProxyKey: string | null;
+
   // Actions
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
+  setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
+  clearCurrentPageProxy: () => void;
   setDocument: (doc: PecoDocument | null, bytes?: Uint8Array) => void;
   setOriginalBytes: (bytes: Uint8Array) => void;
   setDocumentFilePath: (filePath: string) => void;
@@ -83,8 +95,15 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   redoStack: [],
   pendingRestoration: null,
   lastIdbError: null,
+  currentPageProxy: null,
+  currentPageProxyKey: null,
 
   setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
+  setCurrentPageProxy: (filePath, pageIndex, proxy) => {
+    const key = `${filePath}:${pageIndex}`;
+    set({ currentPageProxy: proxy, currentPageProxyKey: proxy ? key : null });
+  },
+  clearCurrentPageProxy: () => set({ currentPageProxy: null, currentPageProxyKey: null }),
   setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
   setDocumentFilePath: (filePath) => set((state) => {
     if (!state.document) return state;
@@ -113,6 +132,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       undoStack: [],
       redoStack: [],
       pendingRestoration: null,
+      // ファイル切替時は古い PDFPageProxy を保持しない (transport が破棄されるため)
+      currentPageProxy: null,
+      currentPageProxyKey: null,
     });
 
     // IDB一時データのクリアをset()外でawaitして確実に完了させる。
@@ -422,3 +444,5 @@ export const selectRedoStack = (s: PecoState) => s.redoStack;
 export const selectCurrentPage = (s: PecoState) =>
   s.document?.pages.get(s.currentPageIndex) ?? null;
 export const selectLastIdbError = (s: PecoState) => s.lastIdbError;
+export const selectCurrentPageProxy = (s: PecoState) => s.currentPageProxy;
+export const selectCurrentPageProxyKey = (s: PecoState) => s.currentPageProxyKey;

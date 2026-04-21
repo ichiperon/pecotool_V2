@@ -1,14 +1,20 @@
 /**
- * S-01-01 〜 S-01-03: usePdfRendering の旧 transport 保護回帰テスト
+ * S-01-01 〜 S-01-03: usePdfRendering のページ切替チラつき抑止挙動検証
+ *
+ * 旧仕様:
+ *  - filePath / pageIndex 変更時の useEffect 冒頭で setPdfPage(null) を同期実行し、
+ *    新 proxy 解決までの間 pdfPage が null になっていた。
+ *    これが「ページ切替時に Canvas が真っ白 → じわっと新ページ」チラつきの原因。
+ *
+ * 新仕様 (本タスクで変更):
+ *  - 旧 pdfPage は切替直後にクリアせず、新 proxy が解決したタイミングで置換する。
+ *  - store.currentPageProxy 共有チャネル経由で受け取れるときは二重 fetch を回避する。
+ *  - ファイル unset (filePath=undefined) 時のみ即座に null クリア。
  *
  * 検証対象:
- *  - filePath / pageIndex 変更時の useEffect 冒頭での setPdfPage(null) 先行クリア
- *  - 連続ページ切替で前回 render が次回 setPdfPage で置換されること
- *  - ファイル切替 A→B 時に A の pdfPage が必ず null クリアされてから B の pdfPage が set されること
- *
- * 注意: pdfjs render の cancel 動作自体は実 transport を要するため、ここでは
- *       「render が呼ばれる対象の pdfPage インスタンス」が直前で null クリア
- *       された後に新インスタンスへ差し替わる、という観察可能な振る舞いだけを検証する。
+ *  - ページ切替 (同ファイル 0→1) 時、新 proxy 解決まで旧 pdfPage が維持される
+ *  - ファイル切替 A→B 時も、B 解決までは A の pdfPage が維持される
+ *  - 連続ページ切替で最終的な pdfPage は最終ページに収束する
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
@@ -31,6 +37,7 @@ vi.mock('../../utils/bitmapCache', () => ({
 }))
 
 import { usePdfRendering } from '../../hooks/usePdfRendering'
+import { usePecoStore } from '../../store/pecoStore'
 
 // ── Test helpers ───────────────────────────────────────────────
 type FakePage = {
@@ -75,16 +82,25 @@ interface HookProps {
 
 beforeEach(() => {
   getCachedPageProxyMock.mockReset()
+  // store の currentPageProxy をリセット（前テストの残留を防ぐ）
+  usePecoStore.setState({ currentPageProxy: null, currentPageProxyKey: null } as any)
 })
 
-describe('S-01-01: filePath/pageIndex 変更時に setPdfPage(null) 先行クリア', () => {
-  it('rerender 直後 result.current.pdfPage は一旦 null になり、await 後に新ページが set される', async () => {
+describe('S-01-01: ページ切替時、新 proxy 解決まで旧 pdfPage を維持 (チラつき抑止)', () => {
+  it('pageIndex 変更後も await 解決前は旧ページが残り、解決後に新ページへ置換', async () => {
     const refs = makeRefs()
     const pageA = makeFakePage('A:0')
     const pageB = makeFakePage('A:1')
 
-    // 初回読込: pageA を返す
-    getCachedPageProxyMock.mockResolvedValueOnce(pageA)
+    // ページ B は手動 resolve で順序を観察
+    let resolveB!: (p: FakePage) => void
+    const bPromise = new Promise<FakePage>((res) => { resolveB = res })
+
+    getCachedPageProxyMock.mockImplementation((_fp: string, idx: number) => {
+      if (idx === 0) return Promise.resolve(pageA)
+      if (idx === 1) return bPromise
+      return Promise.reject(new Error(`unexpected pageIndex ${idx}`))
+    })
 
     const { result, rerender } = renderHook(
       (props: HookProps) =>
@@ -104,14 +120,22 @@ describe('S-01-01: filePath/pageIndex 変更時に setPdfPage(null) 先行クリ
       expect(result.current.pdfPage).toBe(pageA)
     })
 
-    // 次ページ用 mock をセットしてからページ変更
-    getCachedPageProxyMock.mockResolvedValueOnce(pageB)
+    // ページ 1 へ切替
     rerender({ filePath: 'file-A.pdf', pageIndex: 1, zoom: 100 })
 
-    // useEffect 冒頭の setPdfPage(null) で旧プロキシが即時クリアされる
-    expect(result.current.pdfPage).toBeNull()
+    // 新仕様: 旧 pageA が維持される (チラつき抑止のため null にしない)
+    expect(result.current.pdfPage).toBe(pageA)
 
-    // 新ページが set されるまで待機
+    // まだ B を resolve していないので pageA のまま
+    await Promise.resolve()
+    expect(result.current.pdfPage).toBe(pageA)
+
+    // B を resolve すると pdfPage が B に切り替わる
+    await act(async () => {
+      resolveB(pageB)
+      await bPromise
+    })
+
     await waitFor(() => {
       expect(result.current.pdfPage).toBe(pageB)
     })
@@ -152,10 +176,11 @@ describe('S-01-02: 連続ページ切替 (1→3→5) で最終ページが反映
     await waitFor(() => expect(result.current.pdfPage).toBe(pageP1))
 
     // 連続切替: 1 → 3 → 5
+    // 新仕様: 切替直後も pdfPage は null にならず、旧 / 新どちらかが入っている。
     rerender({ filePath: 'file-A.pdf', pageIndex: 3, zoom: 100 })
-    expect(result.current.pdfPage).toBeNull() // 3 への切替直後
+    expect(result.current.pdfPage).not.toBeNull()
     rerender({ filePath: 'file-A.pdf', pageIndex: 5, zoom: 100 })
-    expect(result.current.pdfPage).toBeNull() // 5 への切替直後
+    expect(result.current.pdfPage).not.toBeNull()
 
     // 最終的に 5 が反映される
     await waitFor(() => expect(result.current.pdfPage).toBe(pageP5))
@@ -166,8 +191,8 @@ describe('S-01-02: 連続ページ切替 (1→3→5) で最終ページが反映
   })
 })
 
-describe('S-01-03: ファイル切替 A→B で A プロキシが null クリア後 B が set', () => {
-  it('A の pdfPage は B の resolve 前に null になり、その後 B プロキシへ置換', async () => {
+describe('S-01-03: ファイル切替 A→B で B 解決まで A を維持、解決後 B へ置換', () => {
+  it('A の pdfPage は B の resolve 前は維持され、解決後に B プロキシへ置換', async () => {
     const refs = makeRefs()
     const pageA = makeFakePage('A:0')
     const pageB = makeFakePage('B:0')
@@ -197,14 +222,13 @@ describe('S-01-03: ファイル切替 A→B で A プロキシが null クリア
 
     await waitFor(() => expect(result.current.pdfPage).toBe(pageA))
 
-    // ファイル B へ切替: setPdfPage(null) が同期で走り、A プロキシは即座に消える
+    // ファイル B へ切替: 新仕様では A プロキシは維持される
     rerender({ filePath: 'file-B.pdf', pageIndex: 0, zoom: 100 })
-    expect(result.current.pdfPage).toBeNull()
+    expect(result.current.pdfPage).toBe(pageA)
 
-    // この時点ではまだ B も resolve していない → null のまま
-    // 次にイベントループが回るのを待っても null のはず
+    // この時点ではまだ B も resolve していない → A のまま
     await Promise.resolve()
-    expect(result.current.pdfPage).toBeNull()
+    expect(result.current.pdfPage).toBe(pageA)
 
     // B を resolve すると pdfPage が B に切り替わる
     await act(async () => {
@@ -213,5 +237,60 @@ describe('S-01-03: ファイル切替 A→B で A プロキシが null クリア
     })
 
     await waitFor(() => expect(result.current.pdfPage).toBe(pageB))
+  })
+
+  it('filePath=undefined (ファイル閉じ) 時は即座に pdfPage が null', async () => {
+    const refs = makeRefs()
+    const pageA = makeFakePage('A:0')
+    getCachedPageProxyMock.mockResolvedValue(pageA)
+
+    const { result, rerender } = renderHook(
+      (props: HookProps) =>
+        usePdfRendering({
+          ...refs,
+          filePath: props.filePath,
+          totalPages: 3,
+          pageIndex: props.pageIndex,
+          zoom: props.zoom,
+          renderOverlaysRef: refs.renderOverlaysRef,
+        }),
+      { initialProps: { filePath: 'file-A.pdf' as string | undefined, pageIndex: 0, zoom: 100 } }
+    )
+    await waitFor(() => expect(result.current.pdfPage).toBe(pageA))
+
+    rerender({ filePath: undefined, pageIndex: 0, zoom: 100 })
+    expect(result.current.pdfPage).toBeNull()
+  })
+})
+
+describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getCachedPageProxy を回避', () => {
+  it('currentPageProxyKey が一致すれば getCachedPageProxy を呼ばず store の proxy を使う', async () => {
+    const refs = makeRefs()
+    const sharedPage = makeFakePage('shared:A:0')
+
+    // store に事前 publish しておく
+    usePecoStore.setState({
+      currentPageProxy: sharedPage as any,
+      currentPageProxyKey: 'file-A.pdf:0',
+    } as any)
+
+    const { result } = renderHook(
+      (props: HookProps) =>
+        usePdfRendering({
+          ...refs,
+          filePath: props.filePath,
+          totalPages: 3,
+          pageIndex: props.pageIndex,
+          zoom: props.zoom,
+          renderOverlaysRef: refs.renderOverlaysRef,
+        }),
+      { initialProps: { filePath: 'file-A.pdf', pageIndex: 0, zoom: 100 } }
+    )
+
+    await waitFor(() => {
+      expect(result.current.pdfPage).toBe(sharedPage)
+    })
+    // store のを使ったので getCachedPageProxy は呼ばれていない
+    expect(getCachedPageProxyMock).not.toHaveBeenCalled()
   })
 })

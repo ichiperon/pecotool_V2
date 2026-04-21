@@ -2,6 +2,7 @@ import { RefObject, useEffect, useRef, useState, MutableRefObject } from "react"
 import * as pdfjsLib from "pdfjs-dist";
 import { getCachedPageProxy } from "../utils/pdfLoader";
 import { getBitmapCache, setBitmapCache } from "../utils/bitmapCache";
+import { usePecoStore } from "../store/pecoStore";
 
 interface UsePdfRenderingParams {
   pdfCanvasRef: RefObject<HTMLCanvasElement | null>;
@@ -12,6 +13,12 @@ interface UsePdfRenderingParams {
   pageIndex: number;
   zoom: number;
   onFirstRender?: () => void;
+  /**
+   * 実 render() が完了したタイミングで呼ばれる。
+   * usePageNavigation の isLoadingPageRender を false にするのに使う。
+   * bitmapCache ヒット時も同様に完了扱いで呼ばれる。
+   */
+  onRenderComplete?: () => void;
   renderOverlaysRef: MutableRefObject<(() => void) | null>;
 }
 
@@ -23,6 +30,12 @@ interface UsePdfRenderingResult {
 }
 
 // PDF main render + bitmapCache + viewport/page proxy 管理
+//
+// チラつき対策方針:
+//  - ファイル/ページ切替時に setPdfPage(null) しない。
+//  - 新ページ proxy を取得 → render 完了 → setPdfPage(new) + canvas swap という順序を守る。
+//  - 旧 render はこの effect の cleanup で cancel する (race 防止)。
+//  - proxy 取得は store の currentPageProxy を優先的に共有して二重 fetch を回避。
 export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingResult {
   const {
     pdfCanvasRef,
@@ -32,6 +45,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     pageIndex,
     zoom,
     onFirstRender,
+    onRenderComplete,
     renderOverlaysRef,
   } = params;
 
@@ -44,13 +58,13 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const [retryCount, setRetryCount] = useState(0);
 
   // PDFページの取得
+  // ファイル or ページ切替時: 旧 pdfPage は即座にクリアせず、新ページ proxy の
+  // 取得と render 完了を待って置換する（Canvas チラつき抑止）。
   useEffect(() => {
-    // ファイルまたはページが切り替わった瞬間に古いプロキシを即座にクリア。
-    // これにより破棄済み transport への render 呼び出しを防ぐ。
-    setPdfPage(null);
-
     if (!filePath) {
       hasCalledFirstRenderRef.current = null;
+      // ファイル未選択時は即クリア (表示するものがないため)
+      setPdfPage(null);
       return;
     }
 
@@ -58,7 +72,16 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
 
     (async () => {
       try {
-        const page = await getCachedPageProxy(filePath, pageIndex);
+        // 共有チャネル (store.currentPageProxy) が同じ filePath/pageIndex を
+        // 指していれば二重 fetch を回避して即座に使う。
+        const state = usePecoStore.getState();
+        const expectedKey = `${filePath}:${pageIndex}`;
+        let page: pdfjsLib.PDFPageProxy | null = null;
+        if (state.currentPageProxyKey === expectedKey && state.currentPageProxy) {
+          page = state.currentPageProxy;
+        } else {
+          page = await getCachedPageProxy(filePath, pageIndex);
+        }
         if (cancelled) return;
         setPdfPage(page);
       } catch (err) {
@@ -74,9 +97,27 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     };
   }, [filePath, pageIndex, retryCount]);
 
+  // store.currentPageProxy の更新を subscribe: usePageNavigation が later に
+  // proxy を publish したケース (未ロードページで effect 側が先行した場合など) に対応。
+  useEffect(() => {
+    if (!filePath) return;
+    const expectedKey = `${filePath}:${pageIndex}`;
+    const unsubscribe = usePecoStore.subscribe((state, prev) => {
+      if (state.currentPageProxy === prev.currentPageProxy) return;
+      if (state.currentPageProxyKey !== expectedKey) return;
+      if (!state.currentPageProxy) return;
+      // 同じ proxy 参照なら skip
+      setPdfPage((current) => current === state.currentPageProxy ? current : state.currentPageProxy);
+    });
+    return () => { unsubscribe(); };
+  }, [filePath, pageIndex]);
+
   // PDFレンダリング
   useEffect(() => {
     if (!pdfPage || !pdfCanvasRef.current) return;
+
+    // この render 試行がアクティブかどうかのフラグ。cleanup で false になる。
+    let active = true;
 
     const renderPdf = async () => {
       const canvas = pdfCanvasRef.current!;
@@ -86,45 +127,50 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       const w = Math.floor(viewport.width);
       const h = Math.floor(viewport.height);
 
-      canvas.width = w;
-      canvas.height = h;
-
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.width = w;
-        overlayCanvasRef.current.height = h;
-      }
-
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
-      canvas.style.display = "block";
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.style.width = `${w}px`;
-        overlayCanvasRef.current.style.height = `${h}px`;
-      }
-      if (wrapperRef.current) {
-        wrapperRef.current.style.width = `${w}px`;
-        wrapperRef.current.style.height = `${h}px`;
-      }
-
       const cacheKey = `${pageIndex}:${zoom}`;
       const cached = getBitmapCache(cacheKey);
       if (cached && cached.width === w && cached.height === h) {
+        // キャッシュヒット: サイズ適用 + 即時描画してちらつきゼロで差し替え
+        canvas.width = w;
+        canvas.height = h;
+        if (overlayCanvasRef.current) {
+          overlayCanvasRef.current.width = w;
+          overlayCanvasRef.current.height = h;
+        }
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+        canvas.style.display = "block";
+        if (overlayCanvasRef.current) {
+          overlayCanvasRef.current.style.width = `${w}px`;
+          overlayCanvasRef.current.style.height = `${h}px`;
+        }
+        if (wrapperRef.current) {
+          wrapperRef.current.style.width = `${w}px`;
+          wrapperRef.current.style.height = `${h}px`;
+        }
         context.drawImage(cached.bitmap, 0, 0);
         if (hasCalledFirstRenderRef.current !== filePath) {
           hasCalledFirstRenderRef.current = filePath ?? null;
           onFirstRender?.();
         }
         renderOverlaysRef.current?.();
+        onRenderComplete?.();
         return;
       }
 
-      context.fillStyle = "#ffffff";
-      context.fillRect(0, 0, w, h);
+      // キャッシュミス: オフスクリーンに描画してから on-screen に swap することで
+      // 描画途中の「真っ白→じわっ」状態をユーザーに見せない。
+      const offscreen = window.document.createElement("canvas");
+      offscreen.width = w;
+      offscreen.height = h;
+      const offctx = offscreen.getContext("2d", { alpha: false, willReadFrequently: false })!;
+      offctx.fillStyle = "#ffffff";
+      offctx.fillRect(0, 0, w, h);
 
       const renderContext = {
-        canvasContext: context,
+        canvasContext: offctx,
         viewport: viewport,
-        canvas: canvas,
+        canvas: offscreen,
       };
 
       if (renderTaskRef.current) {
@@ -143,19 +189,43 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         return;
       }
 
+      // cleanup 済み (例: さらに新ページに切り替わった) なら on-screen に反映しない
+      if (!active) return;
+
+      // on-screen canvas にサイズ適用してオフスクリーンから一括コピー
+      canvas.width = w;
+      canvas.height = h;
+      if (overlayCanvasRef.current) {
+        overlayCanvasRef.current.width = w;
+        overlayCanvasRef.current.height = h;
+      }
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+      canvas.style.display = "block";
+      if (overlayCanvasRef.current) {
+        overlayCanvasRef.current.style.width = `${w}px`;
+        overlayCanvasRef.current.style.height = `${h}px`;
+      }
+      if (wrapperRef.current) {
+        wrapperRef.current.style.width = `${w}px`;
+        wrapperRef.current.style.height = `${h}px`;
+      }
+      context.drawImage(offscreen, 0, 0);
+
       if (hasCalledFirstRenderRef.current !== filePath) {
         hasCalledFirstRenderRef.current = filePath ?? null;
         onFirstRender?.();
       }
 
       try {
-        const bitmap = await createImageBitmap(canvas);
+        const bitmap = await createImageBitmap(offscreen);
         setBitmapCache(cacheKey, { bitmap, zoom, width: w, height: h });
       } catch {
         /* ビットマップ作成失敗は無視 */
       }
 
       renderOverlaysRef.current?.();
+      onRenderComplete?.();
       // prefetch は pdfjs worker のタスクキューを占有して現在ページ描画を遅延させるため廃止
     };
 
@@ -172,6 +242,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     }
 
     return () => {
+      active = false;
       if (renderDebounceRef.current) clearTimeout(renderDebounceRef.current);
       renderTaskRef.current?.cancel();
     };

@@ -126,12 +126,14 @@ function App() {
 
   const {
     isLoadingPage,
+    isLoadingPageMeta,
     pageLoadError,
     pageInputValue,
     setPageInputValue,
     loadCurrentPage,
     handlePageInputCommit,
     handlePageInputKeyDown,
+    markRenderComplete,
   } = usePageNavigation({
     document,
     currentPageIndex,
@@ -369,9 +371,9 @@ function App() {
           onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={stopPanning} onMouseLeave={stopPanning}
         >
           <div className="pdf-canvas-container">
-            {document ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
+            {document ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
-          {(isLoadingFile || isLoadingPage) && (
+          {(isLoadingFile || isLoadingPageMeta) && (
             <div className="loading-overlay">
               <div className="loading-spinner" />
               <div className="loading-message">

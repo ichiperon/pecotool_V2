@@ -75,7 +75,7 @@ function makeBlock(id: string, text: string, order: number): TextBlock {
   }
 }
 
-function makeDoc(blocks: TextBlock[]): PecoDocument {
+function makeDoc(blocks: TextBlock[], opts?: { isTextExtracted?: boolean }): PecoDocument {
   const page: PageData = {
     pageIndex: 0,
     width: 595,
@@ -83,6 +83,7 @@ function makeDoc(blocks: TextBlock[]): PecoDocument {
     textBlocks: blocks,
     isDirty: false,
     thumbnail: null,
+    isTextExtracted: opts?.isTextExtracted ?? true,
   }
   return {
     filePath: '',
@@ -217,6 +218,52 @@ describe('OcrEditor', () => {
       render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByText('OCRテキストなし')).toBeTruthy()
+    })
+  })
+
+  describe('C-ED-05b: 抽出中プレースホルダ', () => {
+    it('isTextExtracted=false → "テキスト抽出中..." が表示され、ブロックは描画されない', () => {
+      const doc = makeDoc([], { isTextExtracted: false })
+      usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
+      const searchInputRef = { current: null }
+      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
+
+      expect(screen.getByText('テキスト抽出中...')).toBeTruthy()
+      // プレースホルダ要素が存在する
+      expect(container.querySelector('.ocr-loading-placeholder')).not.toBeNull()
+      // 「OCRテキストなし」は出ない（isTextExtracted=true でのみ出る）
+      expect(screen.queryByText('OCRテキストなし')).toBeNull()
+      // ブロックは描画されない
+      expect(container.querySelectorAll('.ocr-card-content').length).toBe(0)
+    })
+
+    it('isTextExtracted=false だが textBlocks に古いデータがある → 抽出中プレースホルダ優先', () => {
+      const doc = makeDoc(blocks, { isTextExtracted: false })
+      usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
+      const searchInputRef = { current: null }
+      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
+
+      expect(screen.getByText('テキスト抽出中...')).toBeTruthy()
+      expect(container.querySelectorAll('.ocr-card-content').length).toBe(0)
+    })
+
+    it('isTextExtracted=true で textBlocks=[] → "OCRテキストなし" が出る（従来挙動）', () => {
+      const doc = makeDoc([], { isTextExtracted: true })
+      usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
+      const searchInputRef = { current: null }
+      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
+
+      expect(screen.getByText('OCRテキストなし')).toBeTruthy()
+      expect(screen.queryByText('テキスト抽出中...')).toBeNull()
+    })
+
+    it('抽出中でも検索欄は表示される', () => {
+      const doc = makeDoc([], { isTextExtracted: false })
+      usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
+      const searchInputRef = { current: null }
+      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
+
+      expect(screen.getByPlaceholderText('検索...')).toBeTruthy()
     })
   })
 
