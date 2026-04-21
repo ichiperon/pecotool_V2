@@ -206,12 +206,36 @@ async function handleSavePdf(
 // Worker scope での self 型付け。WebWorker lib を tsconfig で有効化しているため DedicatedWorkerGlobalScope が使える。
 declare const self: DedicatedWorkerGlobalScope;
 
+/**
+ * payload から元 PDF bytes を取得する。
+ * - bytes 指定: 従来経路（main thread から transfer された Uint8Array をそのまま使う）
+ * - url 指定: Worker 内で直接 fetch → arrayBuffer する経路。
+ *   main thread heap を経由しないので 100MB 級 PDF でも OOM しない。
+ * 両方指定された場合は bytes を優先。
+ */
+async function resolvePdfBytes(data: {
+  bytes?: Uint8Array;
+  url?: string;
+}): Promise<Uint8Array> {
+  if (data.bytes) return data.bytes;
+  if (data.url) {
+    const res = await fetch(data.url);
+    if (!res.ok) {
+      throw new Error(`[pdf.worker] fetch failed: ${res.status} ${res.statusText}`);
+    }
+    const buf = await res.arrayBuffer();
+    return new Uint8Array(buf);
+  }
+  throw new Error('[pdf.worker] SAVE_PDF payload missing both bytes and url');
+}
+
 self.onmessage = async (e: MessageEvent<SavePdfWorkerRequest>) => {
   const msg = e.data;
   switch (msg.type) {
     case 'SAVE_PDF': {
       try {
-        const { originalPdfBytes, documentState, fontBytes } = msg.data;
+        const { documentState, fontBytes } = msg.data;
+        const originalPdfBytes = await resolvePdfBytes(msg.data);
         const savedBytes = await handleSavePdf(originalPdfBytes, documentState, fontBytes);
         const response: SavePdfWorkerResponse = { type: 'SAVE_PDF_SUCCESS', data: savedBytes };
         self.postMessage(response, [savedBytes.buffer]);

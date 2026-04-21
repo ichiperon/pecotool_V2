@@ -9,6 +9,7 @@ import { inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
 import type {
+  SavePdfSource,
   SavePdfWorkerRequest,
   SavePdfWorkerResponse,
   SerializedPageData,
@@ -68,11 +69,44 @@ function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
  * Powered by @cantoo/pdf-lib.
  */
 
+/**
+ * 保存対象の元 PDF ソース指定:
+ * - Uint8Array を直接渡す（従来互換）
+ * - `SavePdfSource`（{bytes} / {url}）を渡す。URL 経路は main thread 側で
+ *   fetch → arrayBuffer する（Worker 経路では pdf.worker.ts 内で fetch するため
+ *   main thread heap を経由しない）
+ */
+export type BuildPdfSource = Uint8Array | SavePdfSource;
+
+async function resolveBuildPdfSource(source: BuildPdfSource): Promise<Uint8Array> {
+  if (source instanceof Uint8Array) return source;
+  if (source.bytes) return source.bytes;
+  const res = await fetch(source.url);
+  if (!res.ok) {
+    throw new Error(`[buildPdfDocument] fetch failed: ${res.status} ${res.statusText}`);
+  }
+  const buf = await res.arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/** BuildPdfSource から bytes 経路の Uint8Array を抽出する（無ければ null） */
+function extractBytes(source: BuildPdfSource): Uint8Array | null {
+  if (source instanceof Uint8Array) return source;
+  return source.bytes ?? null;
+}
+
+/** BuildPdfSource から URL を抽出する（無ければ null） */
+function extractUrl(source: BuildPdfSource): string | null {
+  if (source instanceof Uint8Array) return null;
+  return source.url ?? null;
+}
+
 export async function buildPdfDocument(
-  originalPdfBytes: Uint8Array,
+  source: BuildPdfSource,
   documentState: PecoDocument,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
+  const originalPdfBytes = await resolveBuildPdfSource(source);
   const originalVersion = extractPdfVersion(originalPdfBytes);
   // throwOnInvalidObject:false → 不正オブジェクトの回復試行をスキップして高速化
   // updateMetadata:false → 更新日時の自動書き換えを抑制
@@ -260,10 +294,12 @@ export function __resetSaveStateForTest(): void {
 }
 
 export async function savePDF(
-  originalPdfBytes: Uint8Array,
+  source: BuildPdfSource,
   documentState: PecoDocument,
   fontBytes?: ArrayBuffer
 ): Promise<Uint8Array> {
+  const sourceBytes = extractBytes(source);
+  const sourceUrl = extractUrl(source);
   // 前回の保存が未完了の場合、完了 or タイムアウトまで待ってから新 worker を起動する
   if (currentSaveTask) {
     const timeoutSymbol = Symbol('timeout');
@@ -306,7 +342,7 @@ export async function savePDF(
       worker = createSaveWorker();
       if (!worker) {
         // Worker API 不在: main thread で直接実行
-        buildPdfDocument(originalPdfBytes, documentState, fontBytes)
+        buildPdfDocument(source, documentState, fontBytes)
           .then(settleResolve)
           .catch(settleReject);
         return;
@@ -345,15 +381,28 @@ export async function savePDF(
         serializedPages[idx] = pageWithoutThumbnail;
       }
 
-      const bytesClone = originalPdfBytes.slice();
-      const transferables: Transferable[] = [bytesClone.buffer];
+      const transferables: Transferable[] = [];
       const fontBytesClone = fontBytes instanceof ArrayBuffer ? fontBytes.slice(0) : undefined;
       if (fontBytesClone) transferables.push(fontBytesClone);
+
+      // URL 経路は Worker 内で直接 fetch するため main thread heap を経由しない。
+      // bytes 経路は従来どおり buffer を transfer する。
+      // bytes が取れれば優先 (fetch 不要)、取れなければ url を Worker に転送する。
+      let sourcePayload: SavePdfSource;
+      if (sourceBytes) {
+        const bytesClone = sourceBytes.slice();
+        transferables.push(bytesClone.buffer);
+        sourcePayload = { bytes: bytesClone };
+      } else if (sourceUrl) {
+        sourcePayload = { url: sourceUrl };
+      } else {
+        throw new Error('[savePDF] source must contain bytes or url');
+      }
 
       const request: SavePdfWorkerRequest = {
         type: 'SAVE_PDF',
         data: {
-          originalPdfBytes: bytesClone,
+          ...sourcePayload,
           documentState: { ...documentState, pages: serializedPages },
           fontBytes: fontBytesClone,
         },
@@ -365,7 +414,7 @@ export async function savePDF(
       }
       if (activeSaveWorker === worker) activeSaveWorker = null;
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
-      buildPdfDocument(originalPdfBytes, documentState, fontBytes)
+      buildPdfDocument(source, documentState, fontBytes)
         .then(settleResolve)
         .catch(settleReject);
     }

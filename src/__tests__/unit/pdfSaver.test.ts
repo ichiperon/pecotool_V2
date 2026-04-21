@@ -1065,4 +1065,59 @@ describe('pdfSaver / Worker 経路', () => {
       expect(r4[0]).toBe(4)
     })
   })
+
+  // ── U-W-05: URL 経路 ─────────────────────────────────────────
+  // source として {url} を渡した場合、bytes を transfer せず url を Worker に転送する。
+  // 受け取った Worker 側は worker 内で fetch する責務を持つ（本テストは postMessage の payload のみを検証）。
+  describe('U-W-05: URL 経路', () => {
+    it('source = {url} のとき postMessage payload に url が入り bytes は含まれない', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF({ url: 'blob:fake-url-123' }, doc)
+      const w = ControllableMockWorker.instances[0]
+      expect(w).toBeDefined()
+      expect(w.postedMessages).toHaveLength(1)
+      const req = w.postedMessages[0]
+      expect(req.type).toBe('SAVE_PDF')
+      expect(req.data.url).toBe('blob:fake-url-123')
+      expect(req.data.bytes).toBeUndefined()
+
+      // 応答を発火して Promise を解決させる
+      w.emitSuccess(new Uint8Array([1, 2, 3]))
+      const result = await p
+      expect(result).toBeInstanceOf(Uint8Array)
+    })
+
+    it('source = Uint8Array のとき postMessage payload に bytes が入り url は含まれない（回帰）', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array([9, 9, 9]), doc)
+      const w = ControllableMockWorker.instances[0]
+      const req = w.postedMessages[0]
+      expect(req.type).toBe('SAVE_PDF')
+      expect(req.data.bytes).toBeInstanceOf(Uint8Array)
+      expect(req.data.url).toBeUndefined()
+
+      w.emitSuccess(new Uint8Array([7]))
+      await p
+    })
+
+    it('Worker 不在時に {url} を渡すと main thread fallback で fetch が呼ばれる', async () => {
+      // Worker factory を null 返却にして main thread fallback を取らせる
+      __setSaveWorkerFactoryForTest(() => null)
+
+      const fakeBytes = new Uint8Array([11, 22, 33])
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        arrayBuffer: vi.fn().mockResolvedValue(fakeBytes.buffer),
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const doc = makeSimpleDoc()
+      const result = await savePDF({ url: 'blob:main-thread-url' }, doc)
+
+      expect(fetchMock).toHaveBeenCalledWith('blob:main-thread-url')
+      expect(result).toBeInstanceOf(Uint8Array)
+    })
+  })
 })

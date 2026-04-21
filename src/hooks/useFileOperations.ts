@@ -4,10 +4,47 @@ import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
+import type { SavePdfSource } from '../utils/pdfWorkerTypes';
 import { formatFileSize } from '../utils/format';
 import { loadFontLazy } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
+
+/**
+ * asset protocol の URL を fetch 可能な形式に整形する。
+ * - Tauri v2 の convertFileSrc は `asset.localhost/...` を返すため `http://` を付与する。
+ * - 既に `http(s)://` で始まっている場合はそのまま返す。
+ */
+function toFetchableAssetUrl(filePath: string): string {
+  const url = convertFileSrc(filePath);
+  return url.startsWith('asset.localhost') ? 'http://' + url : url;
+}
+
+/**
+ * 1 ページ目 render 後 (アイドル時) に background で PDF 全体 bytes を取得して
+ * pecoStore.originalBytes にキャッシュする。Ctrl+S 時は既にメモリ上にあるため
+ * pdf-lib 処理のみで保存完了できる (~1-3 秒)。
+ *
+ * 未キャッシュのまま保存が走った場合は save worker 側で URL から fetch するフォールバック
+ * があるため、ここでの失敗は warn だけで握りつぶす。
+ */
+async function prefetchOriginalBytes(filePath: string): Promise<void> {
+  const state = usePecoStore.getState();
+  if (state.originalBytes) return; // 既にキャッシュ済み
+  if (state.document?.filePath !== filePath) return; // 別ファイルに切替済
+  try {
+    const res = await fetch(toFetchableAssetUrl(filePath));
+    if (!res.ok) throw new Error(`fetch failed: ${res.status} ${res.statusText}`);
+    const buf = await res.arrayBuffer();
+    // 長時間の fetch 中にファイル切替が起きていないか再チェック
+    const now = usePecoStore.getState();
+    if (now.document?.filePath !== filePath) return;
+    if (now.originalBytes) return; // 保存経路が先に埋めた場合は上書きしない
+    now.setOriginalBytes(new Uint8Array(buf));
+  } catch (e) {
+    console.warn('[prefetchOriginalBytes] failed (fallback to URL on save):', e);
+  }
+}
 
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean) => void,
@@ -73,6 +110,14 @@ export function useFileOperations(
         } else {
           setTimeout(() => { loadFontLazy(); }, 1000);
         }
+
+        // 1 ページ目 render / サムネ等が落ち着いた頃合い (~2s) に background で
+        // PDF bytes を取得して originalBytes にキャッシュする。Ctrl+S 時に
+        // pdf-lib 処理だけで完了できるようにするための先読み。
+        // Tauri 側のネットワークは競合しないが、サムネ生成と同時発火させると
+        // WebView2 の帯域を食い合うため少し遅らせる。
+        setTimeout(() => { prefetchOriginalBytes(selected!); }, 2000);
+
         return true;
       }
       return false;
@@ -93,29 +138,16 @@ export function useFileOperations(
     const { document } = usePecoStore.getState();
     if (!document) return null;
 
-    let originalBytes = usePecoStore.getState().originalBytes;
-    if (!originalBytes) {
-      // bytes 直接渡し経路を廃止したため、保存時に asset protocol 経由で lazy fetch する。
-      // 初回は 100MB 級ファイルの場合 1〜3 分かかる可能性があるため toast で通知。
+    // originalBytes が prefetch 経由で既に埋まっていれば bytes 経路、未設定なら
+    // save worker 側で URL から直接 fetch させる (main thread に 103MB を展開しない)。
+    // URL 経路時のみ「読み込み中...」Toast を表示する (bytes 経路は即時完了想定)。
+    const cachedBytes = usePecoStore.getState().originalBytes;
+    const saveSource: SavePdfSource = cachedBytes
+      ? { bytes: cachedBytes }
+      : { url: toFetchableAssetUrl(document.filePath) };
+
+    if (!cachedBytes) {
       showToast("保存用にファイルを読み込み中...");
-      try {
-        let url = convertFileSrc(document.filePath);
-        if (url.startsWith('asset.localhost')) {
-          url = 'http://' + url;
-        }
-        const res = await fetch(url);
-        if (!res.ok) {
-          showToast("ファイルの読み込みに失敗しました。再度お試しください。", true);
-          return null;
-        }
-        const buf = await res.arrayBuffer();
-        originalBytes = new Uint8Array(buf);
-        usePecoStore.getState().setOriginalBytes(originalBytes);
-      } catch (e) {
-        console.error('[_executeSave] originalBytes lazy fetch failed:', e);
-        showToast("ファイルの読み込みに失敗しました。再度お試しください。", true);
-        return null;
-      }
     }
 
     const fontBytes = await loadFontLazy();
@@ -144,7 +176,7 @@ export function useFileOperations(
       [...mergedPages.entries()].filter(([, p]) => p.isDirty)
     );
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
-    const savedBytes = await savePDF(originalBytes, mergedDoc, fontBytes);
+    const savedBytes = await savePDF(saveSource, mergedDoc, fontBytes);
     const writePath = targetPath ?? document.filePath;
 
     await writeFile(writePath, savedBytes);
