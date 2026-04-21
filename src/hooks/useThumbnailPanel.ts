@@ -387,7 +387,36 @@ export function useThumbnailPanel() {
     };
 
     logger.log(`[ThumbnailPanel] Starting worker load for ${capturedFilePath}`);
-    startWorkerLoad();
+    // メイン pdfjs の初回 render (~500ms) と、サムネ worker 側 pdfjs の
+    // 初期化 (LOAD_COMPLETE 実測 ~8.7s) が同時実行されると CPU を奪い合い、
+    // メイン側のページ遷移 render が 1,564ms まで悪化する。
+    // requestIdleCallback でメイン render の山が落ち着く idle 時間まで
+    // 遅延させて起動する。未対応環境 (jsdom / 旧 WebView) では 800ms の
+    // setTimeout フォールバックで同等の遅延を与える。
+    type IdleGlobal = typeof globalThis & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const g = globalThis as IdleGlobal;
+    const kickoff = () => {
+      if (epochRef.current !== capturedEpoch) return;
+      if (prevFilePathRef.current !== capturedFilePath) return;
+      startWorkerLoad();
+    };
+
+    let idleHandle: number | null = null;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    if (typeof g.requestIdleCallback === 'function') {
+      idleHandle = g.requestIdleCallback(kickoff, { timeout: 1500 });
+    } else {
+      timeoutHandle = setTimeout(kickoff, 800);
+    }
+    return () => {
+      if (idleHandle !== null && typeof g.cancelIdleCallback === 'function') {
+        g.cancelIdleCallback(idleHandle);
+      }
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+    };
   }, [document?.filePath, processThumbnailQueue]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
