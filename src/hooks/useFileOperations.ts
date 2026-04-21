@@ -64,21 +64,28 @@ export function useFileOperations(
 
       if (selected && typeof selected === 'string') {
         setIsLoadingFile?.(true);
+        const capturedPath = selected;
 
         try {
-          // bytes ベース読み込み: readFile を先に完了させてから pdfjs に data 直接渡し。
-          // asset protocol の I/O を完全バイパスし、Range fetch や Accept-Ranges 補正も不要。
-          // 200p (~100MB) で readFile は 500ms-1s 程度の追加時間だが pdfjs パースが高速化される。
-          const content = await readFile(selected);
-          const bytes = new Uint8Array(content);
-
-          // originalBytes を setDocument 前に書き込んでおく。保存パスが参照可能になる。
-          usePecoStore.getState().setOriginalBytes(bytes);
-
-          const doc = await loadPDF(selected, bytes);
+          // 初回 1 ページ目表示を最速化するため URL (asset protocol) 経路で先に loadPDF を await。
+          // readFile (200p/~100MB で数百ms〜1s) は後追いバックグラウンドで実行し、
+          // 完了後に originalBytes へセットする（保存時に使用）。
+          // prefetch 廃止済みのため、主 pdfjs の Range fetch は現在ページ分だけの軽量 I/O に収まる。
+          const doc = await loadPDF(selected);
           setDocument(doc);
           addToRecent(selected);
           onOpenComplete?.(doc);
+
+          // readFile はバックグラウンドで並行実行し、完了時に originalBytes を充填する。
+          // 途中でファイルが切り替わっていれば破棄（capturedPath ガード）。
+          void readFile(selected).then((content) => {
+            const current = usePecoStore.getState().document;
+            if (current && current.filePath === capturedPath) {
+              usePecoStore.getState().setOriginalBytes(new Uint8Array(content));
+            }
+          }).catch((e) => {
+            console.error('Background readFile failed:', e);
+          });
         } finally {
           setIsLoadingFile?.(false);
         }
