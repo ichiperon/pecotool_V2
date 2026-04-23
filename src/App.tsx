@@ -147,13 +147,25 @@ function App() {
   // --- Handlers ---
   const handleReload = useCallback(async () => {
     if (!filePath) return;
+    perf.mark('ui.reload');
     await handleOpen(filePath);
   }, [filePath, handleOpen]);
 
   const handleSaveAs = async () => {
     if (!isFileLoaded) return;
+    perf.mark('ui.saveAs');
     await executeSaveAs();
   };
+
+  const handleOpenLogFolder = useCallback(async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('open_log_folder');
+    } catch (err) {
+      console.error('[app] open_log_folder failed:', err);
+      showToast('ログフォルダを開けませんでした。', true);
+    }
+  }, [showToast]);
 
   const handleClose = useCallback(async () => {
     // pages の iteration は subscribe せず getState() で実行 (再レンダトリガーにしない)
@@ -173,6 +185,7 @@ function App() {
 
   const handleDelete = () => {
     if (selectedIds.size === 0 || !currentPage) return;
+    perf.mark('ui.blockDelete', { count: selectedIds.size });
     const newBlocks = currentPage.textBlocks.filter(b => !selectedIds.has(b.id));
     updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
     usePecoStore.getState().clearSelection();
@@ -202,6 +215,7 @@ function App() {
 
   const handleGroup = () => {
     if (selectedIds.size < 2 || !currentPage) return;
+    perf.mark('ui.blockGroup', { count: selectedIds.size });
     const selectedBlocks = currentPage.textBlocks.filter(b => selectedIds.has(b.id));
 
     const minX = Math.min(...selectedBlocks.map(b => b.bbox.x));
@@ -233,6 +247,7 @@ function App() {
       title: 'OCR消去', kind: 'warning'
     });
     if (!confirmed) return;
+    perf.mark('ui.ocrClearCurrentPage');
     clearOcrCurrentPage();
     showToast('現在のページのOCRテキストを削除しました。');
   };
@@ -242,12 +257,14 @@ function App() {
       title: 'OCR消去（全ページ）', kind: 'warning'
     });
     if (!confirmed) return;
+    perf.mark('ui.ocrClearAllPages');
     clearOcrAllPages();
     showToast('全ページのOCRテキストを削除しました。');
   };
 
   const handleRemoveSpaces = () => {
     if (selectedIds.size === 0 || !currentPage) return;
+    perf.mark('ui.blockRemoveSpaces', { count: selectedIds.size });
     const newBlocks = currentPage.textBlocks.map(b => {
       if (!selectedIds.has(b.id)) return b;
       const stripped = b.text.replace(/[ \u3000]/g, '');
@@ -380,6 +397,7 @@ function App() {
         onShowVersion={() => setHelpModal('version')}
         onReload={handleReload}
         onShowOcrSettings={() => setShowOcrSettings(true)}
+        onOpenLogFolder={handleOpenLogFolder}
       />
 
       <Toolbar

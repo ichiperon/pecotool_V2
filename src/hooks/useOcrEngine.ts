@@ -10,6 +10,7 @@ import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
 import { logger } from '../utils/logger';
+import { perf } from '../utils/perfLogger';
 
 const RENDER_SCALE = 2.0;
 
@@ -123,6 +124,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     }
 
     setIsOcrRunning(true);
+    perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
@@ -171,6 +173,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     cancelTokenRef.current = false;
     setIsOcrRunning(true);
     setOcrProgress({ current: 0, total: doc.totalPages });
+    perf.mark('ui.ocrRunAllPages', { totalPages: doc.totalPages });
 
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {

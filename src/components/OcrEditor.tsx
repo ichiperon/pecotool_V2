@@ -21,6 +21,7 @@ import { usePecoStore } from '../store/pecoStore';
 import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
 import { Search } from 'lucide-react';
+import { perf } from '../utils/perfLogger';
 
 interface OcrEditorProps {
   width: number;
@@ -115,6 +116,7 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
         ...notSelected.slice(insertIndex),
       ].map((b, i) => ({ ...b, order: i, isDirty: true }));
 
+      perf.mark('ui.cardReorderMulti', { page: currentPageIndex, count: selected.length });
       updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
     } else {
       // 単一ドラッグ（従来通り）
@@ -125,6 +127,7 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
         order: i,
         isDirty: b.isDirty || oldIndex !== newIndex,
       }));
+      perf.mark('ui.cardReorderSingle', { page: currentPageIndex, from: oldIndex, to: newIndex });
       updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
     }
   };

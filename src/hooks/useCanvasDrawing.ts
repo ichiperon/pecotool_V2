@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { PageData, TextBlock } from "../types";
+import { perf } from "../utils/perfLogger";
 
 interface UseCanvasDrawingParams {
   pageIndex: number;
@@ -102,6 +103,7 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
           return originalOrder !== b.order ? { ...b, order: originalOrder } : b;
         });
 
+        perf.mark('ui.blockNewDraw', { page: pageIndex, writingMode });
         updatePageData(pageIndex, {
           textBlocks: [...updatedBlocks, newBlock],
           isDirty: true,
@@ -181,6 +183,13 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
           newBlocks.splice(i, 0, b1, b2);
           const finalBlocks = newBlocks.map((b, idx) => ({ ...b, order: idx }));
 
+          perf.mark('ui.blockSplit', {
+            page: pageIndex,
+            origLen: block.text.length,
+            b1Len: b1.text.length,
+            b2Len: b2.text.length,
+            vertical: isVertical,
+          });
           updatePageData(pageIndex, { textBlocks: finalBlocks, isDirty: true });
           toggleSplitMode();
           return true;

@@ -17,6 +17,7 @@ interface MenuBarProps {
   onShowVersion: () => void;
   onReload: () => void;
   onShowOcrSettings: () => void;
+  onOpenLogFolder: () => void;
 }
 
 export const MenuBar: React.FC<MenuBarProps> = (props) => {
@@ -159,6 +160,10 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
             </div>
             <div className="menu-dropdown-item" onClick={() => run(props.onShowUsage)}>
               ツールの使い方
+            </div>
+            <div className="menu-separator" />
+            <div className="menu-dropdown-item" onClick={() => run(props.onOpenLogFolder)}>
+              ログフォルダを開く
             </div>
             <div className="menu-separator" />
             <div className="menu-dropdown-item" onClick={() => run(props.onShowVersion)}>

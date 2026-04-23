@@ -35,6 +35,8 @@ export interface PerfLogger {
   download(): Promise<void>;
   /** Tauri invoke で appLocalData/perf/<name>.ndjson に書き込み、絶対パスを返す */
   sendToTauri(name: string): Promise<string>;
+  /** Tauri invoke で appLocalData/logs/<name>.ndjson に書き込み、絶対パスを返す (操作ログ用) */
+  sendOperationLog(name: string): Promise<string>;
   reset(): void;
 }
 
@@ -59,9 +61,14 @@ function detectEnabled(): { enabled: boolean; verbose: boolean } {
     const ls = window.localStorage?.getItem('pecoPerf');
     if (ls === 'verbose') return { enabled: true, verbose: true };
     if (ls === '1') return { enabled: true, verbose: false };
+    // 明示的に無効化したい場合のエスケープハッチ
+    if (ls === 'off' || ls === '0') return { enabled: false, verbose: false };
   } catch {
     // localStorage アクセス不可 (SSR 等) は無効
   }
+  // プロダクションビルドではデフォルトで有効化 (操作ログ常時収集。
+  // mark 単位のオーバーヘッドはサブμ秒、5000 件のリングバッファで頭打ち)
+  if (import.meta.env.PROD) return { enabled: true, verbose: false };
   return { enabled: false, verbose: false };
 }
 
@@ -225,6 +232,14 @@ export const perf: PerfLogger = {
     // Tauri が未初期化の環境 (通常ブラウザ等) でも失敗しないように動的 import
     const { invoke } = await import('@tauri-apps/api/core');
     const path = await invoke<string>('write_perf_log', { name, body });
+    return path;
+  },
+
+  async sendOperationLog(name) {
+    if (!state.enabled) return '';
+    const body = toNdjson(orderedEntries());
+    const { invoke } = await import('@tauri-apps/api/core');
+    const path = await invoke<string>('write_operation_log', { name, body });
     return path;
   },
 

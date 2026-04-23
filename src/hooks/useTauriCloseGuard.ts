@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
 import { usePecoStore } from '../store/pecoStore';
+import { perf } from '../utils/perfLogger';
 
 // 指定ミリ秒でタイムアウトする Promise.race ヘルパ。
 // タイムアウト時は fallback 値で解決する (reject しない)。
@@ -58,6 +59,23 @@ export function useTauriCloseGuard() {
                 undefined,
                 `child window destroy (${w.label})`
               );
+            }
+          }
+
+          // 操作ログを appLocalData/logs/ に書き出す (有効時のみ no-op でなくなる)。
+          // 終了フローを詰まらせないよう 3 秒でタイムアウト、失敗時は警告だけで継続。
+          if (perf.enabled) {
+            perf.mark('app.closeRequested');
+            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+            try {
+              await withTimeout(
+                perf.sendOperationLog(`session-${ts}`),
+                3000,
+                '',
+                'perf.sendOperationLog()'
+              );
+            } catch (e) {
+              console.warn('[useTauriCloseGuard] operation log flush failed (ignored):', e);
             }
           }
         } catch (err) {

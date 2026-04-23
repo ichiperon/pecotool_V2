@@ -269,6 +269,7 @@ export function useFileOperations(
     // Ctrl+S が届いていることを可視化するため、開始時に必ずトースト表示。
     // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
     console.log('[save] handleSave invoked');
+    perf.mark('ui.save');
     const { document } = usePecoStore.getState();
     if (!document) {
       showToast("PDFが開かれていません。", true);

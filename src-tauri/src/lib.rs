@@ -147,6 +147,59 @@ async fn write_perf_log(
     Ok(path.to_string_lossy().to_string())
 }
 
+/// 操作ログを appLocalData/logs/<safe_name>.ndjson に書き出す。
+/// `write_perf_log` と同様に name は ASCII 英数字 + '-', '_' のみ許可。
+/// 返値は書き込み先の絶対パス文字列。
+#[tauri::command]
+async fn write_operation_log(
+    app: tauri::AppHandle,
+    name: String,
+    body: String,
+) -> Result<String, String> {
+    use std::fs;
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    let logs_dir = dir.join("logs");
+    fs::create_dir_all(&logs_dir).map_err(|e| format!("create_dir: {e}"))?;
+    let safe_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let safe_name = if safe_name.is_empty() {
+        format!("log-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0))
+    } else {
+        safe_name
+    };
+    let path = logs_dir.join(format!("{}.ndjson", safe_name));
+    fs::write(&path, body).map_err(|e| format!("write: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// `appLocalData/logs/` を OS 標準ファイラで開く。
+/// 未作成なら先に `fs::create_dir_all` で生成する。
+#[tauri::command]
+async fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
+    use std::fs;
+    use tauri::Manager;
+    use tauri_plugin_opener::OpenerExt;
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    let logs_dir = dir.join("logs");
+    fs::create_dir_all(&logs_dir).map_err(|e| format!("create_dir: {e}"))?;
+    app.opener()
+        .open_path(logs_dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| format!("open_path failed: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn run_ocr(
     image_path: String,
@@ -405,6 +458,8 @@ pub fn run() {
             run_ocr,
             get_pdf_page_dimensions,
             write_perf_log,
+            write_operation_log,
+            open_log_folder,
             write_pdf_chunk,
             backup::save_backup,
             backup::check_pending_backups,
