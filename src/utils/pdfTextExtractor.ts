@@ -45,18 +45,16 @@ export async function loadPage(
     let textBlocks: TextBlock[];
 
     // If PecoTool-saved bbox metadata is available for this page, use it directly.
+    // bbox と text は保存時に同一 TextBlock から同時に書かれているため、meta から
+    // 直接読むことでペアの整合を保証する。pdfjs textItems 経由の idx マッチングは
+    // drawText スキップ(空文字/0幅/非有限スケール)で件数が食い違い、text が後続
+    // ブロックに 1 つズレる既知バグの原因となるため採用しない。
     const savedMeta = bboxMeta?.[String(pageIndex)];
     if (savedMeta && savedMeta.length > 0) {
-      const textByOrder = new Map<number, string>(
-        textItems
-          .filter((item) => item.str.trim() !== '')
-          .map((item, idx) => [idx, item.str])
-      );
-
-      textBlocks = savedMeta.map((meta, idx) => ({
+      textBlocks = savedMeta.map((meta) => ({
         id: crypto.randomUUID(),
-        text: textByOrder.get(idx) ?? meta.text,
-        originalText: textByOrder.get(idx) ?? meta.text,
+        text: meta.text,
+        originalText: meta.text,
         bbox: meta.bbox,
         writingMode: meta.writingMode as 'horizontal' | 'vertical',
         order: meta.order,

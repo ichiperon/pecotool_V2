@@ -8,6 +8,7 @@ import { PecoDocument } from '../types';
 import { inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
+import { safeDecodePdfText } from './pdfLibSafeDecode';
 import type {
   SavePdfSource,
   SavePdfWorkerRequest,
@@ -145,10 +146,9 @@ export async function buildPdfDocument(
   if (infoDict) {
     try {
       const value = infoDict.get(PDFName.of('PecoToolBBoxes'));
-      if (value instanceof PDFHexString) {
-        existingBBoxMeta = JSON.parse(value.decodeText());
-      } else if (value instanceof PDFString) {
-        existingBBoxMeta = JSON.parse(value.decodeText());
+      // decodeText() は数 MB のメタで stack overflow するため safeDecodePdfText を使う
+      if (value instanceof PDFHexString || value instanceof PDFString) {
+        existingBBoxMeta = JSON.parse(safeDecodePdfText(value));
       }
     } catch { /* ignore parse errors */ }
   }

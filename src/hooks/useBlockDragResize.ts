@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { Action, BoundingBox, PageData } from "../types";
 import { classifyDirection, reorderBlocks } from "../utils/bulkReorder";
 import { readReorderThreshold } from "../utils/reorderThreshold";
+import { perf } from "../utils/perfLogger";
 
 type DragMode = "none" | "move" | "resize-nw" | "resize-ne" | "resize-sw" | "resize-se";
 
@@ -85,6 +86,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       if (pageData && pageData.textBlocks.length > 0) {
         const percent = readReorderThreshold();
         const newBlocks = reorderBlocks([...pageData.textBlocks], dir, percent);
+        perf.mark('ui.altReorder', { page: pageIndex, direction: dir, blocks: newBlocks.length });
         updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
       }
     }
@@ -196,7 +198,9 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
         }
         return b;
       });
-      updatePageData(pageIndex, { textBlocks: newBlocks }, false);
+      // 保存フィルタは page.isDirty のみを見るため、block.isDirty だけでなく
+      // page.isDirty も明示的に立てる必要がある (さもないと BB 移動のみの変更は保存されない)
+      updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
     } else {
       if (!dragStartBbox) return true;
       const startBbox: BoundingBox = dragStartBbox;
@@ -222,7 +226,9 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       const newBlocks = pageData.textBlocks.map((b) =>
         b.id === draggedId ? { ...b, bbox: newBbox, isDirty: true } : b
       );
-      updatePageData(pageIndex, { textBlocks: newBlocks }, false);
+      // 保存フィルタは page.isDirty のみを見るため、block.isDirty だけでなく
+      // page.isDirty も明示的に立てる必要がある (さもないと BB リサイズのみの変更は保存されない)
+      updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
     }
     return true;
   };
@@ -238,6 +244,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
           after: { ...pageData },
         };
         pushAction(action);
+        perf.mark('ui.bboxEdit', { page: pageIndex, mode: dragMode });
       }
       preDragPageRef.current = null;
       setDraggedId(null);
