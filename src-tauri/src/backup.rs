@@ -1,4 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
@@ -14,6 +13,20 @@ pub struct BackupInfo {
 /// ファイルパスをハッシュ化してバックアップファイル名を生成する。
 /// ロングパスや特殊文字の問題を回避するため、パス文字列をそのままファイル名に使わない。
 fn path_hash(file_path: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in file_path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+fn legacy_path_hash(file_path: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+
     let mut hasher = DefaultHasher::new();
     file_path.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -32,6 +45,43 @@ fn get_backup_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn backup_file_path(backup_dir: &PathBuf, file_path: &str) -> PathBuf {
     backup_dir.join(format!("{}.json", path_hash(file_path)))
+}
+
+fn legacy_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> PathBuf {
+    backup_dir.join(format!("{}.json", legacy_path_hash(file_path)))
+}
+
+fn direct_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(file_path);
+    if path.extension().and_then(|e| e.to_str()) != Some("json") || !path.is_absolute() {
+        return None;
+    }
+
+    let parent = path.parent()?.canonicalize().ok()?;
+    let backup_dir = backup_dir.canonicalize().ok()?;
+    if parent == backup_dir {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn readable_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> PathBuf {
+    if let Some(path) = direct_backup_file_path(backup_dir, file_path) {
+        return path;
+    }
+
+    let current = backup_file_path(backup_dir, file_path);
+    if current.exists() {
+        return current;
+    }
+
+    let legacy = legacy_backup_file_path(backup_dir, file_path);
+    if legacy.exists() {
+        legacy
+    } else {
+        current
+    }
 }
 
 /// バックアップデータをディスクに書き込む。
@@ -62,7 +112,12 @@ pub async fn save_backup(
 
     tokio::task::spawn_blocking(move || {
         std::fs::write(&bpath, json_str)
-            .map_err(|e| format!("バックアップ書き込み失敗: {e}"))
+            .map_err(|e| format!("バックアップ書き込み失敗: {e}"))?;
+        let legacy_bpath = legacy_backup_file_path(&backup_dir, &file_path);
+        if legacy_bpath != bpath && legacy_bpath.exists() {
+            let _ = std::fs::remove_file(legacy_bpath);
+        }
+        Ok(())
     })
     .await
     .map_err(|e| format!("スレッドエラー: {e}"))?
@@ -108,15 +163,22 @@ pub async fn check_pending_backups(app: AppHandle) -> Result<Vec<BackupInfo>, St
 #[tauri::command]
 pub async fn clear_backup(app: AppHandle, file_path: String) -> Result<(), String> {
     let backup_dir = get_backup_dir(&app)?;
-    let bpath = backup_file_path(&backup_dir, &file_path);
 
     tokio::task::spawn_blocking(move || {
-        if bpath.exists() {
-            std::fs::remove_file(&bpath)
-                .map_err(|e| format!("バックアップ削除失敗: {e}"))
-        } else {
-            Ok(())
+        let mut paths = Vec::new();
+        if let Some(path) = direct_backup_file_path(&backup_dir, &file_path) {
+            paths.push(path);
         }
+        paths.push(backup_file_path(&backup_dir, &file_path));
+        paths.push(legacy_backup_file_path(&backup_dir, &file_path));
+
+        for path in paths {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| format!("バックアップ削除失敗: {e}"))?;
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| format!("スレッドエラー: {e}"))?
@@ -126,7 +188,7 @@ pub async fn clear_backup(app: AppHandle, file_path: String) -> Result<(), Strin
 #[tauri::command]
 pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, String> {
     let backup_dir = get_backup_dir(&app)?;
-    let bpath = backup_file_path(&backup_dir, &file_path);
+    let bpath = readable_backup_file_path(&backup_dir, &file_path);
 
     tokio::task::spawn_blocking(move || {
         std::fs::read_to_string(&bpath)
@@ -134,4 +196,15 @@ pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, St
     })
     .await
     .map_err(|e| format!("スレッドエラー: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_hash;
+
+    #[test]
+    fn path_hash_uses_fixed_fnv1a_64() {
+        assert_eq!(path_hash(""), "cbf29ce484222325");
+        assert_eq!(path_hash("C:\\docs\\sample.pdf"), "9003f252672f1593");
+    }
 }

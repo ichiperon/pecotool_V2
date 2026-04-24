@@ -226,14 +226,14 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
 
     // このスレッドの COM 初期化
     // S_OK (0)      = 初期化成功 → 関数終了時に CoUninitialize が必要
-    // S_FALSE (1)   = 既に初期化済み → CoUninitialize を呼んではいけない
+    // S_FALSE (1)   = 既に初期化済みだが、この呼び出しに対応する CoUninitialize が必要
     // それ以外       = 失敗
     let needs_uninit = unsafe {
         let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
         if hr.is_err() && hr.0 != 0x00000001u32 as i32 {
             return Err(format!("COM初期化失敗: {:?}", hr));
         }
-        hr.0 == 0 // S_OK のみ CoUninitialize が必要
+        hr.0 == 0 || hr.0 == 1
     };
 
     struct ComGuard;
@@ -368,7 +368,10 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
 ///
 /// フロント側はバイナリを Uint8Array のまま `invoke(cmd, bytes, { headers })` で渡す。
 #[tauri::command]
-async fn write_pdf_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+async fn write_pdf_chunk(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
     use std::io::{Seek, SeekFrom, Write};
     use std::fs::OpenOptions;
 
@@ -390,6 +393,10 @@ async fn write_pdf_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String>
     };
 
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let path = normalize_child_path(&path)?;
+        let target = temp_target_path(&path)?;
+        validate_allowed_resolved_path(&app, &target)?;
+
         // 最初のチャンク (offset==0) は create + truncate、後続は create 無しで open
         let mut opts = OpenOptions::new();
         opts.write(true);
@@ -400,7 +407,7 @@ async fn write_pdf_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String>
         }
         let mut f = opts
             .open(&path)
-            .map_err(|e| format!("open failed: {} ({})", e, path))?;
+            .map_err(|e| format!("open failed: {} ({})", e, path.to_string_lossy()))?;
         if offset > 0 {
             f.seek(SeekFrom::Start(offset))
                 .map_err(|e| format!("seek failed: {}", e))?;
@@ -410,6 +417,160 @@ async fn write_pdf_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String>
     })
     .await
     .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
+/// チャンク書き込み済みの一時 PDF を正式ファイルへ置き換える。
+/// Windows では `rename(temp, target)` が既存ファイルを上書きできないため、
+/// 既存 target を同一ディレクトリのバックアップへ退避してから temp を target に移動する。
+#[tauri::command]
+async fn replace_pdf_file(
+    app: tauri::AppHandle,
+    temp_path: String,
+    target_path: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp = normalize_child_path(&temp_path)?;
+        let target = validate_allowed_path(&app, &target_path)?;
+        validate_pdf_temp_target(&temp, &target)?;
+        if !temp.exists() {
+            return Err(format!("temp file does not exist: {}", temp_path));
+        }
+        let len = fs::metadata(&temp)
+            .map_err(|e| format!("metadata failed: {e} ({})", temp_path))?
+            .len();
+        if len == 0 {
+            return Err("temp file is empty".to_string());
+        }
+
+        if !target.exists() {
+            fs::rename(&temp, &target)
+                .map_err(|e| format!("rename temp->target failed: {e}"))?;
+            return Ok(());
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let backup = target.with_extension(format!("pecotool-backup-{}.tmp", stamp));
+
+        fs::rename(&target, &backup)
+            .map_err(|e| format!("rename target->backup failed: {e}"))?;
+
+        match fs::rename(&temp, &target) {
+            Ok(()) => {
+                let _ = fs::remove_file(&backup);
+                Ok(())
+            }
+            Err(e) => {
+                let restore_result = fs::rename(&backup, &target);
+                let _ = fs::remove_file(&temp);
+                match restore_result {
+                    Ok(()) => Err(format!("rename temp->target failed, original restored: {e}")),
+                    Err(restore_err) => Err(format!(
+                        "rename temp->target failed ({e}); restore failed ({restore_err}); backup: {}",
+                        backup.to_string_lossy()
+                    )),
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
+fn normalize_child_path(path: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_string());
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "path has no parent directory".to_string())?
+        .canonicalize()
+        .map_err(|e| format!("canonicalize parent failed: {e}"))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "path has no file name".to_string())?;
+    Ok(parent.join(file_name))
+}
+
+fn validate_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<std::path::PathBuf, String> {
+    let resolved = normalize_child_path(path)?;
+    validate_allowed_resolved_path(app, &resolved)?;
+    Ok(resolved)
+}
+
+fn validate_allowed_resolved_path(
+    app: &tauri::AppHandle,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    use tauri_plugin_fs::FsExt;
+
+    if !app.fs_scope().is_allowed(path) {
+        return Err("path is outside allowed Tauri file scope".to_string());
+    }
+    Ok(())
+}
+
+fn validate_pdf_temp_path(path: &std::path::Path) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "temp path has invalid file name".to_string())?;
+    if !name.contains(".pecotool-") || !name.ends_with(".tmp") {
+        return Err("path is not a pecotool temp file".to_string());
+    }
+    Ok(())
+}
+
+fn temp_target_path(temp: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    validate_pdf_temp_path(temp)?;
+    let temp_name = temp
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "temp path has invalid file name".to_string())?;
+    let marker = temp_name
+        .rfind(".pecotool-")
+        .ok_or_else(|| "path is not a pecotool temp file".to_string())?;
+    let target_name = &temp_name[..marker];
+    if target_name.is_empty() {
+        return Err("temp path has empty target file name".to_string());
+    }
+    let parent = temp
+        .parent()
+        .ok_or_else(|| "temp path has no parent directory".to_string())?;
+    Ok(parent.join(target_name))
+}
+
+fn validate_pdf_temp_target(
+    temp: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    validate_pdf_temp_path(temp)?;
+    if temp.parent() != target.parent() {
+        return Err("temp file must be in the target directory".to_string());
+    }
+
+    let target_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "target path has invalid file name".to_string())?;
+    let temp_name = temp
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "temp path has invalid file name".to_string())?;
+    if !temp_name.starts_with(&format!("{target_name}.pecotool-")) {
+        return Err("temp file does not match target file".to_string());
+    }
+
+    Ok(())
 }
 
 /// `x-path` header は percent-encoded で受け取るため簡易デコード。
@@ -461,6 +622,7 @@ pub fn run() {
             write_operation_log,
             open_log_folder,
             write_pdf_chunk,
+            replace_pdf_file,
             backup::save_backup,
             backup::check_pending_backups,
             backup::clear_backup,

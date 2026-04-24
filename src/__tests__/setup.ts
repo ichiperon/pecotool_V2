@@ -67,6 +67,8 @@ Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
   value: () => ({
     fillStyle: '',
     fillRect: vi.fn(),
+    clearRect: vi.fn(),
+    drawImage: vi.fn(),
   }),
   configurable: true,
   writable: true,
@@ -79,4 +81,3 @@ Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
   configurable: true,
   writable: true,
 })
-

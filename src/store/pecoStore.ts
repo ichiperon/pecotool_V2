@@ -406,7 +406,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (!document) return;
     const page = document.pages.get(currentPageIndex);
     if (!page) return;
-    updatePageData(currentPageIndex, { textBlocks: [], isDirty: true });
+    updatePageData(currentPageIndex, { textBlocks: [], isDirty: true, isTextExtracted: true, ocrCleared: true });
   },
 
   clearLastIdbError: () => set({ lastIdbError: null }),
@@ -416,16 +416,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (!document) return;
     set((state) => {
       if (!state.document) return state;
-      const newPages = new Map(state.document.pages);
-      // ロード済みページのtextBlocksを空にする
-      for (const [idx, page] of newPages.entries()) {
-        newPages.set(idx, { ...page, textBlocks: [], isDirty: true });
+      const newPages = new Map<number, PageData>();
+      for (let idx = 0; idx < state.document.totalPages; idx++) {
+        const page = state.document.pages.get(idx);
+        newPages.set(idx, {
+          pageIndex: idx,
+          width: page?.width ?? 0,
+          height: page?.height ?? 0,
+          textBlocks: [],
+          isDirty: true,
+          thumbnail: page?.thumbnail ?? null,
+          isTextExtracted: true,
+          ocrCleared: true,
+        });
       }
-      // 未ロードページに対しては stub を撒かない。
-      // width:0 + isDirty:true のダミーを事前に作ると、後から loadPage が返した
-      // 実 OCR データが usePageNavigation の merge で空に塗り潰される恐れがある。
-      // 保存時はロード済みページのみ反映し、未ロードページは必要に応じて
-      // ユーザーが明示的に各ページを開いてから再度クリアする前提とする。
       return {
         document: { ...state.document, pages: newPages },
         isDirty: true,

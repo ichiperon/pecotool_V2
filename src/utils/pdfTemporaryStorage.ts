@@ -55,31 +55,26 @@ export async function saveTemporaryPageDataBatch(
   entries: Array<{ filePath: string; pageIndex: number; data: Partial<PageData> }>
 ) {
   if (entries.length === 0) return;
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
-    const store = tx.objectStore(STORE_NAME_DIRTY);
-    for (const { filePath, pageIndex, data } of entries) {
-      const key = `${filePath}:${pageIndex}`;
-      // Always strip thumbnails before saving to IDB to save space
-      const { thumbnail: _thumbnail, ...cleanData } = data;
-      store.put(cleanData, key);
-    }
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const done = (err?: unknown) => {
-        if (settled) return;
-        settled = true;
-        if (err !== undefined) reject(err); else resolve();
-      };
-      tx.oncomplete = () => done();
-      tx.onerror = () => done(tx.error);
-      tx.onabort = () => done(tx.error);
-      // tx.oncomplete が一度も発火しない edge case (IDB スタック) 対策として
-      // 10 秒でタイムアウトさせ、waitForPendingIdbSaves が永久 hang しないようにする。
-      setTimeout(() => done(new Error('[saveTemporaryPageDataBatch] tx timeout')), 10_000);
-    });
-  } catch { /* ignore */ }
+  const db = await openDB();
+  const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
+  const store = tx.objectStore(STORE_NAME_DIRTY);
+  for (const { filePath, pageIndex, data } of entries) {
+    const key = `${filePath}:${pageIndex}`;
+    const { thumbnail: _thumbnail, ...cleanData } = data;
+    store.put(cleanData, key);
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const done = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (err !== undefined) reject(err); else resolve();
+    };
+    tx.oncomplete = () => done();
+    tx.onerror = () => done(tx.error);
+    tx.onabort = () => done(tx.error);
+    setTimeout(() => done(new Error('[saveTemporaryPageDataBatch] tx timeout')), 10_000);
+  });
 }
 
 export async function clearTemporaryChanges(filePath: string) {

@@ -96,6 +96,9 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
   // 描画タイミングに依存しないよう、非同期処理では getState() で最新状態を取得する
   const { document: reactDoc, currentPageIndex } = usePecoStore();
 
+  const isCurrentDocument = (filePath: string) =>
+    usePecoStore.getState().document?.filePath === filePath;
+
   const runOcrCurrentPage = async () => {
     // 最新状態を取得
     const state = usePecoStore.getState();
@@ -127,8 +130,13 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
+      if (!isCurrentDocument(doc.filePath)) return;
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
       const result = await runOcrForPage(ocrPdf, doc.filePath, pageIdx, pageData.width, pageData.height);
+      if (!isCurrentDocument(doc.filePath)) {
+        showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
+        return;
+      }
 
       if (result.status === 'error') {
         showToast(`OCRエラー: ${result.message}`, true);
@@ -137,7 +145,12 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
 
       const settings = useOcrSettingsStore.getState();
       const newBlocks = toTextBlocks(result.blocks ?? [], settings);
-      usePecoStore.getState().updatePageData(pageIdx, { textBlocks: newBlocks, isDirty: true }, true);
+      usePecoStore.getState().updatePageData(pageIdx, {
+        textBlocks: newBlocks,
+        isDirty: true,
+        isTextExtracted: true,
+        ocrCleared: false,
+      }, true);
       showToast(`OCRが完了しました（${newBlocks.length}件）`);
     } catch (e) {
       console.error('[OCR] エラー:', e);
@@ -179,6 +192,11 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
     try {
       for (let i = 0; i < doc.totalPages; i++) {
         if (cancelTokenRef.current) break;
+        if (!isCurrentDocument(doc.filePath)) {
+          cancelTokenRef.current = true;
+          showToast('OCRを中止しました（別のPDFが開かれました）。', true);
+          break;
+        }
 
         setOcrProgress({ current: i + 1, total: doc.totalPages });
         logger.log(`[OCR] 処理中: ${i + 1} / ${doc.totalPages} ページ`);
@@ -203,16 +221,27 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
 
         try {
           const result = await runOcrForPage(ocrPdf, doc.filePath, i, pageWidth, pageHeight);
+          if (!isCurrentDocument(doc.filePath)) {
+            cancelTokenRef.current = true;
+            showToast('OCRを中止しました（別のPDFが開かれました）。', true);
+            break;
+          }
           if (result.status === 'error') {
             console.error(`[OCR] ページ ${i + 1} エラー: ${result.message}`);
             continue;
           }
           const settings = useOcrSettingsStore.getState();
           const newBlocks = toTextBlocks(result.blocks ?? [], settings);
-          usePecoStore.getState().updatePageData(i, { textBlocks: newBlocks, isDirty: true }, false);
+          usePecoStore.getState().updatePageData(i, {
+            textBlocks: newBlocks,
+            isDirty: true,
+            isTextExtracted: true,
+            ocrCleared: false,
+          }, false);
         } catch (e) {
           console.error(`[OCR] ページ ${i + 1} 失敗:`, e);
         }
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
     } finally {
       ocrPdf.destroy().catch(() => {});
@@ -247,7 +276,7 @@ export function useOcrEngine(showToast: (msg: string, isError?: boolean) => void
           'このPDFにはOCRデータが含まれていません。全ページOCRを実行しますか？',
           { title: 'OCR実行の提案', kind: 'info' }
         );
-        if (confirmed) await runOcrAllPages();
+        if (confirmed && isCurrentDocument(doc.filePath)) await runOcrAllPages();
       }
     } catch (e) {
       console.error('[OCR] OCRゼロ検出に失敗:', e);

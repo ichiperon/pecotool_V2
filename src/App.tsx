@@ -13,7 +13,7 @@ import {
   selectRedoStack,
   selectCurrentPage,
 } from "./store/pecoStore";
-import { Terminal } from "lucide-react";
+import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
 import { ask } from '@tauri-apps/plugin-dialog';
 import { destroySharedPdfProxy } from "./utils/pdfLoader";
 import { readReorderThreshold, writeReorderThreshold } from "./utils/reorderThreshold";
@@ -146,10 +146,14 @@ function App() {
 
   // --- Handlers ---
   const handleReload = useCallback(async () => {
+    if (isSaving) {
+      showToast('保存中は再読み込みできません。');
+      return;
+    }
     if (!filePath) return;
     perf.mark('ui.reload');
     await handleOpen(filePath);
-  }, [filePath, handleOpen]);
+  }, [filePath, handleOpen, isSaving, showToast]);
 
   const handleSaveAs = async () => {
     if (!isFileLoaded) return;
@@ -168,6 +172,10 @@ function App() {
   }, [showToast]);
 
   const handleClose = useCallback(async () => {
+    if (isSaving) {
+      showToast('保存中は閉じられません。');
+      return;
+    }
     // pages の iteration は subscribe せず getState() で実行 (再レンダトリガーにしない)
     const doc = usePecoStore.getState().document;
     if (isDirty || Array.from(doc?.pages.values() || []).some(p => p.isDirty)) {
@@ -179,7 +187,7 @@ function App() {
     }
     destroySharedPdfProxy();
     usePecoStore.getState().setDocument(null);
-  }, [isDirty]);
+  }, [isDirty, isSaving, showToast]);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -298,6 +306,16 @@ function App() {
     return () => window.removeEventListener('keydown', handleF5);
   }, [handleOpen]);
 
+  useEffect(() => {
+    if (!isSaving) return;
+    const blockKeys = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener('keydown', blockKeys, true);
+    return () => window.removeEventListener('keydown', blockKeys, true);
+  }, [isSaving]);
+
   // ──────────── 計測モード (perfLogger) ────────────
   // Ctrl+Shift+P: localStorage.pecoPerf='1' をトグル + 再読込
   // F10:          有効時のみ、ndjson をダウンロード & Tauri 経由で appdata に保存
@@ -322,7 +340,7 @@ function App() {
         return;
       }
       // F10: 計測結果書き出し
-      if (e.key === 'F10') {
+      if (e.key === 'F10' && !e.ctrlKey && !e.metaKey) {
         if (!perf.enabled) return;
         e.preventDefault();
         // Tauri 環境では appdata に書き込み → パスを Toast 表示
@@ -525,6 +543,33 @@ function App() {
           </div>
         </div>
       </footer>
+      {isSaving && (
+        <div className="save-lock-overlay" role="alert" aria-live="assertive" aria-busy="true">
+          <div className="save-lock-shell">
+            <div className="save-lock-orbit" aria-hidden="true">
+              <div className="save-lock-ring" />
+              <div className="save-lock-core">
+                <LockKeyhole size={30} strokeWidth={1.8} />
+              </div>
+            </div>
+            <div className="save-lock-copy">
+              <div className="save-lock-kicker"><ShieldCheck size={15} /> PDF 保護モード</div>
+              <div className="save-lock-title">保存中は操作をロックしています</div>
+              <div className="save-lock-subtitle">
+                テキストレイヤーを書き出し、一時ファイルを検証してから安全に置き換えています。
+              </div>
+            </div>
+            <div className="save-lock-rail" aria-hidden="true">
+              <div className="save-lock-rail-fill" />
+            </div>
+            <div className="save-lock-steps">
+              <div className="save-lock-step active"><Database size={14} /> 変更回収</div>
+              <div className="save-lock-step active"><FileCheck2 size={14} /> PDF生成</div>
+              <div className="save-lock-step active"><ShieldCheck size={14} /> 安全置換</div>
+            </div>
+          </div>
+        </div>
+      )}
       {notification && <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>{notification.message}</div>}
     </div>
   );

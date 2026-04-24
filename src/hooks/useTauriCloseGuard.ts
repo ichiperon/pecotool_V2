@@ -23,8 +23,10 @@ export function useTauriCloseGuard() {
   useEffect(() => {
     if (window.location.hash === '#preview') return;
     const currentWindow = getCurrentWindow();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
     const setupCloseListener = async () => {
-      await currentWindow.onCloseRequested(async (event) => {
+      const closeUnlisten = await currentWindow.onCloseRequested(async (event) => {
         event.preventDefault();
         // 「ユーザーが明示的にキャンセル」した場合のみ true。
         // それ以外 (正常フロー / 例外 / タイムアウト) では finally で必ず main を destroy する。
@@ -96,7 +98,17 @@ export function useTauriCloseGuard() {
           }
         }
       });
+      if (disposed) {
+        closeUnlisten();
+      } else {
+        unlisten = closeUnlisten;
+      }
     };
     setupCloseListener();
+    return () => {
+      disposed = true;
+      unlisten?.();
+      unlisten = undefined;
+    };
   }, []);
 }

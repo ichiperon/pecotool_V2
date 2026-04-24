@@ -21,7 +21,15 @@
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: blob: data: http://asset.localhost https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost asset: blob: data: http://asset.localhost https://asset.localhost; worker-src 'self' blob:; object-src 'none';",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "$DESKTOP/**",
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$APPDATA/pecotool/**",
+          "$APPCONFIG/pecotool/**",
+          "$APPLOCALDATA/pecotool/**",
+          "$TEMP/**"
+        ]
       }
     }
   },

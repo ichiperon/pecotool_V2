@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Copy } from "lucide-react";
+import { logUnlessTauriWindowNotFound } from "../utils/tauriWindowErrors";
 
 export function TextPreviewWindow() {
   const [text, setText] = useState<string>("");
@@ -23,8 +24,8 @@ export function TextPreviewWindow() {
       const win = getCurrentWindow();
       const closeUnlisten = await win.onCloseRequested((event) => {
         event.preventDefault();
-        win.hide();
-        emit('preview-hidden');
+        win.hide().catch(logUnlessTauriWindowNotFound);
+        emit('preview-hidden').catch(logUnlessTauriWindowNotFound);
       });
       if (unmounted) { closeUnlisten(); return; }
       unlisteners.push(closeUnlisten);

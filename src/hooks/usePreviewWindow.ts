@@ -3,6 +3,7 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
 import { emit, listen } from '@tauri-apps/api/event';
 import { usePecoStore } from '../store/pecoStore';
+import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
 
 export function usePreviewWindow() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -46,7 +47,7 @@ export function usePreviewWindow() {
       }
       return win;
     } catch (e) {
-      console.error(e);
+      logUnlessTauriWindowNotFound(e);
       return undefined;
     }
   }, []);
@@ -69,12 +70,12 @@ export function usePreviewWindow() {
         }
       }
     } catch (e) {
-      console.error(e);
+      logUnlessTauriWindowNotFound(e);
     }
   }, [isPreviewOpen, initPreviewWindow]);
 
   useEffect(() => {
-    emit('preview-update', previewText).catch(e => console.error(e));
+    emit('preview-update', previewText).catch(logUnlessTauriWindowNotFound);
   }, [previewText]);
 
   useEffect(() => {
@@ -82,7 +83,7 @@ export function usePreviewWindow() {
     let unlistenFn: (() => void) | undefined;
     const setupListener = async () => {
       const un1 = await listen('request-preview', () => {
-        emit('preview-update', previewText).catch(e => console.error(e));
+        emit('preview-update', previewText).catch(logUnlessTauriWindowNotFound);
       });
       const un2 = await listen('preview-hidden', () => {
         setIsPreviewOpen(false);

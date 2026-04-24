@@ -94,4 +94,15 @@ describe('bitmapCache', () => {
       expect(getBitmapCache(`${i}:100`)).toBeDefined();
     }
   });
+
+  it('U-BC-11: same page and zoom in different files do not collide', () => {
+    const entryA = makeEntry();
+    const entryB = makeEntry();
+
+    setBitmapCache('C:\\docs\\a.pdf:0:100', entryA);
+    setBitmapCache('C:\\docs\\b.pdf:0:100', entryB);
+
+    expect(getBitmapCache('C:\\docs\\a.pdf:0:100')).toBe(entryA);
+    expect(getBitmapCache('C:\\docs\\b.pdf:0:100')).toBe(entryB);
+  });
 });

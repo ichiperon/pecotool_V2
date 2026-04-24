@@ -106,6 +106,20 @@ describe('PdfCanvas', () => {
     expect(selectedIds.has('b1')).toBe(true);
   });
 
+  it('should clear selection on blank click without selecting an empty id', () => {
+    usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any);
+
+    const { container } = render(<PdfCanvas pageIndex={0} />);
+    const overlay = container.querySelectorAll('canvas')[1];
+
+    fireEvent.mouseDown(overlay, { clientX: 300, clientY: 300 });
+
+    const state = usePecoStore.getState();
+    expect(state.selectedIds.size).toBe(0);
+    expect(state.selectedIds.has('')).toBe(false);
+    expect(state.lastSelectedId).toBe(null);
+  });
+
   it('should enter drawing mode and allow drawing a new block', () => {
     usePecoStore.setState({ isDrawingMode: true } as any);
     const { container } = render(<PdfCanvas pageIndex={0} />);

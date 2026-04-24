@@ -128,7 +128,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       const w = Math.floor(viewport.width);
       const h = Math.floor(viewport.height);
 
-      const cacheKey = `${pageIndex}:${zoom}`;
+      const cacheKey = `${filePath}:${pageIndex}:${zoom}`;
       const cached = getBitmapCache(cacheKey);
       if (cached && cached.width === w && cached.height === h) {
         // キャッシュヒット: 進行中の古い render があればキャンセルしてから

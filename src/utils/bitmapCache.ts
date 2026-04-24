@@ -12,28 +12,28 @@ function safeClose(bitmap: ImageBitmap) {
 
 type Entry = { bitmap: ImageBitmap; zoom: number; width: number; height: number };
 
-// 外側LRU: pageIndex -> 内側LRU: zoom -> Entry
-const pageMap = new Map<number, Map<number, Entry>>();
+// 外側LRU: document/page key -> 内側LRU: zoom -> Entry
+const pageMap = new Map<string, Map<number, Entry>>();
 
-function parseKey(key: string): { pageIndex: number; zoom: number } | null {
-  const idx = key.indexOf(':');
+function parseKey(key: string): { pageKey: string; zoom: number } | null {
+  const idx = key.lastIndexOf(':');
   if (idx < 0) return null;
-  const pageIndex = Number(key.slice(0, idx));
+  const pageKey = key.slice(0, idx);
   const zoom = Number(key.slice(idx + 1));
-  if (!Number.isFinite(pageIndex) || !Number.isFinite(zoom)) return null;
-  return { pageIndex, zoom };
+  if (!pageKey || !Number.isFinite(zoom)) return null;
+  return { pageKey, zoom };
 }
 
 export function getBitmapCache(key: string): Entry | undefined {
   const parsed = parseKey(key);
   if (!parsed) return undefined;
-  const zoomMap = pageMap.get(parsed.pageIndex);
+  const zoomMap = pageMap.get(parsed.pageKey);
   if (!zoomMap) return undefined;
   const entry = zoomMap.get(parsed.zoom);
   if (entry) {
     // LRU bump: ページ・ズーム両方
-    pageMap.delete(parsed.pageIndex);
-    pageMap.set(parsed.pageIndex, zoomMap);
+    pageMap.delete(parsed.pageKey);
+    pageMap.set(parsed.pageKey, zoomMap);
     zoomMap.delete(parsed.zoom);
     zoomMap.set(parsed.zoom, entry);
   }
@@ -43,14 +43,14 @@ export function getBitmapCache(key: string): Entry | undefined {
 export function setBitmapCache(key: string, entry: Entry) {
   const parsed = parseKey(key);
   if (!parsed) return;
-  let zoomMap = pageMap.get(parsed.pageIndex);
+  let zoomMap = pageMap.get(parsed.pageKey);
   if (!zoomMap) {
     zoomMap = new Map();
-    pageMap.set(parsed.pageIndex, zoomMap);
+    pageMap.set(parsed.pageKey, zoomMap);
   } else {
     // ページLRUバンプ
-    pageMap.delete(parsed.pageIndex);
-    pageMap.set(parsed.pageIndex, zoomMap);
+    pageMap.delete(parsed.pageKey);
+    pageMap.set(parsed.pageKey, zoomMap);
     // 同じズームの既存エントリを破棄
     const existing = zoomMap.get(parsed.zoom);
     if (existing) {
@@ -70,7 +70,7 @@ export function setBitmapCache(key: string, entry: Entry) {
 
   // 外側LRU上限を超えたら最古ページのズーム変種を一括退避
   while (pageMap.size > MAX_PAGES) {
-    const oldestPage = pageMap.keys().next().value as number;
+    const oldestPage = pageMap.keys().next().value as string;
     const evictedZoomMap = pageMap.get(oldestPage);
     pageMap.delete(oldestPage);
     if (evictedZoomMap) {

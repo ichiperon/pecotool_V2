@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import type { ThumbnailWorkerRequest, ThumbnailWorkerResponse } from '../../utils/thumbnailWorkerTypes';
+import { logUnlessTauriWindowNotFound } from '../../utils/tauriWindowErrors';
 import '../../App.css';
 
 // ★ 高速化1: 3ワーカー並列
@@ -108,8 +109,8 @@ export function ThumbnailWindow() {
     let unlisten: (() => void) | undefined;
     win.onCloseRequested((event) => {
       event.preventDefault();
-      win.hide();
-      emit('thumbnail:hidden');
+      win.hide().catch(logUnlessTauriWindowNotFound);
+      emit('thumbnail:hidden').catch(logUnlessTauriWindowNotFound);
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
@@ -403,13 +404,13 @@ export function ThumbnailWindow() {
       await emit('thumbnail:request-state');
     };
 
-    setup().catch(console.error);
+    setup().catch((err) => logUnlessTauriWindowNotFound(err, '[ThumbnailWindow] setup failed:'));
     return () => { unlisteners.forEach(fn => fn()); };
   }, [processThumbnailQueue]);
 
   const handleSelectPage = useCallback((pageIndex: number) => {
     setCurrentPageIndex(pageIndex);
-    emit('thumbnail:page-selected', { pageIndex }).catch(console.error);
+    emit('thumbnail:page-selected', { pageIndex }).catch(logUnlessTauriWindowNotFound);
   }, []);
 
   return (

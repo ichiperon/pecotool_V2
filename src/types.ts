@@ -34,6 +34,8 @@ export interface PageData {
    *   OcrEditor など「textBlocks===[] が本当に空か未ロードか」を区別したい消費側が使う。
    */
   isTextExtracted?: boolean;
+  /** ユーザー操作で OCR を明示的に空にしたページ。後続の抽出結果で上書きしない。 */
+  ocrCleared?: boolean;
 }
 
 export interface PDFMetadata {

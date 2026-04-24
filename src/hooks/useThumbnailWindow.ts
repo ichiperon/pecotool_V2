@@ -3,6 +3,7 @@ import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
 import { usePecoStore } from '../store/pecoStore';
+import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
 
 export function useThumbnailWindow() {
   const [isThumbnailOpen, setIsThumbnailOpen] = useState(false);
@@ -65,7 +66,7 @@ export function useThumbnailWindow() {
         }
       }
     } catch (e) {
-      console.error(e);
+      logUnlessTauriWindowNotFound(e);
     }
   }, [isThumbnailOpen, initThumbnailWindow]);
 
@@ -81,7 +82,7 @@ export function useThumbnailWindow() {
             currentPageIndex: page,
             totalPages: doc.totalPages,
             dirtyPages: getDirtyPages(),
-          }).catch(console.error);
+          }).catch(logUnlessTauriWindowNotFound);
         }
       });
       const u2 = await listen('thumbnail:hidden', () => {
@@ -111,16 +112,16 @@ export function useThumbnailWindow() {
         currentPageIndex,
         totalPages: document.totalPages,
         dirtyPages: getDirtyPages(),
-      }).catch(console.error);
+      }).catch(logUnlessTauriWindowNotFound);
     } else {
-      emit('thumbnail:file-closed').catch(console.error);
+      emit('thumbnail:file-closed').catch(logUnlessTauriWindowNotFound);
     }
     prevDirtyRef.current = '';
   }, [document?.filePath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- ページ変更をサムネイル窓に通知 ---
   useEffect(() => {
-    emit('thumbnail:page-changed', { pageIndex: currentPageIndex }).catch(console.error);
+    emit('thumbnail:page-changed', { pageIndex: currentPageIndex }).catch(logUnlessTauriWindowNotFound);
   }, [currentPageIndex]);
 
   // --- Dirty状態の変化をサムネイル窓に通知 ---
@@ -130,7 +131,7 @@ export function useThumbnailWindow() {
     const serialized = dirty.join(',');
     if (serialized === prevDirtyRef.current) return;
     prevDirtyRef.current = serialized;
-    emit('thumbnail:dirty-update', { dirtyPages: dirty }).catch(console.error);
+    emit('thumbnail:dirty-update', { dirtyPages: dirty }).catch(logUnlessTauriWindowNotFound);
   }, [document, getDirtyPages]);
 
   return { initThumbnailWindow, isThumbnailOpen, toggleThumbnailWindow };

@@ -146,7 +146,7 @@ export function usePageNavigation({
           // isDirty だけで保持すると、clearOcrAllPages の stub や width===0 の未ロード
           // ダミーが空 textBlocks を抱えたまま loadPage の実データを破棄してしまう。
           // 実ユーザー編集は textBlocks が非空である前提のため、ここで絞る。
-          const hasUserEdits = !!existing && existing.isDirty && existing.textBlocks.length > 0;
+          const hasUserEdits = !!existing && existing.isDirty && (existing.textBlocks.length > 0 || existing.ocrCleared === true);
           const mergedData = hasUserEdits
             ? { ...pageData, textBlocks: existing!.textBlocks, isDirty: true, isTextExtracted: true }
             : { ...pageData, isTextExtracted: true };

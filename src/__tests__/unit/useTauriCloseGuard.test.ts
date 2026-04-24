@@ -4,7 +4,8 @@ import { renderHook } from '@testing-library/react'
 // ── hoisted mocks ──────────────────────────────────────────────
 // 既存テストの慣行に倣い、モックは vi.hoisted で巻き上げて vi.mock より先に評価する。
 const m = vi.hoisted(() => {
-  const onCloseRequested = vi.fn()
+  const unlisten = vi.fn()
+  const onCloseRequested = vi.fn().mockResolvedValue(unlisten)
   const destroyWindow = vi.fn().mockResolvedValue(undefined)
   const getCurrentWindow = vi.fn(() => ({
     label: 'main',
@@ -15,7 +16,7 @@ const m = vi.hoisted(() => {
     { label: 'main', destroy: destroyWindow },
   ])
   const ask = vi.fn().mockResolvedValue(true)
-  return { onCloseRequested, destroyWindow, getCurrentWindow, getAllWindows, ask }
+  return { unlisten, onCloseRequested, destroyWindow, getCurrentWindow, getAllWindows, ask }
 })
 
 vi.mock('@tauri-apps/api/window', () => ({
@@ -72,6 +73,35 @@ describe('useTauriCloseGuard', () => {
       // close handler が登録されている (S-15 の前提条件)
       expect(m.onCloseRequested).toHaveBeenCalledTimes(1)
       expect(typeof m.onCloseRequested.mock.calls[0][0]).toBe('function')
+    })
+
+    it('unmount 時に close handler の unlisten が呼ばれる', async () => {
+      const { unmount } = renderHook(() => useTauriCloseGuard())
+
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      unmount()
+
+      expect(m.unlisten).toHaveBeenCalledTimes(1)
+    })
+
+    it('setup 完了前に unmount しても close handler の unlisten が呼ばれる', async () => {
+      let resolveUnlisten: (value: () => void) => void = () => {}
+      m.onCloseRequested.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveUnlisten = resolve
+        })
+      )
+
+      const { unmount } = renderHook(() => useTauriCloseGuard())
+      unmount()
+      resolveUnlisten(m.unlisten)
+
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(m.unlisten).toHaveBeenCalledTimes(1)
     })
 
     it('S-15-02: close handler 発火時に waitForPendingIdbSaves spy が呼ばれる (現行実装ではスキップ・将来実装の足場テスト)', async () => {
