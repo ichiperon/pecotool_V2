@@ -17,6 +17,7 @@ export type SavePdfSource =
 export type SavePdfRequestData = {
   documentState: Omit<PecoDocument, 'pages'> & { pages: Record<number, SerializedPageData> };
   fontBytes?: ArrayBuffer;
+  fallbackFontBytes?: ArrayBuffer[];
 } & SavePdfSource;
 
 // main thread -> Worker (pdf.worker.ts) のメッセージ契約

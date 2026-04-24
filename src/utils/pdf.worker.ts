@@ -1,7 +1,7 @@
 import {
   PDFDocument, StandardFonts, PDFName, PDFHexString, PDFString, PDFRawStream,
   pushGraphicsState, popGraphicsState, translate, scale, degrees, PDFArray,
-  PDFDict, PDFRef, PDFObject
+  PDFDict
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { inflate } from 'pako';
@@ -14,6 +14,7 @@ import type {
   SavePdfWorkerResponse,
   SerializedPageData,
 } from './pdfWorkerTypes';
+import type { PDFObject, PDFRef, PDFFont } from '@cantoo/pdf-lib';
 
 /**
  * Decompress a PDFRawStream's contents.
@@ -54,10 +55,172 @@ function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
   return null;
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function isPecoToolFontKey(key: PDFName): boolean {
+  const name = key.toString();
+  return (
+    name.startsWith('/IPAexGothic-') ||
+    name.startsWith('/NotoSans-') ||
+    name.startsWith('/NotoSansSymbols-') ||
+    name.startsWith('/NotoSansSymbols2-')
+  );
+}
+
+function isPecoToolGraphicsStateKey(key: PDFName): boolean {
+  return /^\/GS-\d+$/.test(key.toString());
+}
+
+function isPdfRef(value: unknown): value is PDFRef {
+  return typeof value === 'object' && value !== null && value.constructor?.name === 'PDFRef';
+}
+
+function pruneStalePecoToolResources(
+  pageNode: { Resources?: () => PDFDict | undefined },
+): void {
+  const resources = pageNode.Resources?.();
+  const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+
+  if (fontDict) {
+    for (const [key] of fontDict.entries()) {
+      if (!isPecoToolFontKey(key)) continue;
+      fontDict.delete(key);
+    }
+  }
+
+  const extGStateDict = resources?.lookupMaybe(PDFName.of('ExtGState'), PDFDict);
+  if (extGStateDict) {
+    for (const [key] of extGStateDict.entries()) {
+      if (!isPecoToolGraphicsStateKey(key)) continue;
+      extGStateDict.delete(key);
+    }
+  }
+}
+
+function replacePageTextContentStreams(
+  pageNode: {
+    get?: (key: PDFName) => PDFObject | undefined;
+    Contents?: () => PDFObject | undefined;
+    set: (key: PDFName, value: PDFObject) => void;
+  },
+  context: typeof PDFDocument.prototype.context,
+): void {
+  const contentsKey = PDFName.of('Contents');
+  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
+  if (!rawContents) return;
+
+  const resolved = context.lookup(rawContents);
+  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+  const newStreams: PDFObject[] = [];
+  const staleStreamRefs = new Set<PDFRef>();
+
+  for (const streamRef of streams) {
+    const stream = context.lookup(streamRef);
+    if (stream instanceof PDFRawStream) {
+      const decoded = decodeStreamContents(stream);
+      if (decoded !== null) {
+        const cleaned = stripTextBlocks(decoded);
+        if (bytesEqual(cleaned, decoded)) {
+          newStreams.push(streamRef);
+        } else {
+          const newStream = context.flateStream(cleaned);
+          newStreams.push(context.register(newStream));
+          if (isPdfRef(streamRef)) staleStreamRefs.add(streamRef);
+        }
+      } else {
+        newStreams.push(streamRef);
+      }
+    } else {
+      newStreams.push(streamRef);
+    }
+  }
+
+  pageNode.set(contentsKey, context.obj(newStreams));
+  if (isPdfRef(rawContents) && resolved instanceof PDFArray) {
+    context.delete(rawContents);
+  }
+  for (const ref of staleStreamRefs) {
+    context.delete(ref);
+  }
+}
+
+interface FontRun {
+  text: string;
+  font: PDFFont;
+}
+
+function makeFontSupportSet(font: PDFFont): Set<number> | null {
+  if (typeof font.getCharacterSet !== 'function') return null;
+  return new Set(font.getCharacterSet());
+}
+
+function splitTextBySupportedFont(
+  text: string,
+  primaryFont: PDFFont,
+  primarySupport: Set<number> | null,
+  fallbackFonts: Array<{ font: PDFFont; support: Set<number> | null }>,
+): FontRun[] {
+  const runs: FontRun[] = [];
+  for (const char of Array.from(text)) {
+    const codePoint = char.codePointAt(0);
+    const font = codePoint !== undefined && primarySupport !== null && !primarySupport.has(codePoint)
+      ? fallbackFonts.find((fallback) => fallback.support?.has(codePoint))?.font ?? primaryFont
+      : primaryFont;
+    const last = runs[runs.length - 1];
+    if (last?.font === font) {
+      last.text += char;
+    } else {
+      runs.push({ text: char, font });
+    }
+  }
+  return runs;
+}
+
+function measureRuns(runs: FontRun[], size: number): { width: number; height: number } {
+  let width = 0;
+  let height = 0;
+  for (const run of runs) {
+    width += run.font.widthOfTextAtSize(run.text, size);
+    height = Math.max(height, run.font.heightAtSize(size));
+  }
+  return { width, height };
+}
+
+function setPageFontWithStableKey(
+  page: unknown,
+  font: PDFFont,
+  fontKeys: Map<PDFFont, PDFName>,
+): void {
+  const pageLike = page as {
+    font?: PDFFont;
+    fontKey?: PDFName;
+    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
+    setFont?: (font: PDFFont) => void;
+  };
+  let key = fontKeys.get(font);
+  if (!key) {
+    key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
+    if (!key) {
+      pageLike.setFont?.(font);
+      key = pageLike.fontKey;
+    }
+    if (key) fontKeys.set(font, key);
+  }
+  pageLike.font = font;
+  if (key) pageLike.fontKey = key;
+}
+
 async function handleSavePdf(
   originalPdfBytes: Uint8Array,
   documentState: { pages: Record<number, SerializedPageData> },
   fontBytes: ArrayBuffer | undefined,
+  fallbackFontBytes: ArrayBuffer[] = [],
 ): Promise<Uint8Array> {
   const originalVersion = extractPdfVersion(originalPdfBytes);
   // forIncrementalUpdate + commit() は subset フォントの glyf を破損させるため撤回。
@@ -88,6 +251,14 @@ async function handleSavePdf(
         ? await pdfDoc.embedFont(fontBytes, { subset: true })
         : await pdfDoc.embedFont(StandardFonts.Helvetica))
     : null;
+  const fallbackFonts = customFont
+    ? await Promise.all(fallbackFontBytes.map((bytes) => pdfDoc.embedFont(bytes, { subset: true })))
+    : [];
+  const primarySupport = customFont ? makeFontSupportSet(customFont) : new Set<number>();
+  const fallbackFontSupports = fallbackFonts.map((font) => ({
+    font,
+    support: makeFontSupportSet(font),
+  }));
 
   // getInfoDict() は pdf-lib の public API には無いため、構造型アサーションで呼び出す（pdfSaver.ts と同じ方針）
   const infoDict = (pdfDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
@@ -123,45 +294,27 @@ async function handleSavePdf(
     const { height } = page.getSize();
 
     // --- Surgical Text Stripping ---
-    // page.node.Contents() は pdf-lib の public API に型定義が無い
-    const contentStreamsRef = (page.node as unknown as { Contents(): PDFObject | PDFRef | undefined }).Contents();
-    if (contentStreamsRef) {
-      const resolved = pdfDoc.context.lookup(contentStreamsRef);
-      let streams: PDFObject[] = [];
-      if (resolved instanceof PDFArray) {
-        streams = resolved.asArray();
-      } else {
-        streams = [contentStreamsRef];
-      }
-      const newStreams: PDFObject[] = [];
-
-      for (const streamRef of streams) {
-        const stream = pdfDoc.context.lookup(streamRef);
-        if (stream instanceof PDFRawStream) {
-          const decoded = decodeStreamContents(stream);
-          if (decoded !== null) {
-            const cleaned = stripTextBlocks(decoded);
-            const newStream = pdfDoc.context.flateStream(cleaned);
-            newStreams.push(pdfDoc.context.register(newStream));
-          } else {
-            newStreams.push(streamRef);
-          }
-        } else {
-          newStreams.push(streamRef);
-        }
-      }
-      page.node.set(PDFName.of('Contents'), pdfDoc.context.obj(newStreams));
-    }
+    pruneStalePecoToolResources(page.node as unknown as { Resources?: () => PDFDict | undefined });
+    replacePageTextContentStreams(
+      page.node as unknown as {
+        get?: (key: PDFName) => PDFObject | undefined;
+        Contents?: () => PDFObject | undefined;
+        set: (key: PDFName, value: PDFObject) => void;
+      },
+      pdfDoc.context,
+    );
 
     if (!customFont) continue;
+    const pageFontKeys = new Map<PDFFont, PDFName>();
+    setPageFontWithStableKey(page, customFont, pageFontKeys);
 
     for (const block of sortedBlocks) {
       if (!block.text) continue;
 
       try {
         const fontSize = 1;
-        const textWidth = customFont.widthOfTextAtSize(block.text, fontSize);
-        const textHeight = customFont.heightAtSize(fontSize);
+        const runs = splitTextBySupportedFont(block.text, customFont, primarySupport, fallbackFontSupports);
+        const { width: textWidth, height: textHeight } = measureRuns(runs, fontSize);
 
         if (textWidth === 0 || textHeight === 0) continue;
 
@@ -174,7 +327,12 @@ async function handleSavePdf(
           const baselineX = block.bbox.x + textHeight * sx * 0.2;
           const baselineY = height - block.bbox.y;
           page.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
-          page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, rotate: degrees(-90), opacity: 0 });
+          let offset = 0;
+          for (const run of runs) {
+            setPageFontWithStableKey(page, run.font, pageFontKeys);
+            page.drawText(run.text, { x: 0, y: offset, size: fontSize, rotate: degrees(-90), renderMode: 3 });
+            offset += run.font.widthOfTextAtSize(run.text, fontSize);
+          }
           page.pushOperators(popGraphicsState());
         } else {
           const sx = block.bbox.width / textWidth;
@@ -184,7 +342,12 @@ async function handleSavePdf(
 
           const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
           page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
-          page.drawText(block.text, { x: 0, y: 0, size: fontSize, font: customFont, opacity: 0 });
+          let offset = 0;
+          for (const run of runs) {
+            setPageFontWithStableKey(page, run.font, pageFontKeys);
+            page.drawText(run.text, { x: offset, y: 0, size: fontSize, renderMode: 3 });
+            offset += run.font.widthOfTextAtSize(run.text, fontSize);
+          }
           page.pushOperators(popGraphicsState());
         }
       } catch (e) {
@@ -253,9 +416,9 @@ self.onmessage = async (e: MessageEvent<SavePdfWorkerRequest>) => {
   switch (msg.type) {
     case 'SAVE_PDF': {
       try {
-        const { documentState, fontBytes } = msg.data;
+        const { documentState, fallbackFontBytes, fontBytes } = msg.data;
         const originalPdfBytes = await resolvePdfBytes(msg.data);
-        const savedBytes = await handleSavePdf(originalPdfBytes, documentState, fontBytes);
+        const savedBytes = await handleSavePdf(originalPdfBytes, documentState, fontBytes, fallbackFontBytes);
         const response: SavePdfWorkerResponse = { type: 'SAVE_PDF_SUCCESS', data: savedBytes };
         self.postMessage(response, [savedBytes.buffer]);
       } catch (err) {

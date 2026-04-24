@@ -1,4 +1,5 @@
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { useRef } from 'react';
+import { ask, open, save } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -32,12 +33,18 @@ async function writeFileChunked(path: string, bytes: Uint8Array): Promise<void> 
     });
   }
 }
+
+async function writeFileAtomically(path: string, bytes: Uint8Array): Promise<void> {
+  const tempPath = `${path}.pecotool-${Date.now()}-${crypto.randomUUID()}.tmp`;
+  await writeFileChunked(tempPath, bytes);
+  await invoke('replace_pdf_file', { tempPath, targetPath: path });
+}
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import type { SavePdfSource } from '../utils/pdfWorkerTypes';
 import { formatFileSize } from '../utils/format';
-import { loadFontLazy } from './useFontLoader';
+import { loadFallbackFontsLazy, loadFontLazy } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
 
@@ -104,6 +111,7 @@ export function useFileOperations(
   onOpenComplete?: (doc: import('../types').PecoDocument) => void,
 ) {
   const { setDocument, setDocumentFilePath, resetDirty } = usePecoStore();
+  const isSavingRef = useRef(false);
 
   const addToRecent = (path: string) => {
     // ファイルフルパスは機密情報のため sessionStorage に保存（ブラウザ/アプリを閉じると消去）
@@ -122,11 +130,27 @@ export function useFileOperations(
     }
     recent = [path, ...recent.filter((p) => p !== path)].slice(0, 10);
     sessionStorage.setItem('peco-recent-files', JSON.stringify(recent));
+    window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
   };
 
   const handleOpen = async (explicitPath?: string): Promise<boolean> => {
     perf.mark('open.start', { explicit: !!explicitPath });
     try {
+      if (isSavingRef.current) {
+        showToast("保存中はPDFを開けません。");
+        return false;
+      }
+
+      const current = usePecoStore.getState();
+      const hasDirtyPages = Array.from(current.document?.pages.values() || []).some((p) => p.isDirty);
+      if (current.document && (current.isDirty || hasDirtyPages)) {
+        const confirmed = await ask('未保存の変更があります。別のPDFを開きますか？', {
+          title: '開く確認',
+          kind: 'warning',
+        });
+        if (!confirmed) return false;
+      }
+
       let selected = explicitPath;
       if (!selected) {
         selected = await open({
@@ -210,11 +234,12 @@ export function useFileOperations(
   const _executeSave = async (targetPath?: string): Promise<number | null> => {
     const { document } = usePecoStore.getState();
     if (!document) return null;
+    const sourceFilePath = document.filePath;
 
     let cachedBytes = usePecoStore.getState().originalBytes;
     if (!cachedBytes) {
       showToast("保存用にファイルを読み込み中...");
-      const fetched = await withStep('readFile', 90_000, () => ensurePrefetchOriginalBytes(document.filePath));
+      const fetched = await withStep('readFile', 90_000, () => ensurePrefetchOriginalBytes(sourceFilePath));
       if (!fetched) {
         showToast("元 PDF の読み込みに失敗しました。", true);
         return null;
@@ -228,6 +253,11 @@ export function useFileOperations(
       showToast("日本語フォントの読み込みに失敗しました。再度お試しください。", true);
       return null;
     }
+    const fallbackFontBytes = await withStep('loadFallbackFonts', 15_000, () => loadFallbackFontsLazy());
+    if (!fallbackFontBytes) {
+      showToast("記号フォントの読み込みに失敗しました。再度お試しください。", true);
+      return null;
+    }
 
     // LRU退避のIDB書き込みが全て完了してからIDBを読み込む（競合状態回避）
     await withStep('waitIdbSaves', 15_000, () => waitForPendingIdbSaves());
@@ -236,7 +266,7 @@ export function useFileOperations(
     const tempDirtyPages = await withStep(
       'readIdbDirty',
       15_000,
-      () => getAllTemporaryPageData(document.filePath),
+      () => getAllTemporaryPageData(sourceFilePath),
     );
 
     const mergedPages = new Map<number, PageData>(document.pages);
@@ -253,14 +283,18 @@ export function useFileOperations(
       [...mergedPages.entries()].filter(([, p]) => p.isDirty)
     );
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
-    const savedBytes = await withStep('savePDF', 150_000, () => savePDF(saveSource, mergedDoc, fontBytes));
+    const savedBytes = await withStep('savePDF', 150_000, () => savePDF(saveSource, mergedDoc, fontBytes, fallbackFontBytes));
     const writePath = targetPath ?? document.filePath;
 
-    await withStep('writeFile', 180_000, () => writeFileChunked(writePath, savedBytes));
+    await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
+    const liveDoc = usePecoStore.getState().document;
+    if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
+      throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
+    }
     // originalBytes を更新し、次回保存時もこの累積変更をベースにするようにする
     usePecoStore.getState().setOriginalBytes(savedBytes);
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
-    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(document.filePath))
+    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
     return savedBytes.length;
   };
@@ -276,6 +310,12 @@ export function useFileOperations(
       return;
     }
 
+    if (isSavingRef.current) {
+      showToast("保存処理が進行中です。");
+      return;
+    }
+
+    isSavingRef.current = true;
     setIsSaving?.(true);
     showToast("保存処理を開始しました...");
     try {
@@ -291,6 +331,7 @@ export function useFileOperations(
       const msg = err instanceof Error ? err.message : String(err);
       showToast(`保存に失敗しました: ${msg}`, true);
     } finally {
+      isSavingRef.current = false;
       setIsSaving?.(false);
     }
   };
@@ -298,6 +339,10 @@ export function useFileOperations(
   const executeSaveAs = async () => {
     const { document } = usePecoStore.getState();
     if (!document) return;
+    if (isSavingRef.current) {
+      showToast("保存処理が進行中です。");
+      return;
+    }
 
     try {
       const path = await save({
@@ -305,11 +350,16 @@ export function useFileOperations(
         defaultPath: document.fileName
       });
       if (path && typeof path === 'string') {
+        isSavingRef.current = true;
         setIsSaving?.(true);
         try {
           const size = await _executeSave(path);
           if (size !== null) {
-            const prevPath = usePecoStore.getState().document?.filePath;
+            const currentDoc = usePecoStore.getState().document;
+            if (!currentDoc || currentDoc.filePath !== document.filePath) {
+              throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
+            }
+            const prevPath = currentDoc.filePath;
             setDocumentFilePath(path);
             resetDirty();
             showToast(`名前を付けて保存しました。(${formatFileSize(size)})`);
@@ -319,6 +369,7 @@ export function useFileOperations(
             invoke('clear_backup', { filePath: path }).catch(() => {});
           }
         } finally {
+          isSavingRef.current = false;
           setIsSaving?.(false);
         }
       }

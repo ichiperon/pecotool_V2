@@ -10,6 +10,7 @@ import { renderHook, act } from '@testing-library/react';
 
 // ---- 依存 mock ----
 vi.mock('@tauri-apps/plugin-dialog', () => ({
+  ask: vi.fn().mockResolvedValue(true),
   open: vi.fn(),
   save: vi.fn(),
 }));
@@ -37,6 +38,7 @@ vi.mock('../../utils/pdfSaver', () => ({
   savePDF: vi.fn().mockResolvedValue(new Uint8Array([4, 5, 6])),
 }));
 vi.mock('../../hooks/useFontLoader', () => ({
+  loadFallbackFontsLazy: vi.fn().mockResolvedValue([]),
   loadFontLazy: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
 }));
 
