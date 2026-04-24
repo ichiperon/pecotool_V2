@@ -70,6 +70,76 @@ const FALLBACK_FONT_PATHS = [
   resolve(__dirname, '../../../../public/fonts/NotoSansSymbols2-Regular.ttf'),
 ];
 
+/**
+ * 保存済み PDF を「ツールの実ロード経路」と等価な形で PecoDocument に復元する。
+ * PecoToolBBoxes meta があればそれを採用 (lossless)、無ければ pdfjs テキスト抽出に
+ * フォールバック。B1-1/B1-2 の多サイクル検証で使う。
+ */
+export async function loadPecoDocumentMetaFirst(
+  realBytes: Uint8Array,
+  realPdfPath: string,
+): Promise<{ doc: PecoDocument; source: 'meta' | 'pdfjs'; totalBlocks: number; totalPages: number }> {
+  const pdfjsLib: any = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdfjsCopy = new Uint8Array(realBytes.byteLength);
+  pdfjsCopy.set(realBytes);
+  const pdfjsDoc = await pdfjsLib
+    .getDocument({ data: pdfjsCopy, disableWorker: true, disableFontFace: true })
+    .promise;
+  const totalPages: number = pdfjsDoc.numPages;
+
+  const { loadPecoToolBBoxMeta } = await import('../../../utils/pdfMetadataLoader');
+  const meta = await loadPecoToolBBoxMeta(pdfjsDoc);
+
+  if (meta) {
+    const pages = new Map<number, PageData>();
+    let totalBlocks = 0;
+    for (let i = 0; i < totalPages; i++) {
+      const page = await pdfjsDoc.getPage(i + 1);
+      const viewport = page.getViewport({ scale: 1.0 });
+      const entries = meta[String(i)] ?? [];
+      const sorted = [...entries].sort((a, b) => a.order - b.order);
+      const blocks: TextBlock[] = sorted.map((m, idx) => ({
+        id: `reload-p${i}-${idx}`,
+        text: m.text,
+        originalText: m.text,
+        bbox: m.bbox,
+        writingMode: m.writingMode as WritingMode,
+        order: idx,
+        isNew: false,
+        isDirty: true,
+      }));
+      totalBlocks += blocks.length;
+      pages.set(i, {
+        pageIndex: i,
+        width: viewport.width,
+        height: viewport.height,
+        textBlocks: blocks,
+        isDirty: true,
+        thumbnail: null,
+      });
+    }
+    try { await pdfjsDoc.cleanup(); } catch { /* ignore */ }
+    try { await pdfjsDoc.destroy(); } catch { /* ignore */ }
+    return {
+      doc: {
+        filePath: realPdfPath,
+        fileName: realPdfPath.replace(/\\/g, '/').split('/').pop() ?? 'input.pdf',
+        totalPages,
+        metadata: {},
+        pages,
+      },
+      source: 'meta',
+      totalBlocks,
+      totalPages,
+    };
+  }
+
+  try { await pdfjsDoc.cleanup(); } catch { /* ignore */ }
+  try { await pdfjsDoc.destroy(); } catch { /* ignore */ }
+  const fallback = await buildPecoDocumentFromRealPdf(realBytes, realPdfPath);
+  return { doc: fallback.doc, source: 'pdfjs', totalBlocks: fallback.totalBlocks, totalPages: fallback.totalPages };
+}
+
 export function loadFallbackFontArrayBuffers(): ArrayBuffer[] {
   return FALLBACK_FONT_PATHS.filter((p) => existsSync(p)).map((p) => {
     const buf = readFileSync(p);

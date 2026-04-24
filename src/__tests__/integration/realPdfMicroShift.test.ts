@@ -15,7 +15,7 @@
  * 付けて実行することを推奨。
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
-import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { inflate } from 'pako';
 import {
@@ -45,31 +45,10 @@ import {
 } from '../../utils/pdfSaver';
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types';
 
-const TEST_DIR = resolve(__dirname, '../../../test');
-const FONT_PATH = resolve(__dirname, '../../../public/fonts/IPAexGothic.ttf');
+import { findInputPdf, TEST_DIR, FONT_PATH } from './helpers/realPdfFixtures';
+
 const SHIFT = { dx: 0.5, dy: 0.5 };
 const VISIBLE_SHIFT = { dx: 30, dy: 30 };
-
-// 出力ファイル名のサフィックス (入力 PDF の検出時に除外する)
-const OUTPUT_SUFFIXES = [
-  '_micro_shifted', '_split', '_move', '_split_all',
-  '_move2_shifted', '_move2_restored', '_edited',
-  '_empty_page', '_vertical_split', '_surrogate',
-];
-
-/** test/ 内の元 PDF (出力ファイルを除く) を 1 件検出する。無ければ null。 */
-function findInputPdf(): string | null {
-  if (!existsSync(TEST_DIR)) return null;
-  const entries = readdirSync(TEST_DIR);
-  const pdfs = entries
-    .filter((name) => name.toLowerCase().endsWith('.pdf'))
-    .filter((name) => !OUTPUT_SUFFIXES.some((suffix) => name.includes(suffix + '.pdf')));
-  if (pdfs.length === 0) return null;
-  // 最新更新のものを採用 (複数あっても安定)
-  const full = pdfs.map((n) => resolve(TEST_DIR, n));
-  full.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-  return full[0];
-}
 
 const REAL_PDF_PATH: string = findInputPdf() ?? '';
 const hasRealPdf = REAL_PDF_PATH !== '';

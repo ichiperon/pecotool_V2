@@ -10,8 +10,7 @@
  *   4. 非 BMP 文字 (絵文字・サロゲートペア) が正しく復元
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 // pdfjs は real を使う (この test の主眼)
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (p: string) => p }));
@@ -25,21 +24,8 @@ import {
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver';
 import { loadPecoToolBBoxMeta } from '../../utils/pdfMetadataLoader';
+import { findInputPdf, FONT_PATH } from './helpers/realPdfFixtures';
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types';
-
-const TEST_DIR = resolve(__dirname, '../../../test');
-const FONT_PATH = resolve(__dirname, '../../../public/fonts/IPAexGothic.ttf');
-
-function findInputPdf(): string | null {
-  if (!existsSync(TEST_DIR)) return null;
-  const pdfs = readdirSync(TEST_DIR)
-    .filter((n) => n.toLowerCase().endsWith('.pdf'))
-    .filter((n) => !['_move', '_split', '_edited', '_empty_page', '_vertical_split', '_surrogate', '_micro_shifted'].some((sfx) => n.includes(sfx)));
-  if (pdfs.length === 0) return null;
-  const full = pdfs.map((n) => resolve(TEST_DIR, n));
-  full.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-  return full[0];
-}
 
 const REAL_PDF_PATH = findInputPdf() ?? '';
 const hasRealPdf = REAL_PDF_PATH !== '';
