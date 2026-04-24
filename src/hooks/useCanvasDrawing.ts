@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { PageData, TextBlock } from "../types";
 import { perf } from "../utils/perfLogger";
+import { splitBlockAtRatio } from "../utils/splitBlock";
 
 interface UseCanvasDrawingParams {
   pageIndex: number;
@@ -98,14 +99,17 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
           isDirty: true,
         };
 
-        const updatedBlocks = sorted.map((b, i) => {
-          const originalOrder = i >= insertIndex ? b.order + 1 : b.order;
-          return originalOrder !== b.order ? { ...b, order: originalOrder } : b;
-        });
+        const updatedBlocks = [...sorted];
+        updatedBlocks.splice(insertIndex, 0, newBlock);
+        const reorderedBlocks = updatedBlocks.map((b, i) => ({
+          ...b,
+          order: i,
+          isDirty: b.id === newBlock.id ? true : b.isDirty,
+        }));
 
         perf.mark('ui.blockNewDraw', { page: pageIndex, writingMode });
         updatePageData(pageIndex, {
-          textBlocks: [...updatedBlocks, newBlock],
+          textBlocks: reorderedBlocks,
           isDirty: true,
         });
       }
@@ -126,58 +130,15 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
 
         if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
           const isVertical = block.writingMode === "vertical";
-          const b1 = { ...block, id: crypto.randomUUID(), isDirty: true };
-          const b2 = { ...block, id: crypto.randomUUID(), isDirty: true };
-
-          const getSplitIndex = (text: string, ratio: number) => {
-            if (text.length <= 1) return 1;
-            let totalW = 0;
-            const weights = [];
-            for (let j = 0; j < text.length; j++) {
-              const code = text.charCodeAt(j);
-              const ww =
-                code <= 0xff || (code >= 0xff61 && code <= 0xff9f) || code === 0x20 ? 1 : 2;
-              weights.push(ww);
-              totalW += ww;
-            }
-            const targetW = totalW * ratio;
-            let currentW = 0;
-            for (let j = 0; j < text.length; j++) {
-              currentW += weights[j];
-              if (currentW >= targetW) {
-                if (currentW - targetW < weights[j] / 2)
-                  return Math.min(text.length - 1, Math.max(1, j + 1));
-                return Math.min(text.length - 1, Math.max(1, j));
-              }
-            }
-            return Math.max(1, text.length - 1);
-          };
-
-          if (!isVertical) {
-            const safeDx = Math.max(1, Math.min(w - 1, pos.x - x));
-            const ratio = safeDx / w;
-            const splitIdx = getSplitIndex(block.text, ratio);
-            b1.text = block.text.substring(0, splitIdx);
-            b1.originalText = b1.text;
-            b2.text = block.text.substring(splitIdx);
-            b2.originalText = b2.text;
-
-            const dx = safeDx / scale;
-            b1.bbox = { ...block.bbox, width: dx };
-            b2.bbox = { ...block.bbox, x: block.bbox.x + dx, width: block.bbox.width - dx };
-          } else {
-            const safeDy = Math.max(1, Math.min(h - 1, pos.y - y));
-            const ratio = safeDy / h;
-            const splitIdx = getSplitIndex(block.text, ratio);
-            b1.text = block.text.substring(0, splitIdx);
-            b1.originalText = b1.text;
-            b2.text = block.text.substring(splitIdx);
-            b2.originalText = b2.text;
-
-            const dy = safeDy / scale;
-            b1.bbox = { ...block.bbox, height: dy };
-            b2.bbox = { ...block.bbox, y: block.bbox.y + dy, height: block.bbox.height - dy };
+          const ratio = isVertical
+            ? Math.max(1, Math.min(h - 1, pos.y - y)) / h
+            : Math.max(1, Math.min(w - 1, pos.x - x)) / w;
+          const split = splitBlockAtRatio(block, ratio);
+          if (!split) {
+            toggleSplitMode();
+            return false;
           }
+          const { b1, b2 } = split;
 
           const newBlocks = pageData.textBlocks.filter((b) => b.id !== block.id);
           newBlocks.splice(i, 0, b1, b2);
