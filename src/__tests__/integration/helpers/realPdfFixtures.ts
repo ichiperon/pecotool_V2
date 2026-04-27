@@ -36,6 +36,8 @@ const OUTPUT_SUFFIXES = [
 	  '_b1_pdfjs_external_1cycle',
 	  '_b1_1_noEdit10cycle', '_b1_2_shift10cycle',
   '_c1_1_raceSim', '_c1_2_doubleSave_1', '_c1_2_doubleSave_2',
+  '_acrobat_compat_injected_input', '_acrobat_compat_repaired',
+  '_dirty_mixed',
 ];
 
 export function findInputPdf(): string | null {

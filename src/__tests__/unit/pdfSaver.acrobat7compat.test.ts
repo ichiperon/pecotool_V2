@@ -43,6 +43,17 @@ async function makeOriginalV16Pdf(): Promise<Uint8Array> {
   return bytes
 }
 
+async function makeOriginalPdfWithLeakedTextShow(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  const page = doc.addPage([595, 842])
+  const content = new Uint8Array(
+    Array.from('q\n(leaked) Tj\n[(array)] TJ\nET\nQ', c => c.charCodeAt(0)),
+  )
+  const stream = doc.context.flateStream(content)
+  page.node.set(PDFName.of('Contents'), doc.context.register(stream))
+  return doc.save({ useObjectStreams: false, addDefaultPage: false })
+}
+
 function makePecoDoc(): PecoDocument {
   const block: TextBlock = {
     id: 'b0',
@@ -210,5 +221,27 @@ describe('Acrobat 7.0 compatibility audit for buildPdfDocument', () => {
       }
     }
     expect(violations).toEqual([])
+  })
+
+  it('(5) 元PDF由来の BT 外 Tj / TJ は保存時に除去される', async () => {
+    const originalWithLeak = await makeOriginalPdfWithLeakedTextShow()
+    const repairedBytes = await buildPdfDocument(originalWithLeak, makePecoDoc())
+    const allContent = await extractAllContentStreams(repairedBytes)
+
+    const tokenRegex = /\b(BT|ET|Tj|TJ)\b/g
+    let lastOpen: 'BT' | 'ET' | null = null
+    let m: RegExpExecArray | null
+    const violations: string[] = []
+    while ((m = tokenRegex.exec(allContent)) !== null) {
+      const tok = m[1]
+      if (tok === 'BT') lastOpen = 'BT'
+      else if (tok === 'ET') lastOpen = 'ET'
+      else if ((tok === 'Tj' || tok === 'TJ') && lastOpen !== 'BT') {
+        violations.push(tok)
+      }
+    }
+    expect(violations).toEqual([])
+    expect(allContent).not.toContain('(leaked)')
+    expect(allContent).not.toContain('[(array)]')
   })
 })

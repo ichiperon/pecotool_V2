@@ -2,8 +2,8 @@
  * PDF content stream syntax-safe parser.
  *
  * PDF 1.7 仕様（7.2 Lexical Conventions）準拠の状態機械で content stream を走査し、
- * 文字列リテラル `(...)` ・16 進文字列 `<...>` ・コメント `%...EOL` の内部に現れる
- * `BT` / `ET` バイト列を誤認識しないよう保証する。
+ * 文字列リテラル `(...)` ・16 進文字列 `<...>` ・コメント `%...EOL` ・inline image
+ * `BI ... ID ... EI` の内部に現れる `BT` / `ET` バイト列を誤認識しないよう保証する。
  *
  * 誤認識の例（旧実装のバグ）:
  *   BT ... (Hello ET world) Tj ET
@@ -137,6 +137,133 @@ function matchesToken(data: Uint8Array, i: number, t0: number, t1: number): bool
   return isDelimiterOrEnd(prev) && isDelimiterOrEnd(next);
 }
 
+function copyInlineImage(data: Uint8Array, start: number, result: Uint8Array, resultIdx: number): {
+  inputIdx: number;
+  resultIdx: number;
+} {
+  let i = start;
+  let inImageData = false;
+  while (i < data.length) {
+    result[resultIdx++] = data[i];
+    if (!inImageData && matchesToken(data, i, 0x49, 0x44 /* ID */)) {
+      if (i + 1 < data.length) result[resultIdx++] = data[i + 1];
+      i += 2;
+      inImageData = true;
+      continue;
+    }
+    if (inImageData && matchesToken(data, i, 0x45, 0x49 /* EI */)) {
+      if (i + 1 < data.length) result[resultIdx++] = data[i + 1];
+      i += 2;
+      break;
+    }
+    i += 1;
+  }
+  return { inputIdx: i, resultIdx };
+}
+
+function trimTrailingWhitespace(data: Uint8Array, end: number): number {
+  while (end > 0 && data[end - 1] <= 0x20) end -= 1;
+  return end;
+}
+
+function isEscaped(data: Uint8Array, index: number): boolean {
+  let slashCount = 0;
+  for (let i = index - 1; i >= 0 && data[i] === 0x5c /* \ */; i--) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+function findLiteralStringStart(data: Uint8Array, end: number): number | null {
+  if (end <= 0 || data[end - 1] !== 0x29 /* ) */) return null;
+  let depth = 1;
+  for (let i = end - 2; i >= 0; i--) {
+    if (isEscaped(data, i)) continue;
+    if (data[i] === 0x29 /* ) */) depth += 1;
+    if (data[i] === 0x28 /* ( */) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
+function findHexStringStart(data: Uint8Array, end: number): number | null {
+  if (end <= 0 || data[end - 1] !== 0x3e /* > */) return null;
+  if (end > 1 && data[end - 2] === 0x3e /* > */) return null;
+  for (let i = end - 2; i >= 0; i--) {
+    if (data[i] !== 0x3c /* < */) continue;
+    if (data[i + 1] === 0x3c /* < */) return null;
+    return i;
+  }
+  return null;
+}
+
+function findArrayStart(data: Uint8Array, end: number): number | null {
+  if (end <= 0 || data[end - 1] !== 0x5d /* ] */) return null;
+  const stack: number[] = [];
+  let state: State = 'NORMAL';
+  let stringDepth = 0;
+  let i = 0;
+
+  while (i < end) {
+    if (state === 'NORMAL') {
+      if (data[i] === 0x5b /* [ */) {
+        stack.push(i);
+        i += 1;
+        continue;
+      }
+      if (data[i] === 0x5d /* ] */) {
+        const start = stack.pop();
+        if (i === end - 1 && stack.length === 0) return start ?? null;
+        i += 1;
+        continue;
+      }
+      const entry = enterNonNormalState(data, i);
+      if (entry) {
+        state = entry.state;
+        stringDepth = entry.stringDepth;
+        i += entry.advance;
+        continue;
+      }
+      i += 1;
+    } else if (state === 'STRING') {
+      const r = scanString(data, i, stringDepth);
+      state = r.state;
+      stringDepth = r.stringDepth;
+      i += r.advance;
+    } else if (state === 'HEX') {
+      const r = scanHex(data, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    } else {
+      const r = scanComment(data, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    }
+  }
+
+  return null;
+}
+
+function dropTrailingTjOperand(data: Uint8Array, resultIdx: number): number {
+  const end = trimTrailingWhitespace(data, resultIdx);
+  const literalStart = findLiteralStringStart(data, end);
+  if (literalStart !== null) return literalStart;
+  const hexStart = findHexStringStart(data, end);
+  if (hexStart !== null) return hexStart;
+  if (end > 0 && data[end - 1] === 0x29 /* ) */) return end - 1;
+  return resultIdx;
+}
+
+function dropTrailingTJOperand(data: Uint8Array, resultIdx: number): number {
+  const end = trimTrailingWhitespace(data, resultIdx);
+  const arrayStart = findArrayStart(data, end);
+  return arrayStart ?? resultIdx;
+}
+
 /**
  * content stream から BT...ET ブロックを安全に削除する。
  *
@@ -193,6 +320,30 @@ export function stripTextBlocks(decoded: Uint8Array): Uint8Array {
             i += r.advance;
           }
         }
+        continue;
+      }
+
+      if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+        const copied = copyInlineImage(decoded, i, result, resultIdx);
+        i = copied.inputIdx;
+        resultIdx = copied.resultIdx;
+        continue;
+      }
+
+      if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
+        i += 2;
+        continue;
+      }
+
+      if (matchesToken(decoded, i, 0x54, 0x6a /* Tj */)) {
+        resultIdx = dropTrailingTjOperand(result, resultIdx);
+        i += 2;
+        continue;
+      }
+
+      if (matchesToken(decoded, i, 0x54, 0x4a /* TJ */)) {
+        resultIdx = dropTrailingTJOperand(result, resultIdx);
+        i += 2;
         continue;
       }
 

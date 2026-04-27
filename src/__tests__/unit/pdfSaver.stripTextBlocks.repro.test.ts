@@ -61,4 +61,47 @@ describe('stripTextBlocks — PDF string literal safety (repro)', () => {
     const output = dec(stripTextBlocks(input));
     expect(output).not.toContain('Tj');
   });
+
+  it('ケースD: inline image 内の BT/ET はテキストブロックとして削除しない', () => {
+    const inlineImage = 'BI /W 2 /H 2 /CS /RGB /BPC 8 ID abc BT image ET xyz EI';
+    const input = enc(`q\n${inlineImage}\nBT /F1 12 Tf (remove me) Tj ET\nQ`);
+    const output = dec(stripTextBlocks(input));
+    expect(output).toContain(inlineImage);
+    expect(output).not.toContain('remove me');
+    expect(output).not.toContain('Tj');
+  });
+
+  it('ケースE: BT 外に孤立した Tj / TJ / ET があれば削除する', () => {
+    const input = enc('q\n(legacy leak) Tj\n[(legacy) 120 (array)] TJ\nET\nQ');
+    const output = dec(stripTextBlocks(input));
+    expect(output).not.toMatch(/\bTj\b|\bTJ\b|\bET\b/);
+    expect(output).not.toContain('(legacy leak)');
+    expect(output).not.toContain('[(legacy) 120 (array)]');
+    expect(output).toContain('q');
+    expect(output).toContain('Q');
+  });
+
+  it('ケースF: BT 外の hex string Tj と壊れた ") Tj ET" 断片を削除する', () => {
+    const input = enc('q\n<48656c6c6f> Tj\n) Tj ET\nQ');
+    const output = dec(stripTextBlocks(input));
+    expect(output).not.toMatch(/\bTj\b|\bET\b/);
+    expect(output).not.toContain('<48656c6c6f>');
+    expect(output).not.toContain(')');
+    expect(output).toContain('q');
+    expect(output).toContain('Q');
+  });
+
+  it('ケースG: BT 外でも text-show ではない operand は削除しない', () => {
+    const input = enc('q\n(plain string without operator)\n10 20 m\nQ');
+    const output = dec(stripTextBlocks(input));
+    expect(output).toContain('(plain string without operator)');
+    expect(output).toContain('10 20 m');
+  });
+
+  it('ケースH: inline image 内の ") Tj TJ ET" は削除しない', () => {
+    const inlineImage = 'BI /W 2 /H 2 /CS /RGB /BPC 8 ID abc ) Tj [(x)] TJ ET xyz EI';
+    const input = enc(`q\n${inlineImage}\nQ`);
+    const output = dec(stripTextBlocks(input));
+    expect(output).toContain(inlineImage);
+  });
 });
