@@ -91,7 +91,7 @@ export function useThumbnailWindow() {
       return () => { u1(); u2(); };
     };
     let unlisten: (() => void) | undefined;
-    const p = setup().then(fn => { unlisten = fn; });
+    const p = setup().then(fn => { unlisten = fn; }).catch(logUnlessTauriWindowNotFound);
     return () => { p.then(() => unlisten?.()); };
   }, [getDirtyPages]);
 
@@ -100,7 +100,7 @@ export function useThumbnailWindow() {
     let unlisten: (() => void) | undefined;
     listen<{ pageIndex: number }>('thumbnail:page-selected', (e) => {
       usePecoStore.getState().setCurrentPage(e.payload.pageIndex);
-    }).then(fn => { unlisten = fn; });
+    }).then(fn => { unlisten = fn; }).catch(logUnlessTauriWindowNotFound);
     return () => { unlisten?.(); };
   }, []);
 

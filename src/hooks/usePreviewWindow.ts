@@ -93,7 +93,7 @@ export function usePreviewWindow() {
     setupListener().then(fn => {
       if (cancelled) { fn(); return; }
       unlistenFn = fn;
-    });
+    }).catch(logUnlessTauriWindowNotFound);
     return () => {
       cancelled = true;
       unlistenFn?.();

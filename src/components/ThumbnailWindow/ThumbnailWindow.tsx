@@ -111,7 +111,7 @@ export function ThumbnailWindow() {
       event.preventDefault();
       win.hide().catch(logUnlessTauriWindowNotFound);
       emit('thumbnail:hidden').catch(logUnlessTauriWindowNotFound);
-    }).then(fn => { unlisten = fn; });
+    }).then(fn => { unlisten = fn; }).catch(logUnlessTauriWindowNotFound);
     return () => { unlisten?.(); };
   }, []);
 
