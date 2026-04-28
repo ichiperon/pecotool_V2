@@ -54,7 +54,7 @@ import { formatFileSize } from '../utils/format';
 import {
   disableSystemFontForSession,
   getPrimaryFontKind,
-  loadBundledNotoCjkFontLazy,
+  loadBundledIpAmjFontLazy,
   loadFallbackFontsLazy,
   loadFontLazy,
 } from './useFontLoader';
@@ -335,9 +335,9 @@ export function useFileOperations(
     } catch (err) {
       if (getPrimaryFontKind() !== 'meiryo') throw err;
 
-      console.warn('[save] Meiryo save failed; retrying with bundled Noto Sans CJK JP:', err);
+      console.warn('[save] Meiryo save failed; retrying with bundled IPAmjMincho:', err);
       disableSystemFontForSession();
-      const retryFontBytes = await withStep('loadBundledFontRetry', 15_000, () => loadBundledNotoCjkFontLazy());
+      const retryFontBytes = await withStep('loadBundledFontRetry', 15_000, () => loadBundledIpAmjFontLazy());
       if (!retryFontBytes) throw err;
       const retryFallbackFontBytes = await withStep('loadFallbackFontsRetry', 15_000, () => loadFallbackFontsLazy());
       if (!retryFallbackFontBytes) throw err;

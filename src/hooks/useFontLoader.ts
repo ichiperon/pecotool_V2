@@ -5,25 +5,18 @@ let fontBytesCache: ArrayBuffer | null = null;
 let fontLoadPromise: Promise<ArrayBuffer | null> | null = null;
 let fallbackFontBytesCache: ArrayBuffer[] | null = null;
 let fallbackFontLoadPromise: Promise<ArrayBuffer[] | null> | null = null;
-let primaryFontKind: 'meiryo' | 'noto-cjk' | null = null;
+let primaryFontKind: 'meiryo' | 'ipamj' | null = null;
 let systemFontDisabledForSession = false;
 
-const BASE_FALLBACK_FONT_PATHS = [
-  '/fonts/IPAmjMincho.ttf',
+const SYMBOL_FALLBACK_FONT_PATHS = [
   '/fonts/NotoSans-Regular.ttf',
   '/fonts/NotoSansSymbols-Regular.ttf',
   '/fonts/NotoSansSymbols2-Regular.ttf',
 ];
 
 function getFallbackFontPaths(): string[] {
-  if (primaryFontKind === 'noto-cjk') return BASE_FALLBACK_FONT_PATHS;
-  return [
-    '/fonts/IPAmjMincho.ttf',
-    '/fonts/NotoSansCJKjp-Regular.otf',
-    '/fonts/NotoSans-Regular.ttf',
-    '/fonts/NotoSansSymbols-Regular.ttf',
-    '/fonts/NotoSansSymbols2-Regular.ttf',
-  ];
+  if (primaryFontKind === 'meiryo') return ['/fonts/IPAmjMincho.ttf', ...SYMBOL_FALLBACK_FONT_PATHS];
+  return SYMBOL_FALLBACK_FONT_PATHS;
 }
 
 function toArrayBuffer(bytes: number[] | Uint8Array): ArrayBuffer {
@@ -31,7 +24,7 @@ function toArrayBuffer(bytes: number[] | Uint8Array): ArrayBuffer {
   return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 }
 
-export function getPrimaryFontKind(): 'meiryo' | 'noto-cjk' | null {
+export function getPrimaryFontKind(): 'meiryo' | 'ipamj' | null {
   return primaryFontKind;
 }
 
@@ -44,14 +37,14 @@ export function disableSystemFontForSession(): void {
   primaryFontKind = null;
 }
 
-export async function loadBundledNotoCjkFontLazy(): Promise<ArrayBuffer | null> {
-  const res = await fetch('/fonts/NotoSansCJKjp-Regular.otf');
+export async function loadBundledIpAmjFontLazy(): Promise<ArrayBuffer | null> {
+  const res = await fetch('/fonts/IPAmjMincho.ttf');
   if (!res.ok) {
     console.error('[loadFontLazy] Failed to fetch bundled font: status', res.status);
     return null;
   }
   fontBytesCache = await res.arrayBuffer();
-  primaryFontKind = 'noto-cjk';
+  primaryFontKind = 'ipamj';
   return fontBytesCache;
 }
 
@@ -73,13 +66,13 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
           logger.log('[loadFontLazy] Meiryo font loaded successfully');
           return fontBytesCache;
         } catch (err) {
-          console.warn('[loadFontLazy] Meiryo unavailable; falling back to bundled Noto Sans CJK JP:', err);
+          console.warn('[loadFontLazy] Meiryo unavailable; falling back to bundled IPAmjMincho:', err);
         }
       }
 
-      fontBytesCache = await loadBundledNotoCjkFontLazy();
+      fontBytesCache = await loadBundledIpAmjFontLazy();
       fontLoadPromise = null;
-      if (fontBytesCache) logger.log('[loadFontLazy] Bundled Noto Sans CJK JP loaded successfully');
+      if (fontBytesCache) logger.log('[loadFontLazy] Bundled IPAmjMincho loaded successfully');
       return fontBytesCache;
     } catch (err) {
       console.error('[loadFontLazy] Error loading font:', err);

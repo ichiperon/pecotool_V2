@@ -87,6 +87,7 @@ function isPecoToolFontKey(key: PDFName): boolean {
   return (
     name.startsWith('/IPAexGothic-') ||
     name.startsWith('/IPAmjMincho-') ||
+    name.startsWith('/NotoSansCJKjp-') ||
     name.startsWith('/NotoSans-') ||
     name.startsWith('/NotoSansSymbols-') ||
     name.startsWith('/NotoSansSymbols2-')
