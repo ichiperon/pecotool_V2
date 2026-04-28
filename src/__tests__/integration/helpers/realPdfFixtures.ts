@@ -16,7 +16,7 @@ import type { PageData, PecoDocument, TextBlock, WritingMode } from '../../../ty
 import { safeDecodePdfText } from '../../../utils/pdfLibSafeDecode';
 
 export const TEST_DIR = resolve(__dirname, '../../../../test');
-export const FONT_PATH = resolve(__dirname, '../../../../public/fonts/IPAexGothic.ttf');
+export const FONT_PATH = resolve(__dirname, '../../../../public/fonts/NotoSansCJKjp-Regular.otf');
 
 const OUTPUT_SUFFIXES = [
   '_micro_shifted', '_split', '_move', '_split_all',
@@ -37,6 +37,7 @@ const OUTPUT_SUFFIXES = [
 	  '_b1_1_noEdit10cycle', '_b1_2_shift10cycle',
   '_c1_1_raceSim', '_c1_2_doubleSave_1', '_c1_2_doubleSave_2',
   '_acrobat_compat_injected_input', '_acrobat_compat_repaired',
+  '_acrobat_form_xobject_input', '_acrobat_form_xobject_repaired',
   '_dirty_mixed',
 ];
 
@@ -67,6 +68,7 @@ export function loadFontArrayBuffer(): ArrayBuffer {
 }
 
 const FALLBACK_FONT_PATHS = [
+  resolve(__dirname, '../../../../public/fonts/IPAmjMincho.ttf'),
   resolve(__dirname, '../../../../public/fonts/NotoSans-Regular.ttf'),
   resolve(__dirname, '../../../../public/fonts/NotoSansSymbols-Regular.ttf'),
   resolve(__dirname, '../../../../public/fonts/NotoSansSymbols2-Regular.ttf'),

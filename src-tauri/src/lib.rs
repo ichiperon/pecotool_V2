@@ -1,5 +1,170 @@
 mod backup;
 
+#[tauri::command]
+async fn load_meiryo_font() -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        use std::{collections::HashSet, fs, path::PathBuf};
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(windir) = std::env::var_os("WINDIR") {
+            candidates.push(PathBuf::from(windir).join("Fonts").join("meiryo.ttc"));
+        }
+        candidates.push(PathBuf::from(r"C:\Windows\Fonts\meiryo.ttc"));
+
+        let mut seen = HashSet::new();
+        for path in candidates {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            return extract_ttc_face(&bytes, 0)
+                .map_err(|e| format!("Meiryo TTC extraction failed ({}): {e}", path.to_string_lossy()));
+        }
+
+        Err("Meiryo font not found".to_string())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
+fn extract_ttc_face(ttc: &[u8], face_index: usize) -> Result<Vec<u8>, String> {
+    if ttc.len() < 12 || &ttc[0..4] != b"ttcf" {
+        return Err("not a TTC font".to_string());
+    }
+
+    let num_fonts = read_u32(ttc, 8)? as usize;
+    if face_index >= num_fonts {
+        return Err("TTC face index out of range".to_string());
+    }
+
+    let offset_pos = 12usize
+        .checked_add(face_index.checked_mul(4).ok_or("offset overflow")?)
+        .ok_or("offset overflow")?;
+    let font_offset = read_u32(ttc, offset_pos)? as usize;
+    let num_tables = read_u16(ttc, font_offset + 4)? as usize;
+    let table_dir = font_offset.checked_add(12).ok_or("table dir overflow")?;
+
+    let header_len = 12usize
+        .checked_add(num_tables.checked_mul(16).ok_or("header overflow")?)
+        .ok_or("header overflow")?;
+    let mut data_offset = header_len;
+    let mut tables: Vec<TtcTable> = Vec::with_capacity(num_tables);
+
+    for i in 0..num_tables {
+        let rec = table_dir
+            .checked_add(i.checked_mul(16).ok_or("record overflow")?)
+            .ok_or("record overflow")?;
+        let tag = ttc
+            .get(rec..rec + 4)
+            .ok_or("table tag out of bounds")?
+            .try_into()
+            .map_err(|_| "invalid table tag")?;
+        let old_offset = read_u32(ttc, rec + 8)? as usize;
+        let length = read_u32(ttc, rec + 12)? as usize;
+        let old_end = old_offset.checked_add(length).ok_or("table overflow")?;
+        if old_end > ttc.len() {
+            return Err("table data out of bounds".to_string());
+        }
+        tables.push(TtcTable {
+            tag,
+            old_offset,
+            length,
+            new_offset: data_offset,
+        });
+        data_offset = data_offset
+            .checked_add(pad4(length))
+            .ok_or("font output overflow")?;
+    }
+
+    let mut out = vec![0u8; data_offset];
+    let sfnt_version = read_u32(ttc, font_offset)?;
+    write_u32(&mut out, 0, sfnt_version)?;
+    write_u16(&mut out, 4, num_tables as u16)?;
+    let max_power = 1usize << (usize::BITS as usize - 1 - num_tables.leading_zeros() as usize);
+    let search_range = max_power * 16;
+    let entry_selector = max_power.trailing_zeros() as u16;
+    let range_shift = num_tables * 16 - search_range;
+    write_u16(&mut out, 6, search_range as u16)?;
+    write_u16(&mut out, 8, entry_selector)?;
+    write_u16(&mut out, 10, range_shift as u16)?;
+
+    for table in &tables {
+        let source = &ttc[table.old_offset..table.old_offset + table.length];
+        out[table.new_offset..table.new_offset + table.length].copy_from_slice(source);
+        if &table.tag == b"head" {
+            write_u32(&mut out, table.new_offset + 8, 0)?;
+        }
+    }
+
+    for (i, table) in tables.iter().enumerate() {
+        let rec = 12 + i * 16;
+        let table_checksum = checksum(&out, table.new_offset, table.length);
+        out[rec..rec + 4].copy_from_slice(&table.tag);
+        write_u32(&mut out, rec + 4, table_checksum)?;
+        write_u32(&mut out, rec + 8, table.new_offset as u32)?;
+        write_u32(&mut out, rec + 12, table.length as u32)?;
+    }
+
+    let head = tables
+        .iter()
+        .find(|table| &table.tag == b"head")
+        .ok_or("head table not found")?;
+    let adjustment = 0xB1B0AFBAu32.wrapping_sub(checksum(&out, 0, out.len()));
+    write_u32(&mut out, head.new_offset + 8, adjustment)?;
+    Ok(out)
+}
+
+struct TtcTable {
+    tag: [u8; 4],
+    old_offset: usize,
+    length: usize,
+    new_offset: usize,
+}
+
+fn pad4(value: usize) -> usize {
+    (value + 3) & !3
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
+    let slice = bytes.get(offset..offset + 2).ok_or("read_u16 out of bounds")?;
+    Ok(u16::from_be_bytes([slice[0], slice[1]]))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, String> {
+    let slice = bytes.get(offset..offset + 4).ok_or("read_u32 out of bounds")?;
+    Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn write_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<(), String> {
+    let target = bytes.get_mut(offset..offset + 2).ok_or("write_u16 out of bounds")?;
+    target.copy_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn write_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<(), String> {
+    let target = bytes.get_mut(offset..offset + 4).ok_or("write_u32 out of bounds")?;
+    target.copy_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn checksum(bytes: &[u8], start: usize, length: usize) -> u32 {
+    let mut sum = 0u32;
+    let end = start.saturating_add(pad4(length));
+    let mut offset = start;
+    while offset < end {
+        let b0 = bytes.get(offset).copied().unwrap_or(0) as u32;
+        let b1 = bytes.get(offset + 1).copied().unwrap_or(0) as u32;
+        let b2 = bytes.get(offset + 2).copied().unwrap_or(0) as u32;
+        let b3 = bytes.get(offset + 3).copied().unwrap_or(0) as u32;
+        sum = sum.wrapping_add((b0 << 24) | (b1 << 16) | (b2 << 8) | b3);
+        offset += 4;
+    }
+    sum
+}
+
 /// PDF の /MediaBox (or /CropBox) を直接パースし、全ページの論理寸法を返す。
 /// pdfjs の getPage().getViewport() と比較して10倍以上高速。
 /// 各タプルは (width_pt, height_pt)。/Rotate 90/270 は swap 済み。
@@ -616,6 +781,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            load_meiryo_font,
             run_ocr,
             get_pdf_page_dimensions,
             write_perf_log,

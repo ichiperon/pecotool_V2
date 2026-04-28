@@ -264,6 +264,76 @@ function dropTrailingTJOperand(data: Uint8Array, resultIdx: number): number {
   return arrayStart ?? resultIdx;
 }
 
+function findNameStart(data: Uint8Array, end: number): number | null {
+  let i = trimTrailingWhitespace(data, end) - 1;
+  while (i >= 0 && !isDelimiterOrEnd(data[i])) i -= 1;
+  if (i >= 0 && data[i] === 0x2f /* / */) return i;
+  return null;
+}
+
+function findSimpleOperandStart(data: Uint8Array, end: number): number | null {
+  const trimmedEnd = trimTrailingWhitespace(data, end);
+  if (trimmedEnd <= 0) return null;
+  let i = trimmedEnd - 1;
+  while (i >= 0 && !isDelimiterOrEnd(data[i])) i -= 1;
+  return i + 1 < trimmedEnd ? i + 1 : null;
+}
+
+function dropTrailingOperand(data: Uint8Array, resultIdx: number): number {
+  const end = trimTrailingWhitespace(data, resultIdx);
+  const literalStart = findLiteralStringStart(data, end);
+  if (literalStart !== null) return literalStart;
+  const hexStart = findHexStringStart(data, end);
+  if (hexStart !== null) return hexStart;
+  const arrayStart = findArrayStart(data, end);
+  if (arrayStart !== null) return arrayStart;
+  const nameStart = findNameStart(data, end);
+  if (nameStart !== null) return nameStart;
+  return findSimpleOperandStart(data, end) ?? resultIdx;
+}
+
+function dropTrailingOperands(data: Uint8Array, resultIdx: number, count: number): number {
+  let nextIdx = resultIdx;
+  for (let i = 0; i < count; i++) {
+    const dropped = dropTrailingOperand(data, nextIdx);
+    if (dropped === nextIdx) break;
+    nextIdx = dropped;
+  }
+  return nextIdx;
+}
+
+function matchesOperator(data: Uint8Array, i: number, operator: string): boolean {
+  for (let j = 0; j < operator.length; j++) {
+    if (data[i + j] !== operator.charCodeAt(j)) return false;
+  }
+  const prev = i === 0 ? undefined : data[i - 1];
+  const next = i + operator.length >= data.length ? undefined : data[i + operator.length];
+  return isDelimiterOrEnd(prev) && isDelimiterOrEnd(next);
+}
+
+function textOperatorOperandCount(data: Uint8Array, i: number): { length: number; operands: number } | null {
+  const operators: Array<[string, number]> = [
+    ['T*', 0],
+    ['Tc', 1],
+    ['Tw', 1],
+    ['Tz', 1],
+    ['TL', 1],
+    ['Tf', 2],
+    ['Tr', 1],
+    ['Ts', 1],
+    ['Td', 2],
+    ['TD', 2],
+    ['Tm', 6],
+    ["'", 1],
+    ['"', 3],
+  ];
+
+  for (const [operator, operands] of operators) {
+    if (matchesOperator(data, i, operator)) return { length: operator.length, operands };
+  }
+  return null;
+}
+
 /**
  * content stream から BT...ET ブロックを安全に削除する。
  *
@@ -344,6 +414,13 @@ export function stripTextBlocks(decoded: Uint8Array): Uint8Array {
       if (matchesToken(decoded, i, 0x54, 0x4a /* TJ */)) {
         resultIdx = dropTrailingTJOperand(result, resultIdx);
         i += 2;
+        continue;
+      }
+
+      const textOperator = textOperatorOperandCount(decoded, i);
+      if (textOperator) {
+        resultIdx = dropTrailingOperands(result, resultIdx, textOperator.operands);
+        i += textOperator.length;
         continue;
       }
 

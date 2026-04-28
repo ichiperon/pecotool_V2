@@ -40,9 +40,16 @@ async function writeFileAtomically(path: string, bytes: Uint8Array): Promise<voi
   await invoke('replace_pdf_file', { tempPath, targetPath: path });
 }
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
-import { loadPDF, getAllTemporaryPageData, clearTemporaryChanges } from '../utils/pdfLoader';
+import {
+  loadPDF,
+  getAllTemporaryPageData,
+  clearTemporaryChanges,
+  getSharedPdfProxy,
+  loadPage,
+  loadPecoToolBBoxMeta,
+} from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
-import type { SavePdfSource } from '../utils/pdfWorkerTypes';
+import type { SavePdfSource, SkippedPdfTextChar } from '../utils/pdfWorkerTypes';
 import { formatFileSize } from '../utils/format';
 import { loadFallbackFontsLazy, loadFontLazy } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
@@ -102,6 +109,26 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
     }
   });
   return task;
+}
+
+interface SaveResult {
+  size: number;
+  skippedChars: SkippedPdfTextChar[];
+}
+
+function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
+  const sample = skippedChars.slice(0, 8).map((item) => {
+    const visible = item.char >= ' ' && item.char !== '\u007f' ? `${item.char} ` : '';
+    return `${visible}${item.codePoint}`;
+  }).join('、');
+  const suffix = skippedChars.length > 8 ? ' ほか' : '';
+  return `PDFテキスト層に埋め込めない文字を除外しました: ${sample}${suffix}`;
+}
+
+function formatSaveToast(prefix: string, size: number, skippedChars: SkippedPdfTextChar[]): string {
+  const base = `${prefix}。(${formatFileSize(size)})`;
+  if (skippedChars.length === 0) return base;
+  return `${base} ${formatSkippedCharWarning(skippedChars)}`;
 }
 
 export function useFileOperations(
@@ -229,9 +256,9 @@ export function useFileOperations(
    * 保存の共通処理。originalBytes の待機 → IDB マージ → PDF 生成 → ファイル書き込みを行う。
    * 各 await は個別 timeout で囲み、詰まった段階をトースト/コンソールで特定できるようにする。
    * @param targetPath 書き込み先パス。省略時は document.filePath に上書き保存。
-   * @returns 書き込んだバイト数。失敗時は null。
+   * @returns 保存結果。失敗時は null。
    */
-  const _executeSave = async (targetPath?: string): Promise<number | null> => {
+  const _executeSave = async (targetPath?: string): Promise<SaveResult | null> => {
     const { document } = usePecoStore.getState();
     if (!document) return null;
     const sourceFilePath = document.filePath;
@@ -282,8 +309,24 @@ export function useFileOperations(
     const dirtyOnlyPages = new Map<number, PageData>(
       [...mergedPages.entries()].filter(([, p]) => p.isDirty)
     );
+    if (dirtyOnlyPages.size === 0) {
+      await withStep('loadRepairPages', 300_000, async () => {
+        const pdf = await getSharedPdfProxy(sourceFilePath);
+        const bboxMeta = await loadPecoToolBBoxMeta(pdf).catch(() => null);
+        for (let pageIndex = 0; pageIndex < document.totalPages; pageIndex++) {
+          const pageData = await loadPage(pdf, pageIndex, sourceFilePath, bboxMeta, document.mtime);
+          dirtyOnlyPages.set(pageIndex, { ...pageData, isDirty: true });
+        }
+      });
+    }
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
-    const savedBytes = await withStep('savePDF', 150_000, () => savePDF(saveSource, mergedDoc, fontBytes, fallbackFontBytes));
+    let skippedChars: SkippedPdfTextChar[] = [];
+    const savedBytes = await withStep('savePDF', 150_000, () =>
+      savePDF(saveSource, mergedDoc, fontBytes, fallbackFontBytes, (chars) => { skippedChars = chars; })
+    );
+    if (skippedChars.length > 0) {
+      console.warn('[save] Skipped PDF text-layer chars:', skippedChars);
+    }
     const writePath = targetPath ?? document.filePath;
 
     await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
@@ -296,7 +339,7 @@ export function useFileOperations(
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
     await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
-    return savedBytes.length;
+    return { size: savedBytes.length, skippedChars };
   };
 
   const handleSave = async () => {
@@ -319,10 +362,10 @@ export function useFileOperations(
     setIsSaving?.(true);
     showToast("保存処理を開始しました...");
     try {
-      const size = await _executeSave();
-      if (size !== null) {
+      const result = await _executeSave();
+      if (result !== null) {
         resetDirty();
-        showToast(`保存しました。(${formatFileSize(size)})`);
+        showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
         invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
       }
@@ -353,8 +396,8 @@ export function useFileOperations(
         isSavingRef.current = true;
         setIsSaving?.(true);
         try {
-          const size = await _executeSave(path);
-          if (size !== null) {
+          const result = await _executeSave(path);
+          if (result !== null) {
             const currentDoc = usePecoStore.getState().document;
             if (!currentDoc || currentDoc.filePath !== document.filePath) {
               throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
@@ -362,7 +405,7 @@ export function useFileOperations(
             const prevPath = currentDoc.filePath;
             setDocumentFilePath(path);
             resetDirty();
-            showToast(`名前を付けて保存しました。(${formatFileSize(size)})`);
+            showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
             addToRecent(path);
             // 元のパスのバックアップも新しいパスのバックアップも削除する
             if (prevPath) invoke('clear_backup', { filePath: prevPath }).catch(() => {});

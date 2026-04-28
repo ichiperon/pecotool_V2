@@ -21,7 +21,7 @@ vi.mock('@cantoo/pdf-lib', () => ({
   PDFObject: class {},
 }));
 vi.mock('@pdf-lib/fontkit', () => ({ default: {} }));
-vi.mock('pako', () => ({ inflate: vi.fn() }));
+vi.mock('pako', () => ({ deflate: vi.fn(), inflate: vi.fn() }));
 
 import { stripTextBlocks } from '../../utils/pdfSaver';
 
@@ -103,5 +103,14 @@ describe('stripTextBlocks — PDF string literal safety (repro)', () => {
     const input = enc(`q\n${inlineImage}\nQ`);
     const output = dec(stripTextBlocks(input));
     expect(output).toContain(inlineImage);
+  });
+
+  it('ケースI: BT 外のテキスト状態/位置演算子をオペランドごと削除する', () => {
+    const input = enc('q\n/F2+0 5.99829 Tf 7.197948 TL T*\n1 2 Td 1 0 0 1 3 4 Tm\nQ');
+    const output = dec(stripTextBlocks(input));
+    expect(output).not.toMatch(/\bTf\b|\bTL\b|\bT\*\b|\bTd\b|\bTm\b/);
+    expect(output).not.toContain('/F2+0');
+    expect(output).toContain('q');
+    expect(output).toContain('Q');
   });
 });
