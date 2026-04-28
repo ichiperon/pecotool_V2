@@ -51,7 +51,13 @@ import {
 import { savePDF } from '../utils/pdfSaver';
 import type { SavePdfSource, SkippedPdfTextChar } from '../utils/pdfWorkerTypes';
 import { formatFileSize } from '../utils/format';
-import { loadFallbackFontsLazy, loadFontLazy } from './useFontLoader';
+import {
+  disableSystemFontForSession,
+  getPrimaryFontKind,
+  loadBundledNotoCjkFontLazy,
+  loadFallbackFontsLazy,
+  loadFontLazy,
+} from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
 
@@ -321,9 +327,24 @@ export function useFileOperations(
     }
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
     let skippedChars: SkippedPdfTextChar[] = [];
-    const savedBytes = await withStep('savePDF', 150_000, () =>
-      savePDF(saveSource, mergedDoc, fontBytes, fallbackFontBytes, (chars) => { skippedChars = chars; })
-    );
+    const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
+      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; });
+    let savedBytes: Uint8Array;
+    try {
+      savedBytes = await withStep('savePDF', 150_000, () => runSavePdf(fontBytes, fallbackFontBytes));
+    } catch (err) {
+      if (getPrimaryFontKind() !== 'meiryo') throw err;
+
+      console.warn('[save] Meiryo save failed; retrying with bundled Noto Sans CJK JP:', err);
+      disableSystemFontForSession();
+      const retryFontBytes = await withStep('loadBundledFontRetry', 15_000, () => loadBundledNotoCjkFontLazy());
+      if (!retryFontBytes) throw err;
+      const retryFallbackFontBytes = await withStep('loadFallbackFontsRetry', 15_000, () => loadFallbackFontsLazy());
+      if (!retryFallbackFontBytes) throw err;
+
+      skippedChars = [];
+      savedBytes = await withStep('savePDFRetry', 150_000, () => runSavePdf(retryFontBytes, retryFallbackFontBytes));
+    }
     if (skippedChars.length > 0) {
       console.warn('[save] Skipped PDF text-layer chars:', skippedChars);
     }

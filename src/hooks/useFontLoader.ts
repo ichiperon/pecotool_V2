@@ -6,6 +6,7 @@ let fontLoadPromise: Promise<ArrayBuffer | null> | null = null;
 let fallbackFontBytesCache: ArrayBuffer[] | null = null;
 let fallbackFontLoadPromise: Promise<ArrayBuffer[] | null> | null = null;
 let primaryFontKind: 'meiryo' | 'noto-cjk' | null = null;
+let systemFontDisabledForSession = false;
 
 const BASE_FALLBACK_FONT_PATHS = [
   '/fonts/IPAmjMincho.ttf',
@@ -30,14 +31,28 @@ function toArrayBuffer(bytes: number[] | Uint8Array): ArrayBuffer {
   return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 }
 
-async function loadBundledNotoCjkFont(): Promise<ArrayBuffer | null> {
+export function getPrimaryFontKind(): 'meiryo' | 'noto-cjk' | null {
+  return primaryFontKind;
+}
+
+export function disableSystemFontForSession(): void {
+  systemFontDisabledForSession = true;
+  fontBytesCache = null;
+  fontLoadPromise = null;
+  fallbackFontBytesCache = null;
+  fallbackFontLoadPromise = null;
+  primaryFontKind = null;
+}
+
+export async function loadBundledNotoCjkFontLazy(): Promise<ArrayBuffer | null> {
   const res = await fetch('/fonts/NotoSansCJKjp-Regular.otf');
   if (!res.ok) {
     console.error('[loadFontLazy] Failed to fetch bundled font: status', res.status);
     return null;
   }
+  fontBytesCache = await res.arrayBuffer();
   primaryFontKind = 'noto-cjk';
-  return res.arrayBuffer();
+  return fontBytesCache;
 }
 
 /**
@@ -49,18 +64,20 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
 
   fontLoadPromise = (async () => {
     try {
-      try {
-        const meiryoBytes = await invoke<number[] | Uint8Array>('load_meiryo_font');
-        fontBytesCache = toArrayBuffer(meiryoBytes);
-        primaryFontKind = 'meiryo';
-        fontLoadPromise = null;
-        logger.log('[loadFontLazy] Meiryo font loaded successfully');
-        return fontBytesCache;
-      } catch (err) {
-        console.warn('[loadFontLazy] Meiryo unavailable; falling back to bundled Noto Sans CJK JP:', err);
+      if (!systemFontDisabledForSession) {
+        try {
+          const meiryoBytes = await invoke<number[] | Uint8Array>('load_meiryo_font');
+          fontBytesCache = toArrayBuffer(meiryoBytes);
+          primaryFontKind = 'meiryo';
+          fontLoadPromise = null;
+          logger.log('[loadFontLazy] Meiryo font loaded successfully');
+          return fontBytesCache;
+        } catch (err) {
+          console.warn('[loadFontLazy] Meiryo unavailable; falling back to bundled Noto Sans CJK JP:', err);
+        }
       }
 
-      fontBytesCache = await loadBundledNotoCjkFont();
+      fontBytesCache = await loadBundledNotoCjkFontLazy();
       fontLoadPromise = null;
       if (fontBytesCache) logger.log('[loadFontLazy] Bundled Noto Sans CJK JP loaded successfully');
       return fontBytesCache;

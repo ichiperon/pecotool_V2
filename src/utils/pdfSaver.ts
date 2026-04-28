@@ -727,7 +727,20 @@ export async function savePDF(
       activeWorker.onerror = (err) => {
         if (settled) return;
         cleanup();
-        settleReject(err);
+        const details = err instanceof ErrorEvent
+          ? [
+              err.message,
+              err.filename ? `${err.filename}:${err.lineno}:${err.colno}` : '',
+              err.error instanceof Error ? err.error.stack : '',
+            ].filter(Boolean).join('\n')
+          : String(err);
+        settleReject(new Error(details || 'PDF保存ワーカーでエラーが発生しました。'));
+      };
+
+      activeWorker.onmessageerror = (err) => {
+        if (settled) return;
+        cleanup();
+        settleReject(new Error(`PDF保存ワーカーとの通信に失敗しました: ${String(err)}`));
       };
 
       const serializedPages: Record<number, SerializedPageData> = {};
