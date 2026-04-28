@@ -726,6 +726,7 @@ export async function savePDF(
 
       activeWorker.onerror = (err) => {
         if (settled) return;
+        err.preventDefault();
         cleanup();
         const details = err instanceof ErrorEvent
           ? [
