@@ -168,10 +168,14 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     const currentBlock = filteredBlocks[currentIndex];
     const nextBlock = filteredBlocks[nextIndex];
     const newSet = new Set(selectedIds);
-    newSet.add(currentBlock.id);
-    newSet.delete(nextBlock.id);
-    newSet.add(nextBlock.id);
-    setSelectedIds(Array.from(newSet));
+    if (selectedIds.has(currentBlock.id) && selectedIds.has(nextBlock.id) && selectedIds.size > 1) {
+      newSet.delete(currentBlock.id);
+    } else {
+      newSet.add(currentBlock.id);
+      newSet.add(nextBlock.id);
+    }
+    const newIds = Array.from(newSet).filter(id => id !== nextBlock.id);
+    setSelectedIds([...newIds, nextBlock.id]);
 
     setTimeout(() => {
       cardRefs.current[nextIndex]?.focusContent();

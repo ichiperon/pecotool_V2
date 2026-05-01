@@ -51,6 +51,33 @@ describe('useKeyboardShortcuts: BB操作ショートカット', () => {
     expect(actions.handleGroup).toHaveBeenCalledTimes(1);
   });
 
+  it('カード本文へフォーカス移動後も window Ctrl+G でグループ化を実行する', () => {
+    const actions = makeActions();
+    const content = document.createElement('div');
+    content.className = 'ocr-card-content';
+    content.setAttribute('contenteditable', 'true');
+    document.body.appendChild(content);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    content.focus();
+
+    expect(press(content, 'g').defaultPrevented).toBe(true);
+    expect(actions.handleGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('OCRカード本文以外の contentEditable では Ctrl+G を編集側に渡す', () => {
+    const actions = makeActions();
+    const content = document.createElement('div');
+    content.setAttribute('contenteditable', 'true');
+    document.body.appendChild(content);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    content.focus();
+
+    expect(press(content, 'g').defaultPrevented).toBe(false);
+    expect(actions.handleGroup).not.toHaveBeenCalled();
+  });
+
   it('編集中の Ctrl+X はテキスト編集側に渡す', () => {
     const actions = makeActions();
     const input = document.createElement('input');

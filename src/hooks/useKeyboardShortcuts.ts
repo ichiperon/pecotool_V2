@@ -53,8 +53,12 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const tag = target?.tagName;
+      const isFormEditing = tag === 'INPUT' || tag === 'TEXTAREA';
+      const isContentEditing = !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
+      const isOcrCardContent = !!target?.closest('.ocr-card-content');
+      const isEditing = isFormEditing || isContentEditing;
       if ((e.ctrlKey || e.metaKey) && e.key === 'o' && !isEditing) {
         e.preventDefault();
         actions.handleOpen();
@@ -80,7 +84,7 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'x' && !isEditing) {
         e.preventDefault();
         actions.toggleSplitMode();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'g' && !isEditing) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'g' && !isFormEditing && (!isContentEditing || isOcrCardContent)) {
         e.preventDefault();
         actions.handleGroup();
       }

@@ -409,6 +409,30 @@ describe('OcrEditor', () => {
       expect(usePecoStore.getState().lastSelectedId).toBe('b3')
     })
 
+    it('window Shift+ArrowUp は下端から逆方向に戻ると選択下端を解除する', () => {
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2', 'b3', 'b4']), lastSelectedId: 'b4' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowUp', shiftKey: true })
+
+      expectSelectedIds(['b2', 'b3'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b3')
+    })
+
+    it('window Shift+ArrowDown は上端から逆方向に戻ると選択上端を解除する', () => {
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1', 'b2', 'b3']), lastSelectedId: 'b1' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', shiftKey: true })
+
+      expectSelectedIds(['b2', 'b3'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b2')
+    })
+
     it('検索フィルター中の window Ctrl+ArrowDown は表示カード間だけを移動する', async () => {
       const user = userEvent.setup()
       const filteredNavBlocks = [
