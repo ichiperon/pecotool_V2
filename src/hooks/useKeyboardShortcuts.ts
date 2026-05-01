@@ -74,13 +74,13 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
-      } else if (e.key === 'F10' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'b' && !isEditing) {
         e.preventDefault();
         actions.toggleDrawingMode();
-      } else if (e.key === 'F11' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'x' && !isEditing) {
         e.preventDefault();
         actions.toggleSplitMode();
-      } else if (e.key === 'F12' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'g' && !isEditing) {
         e.preventDefault();
         actions.handleGroup();
       }

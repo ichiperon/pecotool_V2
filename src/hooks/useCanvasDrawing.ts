@@ -7,11 +7,13 @@ interface UseCanvasDrawingParams {
   pageIndex: number;
   zoom: number;
   getPageData: () => PageData | undefined;
+  selectedIds: Set<string>;
   updatePageData: (
     pageIndex: number,
     partial: Partial<PageData>,
     pushUndo?: boolean
   ) => void;
+  setSelectedIds: (ids: string[]) => void;
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
 }
@@ -28,7 +30,7 @@ interface UseCanvasDrawingResult {
 
 // 描画モード（新規bbox作成）と分割モード（クリックでblock分割）のマウス処理
 export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawingResult {
-  const { pageIndex, zoom, getPageData, updatePageData, toggleDrawingMode, toggleSplitMode } =
+  const { pageIndex, zoom, getPageData, selectedIds, updatePageData, setSelectedIds, toggleDrawingMode, toggleSplitMode } =
     params;
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
@@ -59,32 +61,39 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
         const cy = y + height / 2;
 
         const sorted = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
-        let insertIndex = sorted.length;
-        for (let i = 0; i < sorted.length; i++) {
-          const b = sorted[i];
-          const bCx = b.bbox.x + b.bbox.width / 2;
-          const bCy = b.bbox.y + b.bbox.height / 2;
+        const selectedInsertIndex = sorted.reduce(
+          (lastIndex, block, index) => selectedIds.has(block.id) ? index : lastIndex,
+          -1
+        );
 
-          let newComesFirst: boolean;
-          if (writingMode === "vertical" || b.writingMode === "vertical") {
-            const sameCol = Math.abs(cx - bCx) < Math.max(width, b.bbox.width) * 0.6;
-            if (sameCol) {
-              newComesFirst = cy < bCy;
-            } else {
-              newComesFirst = cx > bCx;
-            }
-          } else {
-            const sameRow = Math.abs(cy - bCy) < Math.max(height, b.bbox.height) * 0.6;
-            if (sameRow) {
-              newComesFirst = cx < bCx;
-            } else {
-              newComesFirst = cy < bCy;
-            }
-          }
+        let insertIndex = selectedInsertIndex >= 0 ? selectedInsertIndex + 1 : sorted.length;
+        if (selectedInsertIndex === -1) {
+          for (let i = 0; i < sorted.length; i++) {
+            const b = sorted[i];
+            const bCx = b.bbox.x + b.bbox.width / 2;
+            const bCy = b.bbox.y + b.bbox.height / 2;
 
-          if (newComesFirst) {
-            insertIndex = i;
-            break;
+            let newComesFirst: boolean;
+            if (writingMode === "vertical" || b.writingMode === "vertical") {
+              const sameCol = Math.abs(cx - bCx) < Math.max(width, b.bbox.width) * 0.6;
+              if (sameCol) {
+                newComesFirst = cy < bCy;
+              } else {
+                newComesFirst = cx > bCx;
+              }
+            } else {
+              const sameRow = Math.abs(cy - bCy) < Math.max(height, b.bbox.height) * 0.6;
+              if (sameRow) {
+                newComesFirst = cx < bCx;
+              } else {
+                newComesFirst = cy < bCy;
+              }
+            }
+
+            if (newComesFirst) {
+              insertIndex = i;
+              break;
+            }
           }
         }
 
@@ -112,6 +121,7 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
           textBlocks: reorderedBlocks,
           isDirty: true,
         });
+        setSelectedIds([newBlock.id]);
       }
     }
     toggleDrawingMode();

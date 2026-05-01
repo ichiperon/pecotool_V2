@@ -278,6 +278,37 @@ async fn get_pdf_page_dimensions(file_path: String) -> Result<Vec<(f64, f64)>, S
     .map_err(|e| format!("spawn_blocking error: {}", e))?
 }
 
+#[tauri::command]
+async fn list_pdf_files_in_folder(
+    app: tauri::AppHandle,
+    folder_path: String,
+) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+        use std::fs;
+
+        let folder = validate_allowed_directory_path(&app, &folder_path)?;
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(&folder).map_err(|e| format!("read_dir failed: {e}"))? {
+            let entry = entry.map_err(|e| format!("read_dir entry failed: {e}"))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+            {
+                paths.push(path.to_string_lossy().to_string());
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
 /// 計測ログを appLocalData/perf/<safe_name>.ndjson に書き出す。
 /// name はファイル名衝突 / path traversal 対策として ASCII 英数字と '-', '_' のみを許可。
 /// 返値は書き込み先の絶対パス文字列。
@@ -672,6 +703,24 @@ fn validate_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<std::path
     Ok(resolved)
 }
 
+fn validate_allowed_directory_path(
+    app: &tauri::AppHandle,
+    path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_string());
+    }
+    let resolved = path
+        .canonicalize()
+        .map_err(|e| format!("canonicalize directory failed: {e}"))?;
+    if !resolved.is_dir() {
+        return Err("path must be a directory".to_string());
+    }
+    validate_allowed_resolved_path(app, &resolved)?;
+    Ok(resolved)
+}
+
 fn validate_allowed_resolved_path(
     app: &tauri::AppHandle,
     path: &std::path::Path,
@@ -784,6 +833,7 @@ pub fn run() {
             load_meiryo_font,
             run_ocr,
             get_pdf_page_dimensions,
+            list_pdf_files_in_folder,
             write_perf_log,
             write_operation_log,
             open_log_folder,

@@ -15,11 +15,12 @@ interface OcrCardProps {
   pageIndex: number;
   dragListeners?: DraggableSyntheticListeners;
   onNavigate?: (direction: 'up' | 'down') => void;
+  onExtendSelection?: (direction: 'up' | 'down') => void;
   onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
 }
 
 export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
-  function OcrCard({ block, pageIndex, dragListeners, onNavigate, onSelect }, ref) {
+  function OcrCard({ block, pageIndex, dragListeners, onNavigate, onExtendSelection, onSelect }, ref) {
   // selectedIds全体ではなく、このブロックのisSelectedのみ購読（200回の再レンダリングを防ぐ）
   const isSelected = usePecoStore(state => state.selectedIds.has(block.id));
   // 細粒度selectorで購読: action参照は不変。
@@ -149,6 +150,14 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    const direction = e.key === 'ArrowDown' ? 'down' : e.key === 'ArrowUp' ? 'up' : null;
+    if (e.shiftKey && direction) {
+      if (!isComposingRef.current && onExtendSelection) {
+        e.preventDefault();
+        onExtendSelection(direction);
+      }
+      return;
+    }
     if (!onNavigate || !e.ctrlKey) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();

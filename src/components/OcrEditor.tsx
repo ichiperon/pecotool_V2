@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -158,6 +158,63 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     }, 50);
   };
 
+  const handleExtendSelection = (currentBlockId: string, direction: 'up' | 'down') => {
+    const currentIndex = filteredBlocks.findIndex(b => b.id === currentBlockId);
+    if (currentIndex === -1) return;
+
+    const nextIndex = direction === 'down' ? currentIndex + 1 : currentIndex - 1;
+    if (nextIndex < 0 || nextIndex >= filteredBlocks.length) return;
+
+    const currentBlock = filteredBlocks[currentIndex];
+    const nextBlock = filteredBlocks[nextIndex];
+    const newSet = new Set(selectedIds);
+    newSet.add(currentBlock.id);
+    newSet.delete(nextBlock.id);
+    newSet.add(nextBlock.id);
+    setSelectedIds(Array.from(newSet));
+
+    setTimeout(() => {
+      cardRefs.current[nextIndex]?.focusContent();
+    }, 50);
+  };
+
+  useEffect(() => {
+    const getAnchorId = () => {
+      if (lastSelectedId) return lastSelectedId;
+      if (selectedIds.size === 1) return Array.from(selectedIds)[0];
+      return null;
+    };
+
+    const isEditableTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      return target.tagName === 'INPUT'
+        || target.tagName === 'TEXTAREA'
+        || target.isContentEditable
+        || !!target.closest('[contenteditable="true"]');
+    };
+
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      if (!event.ctrlKey && !event.shiftKey) return;
+      if (isEditableTarget(event.target)) return;
+
+      const anchorId = getAnchorId();
+      if (!anchorId) return;
+
+      event.preventDefault();
+      const direction = event.key === 'ArrowDown' ? 'down' : 'up';
+
+      if (event.shiftKey) {
+        handleExtendSelection(anchorId, direction);
+      } else {
+        handleNavigate(anchorId, direction);
+      }
+    };
+
+    window.addEventListener('keydown', handleWindowKeyDown);
+    return () => window.removeEventListener('keydown', handleWindowKeyDown);
+  }, [handleNavigate, handleExtendSelection, lastSelectedId, selectedIds]);
+
   const handleSelect = (id: string, ctrl: boolean, shift: boolean) => {
     if (shift && lastSelectedId) {
       const startIdx = filteredBlocks.findIndex(b => b.id === lastSelectedId);
@@ -227,6 +284,7 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
                     block={block}
                     pageIndex={currentPageIndex}
                     onNavigate={(dir) => handleNavigate(block.id, dir)}
+                    onExtendSelection={(dir) => handleExtendSelection(block.id, dir)}
                     onSelect={handleSelect}
                   />
                 ))}

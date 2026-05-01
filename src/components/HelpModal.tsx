@@ -32,10 +32,12 @@ export function HelpModal({ helpModal, onClose }: Props) {
               <div className="help-item"><kbd>Delete</kbd><span>選択BBを削除（非編集時）</span></div>
               <div className="help-divider" />
               <div className="modal-section-title">BB操作</div>
-              <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F10</kbd><span>BB追加モード</span></div>
-              <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F11</kbd><span>BB分割モード</span></div>
-              <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F12</kbd><span>選択BBをグループ化</span></div>
+              <div className="help-item"><kbd>Ctrl</kbd>+<kbd>B</kbd><span>BB追加モード</span></div>
+              <div className="help-item"><kbd>Ctrl</kbd>+<kbd>X</kbd><span>BB分割モード</span></div>
+              <div className="help-item"><kbd>Ctrl</kbd>+<kbd>G</kbd><span>選択BBをグループ化</span></div>
               <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd><span>選択BB内のスペース削除</span></div>
+              <div className="help-item"><kbd>Ctrl</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd><span>BBカード間を移動</span></div>
+              <div className="help-item"><kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd><span>隣接OCR/BBカードを選択に追加</span></div>
               <div className="help-divider" />
               <div className="modal-section-title">表示</div>
               <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>画面にフィット</span></div>
@@ -62,15 +64,16 @@ export function HelpModal({ helpModal, onClose }: Props) {
                   <li>PDFビューまたは右パネルのBBをクリックで選択</li>
                   <li><kbd>Ctrl</kbd>+クリック で複数選択</li>
                   <li><kbd>Shift</kbd>+クリック で範囲選択（右パネルのみ）</li>
+                  <li><kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> で隣接OCR/BBカードを選択に追加</li>
                 </ul>
               </div>
               <div className="usage-section">
                 <div className="usage-title">BB操作</div>
                 <ul className="usage-list">
-                  <li><b>追加：</b> Ctrl+F10 で追加モード → PDFビュー上をドラッグ</li>
+                  <li><b>追加：</b> Ctrl+B で追加モード → PDFビュー上をドラッグ</li>
                   <li><b>移動・リサイズ：</b> 選択後にPDFビュー上でドラッグ</li>
-                  <li><b>分割：</b> Ctrl+F11 で分割モード → BBをクリック</li>
-                  <li><b>グループ化：</b> 複数選択して Ctrl+F12</li>
+                  <li><b>分割：</b> Ctrl+X で分割モード → BBをクリック</li>
+                  <li><b>グループ化：</b> 複数選択して Ctrl+G</li>
                   <li><b>並び順修正：</b> <kbd>Alt</kbd>+ドラッグで位置を移動して序列を更新</li>
                 </ul>
               </div>
@@ -79,7 +82,7 @@ export function HelpModal({ helpModal, onClose }: Props) {
                 <ul className="usage-list">
                   <li>右パネルのBBカードをクリックして直接入力</li>
                   <li>OCRの誤認識スペースは「スペース削除」ボタンまたは Ctrl+Shift+Space で一括削除</li>
-                  <li>Ctrl+↑↓ でBB間を移動</li>
+                  <li><kbd>Ctrl</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> でBBカード間を移動</li>
                 </ul>
               </div>
             </div>

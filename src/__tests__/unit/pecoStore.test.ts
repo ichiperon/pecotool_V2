@@ -487,6 +487,49 @@ describe('pecoStore', () => {
       expect(blocks[0].bbox.y).toBe(70)
     })
 
+    it('targetCenter 指定の paste は単一ブロックの中心を指定位置に合わせる', () => {
+      const b1 = makeBlock({ bbox: { x: 50, y: 60, width: 100, height: 20 } })
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [b1],
+      })
+
+      usePecoStore.getState().pasteClipboard({ x: 200, y: 300 })
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].bbox.x).toBe(150)
+      expect(blocks[0].bbox.y).toBe(290)
+      expect(blocks[0].bbox.x + blocks[0].bbox.width / 2).toBe(200)
+      expect(blocks[0].bbox.y + blocks[0].bbox.height / 2).toBe(300)
+      expect(usePecoStore.getState().selectedIds).toEqual(new Set([blocks[0].id]))
+    })
+
+    it('targetCenter 指定の paste は複数ブロックの相対位置を保ってグループ中心を合わせる', () => {
+      const b1 = makeBlock({ id: 'clip-1', bbox: { x: 10, y: 20, width: 30, height: 10 } })
+      const b2 = makeBlock({ id: 'clip-2', bbox: { x: 70, y: 100, width: 20, height: 40 } })
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [b1, b2],
+      })
+
+      usePecoStore.getState().pasteClipboard({ x: 200, y: 300 })
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].bbox.x).toBe(160)
+      expect(blocks[0].bbox.y).toBe(240)
+      expect(blocks[1].bbox.x).toBe(220)
+      expect(blocks[1].bbox.y).toBe(320)
+      expect(blocks[1].bbox.x - blocks[0].bbox.x).toBe(b2.bbox.x - b1.bbox.x)
+      expect(blocks[1].bbox.y - blocks[0].bbox.y).toBe(b2.bbox.y - b1.bbox.y)
+      expect((blocks[0].bbox.x + blocks[1].bbox.x + blocks[1].bbox.width) / 2).toBe(200)
+      expect((blocks[0].bbox.y + blocks[1].bbox.y + blocks[1].bbox.height) / 2).toBe(300)
+      expect(usePecoStore.getState().selectedIds).toEqual(new Set(blocks.map(b => b.id)))
+    })
+
     it('U-PS-41: paste で isNew=true, isDirty=true が設定される', () => {
       const b1 = makeBlock({ isNew: false, isDirty: false })
       const page = makePage({ textBlocks: [] })

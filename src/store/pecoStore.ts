@@ -66,7 +66,7 @@ interface PecoState {
   setSelectedIds: (ids: string[]) => void;
   clearSelection: () => void;
   copySelected: () => void;
-  pasteClipboard: () => void;
+  pasteClipboard: (targetCenter?: { x: number; y: number }) => void;
   pushAction: (action: Action) => void;
   undo: () => void;
   redo: () => void;
@@ -324,7 +324,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     set({ clipboard: selected.map(b => ({ ...b })) });
   },
 
-  pasteClipboard: () => {
+  pasteClipboard: (targetCenter) => {
     const { document, currentPageIndex, clipboard, updatePageData } = get();
     if (!document || clipboard.length === 0) return;
     const page = document.pages.get(currentPageIndex);
@@ -332,14 +332,24 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     const newBlocks = [...page.textBlocks];
     const pastedIds = new Set<string>();
+    let offsetX = 10;
+    let offsetY = 10;
+
+    if (targetCenter) {
+      const minX = Math.min(...clipboard.map(b => b.bbox.x));
+      const minY = Math.min(...clipboard.map(b => b.bbox.y));
+      const maxX = Math.max(...clipboard.map(b => b.bbox.x + b.bbox.width));
+      const maxY = Math.max(...clipboard.map(b => b.bbox.y + b.bbox.height));
+      offsetX = targetCenter.x - (minX + maxX) / 2;
+      offsetY = targetCenter.y - (minY + maxY) / 2;
+    }
 
     clipboard.forEach((b) => {
       const newId = crypto.randomUUID();
       const newBlock: TextBlock = {
         ...b,
         id: newId,
-        // Slightly offset pasted blocks
-        bbox: { ...b.bbox, x: b.bbox.x + 10, y: b.bbox.y + 10 },
+        bbox: { ...b.bbox, x: b.bbox.x + offsetX, y: b.bbox.y + offsetY },
         order: newBlocks.length,
         isNew: true,
         isDirty: true
