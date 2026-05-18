@@ -145,7 +145,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       const h = block.bbox.height * scale;
 
       if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
-        if ((mods.ctrlKey || mods.metaKey) && selectedIds.has(block.id)) {
+        if ((mods.ctrlKey || mods.metaKey || mods.shiftKey) && selectedIds.has(block.id)) {
           toggleSelection(block.id, true);
           return true;
         }

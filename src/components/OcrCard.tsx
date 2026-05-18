@@ -131,6 +131,9 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    // Issue #45: OcrCard 上の右クリックは App.tsx の onContextMenu に伝播させない
+    // (背後の HelpMenu が開いてしまうのを防ぐ)
+    e.stopPropagation();
     if (!isSelected) {
       toggleSelection(block.id, false);
     }

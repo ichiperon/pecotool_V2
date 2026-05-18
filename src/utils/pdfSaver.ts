@@ -7,7 +7,7 @@ import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import { deflate, inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
-import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
+import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import type {
   SavePdfSource,
@@ -583,6 +583,10 @@ export async function buildPdfDocument(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
+  // 修正 (#30): Catalog の /Version を消す。Acrobat は header と Catalog /Version の
+  // 最大値で実効バージョンを判定するため、header だけ 1.6 に戻しても Catalog の
+  // /Version 1.7 が残っていると Acrobat 7 では開けない。restorePdfVersion 前に呼ぶ。
+  if (originalVersion) stripCatalogVersion(pdfDoc);
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
   // save() 全書き換え経路。pdf-lib は streaming serializer で、ベンチ実測では
   // 100MB PDF でも 91ms で完了する (disk write は別段の writeFileChunked で処理)。

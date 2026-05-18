@@ -347,6 +347,8 @@ function App() {
   useEffect(() => {
     if (!isSaving) return;
     const blockKeys = (e: KeyboardEvent) => {
+      // Issue #47: 保存中でも Esc は通す (モーダル/ダイアログから抜けられないと UX が詰む)
+      if (e.key === 'Escape') return;
       e.preventDefault();
       e.stopPropagation();
     };
@@ -405,7 +407,12 @@ function App() {
   return (
     <div
       className="app-container"
-      onContextMenu={(e) => { e.preventDefault(); setHelpMenu({ x: e.clientX, y: e.clientY, visible: true }); }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        // Issue #45: モーダル/ダイアログ表示中は背後に HelpMenu を重ねて開かない
+        if (helpModal || showOcrSettings || pendingBackups.length > 0) return;
+        setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
+      }}
       onClick={() => {
         if (helpMenu.visible) setHelpMenu({ ...helpMenu, visible: false });
         if (showSettingsDropdown) setShowSettingsDropdown(false);
@@ -613,7 +620,24 @@ function App() {
           </div>
         </div>
       )}
-      {notification && <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>{notification.message}</div>}
+      {notification && (
+        <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>
+          <span>{notification.message}</span>
+          {notification.action && (
+            <button
+              type="button"
+              className="toast-action-btn"
+              onClick={() => {
+                const action = notification.action;
+                setNotification(null);
+                action?.onClick();
+              }}
+            >
+              {notification.action.label}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

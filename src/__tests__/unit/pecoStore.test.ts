@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { usePecoStore, waitForPendingIdbSaves } from '../../store/pecoStore'
+import { usePecoStore, waitForPendingIdbSaves, selectCurrentPageTextBlocks } from '../../store/pecoStore'
 import * as pdfLoader from '../../utils/pdfLoader'
 import type { PecoDocument, PageData, Action, TextBlock } from '../../types'
 
@@ -48,7 +48,6 @@ function makeDoc(pages: Map<number, PageData> = new Map([[0, makePage()]])): Pec
 
 const INITIAL_STATE = {
   document:         null,
-  originalBytes:    null,
   thumbnails:       new Map(),
   currentPageIndex: 0,
   zoom:             100,
@@ -1047,6 +1046,47 @@ describe('pecoStore', () => {
       resolveSave()
       await wait
       expect(order).toEqual(['resolved-immediately', 'wait'])
+    })
+  })
+
+  // ── issue #22: selectCurrentPageTextBlocks セレクタ ─────────
+  describe('issue #22: selectCurrentPageTextBlocks セレクタ', () => {
+    it('textBlocks を変更しないフィールド更新 (isDirty / thumbnail / isTextExtracted) では同一参照を返す', () => {
+      const blocks: TextBlock[] = [makeBlock({ id: 'b1' })]
+      const page = makePage({ textBlocks: blocks, isDirty: false, thumbnail: null, isTextExtracted: false })
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc, currentPageIndex: 0 })
+
+      const before = selectCurrentPageTextBlocks(usePecoStore.getState())
+      expect(before).toBe(blocks)
+
+      // updatePageData で textBlocks 以外を更新
+      usePecoStore.getState().updatePageData(0, { isDirty: true, thumbnail: 'data:foo', isTextExtracted: true }, false)
+
+      const after = selectCurrentPageTextBlocks(usePecoStore.getState())
+      // 参照が同じであることが overlay 再描画 effect が走らない根拠
+      expect(after).toBe(before)
+    })
+
+    it('textBlocks 自体を更新すると新しい参照を返す', () => {
+      const blocks: TextBlock[] = [makeBlock({ id: 'b1' })]
+      const page = makePage({ textBlocks: blocks })
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc, currentPageIndex: 0 })
+
+      const before = selectCurrentPageTextBlocks(usePecoStore.getState())
+
+      const newBlocks: TextBlock[] = [makeBlock({ id: 'b1' }), makeBlock({ id: 'b2' })]
+      usePecoStore.getState().updatePageData(0, { textBlocks: newBlocks }, false)
+
+      const after = selectCurrentPageTextBlocks(usePecoStore.getState())
+      expect(after).not.toBe(before)
+      expect(after).toBe(newBlocks)
+    })
+
+    it('document が null のときは null を返す', () => {
+      usePecoStore.setState({ document: null })
+      expect(selectCurrentPageTextBlocks(usePecoStore.getState())).toBeNull()
     })
   })
 

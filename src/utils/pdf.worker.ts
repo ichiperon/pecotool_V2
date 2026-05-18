@@ -6,7 +6,7 @@ import {
 import fontkit from '@pdf-lib/fontkit';
 import { deflate, inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
-import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
+import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import type {
   SavePdfWorkerRequest,
@@ -517,6 +517,8 @@ async function handleSavePdf(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
+  // 修正 (#30): Catalog の /Version を消す (詳細は pdfSaver.ts 側コメント参照)。
+  if (originalVersion) stripCatalogVersion(pdfDoc);
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
   // save() 全書き換え経路 (incremental の fontkit subset 破損を回避)。
   const saveOptions: Parameters<typeof pdfDoc.save>[0] = {

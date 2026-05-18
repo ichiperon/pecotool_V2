@@ -1,16 +1,26 @@
 import { useEffect, useState } from 'react';
 
-// sessionStorage ベースの最近開いたファイル一覧（機密漏えい回避のため localStorage を使わない）
+// localStorage ベースの最近開いたファイル一覧。
+// issue #37: 以前は sessionStorage を使っていたためアプリ再起動で常に空になり、
+// 「最近開いたファイル」機能が実質的に動作していなかった。永続化のため
+// localStorage に切替。useFileOperations.ts 側の add/remove も同じ key を見る。
 export function useRecentFiles() {
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
 
   useEffect(() => {
     const load = () => {
-      // 旧バージョンで localStorage に平文保存された Recent Files を削除（機密情報のため）
-      if (localStorage.getItem('peco-recent-files')) {
-        localStorage.removeItem('peco-recent-files');
+      // 旧版で sessionStorage 側に残っているエントリは、起動初回に
+      // localStorage 側へ移行 (空の場合のみ) して破棄する。常にどちらかが
+      // 真実とみなされる状態を作らないように、localStorage が空のときだけ移行。
+      const session = sessionStorage.getItem('peco-recent-files');
+      const local = localStorage.getItem('peco-recent-files');
+      if (session && !local) {
+        localStorage.setItem('peco-recent-files', session);
       }
-      const saved = sessionStorage.getItem('peco-recent-files');
+      if (session) {
+        sessionStorage.removeItem('peco-recent-files');
+      }
+      const saved = localStorage.getItem('peco-recent-files');
       if (!saved) {
         setRecentFiles([]);
         return;

@@ -29,20 +29,29 @@ export function usePdfViewerState(currentPageIndex: number) {
     }
   }, [pageWidth, pageHeight, setZoom]);
 
+  // ResizeObserver は ref ベースで一度だけ生成し、内部から常に最新の fitToScreen を呼ぶ。
+  // 以前は依存に fitToScreen / currentPageIndex / isAutoFit が入っており、
+  // ページ切替の都度 disconnect → 再生成されてブラウザ内部の Observer スロットを浪費していた。
+  // (issue #26)
+  const fitToScreenRef = useRef(fitToScreen);
+  const isAutoFitRef = useRef(isAutoFit);
+  useEffect(() => { fitToScreenRef.current = fitToScreen; }, [fitToScreen]);
+  useEffect(() => { isAutoFitRef.current = isAutoFit; }, [isAutoFit]);
+
   useEffect(() => {
-    if (!isAutoFit || !isFileLoaded) return;
+    if (!isFileLoaded) return;
     const container = viewerRef.current;
     if (!container) return;
     let rafId: number;
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
-        if (isAutoFit) fitToScreen(true);
+        if (isAutoFitRef.current) fitToScreenRef.current(true);
       });
     });
     observer.observe(container);
     return () => { observer.disconnect(); cancelAnimationFrame(rafId); };
-  }, [isFileLoaded, currentPageIndex, isAutoFit, fitToScreen]);
+  }, [isFileLoaded]);
 
   return {
     zoom,

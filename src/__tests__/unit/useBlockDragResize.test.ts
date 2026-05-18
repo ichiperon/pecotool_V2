@@ -159,6 +159,86 @@ describe('useBlockDragResize: page.isDirty 伝播', () => {
   });
 });
 
+describe('useBlockDragResize: 修飾キー付きクリック (#6)', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  // 回帰対象: 以前は tryStartDragOrResize の「既選択ブロックを個別解除する」分岐が
+  // ctrlKey/metaKey しか見ていなかったため、Shift+クリックで個別解除できなかった。
+  // 修正後は shiftKey も同じ「個別トグル」扱いになり、toggleSelection(id, true) が
+  // 呼ばれて既選択ブロックが外れる (move ドラッグに入らない)。
+  it('Shift+クリックで既選択ブロックは toggleSelection(id, true) で外れ、drag に入らない', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const toggleSelection = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]), // すでに選択済み
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection,
+        pushAction: vi.fn(),
+      })
+    );
+
+    let started = false;
+    act(() => {
+      started = result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: true }
+      );
+    });
+
+    // 個別解除分岐で return true (ハンドル済み) になる
+    expect(started).toBe(true);
+    // multi=true で toggleSelection が呼ばれる → store 側で既存セットから id を削除
+    expect(toggleSelection).toHaveBeenCalledWith(block.id, true);
+    // move ドラッグには入らない (dragMode は "none" のまま)
+    expect(result.current.dragMode).toBe('none');
+    expect(result.current.draggedId).toBeNull();
+    // ドラッグ用 page snapshot も走らない
+    expect(updatePageData).not.toHaveBeenCalled();
+  });
+
+  it('Ctrl+クリックで既選択ブロックも従来どおり外れる (回帰防止)', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const toggleSelection = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData: vi.fn(),
+        toggleSelection,
+        pushAction: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: true, metaKey: false, shiftKey: false }
+      );
+    });
+
+    expect(toggleSelection).toHaveBeenCalledWith(block.id, true);
+    expect(result.current.dragMode).toBe('none');
+  });
+});
+
 describe('useBlockDragResize: updateDragResize の RAF coalesce (perf #10)', () => {
   beforeEach(() => {
     installRafMock();
