@@ -143,7 +143,9 @@ export function useFileOperations(
   setIsLoadingFile?: (v: boolean) => void,
   onOpenComplete?: (doc: import('../types').PecoDocument) => void,
 ) {
-  const { setDocument, setDocumentFilePath, resetDirty } = usePecoStore();
+  const setDocument = usePecoStore((s) => s.setDocument);
+  const setDocumentFilePath = usePecoStore((s) => s.setDocumentFilePath);
+  const resetDirty = usePecoStore((s) => s.resetDirty);
   const isSavingRef = useRef(false);
 
   const addToRecent = (path: string) => {

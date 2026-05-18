@@ -467,3 +467,4 @@ export const selectCurrentPage = (s: PecoState) =>
 export const selectLastIdbError = (s: PecoState) => s.lastIdbError;
 export const selectCurrentPageProxy = (s: PecoState) => s.currentPageProxy;
 export const selectCurrentPageProxyKey = (s: PecoState) => s.currentPageProxyKey;
+export const selectHasDocument = (s: PecoState) => s.document !== null;

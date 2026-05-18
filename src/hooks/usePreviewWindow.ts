@@ -2,13 +2,12 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
 import { emit, listen } from '@tauri-apps/api/event';
-import { usePecoStore } from '../store/pecoStore';
+import { usePecoStore, selectCurrentPage } from '../store/pecoStore';
 import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
 
 export function usePreviewWindow() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const { document, currentPageIndex } = usePecoStore();
-  const currentPage = document?.pages.get(currentPageIndex);
+  const currentPage = usePecoStore(selectCurrentPage);
 
   const previewText = useMemo(() => {
     if (!currentPage?.textBlocks) return "";

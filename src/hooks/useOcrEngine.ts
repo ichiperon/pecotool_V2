@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ask, open } from '@tauri-apps/plugin-dialog';
 import { writeFile, remove } from '@tauri-apps/plugin-fs';
 import { tempDir, join } from '@tauri-apps/api/path';
-import { usePecoStore } from '../store/pecoStore';
+import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc } from '../utils/pdfLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
@@ -116,8 +116,11 @@ export function useOcrEngine(
   const cancelTokenRef = useRef(false);
   const isOcrRunningRef = useRef(false);
 
-  // 描画タイミングに依存しないよう、非同期処理では getState() で最新状態を取得する
-  const { document: reactDoc, currentPageIndex } = usePecoStore();
+  // 描画タイミングに依存しないよう、非同期処理では getState() で最新状態を取得する。
+  // Toolbar の disabled 制御に必要な「document の有無」と「現在ページ」だけ細粒度購読し、
+  // テキスト編集等の document 全体差し替えで本フックが再 render されないようにする。
+  const hasDocument = usePecoStore(selectHasDocument);
+  const currentPageIndex = usePecoStore(selectCurrentPageIndex);
 
   const isCurrentDocument = (filePath: string) =>
     usePecoStore.getState().document?.filePath === filePath;
@@ -420,7 +423,7 @@ export function useOcrEngine(
     }
   };
 
-  // reactDoc / currentPageIndex は Toolbar の disabled 制御用に返す
+  // hasDocument / currentPageIndex は Toolbar の disabled 制御用に返す
   return {
     isOcrRunning,
     ocrProgress,
@@ -429,7 +432,7 @@ export function useOcrEngine(
     runOcrFolder,
     cancelOcr,
     checkAndPromptOcrZero,
-    hasDocument: !!reactDoc,
+    hasDocument,
     currentPageIndex,
   };
 }
