@@ -90,6 +90,10 @@ export async function loadFallbackFontsLazy(): Promise<ArrayBuffer[] | null> {
 
   fallbackFontLoadPromise = (async () => {
     try {
+      // primary フォント (Meiryo / IPAmjMincho) を先に確定させてから fallback パスを決める。
+      // これを await しないと並列呼び出し時に primaryFontKind が null のままで
+      // Meiryo 環境でも IPAmjMincho.ttf が fallback に含まれない状態でキャッシュされる。
+      await loadFontLazy();
       const buffers: ArrayBuffer[] = [];
       for (const path of getFallbackFontPaths()) {
         const res = await fetch(path);
