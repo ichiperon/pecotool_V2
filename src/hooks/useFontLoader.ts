@@ -76,7 +76,15 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
       return fontBytesCache;
     } catch (err) {
       console.error('[loadFontLazy] Error loading font:', err);
-      fontLoadPromise = null; // リトライ可能にする
+      // issue #52: 失敗時にリトライ可能にするだけでなく、副作用で書かれた可能性のある
+      // 中間状態 (primaryFontKind, fallback cache) も完全に巻き戻す。
+      // そうしないと次回 loadFallbackFontsLazy が古い primaryFontKind を見て
+      // フォールバック配列を誤った組み合わせで固定化してしまう。
+      fontLoadPromise = null;
+      fontBytesCache = null;
+      primaryFontKind = null;
+      fallbackFontBytesCache = null;
+      fallbackFontLoadPromise = null;
       return null;
     }
   })();
