@@ -90,7 +90,7 @@ export function BackupRestoreDialog({
               color: '#6c7086', padding: '2px',
               opacity: isAnyProcessing ? 0.4 : 1,
             }}
-            title={isAnyProcessing ? '復元中は閉じられません' : '閉じる（破棄しない）'}
+            title={isAnyProcessing ? '復元中は閉じられません' : '保留する（次回起動時に再表示）'}
           >
             <X size={18} />
           </button>
@@ -165,7 +165,7 @@ export function BackupRestoreDialog({
           borderTop: '1px solid #3b3b52',
           fontSize: '11px', color: '#585b70', textAlign: 'right',
         }}>
-          ✕ で閉じても、バックアップファイルは削除されません
+          ✕ で閉じると次回起動時にも復元候補として表示されます
         </div>
     </Modal>
   );
