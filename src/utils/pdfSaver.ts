@@ -1,6 +1,7 @@
 import {
   PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState,
-  translate, scale, PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray,
+  translate, scale, concatTransformationMatrix,
+  PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray,
   PDFDict
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
@@ -228,14 +229,23 @@ function replacePageTextContentStreams(
 
   const resolved = context.lookup(rawContents);
   const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
-  const decodedStreams: Uint8Array[] = [];
+  type ResolvedEntry = { ref: unknown; stream: PDFRawStream; decoded: Uint8Array };
+  const resolvedEntries: ResolvedEntry[] = [];
 
+  // #78: 旧実装は途中 1 つの stream が decode 失敗すると early return しており、
+  // それより前に decodedStreams へ積まれた stream が merge/strip されないまま元のまま残り、
+  // 後段で部分書換 (B のみ書き換え + A,C は原本) になって Double OCR が部分残存していた。
+  // 修正後: decode 失敗の stream は個別 in-place で cleanContentStream を試み、
+  // 成功した stream のみ per-stream strip する。merge 経路は decode 失敗が無い場合のみ。
+  let anyDecodeFailed = false;
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
     if (!(stream instanceof PDFRawStream)) {
       // issue #44: 暗号化 PDF や indirect chain で stream が PDFRawStream 以外になる
       // ケースがあり、その場合 text strip が silent でスキップされて Double OCR が
       // 残る。原因切り分けのため警告を出す。
+      // #78: ここで return すると他 stream の strip もスキップされ部分書換になるが、
+      //       より厳しい原本維持を選ぶ (warning は維持)。
       console.warn('[pdfSaver] Skipping text strip: page content stream is not a PDFRawStream', {
         streamType: stream?.constructor?.name ?? typeof stream,
       });
@@ -243,13 +253,30 @@ function replacePageTextContentStreams(
     }
     const decoded = decodeStreamContents(stream);
     if (decoded === null) {
+      // この stream は decode 不能。in-place で個別 strip を試みる。
+      // 失敗時は何もしない (フィルタチェーン未対応等は元のまま残る) ので、他 stream への
+      // 影響は無い。merge 経路には進まないので anyDecodeFailed を立てる。
       cleanContentStream(stream);
-      return;
+      anyDecodeFailed = true;
+      continue;
     }
-    decodedStreams.push(decoded);
+    resolvedEntries.push({ ref: streamRef, stream, decoded });
   }
 
-  const merged = concatWithNewlines(decodedStreams);
+  // 1 つでも decode 失敗があれば merge 経路は取らない (array 構造を維持する必要がある)。
+  // 代わりに decode 成功 stream を個別に strip して in-place 書き戻す。
+  if (anyDecodeFailed) {
+    for (const entry of resolvedEntries) {
+      const cleaned = stripTextBlocks(entry.decoded);
+      if (bytesEqual(cleaned, entry.decoded)) continue;
+      entry.stream.updateContents(deflate(cleaned));
+      entry.stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+      entry.stream.dict.delete(PDFName.of('DecodeParms'));
+    }
+    return;
+  }
+
+  const merged = concatWithNewlines(resolvedEntries.map((e) => e.decoded));
   const cleaned = stripTextBlocks(merged);
   if (!bytesEqual(cleaned, merged)) {
     pageNode.set(contentsKey, context.register(context.flateStream(cleaned)));
@@ -258,6 +285,61 @@ function replacePageTextContentStreams(
       deleteIfUniqueRef(context, streamRef, contentRefCounts);
     }
   }
+}
+
+/**
+ * #71: 回転ページで OCR bbox (viewport-space, y-down) を正しく描画するため、
+ * 「viewport-aligned drawing frame」を PDF user space にマップする cm (concat matrix) を返す。
+ *
+ * - OCR / pdfjs が返す bbox は viewport 座標 (rotated screen, origin upper-left, y-down)。
+ * - pdfSaver は元々 translate(bbox.x, vh - bbox.y) を user-space と仮定して描画していた。
+ *   これは R=0 のときだけ偶然正しく、R≠0 では位置がページ外/対角へ飛んでいた (#50 regression)。
+ * - 修正: per-block で cm M を push し、その下で「viewport coords を user space と仮定した」
+ *   既存ロジックをそのまま動かす。M は /Rotate 適用時に正しい viewport 位置に着地するよう設計。
+ *
+ * 戻り値: cm operator 配列 (R=0 なら空配列)。pageW/pageH は page.getSize() の原 PDF 寸法。
+ *
+ * 導出: viewport(x_v, y_v) → user(u_x, u_y) を pdfjs convertToPdfPoint と同じ式に従う:
+ *   R=90  → user(y_v, x_v)
+ *   R=180 → user(pageW - x_v, y_v)
+ *   R=270 → user(pageH - y_v, pageW - x_v)
+ *
+ * これを translate(bbox.x, vh - bbox.y) の出力に M を掛けて満たすよう連立方程式を解いた結果:
+ *   R=90:  M = [0 1 -1 0 pageW 0]
+ *   R=180: M = [-1 0 0 -1 pageW pageH]
+ *   R=270: M = [0 -1 1 0 (pageH - pageW) pageW]
+ *
+ * 文字向きも M の linear 部分 + /Rotate の合成で R=0 と同じ「画面右=+x_text、画面上=+y_text」に
+ * なる (検証済み)。drawText の rotate 引数追加は不要。
+ */
+function getRotationCm(
+  rotation: number,
+  pageW: number,
+  pageH: number,
+) {
+  switch (rotation) {
+    case 0:
+      return [] as const;
+    case 90:
+      return [concatTransformationMatrix(0, 1, -1, 0, pageW, 0)] as const;
+    case 180:
+      return [concatTransformationMatrix(-1, 0, 0, -1, pageW, pageH)] as const;
+    case 270:
+      return [concatTransformationMatrix(0, -1, 1, 0, pageH - pageW, pageW)] as const;
+    default:
+      return [] as const;
+  }
+}
+
+/** /Rotate を 0..360 に正規化 (負値も対応) */
+function normalizeRotation(angle: number): number {
+  return ((Math.round(angle) % 360) + 360) % 360;
+}
+
+/** 回転後の viewport 寸法。R=90/270 で width/height swap。 */
+function getViewportSize(rotation: number, pageW: number, pageH: number): { vw: number; vh: number } {
+  if (rotation === 90 || rotation === 270) return { vw: pageH, vh: pageW };
+  return { vw: pageW, vh: pageH };
 }
 
 interface FontRun {
@@ -520,7 +602,14 @@ export async function buildPdfDocument(
     metaChanged = true;
 
     const page = pdfDoc.getPage(pageIndex);
-    const { height } = page.getSize();
+    const { width: pageW, height: pageH } = page.getSize();
+    // #71: bbox は OCR / 既存テキスト経由いずれも viewport 空間 (rotated screen, y-down)。
+    // pdfSaver は元々 R=0 を仮定して translate(bbox.x, pageH - bbox.y) していたため、
+    // R=90/180/270 では位置がページ外へ飛んでいた (#50 regression)。
+    // 修正方針: viewport 寸法 (vw/vh) を使い、rotation に応じた cm を per-block push する。
+    const rotation = normalizeRotation(page.getRotation().angle);
+    const { vh } = getViewportSize(rotation, pageW, pageH);
+    const rotationCm = getRotationCm(rotation, pageW, pageH);
 
     // --- Surgical Text Stripping ---
     pruneStalePecoToolResources(page.node as unknown as { Resources?: () => PDFDict | undefined });
@@ -554,22 +643,29 @@ export async function buildPdfDocument(
           pageIndex,
         );
         const { width: textWidth, height: textHeight } = measureRuns(runs, fontSize);
-        
+
         if (textWidth === 0 || textHeight === 0) {
           console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (zero font metrics) text="${block.text.slice(0, 20)}"`);
           continue;
         }
 
         if (block.writingMode === 'vertical') {
-          // 修正 (#23, #28): 縦書きは run ごとに pushGraphicsState / scale を切り替え、
-          // それぞれのフォントの heightAtSize / ascent でスケールと baselineX を算出する。
-          //  - sy: 全 run 共通 (bbox.height / totalTextWidth) — 縦方向の総スケール
-          //  - sx_run: 各 run の heightAtSize から算出。混在フォントでも縦幅にフィットする
-          //  - baselineX_run: ascent 比から導出 (Meiryo 0.2 マジックナンバーを廃止)
+          // 修正 (#23, #28, #75): 縦書きは run ごとに pushGraphicsState を切り替え、
+          // フォント別の ascent から baselineX を算出する (Meiryo 0.2 マジックナンバーを廃止)。
+          //  - sx_outer / sy_outer: ブロック全体で共通のスケール。Σ run advance = bbox.height。
+          //  - baselineX_run: 各 run の ascent/descent 比から導出
           //  - offsetInPage: ページ座標で累積する縦方向 advance
-          const sy = block.bbox.height / textWidth;
-          if (!isFinite(sy)) {
-            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sy=${sy}) text="${block.text.slice(0, 20)}"`);
+          //
+          // #75 修正: 旧実装は per-run sx_run (heightAtSize 別) + 共通 sy_outer の組み合わせで
+          // cm を発行していたため、混在フォントで heightAtSize の異なる run の glyph が
+          // 視覚的に揃わず "重なる/隙間ができる" バグがあった。
+          // 修正後: cm 内 scale を完全に共通化 (sx_outer = bbox.width / textHeight, sy_outer)。
+          // 全 run が同一スケールで描画され、advance は `widthOfTextAtSize * sy_outer` で一貫する。
+          // Σ widthOfTextAtSize = textWidth なので Σ advance = textWidth * sy_outer = bbox.height。
+          const sx_outer = block.bbox.width / textHeight;
+          const sy_outer = block.bbox.height / textWidth;
+          if (!isFinite(sx_outer) || !isFinite(sy_outer)) {
+            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx_outer} sy=${sy_outer}) text="${block.text.slice(0, 20)}"`);
             continue;
           }
           let offsetInPage = 0;
@@ -577,39 +673,44 @@ export async function buildPdfDocument(
           for (const run of runs) {
             const runHeight = run.font.heightAtSize(fontSize);
             if (runHeight === 0) continue;
-            const sx_run = block.bbox.width / runHeight;
-            if (!isFinite(sx_run)) {
-              console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped run (non-finite scale sx=${sx_run}) text="${run.text.slice(0, 20)}"`);
-              continue;
-            }
+            const runTextWidth = run.font.widthOfTextAtSize(run.text, fontSize);
+            if (runTextWidth === 0) continue;
             const runAscent = run.font.heightAtSize(fontSize, { descender: false });
             const descentRatio = (runHeight - runAscent) / runHeight;
             const baselineX_run = block.bbox.x + descentRatio * block.bbox.width;
-            const baselineY_run = height - block.bbox.y - offsetInPage;
+            const baselineY_run = vh - block.bbox.y - offsetInPage;
             setPageFontWithStableKey(page, run.font, pageFontKeys);
             page.pushOperators(
               pushGraphicsState(),
+              ...rotationCm,
               translate(baselineX_run, baselineY_run),
-              scale(sx_run, sy),
+              scale(sx_outer, sy_outer),
             );
             page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
             page.pushOperators(popGraphicsState());
-            offsetInPage += run.font.widthOfTextAtSize(run.text, fontSize) * sy;
+            // #75: per-run advance は runTextWidth * sy_outer (共通スケール)。
+            // Σ advance = textWidth * sy_outer = bbox.height で完全に bbox を埋める。
+            offsetInPage += runTextWidth * sy_outer;
             renderedAny = true;
           }
           if (!renderedAny) continue;
         } else {
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
-          
+
           if (!isFinite(sx) || !isFinite(sy)) {
             console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx} sy=${sy}) text="${block.text.slice(0, 20)}"`);
             continue;
           }
 
-          const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
+          const baselineY = vh - block.bbox.y - textHeight * sy * 0.8;
 
-          page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
+          page.pushOperators(
+            pushGraphicsState(),
+            ...rotationCm,
+            translate(block.bbox.x, baselineY),
+            scale(sx, sy),
+          );
           let offset = 0;
           for (const run of runs) {
             setPageFontWithStableKey(page, run.font, pageFontKeys);

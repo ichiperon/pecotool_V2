@@ -471,22 +471,15 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
   });
 
   // ─────────────────────────────────────────────────────────────
-  // #50: /Rotate 90 ページで OCR の BB が PDF user space に変換される
+  // #71 (regression of #50): /Rotate 90 ページの OCR 結果 BB は viewport 空間のまま保持する
+  // (旧 #50 では useOcrEngine 側で PDF user space に変換していたが、pdfSaver が viewport-y を
+  //  仮定して描画していたため R=90/180/270 で位置がページ外へ飛んでいた。
+  //  修正後: bbox は viewport のまま、pdfSaver が page.getRotation() を読んで cm で補正。)
   // ─────────────────────────────────────────────────────────────
-  it('issue #50: /Rotate 90 ページの OCR 結果 BB は viewport.convertToPdfPoint で PDF user space に変換される', async () => {
-    // PDF user space: 595 x 842 (rotation=0 時の縦長 A4)
-    // /Rotate 90 → 画面 (scale=2.0) は 1684 x 1190 で render される
-    // Rust 側は画像ピクセルを render_scale で割って返すため、
-    // 戻り値の BB は (scale=1.0 の) viewport 座標系 = 842 x 595
-    //
+  it('issue #71: /Rotate 90 ページの OCR 結果 BB は viewport 空間のまま store に入る', async () => {
     // 入力 BB (rotated viewport, scale=1.0): x=10, y=10, w=20, h=30
-    // 4 隅:  (10,10), (30,10), (10,40), (30,40)
-    // rotation=90 の convertToPdfPoint:  (xv,yv) -> (yv, xv)
-    //   (10,10) → (10,10)
-    //   (30,10) → (10,30)
-    //   (10,40) → (40,10)
-    //   (30,40) → (40,30)
-    // PDF user space AABB: x in [10,40], y in [10,30] → x=10, y=10, w=30, h=20
+    // 修正前: convertToPdfPoint で PDF user space に変換 → x=10, y=10, w=30, h=20
+    // 修正後: viewport 座標のまま → x=10, y=10, w=20, h=30
     const rotated = makeMockPdf(1, { width: 595, height: 842, rotation: 90 });
     h.openFreshPdfDocMock.mockResolvedValue(rotated);
     h.getCachedPageProxyMock.mockResolvedValue(makeMockPage(595, 842, 90));
@@ -511,24 +504,17 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     const p0 = usePecoStore.getState().document!.pages.get(0)!;
     expect(p0.textBlocks).toHaveLength(1);
     const bb = p0.textBlocks[0].bbox;
-    // x,y は 4 隅変換後の min。w,h は max-min。
+    // viewport 座標そのまま (w/h スワップなし)
     expect(bb.x).toBeCloseTo(10, 6);
     expect(bb.y).toBeCloseTo(10, 6);
-    expect(bb.width).toBeCloseTo(30, 6);
-    expect(bb.height).toBeCloseTo(20, 6);
-    // ページ寸法 (PDF user space) の範囲内に収まっていることが #50 の主目的
-    expect(bb.x).toBeGreaterThanOrEqual(0);
-    expect(bb.y).toBeGreaterThanOrEqual(0);
-    expect(bb.x + bb.width).toBeLessThanOrEqual(595);
-    expect(bb.y + bb.height).toBeLessThanOrEqual(842);
+    expect(bb.width).toBeCloseTo(20, 6);
+    expect(bb.height).toBeCloseTo(30, 6);
   });
 
-  it('issue #50: /Rotate 0 ページの OCR 結果 BB は y 軸が反転され PDF user space に変換される', async () => {
-    // 回転なしでも viewport y は上が 0、PDF user space y は下が 0 なので y 軸反転だけ起きる。
-    // 入力 BB (viewport): x=10, y=10, w=20, h=30  (4 隅: (10,10) (30,10) (10,40) (30,40))
-    // rotation=0 の convertToPdfPoint: (x,y) -> (x, 842 - y)
-    //   (10,10) → (10,832), (30,10) → (30,832), (10,40) → (10,802), (30,40) → (30,802)
-    // PDF user space AABB: x∈[10,30], y∈[802,832] → x=10, y=802, w=20, h=30
+  it('issue #71: /Rotate 0 ページの OCR 結果 BB も viewport 空間のまま保持する (y 軸反転なし)', async () => {
+    // 入力 BB (viewport): x=10, y=10, w=20, h=30
+    // 修正前: y 軸反転で y=802 へ変換
+    // 修正後: viewport 座標のまま (y=10)
     const unrotated = makeMockPdf(1, { width: 595, height: 842, rotation: 0 });
     h.openFreshPdfDocMock.mockResolvedValue(unrotated);
 
@@ -551,7 +537,7 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
 
     const bb = usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].bbox;
     expect(bb.x).toBeCloseTo(10, 6);
-    expect(bb.y).toBeCloseTo(802, 6);
+    expect(bb.y).toBeCloseTo(10, 6);
     expect(bb.width).toBeCloseTo(20, 6);
     expect(bb.height).toBeCloseTo(30, 6);
   });

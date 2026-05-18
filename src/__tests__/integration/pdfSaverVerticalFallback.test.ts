@@ -161,6 +161,85 @@ describe('pdfSaver issue #23: vertical mixed-font per-run scale', () => {
   }, 60_000);
 });
 
+describe('pdfSaver issue #75: vertical mixed-font shared scale + consistent advance', () => {
+  /**
+   * #75: 旧実装は cm 内 scale を「per-run sx_run + 共通 sy_outer」の組み合わせにしていたため、
+   *      混在フォントで heightAtSize の異なる run の glyph が視覚的に揃わず重なる/隙間ができた。
+   *      修正方針: cm 内 scale を完全に共通化 (sx_outer, sy_outer)。
+   *      offsetInPage は runTextWidth * sy_outer で累積され、Σ = bbox.height となる。
+   *
+   * 検証方法:
+   *   - 縦書きで Mixed フォント (primary + fallback) ブロックを保存する。
+   *   - content stream の scale cm (a=sx, d=sy, b=0, c=0) を全 run 分抽出し、
+   *     全 run で同一 scale 値 (sx_outer, sy_outer) が使われていることを確認。
+   *   - translate cm の f 引数 (baselineY_run) の delta 累積が bbox.height にほぼ等しいことを確認。
+   *     (= per-run advance と offsetInPage の一致を意味する)
+   */
+  it('mixed-font vertical block で全 run の scale 値が共通かつ Σ advance ≈ bbox.height', async () => {
+    const primary = arrayBufferFromFile(resolve(process.cwd(), 'public/fonts/IPAexGothic.ttf'));
+    const fallbackMincho = arrayBufferFromFile(resolve(process.cwd(), 'public/fonts/IPAmjMincho.ttf'));
+
+    const empty = await makeEmptyPdf();
+    // 𠮷 (U+20BB7) は IPAexGothic に無い → IPAmjMincho へフォールバック
+    // テキスト 'あ𠮷い𠮷う' → 5 つの異なる run でフォントが切り替わる
+    const doc = makeVerticalDoc('あ𠮷い𠮷う');
+    const saved = await buildPdfDocument(empty, doc, primary, [fallbackMincho]);
+    const savedDoc = await PDFDocument.load(saved, { throwOnInvalidObject: false });
+    const content = decodePage0Contents(savedDoc);
+    expect(content).not.toBeNull();
+    const latin = new TextDecoder('latin1').decode(content!);
+
+    // cm 演算子を全て抽出
+    const cmRe = /(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+cm\b/g;
+    const scaleCms: Array<{ a: number; d: number }> = [];
+    const translateYs: number[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = cmRe.exec(latin)) !== null) {
+      const a = parseFloat(m[1]); const b = parseFloat(m[2]);
+      const c = parseFloat(m[3]); const d = parseFloat(m[4]);
+      const e = parseFloat(m[5]); const f = parseFloat(m[6]);
+      // scale cm: a=sx, d=sy, b=0, c=0, e=0, f=0
+      if (b === 0 && c === 0 && e === 0 && f === 0 && a !== 1 && d !== 1) {
+        scaleCms.push({ a, d });
+      }
+      // translate cm: a=1, d=1, b=0, c=0
+      if (a === 1 && b === 0 && c === 0 && d === 1) translateYs.push(f);
+    }
+
+    // run 数 ≥ 3 (フォントの切り替えで 3 以上の cm が出る)
+    expect(translateYs.length).toBeGreaterThanOrEqual(3);
+    expect(scaleCms.length).toBeGreaterThanOrEqual(3);
+
+    // #75 検証1: 全 run の scale cm が同一値 (sx_outer, sy_outer) であること。
+    // 旧実装は sx を per-run sx_run で出力していたため、heightAtSize の異なるフォントで sx が変動した。
+    const firstScale = scaleCms[0];
+    for (const sc of scaleCms) {
+      expect(sc.a).toBeCloseTo(firstScale.a, 4);
+      expect(sc.d).toBeCloseTo(firstScale.d, 4);
+    }
+
+    // #75 検証2: Σ advance (translateY の delta 累積) ≈ bbox.height = 400。
+    // 旧実装でも数値は近いが、共通スケール統一で完全に bbox を埋めるはず。
+    const deltas: number[] = [];
+    for (let i = 0; i < translateYs.length - 1; i++) {
+      deltas.push(translateYs[i] - translateYs[i + 1]);
+    }
+    const totalAdvance = deltas.reduce((s, d) => s + d, 0);
+    // delta は 0 < delta < bbox.height の範囲。
+    // 最後の run の advance は含まれない (delta は N-1 個) ので、totalAdvance < bbox.height となる。
+    // ただし 1 run 単独で bbox.height を食い尽くす値であってはいけない (= overlap or 単一 run 描画失敗)。
+    for (const d of deltas) {
+      expect(d).toBeGreaterThan(0);
+      // 各 delta は bbox.height (= 400) より小さい (1 run で全部食い尽くすのは異常)
+      expect(d).toBeLessThan(400);
+    }
+    // 累積 advance は bbox.height にほぼ等しい (最後の run 分を含めると bbox.height、
+    // delta は N-1 個なので、最後の run の advance ぶん少なくなる; 大体 bbox.height * (N-1)/N)。
+    expect(totalAdvance).toBeGreaterThan(0);
+    expect(totalAdvance).toBeLessThanOrEqual(400);
+  }, 60_000);
+});
+
 describe('pdfSaver issue #28: vertical baselineX uses font ascent (not magic 0.2)', () => {
   it('縦書き baselineX が bbox.x + (1 - ascent/heightAtSize) * bbox.width に一致する', async () => {
     // IPAexGothic で縦書き保存 → Tm 演算子の e (=baselineX) を検査

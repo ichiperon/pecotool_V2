@@ -6,7 +6,7 @@ import { writeFile, remove } from '@tauri-apps/plugin-fs';
 import { tempDir, join } from '@tauri-apps/api/path';
 import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
-import { TextBlock, OcrResult, OcrResultBlock, PecoDocument, BoundingBox } from '../types';
+import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
 import { logger } from '../utils/logger';
@@ -18,13 +18,19 @@ const RENDER_SCALE = 2.0;
  * Render a page from an isolated PDF document (not the shared LRU cache)
  * so it never conflicts with PdfCanvas's concurrent render on the same proxy.
  *
- * 戻り値: (テンポラリ画像パス, scale=1.0 の rotation 適用済み viewport)。
- * viewport は OCR 結果 BB の PDF user space 変換 (#50) に使用する。
+ * 戻り値: テンポラリ画像パス。
+ *
+ * #71 修正: 以前は scale=1.0 viewport を返し、OCR の bbox を
+ *   convertViewportBBoxToPdfUserSpace で PDF user space に変換していた。
+ *   しかし pdfSaver 側は bbox を viewport-y (top-down) と仮定して描画していたため、
+ *   R=0 では偶然キャンセルされ、R=90/180/270 では位置がページ外へ飛んでいた。
+ *   修正後: OCR の bbox は viewport 空間のまま store に入れ、pdfSaver が
+ *   page.getRotation() を読んで cm で位置補正する設計に統一した。
  */
 async function renderPageToTempFile(
   ocrPdf: pdfjsLib.PDFDocumentProxy,
   pageIndex: number,
-): Promise<{ tempPath: string; unscaledViewport: pdfjsLib.PageViewport }> {
+): Promise<{ tempPath: string }> {
   const page = await ocrPdf.getPage(pageIndex + 1);
   const canvas = document.createElement('canvas');
   try {
@@ -45,10 +51,7 @@ async function renderPageToTempFile(
     const fileName = `peco_ocr_${pageIndex}_${Date.now()}.png`;
     const tempPath = await join(tmp, fileName);
     await writeFile(tempPath, bytes);
-    // pdfSaver は PDF user space で bbox を扱うため、render scale=1.0 ベースの viewport を返す。
-    // rotation はそのまま継承される (scale を変えても /Rotate 情報は同一)。
-    const unscaledViewport = page.getViewport({ scale: 1.0 });
-    return { tempPath, unscaledViewport };
+    return { tempPath };
   } finally {
     canvas.width = 0;
     canvas.height = 0;
@@ -56,59 +59,20 @@ async function renderPageToTempFile(
   }
 }
 
-/**
- * Rust 側から返ってくる OCR BB は「画像ピクセルを render_scale で割った値」=
- * `viewport.getViewport({ scale: 1.0 })` のスクリーン座標系（/Rotate 適用後）。
- * pdfSaver は PDF user space で bbox を扱うため、回転ページではここで変換しないと
- * 描画位置がページ外へ飛ぶ (#50)。
- *
- * 4 隅を `viewport.convertToPdfPoint()` で PDF user space に戻し、
- * 軸整列 (axis-aligned) bbox を再構成する。
- */
-function convertViewportBBoxToPdfUserSpace(
-  bbox: BoundingBox,
-  viewport: pdfjsLib.PageViewport,
-): BoundingBox {
-  // 回転なしならスクリーン座標と PDF user space は y 軸方向だけ反転する関係なので
-  // convertToPdfPoint を通せば自動的に正しく変換される。
-  // 4 隅を変換してから min/max を取ることで回転後も AABB を維持できる。
-  const corners: Array<[number, number]> = [
-    [bbox.x, bbox.y],
-    [bbox.x + bbox.width, bbox.y],
-    [bbox.x, bbox.y + bbox.height],
-    [bbox.x + bbox.width, bbox.y + bbox.height],
-  ];
-  const transformed = corners.map(([x, y]) => viewport.convertToPdfPoint(x, y));
-  const xs = transformed.map((p) => p[0]);
-  const ys = transformed.map((p) => p[1]);
-  const minX = Math.min(...xs);
-  const minY = Math.min(...ys);
-  const maxX = Math.max(...xs);
-  const maxY = Math.max(...ys);
-  return {
-    x: minX,
-    y: minY,
-    width: maxX - minX,
-    height: maxY - minY,
-  };
-}
-
 function toTextBlocks(
   blocks: OcrResultBlock[],
   settings: OcrSortSettings,
-  viewport?: pdfjsLib.PageViewport | null,
 ): TextBlock[] {
   const filtered = blocks.filter((b) => b.text.trim() !== '');
   const sorted = sortOcrBlocks(filtered, settings);
   return sorted.map((b, i) => {
-    // viewport が無い場合 (テスト等で省略) は変換せずそのまま使う。
-    // 通常経路では viewport は必ず渡される。
-    const bbox = viewport ? convertViewportBBoxToPdfUserSpace(b.bbox, viewport) : b.bbox;
+    // #71: bbox は viewport 空間 (rotated screen coords, y-down) のまま保持する。
+    // pdfSaver 側で page.getRotation() を読み、rotation に応じた cm で位置補正する。
     return {
       id: crypto.randomUUID(),
       text: b.text,
       originalText: b.text,
-      bbox,
+      bbox: b.bbox,
       writingMode: b.writingMode,
       order: i,
       isNew: true,
@@ -123,13 +87,11 @@ async function runOcrForPage(
   pageIndex: number,
   pageWidth: number,
   pageHeight: number,
-): Promise<{ result: OcrResult; unscaledViewport: pdfjsLib.PageViewport | null }> {
+): Promise<{ result: OcrResult }> {
   let tempPath: string | null = null;
-  let unscaledViewport: pdfjsLib.PageViewport | null = null;
   try {
     const rendered = await renderPageToTempFile(ocrPdf, pageIndex);
     tempPath = rendered.tempPath;
-    unscaledViewport = rendered.unscaledViewport;
     const raw = await invoke<string>('run_ocr', {
       imagePath: tempPath,
       pageWidth,
@@ -142,10 +104,9 @@ async function runOcrForPage(
     } catch (e) {
       return {
         result: { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` },
-        unscaledViewport,
       };
     }
-    return { result: parsed, unscaledViewport };
+    return { result: parsed };
   } finally {
     if (tempPath) {
       remove(tempPath).catch((e) => {
@@ -245,7 +206,7 @@ export function useOcrEngine(
         }
 
         try {
-          const { result, unscaledViewport } = await runOcrForPage(
+          const { result } = await runOcrForPage(
             ocrPdf,
             doc.filePath,
             i,
@@ -262,9 +223,9 @@ export function useOcrEngine(
             continue;
           }
           const settings = useOcrSettingsStore.getState();
-          // #50: 回転ページでは OCR の BB が rotated viewport 座標で返るため、
-          // PDF user space へ変換してから store に入れる。
-          const newBlocks = toTextBlocks(result.blocks ?? [], settings, unscaledViewport);
+          // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
+          // pdfSaver が page.getRotation() を読んで cm で位置補正する。
+          const newBlocks = toTextBlocks(result.blocks ?? [], settings);
           usePecoStore.getState().updatePageData(i, {
             textBlocks: newBlocks,
             isDirty: true,
@@ -331,7 +292,7 @@ export function useOcrEngine(
     try {
       if (!isCurrentDocument(doc.filePath)) return;
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
-      const { result, unscaledViewport } = await runOcrForPage(
+      const { result } = await runOcrForPage(
         ocrPdf,
         doc.filePath,
         pageIdx,
@@ -349,9 +310,9 @@ export function useOcrEngine(
       }
 
       const settings = useOcrSettingsStore.getState();
-      // #50: 回転ページでは OCR の BB が rotated viewport 座標で返るため、
-      // PDF user space へ変換してから store に入れる。
-      const newBlocks = toTextBlocks(result.blocks ?? [], settings, unscaledViewport);
+      // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
+      // pdfSaver が page.getRotation() を読んで cm で位置補正する。
+      const newBlocks = toTextBlocks(result.blocks ?? [], settings);
       usePecoStore.getState().updatePageData(pageIdx, {
         textBlocks: newBlocks,
         isDirty: true,

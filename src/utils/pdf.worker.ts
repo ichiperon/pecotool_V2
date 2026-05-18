@@ -1,6 +1,7 @@
 import {
   PDFDocument, StandardFonts, PDFName, PDFHexString, PDFString, PDFRawStream,
-  pushGraphicsState, popGraphicsState, translate, scale, degrees, PDFArray,
+  pushGraphicsState, popGraphicsState, translate, scale, degrees,
+  concatTransformationMatrix, PDFArray,
   PDFDict
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
@@ -217,8 +218,12 @@ function replacePageTextContentStreams(
 
   const resolved = context.lookup(rawContents);
   const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
-  const decodedStreams: Uint8Array[] = [];
+  type ResolvedEntry = { ref: unknown; stream: PDFRawStream; decoded: Uint8Array };
+  const resolvedEntries: ResolvedEntry[] = [];
 
+  // #78: 詳細コメントは pdfSaver.ts 側参照。
+  // decode 失敗があれば merge せず、成功 stream のみ in-place で個別 strip する。
+  let anyDecodeFailed = false;
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
     if (!(stream instanceof PDFRawStream)) {
@@ -231,12 +236,24 @@ function replacePageTextContentStreams(
     const decoded = decodeStreamContents(stream);
     if (decoded === null) {
       cleanContentStream(stream);
-      return;
+      anyDecodeFailed = true;
+      continue;
     }
-    decodedStreams.push(decoded);
+    resolvedEntries.push({ ref: streamRef, stream, decoded });
   }
 
-  const merged = concatWithNewlines(decodedStreams);
+  if (anyDecodeFailed) {
+    for (const entry of resolvedEntries) {
+      const cleaned = stripTextBlocks(entry.decoded);
+      if (bytesEqual(cleaned, entry.decoded)) continue;
+      entry.stream.updateContents(deflate(cleaned));
+      entry.stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+      entry.stream.dict.delete(PDFName.of('DecodeParms'));
+    }
+    return;
+  }
+
+  const merged = concatWithNewlines(resolvedEntries.map((e) => e.decoded));
   const cleaned = stripTextBlocks(merged);
   if (!bytesEqual(cleaned, merged)) {
     pageNode.set(contentsKey, context.register(context.flateStream(cleaned)));
@@ -250,6 +267,38 @@ function replacePageTextContentStreams(
 interface FontRun {
   text: string;
   font: PDFFont;
+}
+
+/**
+ * #71: 詳細コメントは pdfSaver.ts 側参照。
+ * 回転ページで viewport-space bbox を正しく描画するための cm (concat matrix) を返す。
+ */
+function getRotationCm(
+  rotation: number,
+  pageW: number,
+  pageH: number,
+) {
+  switch (rotation) {
+    case 0:
+      return [] as const;
+    case 90:
+      return [concatTransformationMatrix(0, 1, -1, 0, pageW, 0)] as const;
+    case 180:
+      return [concatTransformationMatrix(-1, 0, 0, -1, pageW, pageH)] as const;
+    case 270:
+      return [concatTransformationMatrix(0, -1, 1, 0, pageH - pageW, pageW)] as const;
+    default:
+      return [] as const;
+  }
+}
+
+function normalizeRotation(angle: number): number {
+  return ((Math.round(angle) % 360) + 360) % 360;
+}
+
+function getViewportSize(rotation: number, pageW: number, pageH: number): { vw: number; vh: number } {
+  if (rotation === 90 || rotation === 270) return { vw: pageH, vh: pageW };
+  return { vw: pageW, vh: pageH };
 }
 
 interface RepairTextBlock {
@@ -450,7 +499,11 @@ async function handleSavePdf(
     metaChanged = true;
 
     const page = pdfDoc.getPage(pageIndex);
-    const { height } = page.getSize();
+    const { width: pageW, height: pageH } = page.getSize();
+    // #71: 詳細コメントは pdfSaver.ts 側参照。viewport-space bbox を rotation 別 cm で描画する。
+    const rotation = normalizeRotation(page.getRotation().angle);
+    const { vh } = getViewportSize(rotation, pageW, pageH);
+    const rotationCm = getRotationCm(rotation, pageW, pageH);
 
     // --- Surgical Text Stripping ---
     pruneStalePecoToolResources(page.node as unknown as { Resources?: () => PDFDict | undefined });
@@ -487,34 +540,33 @@ async function handleSavePdf(
         if (textWidth === 0 || textHeight === 0) continue;
 
         if (block.writingMode === 'vertical') {
-          // 修正 (#23, #28): 縦書きは run ごとに pushGraphicsState / scale を切り替え、
-          // それぞれのフォントの heightAtSize / ascent でスケールと baselineX を算出する。
-          //  - sy: 全 run 共通 (bbox.height / totalTextWidth) — 縦方向の総スケール
-          //  - sx_run: 各 run の heightAtSize から算出。混在フォントでも縦幅にフィットする
-          //  - baselineX_run: ascent 比から導出 (Meiryo 0.2 マジックナンバーを廃止)
-          //  - offsetInPage: ページ座標で累積する縦方向 advance
-          const sy = block.bbox.height / textWidth;
-          if (!isFinite(sy)) continue;
+          // 修正 (#23, #28, #75): 詳細コメントは pdfSaver.ts 側参照。
+          // #75: cm 内 scale を共通化 (sx_outer, sy_outer)。advance は runTextWidth * sy_outer で
+          //      Σ = bbox.height となり完全に bbox を埋める。
+          const sx_outer = block.bbox.width / textHeight;
+          const sy_outer = block.bbox.height / textWidth;
+          if (!isFinite(sx_outer) || !isFinite(sy_outer)) continue;
           let offsetInPage = 0;
           let renderedAny = false;
           for (const run of runs) {
             const runHeight = run.font.heightAtSize(fontSize);
             if (runHeight === 0) continue;
-            const sx_run = block.bbox.width / runHeight;
-            if (!isFinite(sx_run)) continue;
+            const runTextWidth = run.font.widthOfTextAtSize(run.text, fontSize);
+            if (runTextWidth === 0) continue;
             const runAscent = run.font.heightAtSize(fontSize, { descender: false });
             const descentRatio = (runHeight - runAscent) / runHeight;
             const baselineX_run = block.bbox.x + descentRatio * block.bbox.width;
-            const baselineY_run = height - block.bbox.y - offsetInPage;
+            const baselineY_run = vh - block.bbox.y - offsetInPage;
             setPageFontWithStableKey(page, run.font, pageFontKeys);
             page.pushOperators(
               pushGraphicsState(),
+              ...rotationCm,
               translate(baselineX_run, baselineY_run),
-              scale(sx_run, sy),
+              scale(sx_outer, sy_outer),
             );
             page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
             page.pushOperators(popGraphicsState());
-            offsetInPage += run.font.widthOfTextAtSize(run.text, fontSize) * sy;
+            offsetInPage += runTextWidth * sy_outer;
             renderedAny = true;
           }
           if (!renderedAny) continue;
@@ -524,8 +576,13 @@ async function handleSavePdf(
 
           if (!isFinite(sx) || !isFinite(sy)) continue;
 
-          const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
-          page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
+          const baselineY = vh - block.bbox.y - textHeight * sy * 0.8;
+          page.pushOperators(
+            pushGraphicsState(),
+            ...rotationCm,
+            translate(block.bbox.x, baselineY),
+            scale(sx, sy),
+          );
           let offset = 0;
           for (const run of runs) {
             setPageFontWithStableKey(page, run.font, pageFontKeys);
