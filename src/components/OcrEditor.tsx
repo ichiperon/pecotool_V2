@@ -223,10 +223,25 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     }, 50);
   }, [filteredBlocks, selectedIds, setSelectedIds, focusBlockByIndex]);
 
+  // window keydown listener は ref パターンで mount 時 1 回だけ登録する。
+  // 以前は handleNavigate / handleExtendSelection / selectedIds / lastSelectedId 依存で
+  // テキスト1文字編集ごとに addEventListener / removeEventListener が走り GC 圧/CPU コスト
+  // が発生していた (issue #27)。
+  const handleNavigateRef = useRef(handleNavigate);
+  const handleExtendSelectionRef = useRef(handleExtendSelection);
+  const selectedIdsRef = useRef(selectedIds);
+  const lastSelectedIdRef = useRef(lastSelectedId);
+  useEffect(() => { handleNavigateRef.current = handleNavigate; }, [handleNavigate]);
+  useEffect(() => { handleExtendSelectionRef.current = handleExtendSelection; }, [handleExtendSelection]);
+  useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+  useEffect(() => { lastSelectedIdRef.current = lastSelectedId; }, [lastSelectedId]);
+
   useEffect(() => {
     const getAnchorId = () => {
-      if (lastSelectedId) return lastSelectedId;
-      if (selectedIds.size === 1) return Array.from(selectedIds)[0];
+      const lastId = lastSelectedIdRef.current;
+      const ids = selectedIdsRef.current;
+      if (lastId) return lastId;
+      if (ids.size === 1) return Array.from(ids)[0];
       return null;
     };
 
@@ -250,15 +265,15 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
       const direction = event.key === 'ArrowDown' ? 'down' : 'up';
 
       if (event.shiftKey) {
-        handleExtendSelection(anchorId, direction);
+        handleExtendSelectionRef.current(anchorId, direction);
       } else {
-        handleNavigate(anchorId, direction);
+        handleNavigateRef.current(anchorId, direction);
       }
     };
 
     window.addEventListener('keydown', handleWindowKeyDown);
     return () => window.removeEventListener('keydown', handleWindowKeyDown);
-  }, [handleNavigate, handleExtendSelection, lastSelectedId, selectedIds]);
+  }, []);
 
   const handleSelect = useCallback((id: string, ctrl: boolean, shift: boolean) => {
     if (shift && lastSelectedId) {

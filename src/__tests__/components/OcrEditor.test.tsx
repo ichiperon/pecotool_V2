@@ -599,4 +599,73 @@ describe('OcrEditor', () => {
     })
   })
 
+  // ── P-22: issue #27 グローバル keydown listener が毎レンダー再登録されない ──
+  describe('P-22 (issue #27): window keydown listener は再レンダーで再登録されない', () => {
+    it('テキスト編集等で再レンダーが起きても addEventListener("keydown", ...) は 1 回のみ', () => {
+      const addSpy = vi.spyOn(window, 'addEventListener')
+      const removeSpy = vi.spyOn(window, 'removeEventListener')
+      addSpy.mockClear()
+      removeSpy.mockClear()
+
+      setup()
+
+      // 初回 mount で 'keydown' の addEventListener が 1 回呼ばれる前提
+      const initialKeydownAdds = addSpy.mock.calls.filter(c => c[0] === 'keydown').length
+      expect(initialKeydownAdds).toBe(1)
+
+      // テキストブロックを編集して store 更新 → OcrEditor 再レンダー
+      act(() => {
+        const doc = usePecoStore.getState().document!
+        const page = doc.pages.get(0)!
+        const newBlocks = page.textBlocks.map((b, i) =>
+          i === 0 ? { ...b, text: 'edited' } : b
+        )
+        const newPages = new Map(doc.pages)
+        newPages.set(0, { ...page, textBlocks: newBlocks })
+        usePecoStore.setState({ document: { ...doc, pages: newPages } } as any)
+      })
+
+      // 選択も変える (これも以前は依存に入っていて再登録の引き金)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2']), lastSelectedId: 'b2' } as any)
+      })
+
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b3']), lastSelectedId: 'b3' } as any)
+      })
+
+      // 再レンダー後も 'keydown' の addEventListener 累計は変わらない
+      const finalKeydownAdds = addSpy.mock.calls.filter(c => c[0] === 'keydown').length
+      const finalKeydownRemoves = removeSpy.mock.calls.filter(c => c[0] === 'keydown').length
+      expect(finalKeydownAdds).toBe(initialKeydownAdds)
+      expect(finalKeydownRemoves).toBe(0)
+
+      addSpy.mockRestore()
+      removeSpy.mockRestore()
+    })
+
+    it('listener が ref 経由で最新の selectedIds / lastSelectedId を読む', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+
+      // 初期: 何も選択されていない
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(), lastSelectedId: null } as any)
+      })
+
+      // listener 登録後に selectedIds / lastSelectedId が変化しても、ref 経由で
+      // 最新値を読むので動作が壊れない
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+      expectSelectedIds(['b2'])
+    })
+  })
+
 })
