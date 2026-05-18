@@ -259,6 +259,15 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
       if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
       if (!event.ctrlKey && !event.shiftKey) return;
       if (isEditableTarget(event.target)) return;
+      // Issue #84: モーダルが開いている間はグローバルキーハンドラを無効化する。
+      // Modal は Tab/Esc のみキャプチャするので、Shift+Arrow 等が裏側に届いて
+      // OCR カードの選択を巻き込んでしまう (= モーダル内 focus と OcrEditor 選択が
+      // 二重で動く) のを防ぐ。
+      // 注: スコープ内 `document` は store ステートで shadow されているので window.document を使う。
+      if (typeof window !== 'undefined'
+          && window.document?.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
 
       const anchorId = getAnchorId();
       if (!anchorId) return;

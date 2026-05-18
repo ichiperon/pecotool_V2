@@ -599,6 +599,109 @@ describe('OcrEditor', () => {
     })
   })
 
+  // ── M-84: issue #84 モーダル open 中はグローバル keydown を抑止する ──
+  describe('M-84 (issue #84): モーダル open 中は window keydown ハンドラが動かない', () => {
+    afterEach(() => {
+      // 各テストで body に挿した dialog を確実に掃除
+      document.querySelectorAll('[data-test-modal]').forEach((el) => el.remove())
+    })
+
+    function openFakeModal() {
+      // Modal 実装が描画する DOM と同じ属性で「モーダル open」状態を再現
+      const dialog = document.createElement('div')
+      dialog.setAttribute('role', 'dialog')
+      dialog.setAttribute('aria-modal', 'true')
+      dialog.setAttribute('data-test-modal', 'true')
+      document.body.appendChild(dialog)
+      return dialog
+    }
+
+    it('window Ctrl+ArrowDown: モーダルが開いていると選択を変えない', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      // モーダルを開く
+      openFakeModal()
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+
+      // 選択は b1 のまま (本来なら b2 に動く)
+      expectSelectedIds(['b1'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b1')
+    })
+
+    it('window Shift+ArrowDown: モーダルが開いていると選択を拡張しない', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      openFakeModal()
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', shiftKey: true })
+
+      // 選択は b1 のまま (本来なら b1,b2 に拡張)
+      expectSelectedIds(['b1'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b1')
+    })
+
+    it('モーダルを閉じる (DOM から消す) と再びキー操作が効く', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      const dialog = openFakeModal()
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+      expectSelectedIds(['b1']) // ガードで抑止
+
+      // モーダル close → ガード解除
+      dialog.remove()
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+      expectSelectedIds(['b2'])
+    })
+
+    it('role=dialog でも aria-modal=false の要素はガードしない (非モーダル dialog 互換)', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      const nonModal = document.createElement('div')
+      nonModal.setAttribute('role', 'dialog')
+      nonModal.setAttribute('aria-modal', 'false')
+      nonModal.setAttribute('data-test-modal', 'true')
+      document.body.appendChild(nonModal)
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+
+      // 非モーダル dialog なので OcrEditor のキー処理は通常通り動く
+      expectSelectedIds(['b2'])
+    })
+  })
+
   // ── P-22: issue #27 グローバル keydown listener が毎レンダー再登録されない ──
   describe('P-22 (issue #27): window keydown listener は再レンダーで再登録されない', () => {
     it('テキスト編集等で再レンダーが起きても addEventListener("keydown", ...) は 1 回のみ', () => {
