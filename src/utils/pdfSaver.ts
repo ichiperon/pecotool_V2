@@ -168,6 +168,31 @@ function isFormXObject(stream: PDFRawStream): boolean {
   return subtype instanceof PDFName && subtype.asString() === '/Form';
 }
 
+/**
+ * Form XObject (Subtype=/Form) を再帰的に走査し、BT...ET ブロックを strip する。
+ *
+ * #82 visited Set の不変条件 (将来回帰防止のため明示):
+ *   1. **冪等性**: `stripTextBlocks` は純粋な状態機械で副作用なし。同じ入力に
+ *      対して同じ出力を返し、複数回呼んでも結果は変わらない。
+ *   2. **早期 return**: `cleanContentStream` は strip 結果が原本とバイト等価なら
+ *      `updateContents` を呼ばずに false を返す。すなわち「2 回目以降の strip は
+ *      物理的に no-op」になる。
+ *   3. **deep-first add**: 子 Resources を再帰する直前ではなく entries() ループの先頭で
+ *      `visitedRefs.add(refKey)` する。つまり「visited に入っている ref は、本体・
+ *      子 Resources 含めて既に処理済み」が保証される。
+ *
+ * 上記 (1)(2)(3) の合成により、`visitedRefs` を全ページで共有 (`sharedVisitedFormRefs`)
+ * しても「あるページで処理した Form XObject を別ページで二重処理してしまう」可能性は
+ * ない。共有することで:
+ *   - 複数ページに跨る共有 Form XObject (Acrobat の typical 構造) を 1 回だけ deflate
+ *     できファイル肥大化を防ぐ (issue #54)。
+ *   - サイクリック参照があっても無限再帰しない (cycle detection)。
+ *
+ * もし将来「page 毎に Form XObject に対して別処理 (例: per-page font 登録) を行う」
+ * 変更が入る場合、その処理は visited skip より前に書く必要がある (もしくは visited
+ * の semantics をその処理用に分離する)。本関数の責務は「BT...ET strip 1 回だけ」
+ * なので現状の共有で正しい。
+ */
 function cleanFormXObjectsInResources(
   resources: PDFDict | undefined,
   context: typeof PDFDocument.prototype.context,
@@ -179,6 +204,8 @@ function cleanFormXObjectsInResources(
   for (const [, value] of xObjectDict.entries()) {
     const refKey = isPdfRef(value) ? value.toString() : null;
     if (refKey !== null) {
+      // 上の不変条件 (3) を満たすため、recurse する手前で先に mark する。
+      // 既存マークありなら本体+子 Resources は前回処理で完結している。
       if (visitedRefs.has(refKey)) continue;
       visitedRefs.add(refKey);
     }
@@ -409,9 +436,42 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
 }
 
 /**
- * 修正 (#33): Resources の Font 辞書登録と pageLike state の同期を分離する。
+ * #80: Resources.Font dict を scan して、すでに同じ font.ref が登録されていれば
+ * その key を再利用する。タグ prefix が `font.name` (postscriptName) と一致するもの
+ * のみを再利用対象とし、誤マッチを避ける。
  *
- * 旧実装:
+ * 戻り値: 既存 key (再利用可能) または undefined (新規登録が必要)。
+ *
+ * これにより:
+ *   - pruneStalePecoToolResources が削除しきれなかった非 PecoTool 経路の同 ref 登録を
+ *     再利用できる (alias 重複を防ぐ)。
+ *   - pdf-lib 内部 `newFontDictionary` API への直接依存が「miss 時のみ」に縮小される。
+ */
+function findExistingFontKey(page: unknown, font: PDFFont): PDFName | undefined {
+  const pageLike = page as {
+    node?: { Resources?: () => PDFDict | undefined };
+  };
+  const resources = pageLike.node?.Resources?.();
+  const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+  if (!fontDict) return undefined;
+
+  const targetRefKey = font.ref.toString();
+  // 既存 key の tag prefix は `/<font.name>-<random>` 形式 (pdf-lib の uniqueKey 仕様)。
+  // postscriptName に prefix 一致 + ref 一致の両方を満たすキーのみを再利用する。
+  const tagPrefix = `/${font.name}-`;
+  for (const [key, value] of fontDict.entries()) {
+    if (!isPdfRef(value)) continue;
+    if (value.toString() !== targetRefKey) continue;
+    if (!key.toString().startsWith(tagPrefix)) continue;
+    return key;
+  }
+  return undefined;
+}
+
+/**
+ * 修正 (#33, #80): Resources の Font 辞書登録と pageLike state の同期を分離する。
+ *
+ * 旧実装 (#33 修正前):
  *   `pageLike.font = font;` を毎回無条件で代入し、その後 `pageLike.fontKey` を
  *   key 取得時のみ条件付きで代入していた。fallback で `pageLike.setFont?.(font)`
  *   を呼ぶ経路では setFont 内部で `newFontDictionary` がさらに呼ばれ、同じ font
@@ -420,7 +480,11 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
  *
  * 新実装:
  *   1. `getOrRegisterPageFontKey()` — 同じ font には常に同じ key を返す純粋関数。
- *      cache hit なら何もしない。miss のときだけ 1 度だけ newFontDictionary を呼ぶ。
+ *      探索順:
+ *        a. in-page cache (Map<PDFFont, PDFName>) — same-page の高速 path
+ *        b. Resources.Font dict scan — 既存 ref+name 一致を再利用 (#80)
+ *        c. `newFontDictionary` を 1 回だけ呼んで新規登録 (miss 時のみ)
+ *      pdf-lib 内部 API への直接依存は (c) のフォールバックだけに縮約された。
  *   2. `syncPageFontState()` — pageLike.font / pageLike.fontKey をペアで上書き。
  *      key が無いときは何も書かない (drawText で誤キー出力を防ぐ)。
  */
@@ -431,6 +495,14 @@ function getOrRegisterPageFontKey(
 ): PDFName | undefined {
   const cached = fontKeys.get(font);
   if (cached) return cached;
+
+  // #80: 内部 API を叩く前に Font dict を 1 回 scan して既存 key を再利用する。
+  // 同じ font ref に対する重複登録を防ぎ、newFontDictionary 直接依存を最小化する。
+  const existing = findExistingFontKey(page, font);
+  if (existing) {
+    fontKeys.set(font, existing);
+    return existing;
+  }
 
   const pageLike = page as {
     fontKey?: PDFName;
@@ -732,7 +804,8 @@ export async function buildPdfDocument(
   // 修正 (#30): Catalog の /Version を消す。Acrobat は header と Catalog /Version の
   // 最大値で実効バージョンを判定するため、header だけ 1.6 に戻しても Catalog の
   // /Version 1.7 が残っていると Acrobat 7 では開けない。save() 前に削除する。
-  if (originalVersion) stripCatalogVersion(pdfDoc);
+  // #85: originalVersion を渡して header >= catalog の場合のみ削除させる。
+  if (originalVersion) stripCatalogVersion(pdfDoc, originalVersion);
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
   // save() 全書き換え経路。pdf-lib は streaming serializer で、ベンチ実測では
   // 100MB PDF でも 91ms で完了する (disk write は別段の writeFileChunked で処理)。

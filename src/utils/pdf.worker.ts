@@ -157,6 +157,17 @@ function isFormXObject(stream: PDFRawStream): boolean {
   return subtype instanceof PDFName && subtype.asString() === '/Form';
 }
 
+/**
+ * Form XObject (Subtype=/Form) を再帰的に走査し、BT...ET ブロックを strip する。
+ * #82: visited Set の不変条件詳細は pdfSaver.ts 側コメント参照。
+ *
+ * 不変条件サマリ:
+ *   1. stripTextBlocks は冪等 (純粋な状態機械)
+ *   2. cleanContentStream は bytesEqual なら no-op return
+ *   3. visited.add() は recurse する手前で行う → mark 済 ref は本体+子 Resources 含
+ *      完全処理済みが保証される
+ * これにより sharedVisitedFormRefs を全ページで共有しても二重処理は発生しない。
+ */
 function cleanFormXObjectsInResources(
   resources: PDFDict | undefined,
   context: typeof PDFDocument.prototype.context,
@@ -168,6 +179,8 @@ function cleanFormXObjectsInResources(
   for (const [, value] of xObjectDict.entries()) {
     const refKey = isPdfRef(value) ? value.toString() : null;
     if (refKey !== null) {
+      // 上の不変条件 (3) を満たすため recurse 手前で先 mark する。
+      // 既存マークありなら本体+子 Resources は前回処理で完結している。
       if (visitedRefs.has(refKey)) continue;
       visitedRefs.add(refKey);
     }
@@ -365,8 +378,33 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
 }
 
 /**
- * 修正 (#33): Resources の Font 辞書登録と pageLike state の同期を分離する。
+ * #80: Resources.Font dict scan で既存 key を再利用する (pdfSaver.ts 側詳細参照)。
+ * `font.ref` 完全一致 + key tag prefix が `/<font.name>-` 一致のみ採用。
+ */
+function findExistingFontKey(page: unknown, font: PDFFont): PDFName | undefined {
+  const pageLike = page as {
+    node?: { Resources?: () => PDFDict | undefined };
+  };
+  const resources = pageLike.node?.Resources?.();
+  const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+  if (!fontDict) return undefined;
+
+  const targetRefKey = font.ref.toString();
+  const tagPrefix = `/${font.name}-`;
+  for (const [key, value] of fontDict.entries()) {
+    if (!isPdfRef(value)) continue;
+    if (value.toString() !== targetRefKey) continue;
+    if (!key.toString().startsWith(tagPrefix)) continue;
+    return key;
+  }
+  return undefined;
+}
+
+/**
+ * 修正 (#33, #80): Resources の Font 辞書登録と pageLike state の同期を分離する。
  * 詳細コメントは pdfSaver.ts 側参照。
+ *
+ * #80: cache → scan → newFontDictionary の 3 段。内部 API 依存は scan miss 時のみ。
  */
 function getOrRegisterPageFontKey(
   page: unknown,
@@ -375,6 +413,13 @@ function getOrRegisterPageFontKey(
 ): PDFName | undefined {
   const cached = fontKeys.get(font);
   if (cached) return cached;
+
+  // #80: 内部 API を叩く前に Font dict scan を 1 回挟む。
+  const existing = findExistingFontKey(page, font);
+  if (existing) {
+    fontKeys.set(font, existing);
+    return existing;
+  }
 
   const pageLike = page as {
     fontKey?: PDFName;
@@ -604,7 +649,8 @@ async function handleSavePdf(
   }
 
   // 修正 (#30): Catalog の /Version を消す (詳細は pdfSaver.ts 側コメント参照)。
-  if (originalVersion) stripCatalogVersion(pdfDoc);
+  // #85: originalVersion を渡して header >= catalog の場合のみ削除させる。
+  if (originalVersion) stripCatalogVersion(pdfDoc, originalVersion);
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
   // save() 全書き換え経路 (incremental の fontkit subset 破損を回避)。
   const saveOptions: Parameters<typeof pdfDoc.save>[0] = {
