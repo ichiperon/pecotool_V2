@@ -331,13 +331,14 @@ function App() {
     handleOpen,
   });
 
-  // --- Effects ---
-  // issue (CloseGuard): 保存中の close を suppress するため isSavingRef を渡す。
-  useTauriCloseGuard({ isSavingRef });
-
-  // issue #74: F5 を modal / restore 中も握りつぶす ref をここで isSaving の最新値に同期。
+  // issue #74 / CloseGuard: isSaving の最新値を ref に同期。
+  // useTauriCloseGuard と F5 ガードに渡す前に宣言する必要がある (TDZ 回避)。
   const isSavingRef = useRef(isSaving);
   isSavingRef.current = isSaving;
+
+  // --- Effects ---
+  // CloseGuard: 保存中の close を suppress するため isSavingRef を渡す (Critical: rename race のデータロス回避)。
+  useTauriCloseGuard({ isSavingRef });
 
   useEffect(() => {
     const handleF5 = (e: KeyboardEvent) => {
