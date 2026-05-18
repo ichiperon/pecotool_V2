@@ -190,4 +190,86 @@ describe('usePreviewWindow', () => {
       expect(m.emit).toHaveBeenCalledWith('preview-update', 'updated')
     })
   })
+
+  describe('issue #66 回帰: preview ウィンドウ未開時 emit gate / selector 細粒度化', () => {
+    it('isPreviewOpen=false のときは textBlocks 更新で preview-update が emit されない', async () => {
+      // 初期ページ
+      usePecoStore.setState({
+        document: makeDocWithPage(makePage(0, [makeBlock('b1', 'hello', 0)])),
+        currentPageIndex: 0,
+      } as any)
+
+      renderHook(() => usePreviewWindow())
+
+      // listener setup 完了を待つ
+      await waitFor(() => {
+        expect(m.listen).toHaveBeenCalledWith('request-preview', expect.any(Function))
+      })
+
+      // 編集 1 文字ごとの状態変化を模擬
+      m.emit.mockClear()
+      for (let i = 0; i < 5; i++) {
+        const text = 'hello' + 'x'.repeat(i + 1)
+        act(() => {
+          usePecoStore.setState({
+            document: makeDocWithPage(makePage(0, [makeBlock('b1', text, 0)])),
+          } as any)
+        })
+        await Promise.resolve()
+        await Promise.resolve()
+      }
+
+      // preview 未開状態では preview-update は一度も emit されない
+      const previewUpdateCalls = m.emit.mock.calls.filter(c => c[0] === 'preview-update')
+      expect(previewUpdateCalls.length).toBe(0)
+    })
+
+    it('textBlocks 以外の field (isDirty) 更新では preview-update が再 emit されない', async () => {
+      // preview ウィンドウが開いているふり: getAllWindows が既存ウィンドウを返し、
+      // togglePreviewWindow で isPreviewOpen=true にする
+      const fakeWin = {
+        label: 'preview-window',
+        show: vi.fn().mockResolvedValue(undefined),
+        hide: vi.fn().mockResolvedValue(undefined),
+        setFocus: vi.fn().mockResolvedValue(undefined),
+      }
+      m.getAllWindows.mockResolvedValue([fakeWin])
+
+      // 初期ページ
+      const initialBlocks = [makeBlock('b1', 'hello', 0)]
+      usePecoStore.setState({
+        document: makeDocWithPage(makePage(0, initialBlocks)),
+        currentPageIndex: 0,
+      } as any)
+
+      const { result } = renderHook(() => usePreviewWindow())
+      await waitFor(() => {
+        expect(m.listen).toHaveBeenCalledWith('request-preview', expect.any(Function))
+      })
+
+      // preview を開く -> isPreviewOpen=true
+      await act(async () => {
+        await result.current.togglePreviewWindow()
+      })
+      await waitFor(() => {
+        expect(result.current.isPreviewOpen).toBe(true)
+      })
+
+      // ここまでで「preview-update」emit が最低 1 回走っている (isPreviewOpen 立ち上がり)
+      m.emit.mockClear()
+
+      // textBlocks を変えずに isDirty のみ更新 (updatePageData は old page を spread するため
+      // textBlocks 参照は維持される)
+      act(() => {
+        usePecoStore.getState().updatePageData(0, { isDirty: true }, false)
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // textBlocks 参照が変わっていないので useMemo は recompute されず、
+      // previewText も同一値のため preview-update は再 emit されない
+      const previewUpdateCalls = m.emit.mock.calls.filter(c => c[0] === 'preview-update')
+      expect(previewUpdateCalls.length).toBe(0)
+    })
+  })
 })

@@ -2,16 +2,19 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
 import { emit, listen } from '@tauri-apps/api/event';
-import { usePecoStore, selectCurrentPage } from '../store/pecoStore';
+import { usePecoStore, selectCurrentPageTextBlocks } from '../store/pecoStore';
 import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
 
 export function usePreviewWindow() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const currentPage = usePecoStore(selectCurrentPage);
+  // PageData 全体ではなく textBlocks のみを購読する。
+  // isDirty / thumbnail / isTextExtracted など textBlocks 以外のフィールド更新で
+  // previewText が recompute されるのを防ぐ (issue #66)。
+  const textBlocks = usePecoStore(selectCurrentPageTextBlocks);
 
   const previewText = useMemo(() => {
-    if (!currentPage?.textBlocks) return "";
-    const sorted = [...currentPage.textBlocks].sort((a, b) => a.order - b.order);
+    if (!textBlocks) return "";
+    const sorted = [...textBlocks].sort((a, b) => a.order - b.order);
     let text = "";
     for (let i = 0; i < sorted.length; i++) {
       const curr = sorted[i];
@@ -29,7 +32,7 @@ export function usePreviewWindow() {
       text += curr.text;
     }
     return text;
-  }, [currentPage]);
+  }, [textBlocks]);
 
   // listen() の再登録を避けるため最新 previewText を ref に保持。
   // 編集 1 文字ごとに useEffect が走って Tauri IPC が 4 ラウンドトリップ発火するのを止める。
@@ -79,8 +82,12 @@ export function usePreviewWindow() {
   }, [isPreviewOpen, initPreviewWindow]);
 
   useEffect(() => {
+    // preview ウィンドウ未開時は emit しない。
+    // 編集 1 文字ごとに Tauri IPC が走るのを防ぐ (issue #66)。
+    // 開いた瞬間は preview ウィンドウ側が request-preview を emit して最新値を取得する。
+    if (!isPreviewOpen) return;
     emit('preview-update', previewText).catch(logUnlessTauriWindowNotFound);
-  }, [previewText]);
+  }, [previewText, isPreviewOpen]);
 
   useEffect(() => {
     let cancelled = false;
