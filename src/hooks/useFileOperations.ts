@@ -16,6 +16,20 @@ import { invoke } from '@tauri-apps/api/core';
 async function writeFileChunked(path: string, bytes: Uint8Array): Promise<void> {
   const CHUNK = 4 * 1024 * 1024; // 4MB
   const headerPath = encodeURIComponent(path);
+  // bytes.byteLength === 0 の場合でも offset==0 で 1 回だけ呼び、
+  // Rust 側 (offset==0 で create+truncate) に空ファイル生成を任せる。
+  // for ループは bytes.byteLength === 0 だと一度も入らず、結果として
+  // tempPath が作られないまま replace_pdf_file が呼ばれて無音失敗するため、
+  // 空配列専用の単発 invoke で open/create を保証する。
+  if (bytes.byteLength === 0) {
+    await invoke('write_pdf_chunk', new ArrayBuffer(0), {
+      headers: {
+        'x-path': headerPath,
+        'x-offset': '0',
+      },
+    });
+    return;
+  }
   for (let offset = 0; offset < bytes.byteLength; offset += CHUNK) {
     const end = Math.min(offset + CHUNK, bytes.byteLength);
     // subarray はビューを返すだけ (copy しない)
@@ -148,23 +162,36 @@ export function useFileOperations(
   const resetDirty = usePecoStore((s) => s.resetDirty);
   const isSavingRef = useRef(false);
 
+  // sessionStorage 上の peco-recent-files を string[] として読み出す。
+  // 改ざん・型不整合・壊れた JSON は全て空配列にフォールバックする。
+  const readRecent = (): string[] => {
+    const saved = sessionStorage.getItem('peco-recent-files');
+    if (!saved) return [];
+    try {
+      const parsed: unknown = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+        return parsed;
+      }
+    } catch {
+      // 不正 JSON は無視
+    }
+    return [];
+  };
+
   const addToRecent = (path: string) => {
     // ファイルフルパスは機密情報のため sessionStorage に保存（ブラウザ/アプリを閉じると消去）
-    const saved = sessionStorage.getItem('peco-recent-files');
-    let recent: string[] = [];
-    if (saved) {
-      try {
-        const parsed: unknown = JSON.parse(saved);
-        // 改ざん・型不整合に備え string[] を narrow。失敗時は空配列で続行。
-        if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
-          recent = parsed;
-        }
-      } catch {
-        // 不正 JSON は無視して空配列にフォールバック
-      }
-    }
-    recent = [path, ...recent.filter((p) => p !== path)].slice(0, 10);
+    const recent = [path, ...readRecent().filter((p) => p !== path)].slice(0, 10);
     sessionStorage.setItem('peco-recent-files', JSON.stringify(recent));
+    window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
+  };
+
+  // Recent Files から指定パスを除去する。読み込み失敗時の自動クリーンアップで使用。
+  // useRecentFiles 側は peco-recent-files-updated を listen しているため即座に UI 反映される。
+  const removeFromRecent = (path: string) => {
+    const current = readRecent();
+    const next = current.filter((p) => p !== path);
+    if (next.length === current.length) return; // 変化なしなら storage 書き込みもイベントも発火しない
+    sessionStorage.setItem('peco-recent-files', JSON.stringify(next));
     window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
   };
 
@@ -233,6 +260,16 @@ export function useFileOperations(
       return false;
     } catch (err) {
       console.error("Failed to open file:", err);
+      // Recent Files (explicitPath あり) 経由で開いた時に読み込みが失敗したら、
+      // 削除/移動済みファイルが履歴に残り続けて選択するたびにエラーになる現象を防ぐため
+      // sessionStorage から該当パスを除去 + peco-recent-files-updated イベントを発火する。
+      if (explicitPath) {
+        try {
+          removeFromRecent(explicitPath);
+        } catch (cleanupErr) {
+          console.warn('[handleOpen] removeFromRecent failed (ignored):', cleanupErr);
+        }
+      }
       showToast("ファイルの読み込みに失敗しました。", true);
       setIsLoadingFile?.(false);
       return false;
