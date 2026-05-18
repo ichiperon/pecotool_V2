@@ -273,20 +273,6 @@ function asPageIndex(value: unknown): number | null {
   return typeof pageIndex === 'number' && Number.isInteger(pageIndex) ? pageIndex : null;
 }
 
-function isRepairTextBlock(value: unknown): value is RepairTextBlock {
-  const block = value as Partial<RepairTextBlock> | undefined;
-  const bbox = block?.bbox;
-  return (
-    typeof block?.text === 'string' &&
-    typeof block.order === 'number' &&
-    (block.writingMode === 'horizontal' || block.writingMode === 'vertical') &&
-    typeof bbox?.x === 'number' &&
-    typeof bbox.y === 'number' &&
-    typeof bbox.width === 'number' &&
-    typeof bbox.height === 'number'
-  );
-}
-
 function makeFontSupportSet(font: PDFFont): Set<number> | null {
   if (typeof font.getCharacterSet !== 'function') return null;
   return new Set(font.getCharacterSet());
@@ -438,21 +424,13 @@ export async function buildPdfDocument(
   const bboxMeta = { ...existingBBoxMeta };
   let metaChanged = false;
 
+  // 修正 (#25): existingBBoxMeta から pagesToWrite を pre-populate しない。
+  // 以前は existingBBoxMeta の全ページを pagesToWrite に登録していたため、
+  // 未編集ページに対しても pruneStalePecoToolResources / replacePageTextContentStreams
+  // が走り、保存しただけで content stream が書き換わって原本のメタが破壊されていた。
+  // dirty page が無い場合は metaChanged も false のままで infoDict.set は呼ばれず、
+  // 既存メタはバイト等価で保持される (E2-3c 大容量メタ保存テストが要求する不変条件)。
   const pagesToWrite = new Map<number, RepairPageData>();
-  for (const [pageIndexStr, entries] of Object.entries(existingBBoxMeta)) {
-    const pageIndex = asPageIndex(pageIndexStr);
-    if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount() || !Array.isArray(entries)) continue;
-    pagesToWrite.set(pageIndex, {
-      textBlocks: entries
-        .filter(isRepairTextBlock)
-        .map((block) => ({
-          text: block.text,
-          bbox: block.bbox,
-          writingMode: block.writingMode,
-          order: block.order,
-        })),
-    });
-  }
   for (const [pageIndexValue, pageData] of dirtyPages) {
     const pageIndex = asPageIndex(pageIndexValue);
     if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) continue;
@@ -538,25 +516,43 @@ export async function buildPdfDocument(
         }
 
         if (block.writingMode === 'vertical') {
-          const sx = block.bbox.width / textHeight;
+          // 修正 (#23, #28): 縦書きは run ごとに pushGraphicsState / scale を切り替え、
+          // それぞれのフォントの heightAtSize / ascent でスケールと baselineX を算出する。
+          //  - sy: 全 run 共通 (bbox.height / totalTextWidth) — 縦方向の総スケール
+          //  - sx_run: 各 run の heightAtSize から算出。混在フォントでも縦幅にフィットする
+          //  - baselineX_run: ascent 比から導出 (Meiryo 0.2 マジックナンバーを廃止)
+          //  - offsetInPage: ページ座標で累積する縦方向 advance
           const sy = block.bbox.height / textWidth;
-
-          if (!isFinite(sx) || !isFinite(sy)) {
-            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx} sy=${sy}) text="${block.text.slice(0, 20)}"`);
+          if (!isFinite(sy)) {
+            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sy=${sy}) text="${block.text.slice(0, 20)}"`);
             continue;
           }
-
-          const baselineX = block.bbox.x + textHeight * sx * 0.2;
-          const baselineY = height - block.bbox.y;
-
-          page.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
-          let offset = 0;
+          let offsetInPage = 0;
+          let renderedAny = false;
           for (const run of runs) {
+            const runHeight = run.font.heightAtSize(fontSize);
+            if (runHeight === 0) continue;
+            const sx_run = block.bbox.width / runHeight;
+            if (!isFinite(sx_run)) {
+              console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped run (non-finite scale sx=${sx_run}) text="${run.text.slice(0, 20)}"`);
+              continue;
+            }
+            const runAscent = run.font.heightAtSize(fontSize, { descender: false });
+            const descentRatio = (runHeight - runAscent) / runHeight;
+            const baselineX_run = block.bbox.x + descentRatio * block.bbox.width;
+            const baselineY_run = height - block.bbox.y - offsetInPage;
             setPageFontWithStableKey(page, run.font, pageFontKeys);
-            page.drawText(run.text, { x: 0, y: offset, size: fontSize, rotate: degrees(-90), renderMode: 3 });
-            offset += run.font.widthOfTextAtSize(run.text, fontSize);
+            page.pushOperators(
+              pushGraphicsState(),
+              translate(baselineX_run, baselineY_run),
+              scale(sx_run, sy),
+            );
+            page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
+            page.pushOperators(popGraphicsState());
+            offsetInPage += run.font.widthOfTextAtSize(run.text, fontSize) * sy;
+            renderedAny = true;
           }
-          page.pushOperators(popGraphicsState());
+          if (!renderedAny) continue;
         } else {
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
