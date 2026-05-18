@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Action, BoundingBox, PageData } from "../types";
 import { classifyDirection, reorderBlocks } from "../utils/bulkReorder";
 import { readReorderThreshold } from "../utils/reorderThreshold";
@@ -65,6 +65,12 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
   >(new Map());
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
   const preDragPageRef = useRef<PageData | null>(null);
+  // updateDragResize を RAF で coalesce するための保留状態。
+  // mousemove は 1 フレームに複数発火しうるため、毎回 updatePageData を呼ぶと
+  // pages Map / textBlocks 配列の全コピーが mousemove ごとに発生してカクつく。
+  // 同一フレーム内では最新の pos のみを採用し、updatePageData を 1 回に集約する。
+  const pendingDragPosRef = useRef<{ x: number; y: number } | null>(null);
+  const dragRafRef = useRef<number | null>(null);
 
   const beginAltDrag = (pos: { x: number; y: number }) => {
     setIsAltDragging(true);
@@ -174,13 +180,15 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     return false;
   };
 
-  const updateDragResize = (pos: { x: number; y: number }): boolean => {
-    if (!draggedId || dragMode === "none") return false;
+  // updateDragResize の実体。pendingDragPosRef.current を最新 pos として消費し
+  // updatePageData を 1 回呼ぶ。RAF コールバックおよび finishDragResize の flush から使う。
+  const applyDragResize = (pos: { x: number; y: number }): void => {
+    if (!draggedId || dragMode === "none") return;
     const scale = zoom / 100;
     const dx = (pos.x - dragStartMouse.x) / scale;
     const dy = (pos.y - dragStartMouse.y) / scale;
     const pageData = getPageData();
-    if (!pageData) return true;
+    if (!pageData) return;
 
     if (dragMode === "move") {
       const newBlocks = pageData.textBlocks.map((b) => {
@@ -202,7 +210,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       // page.isDirty も明示的に立てる必要がある (さもないと BB 移動のみの変更は保存されない)
       updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
     } else {
-      if (!dragStartBbox) return true;
+      if (!dragStartBbox) return;
       const startBbox: BoundingBox = dragStartBbox;
       const newBbox: BoundingBox = { ...startBbox };
       if (dragMode === "resize-se") {
@@ -230,11 +238,35 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       // page.isDirty も明示的に立てる必要がある (さもないと BB リサイズのみの変更は保存されない)
       updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
     }
+  };
+
+  const updateDragResize = (pos: { x: number; y: number }): boolean => {
+    if (!draggedId || dragMode === "none") return false;
+    // 同一フレーム内の複数 mousemove を coalesce: 最新 pos のみを採用し、
+    // RAF コールバックで 1 度だけ実体処理を走らせる。
+    pendingDragPosRef.current = pos;
+    if (dragRafRef.current !== null) return true;
+    dragRafRef.current = requestAnimationFrame(() => {
+      dragRafRef.current = null;
+      const next = pendingDragPosRef.current;
+      pendingDragPosRef.current = null;
+      if (next) applyDragResize(next);
+    });
     return true;
   };
 
   const finishDragResize = () => {
     if (draggedId && dragMode !== "none") {
+      // ドロップ位置を確実に反映するため、保留中の RAF をキャンセルして
+      // 最新の pending pos を同期的に flush してから undo 用 snapshot を作る。
+      if (dragRafRef.current !== null) {
+        cancelAnimationFrame(dragRafRef.current);
+        dragRafRef.current = null;
+      }
+      const pending = pendingDragPosRef.current;
+      pendingDragPosRef.current = null;
+      if (pending) applyDragResize(pending);
+
       const pageData = getPageData();
       if (pageData && preDragPageRef.current) {
         const action: Action = {
@@ -251,6 +283,17 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       setDragMode("none");
     }
   };
+
+  // unmount 時に保留中の RAF をクリーンアップ (ドラッグ中に component が消えた場合の安全装置)
+  useEffect(() => {
+    return () => {
+      if (dragRafRef.current !== null) {
+        cancelAnimationFrame(dragRafRef.current);
+        dragRafRef.current = null;
+      }
+      pendingDragPosRef.current = null;
+    };
+  }, []);
 
   const getHoverCursor = (
     pos: { x: number; y: number },
