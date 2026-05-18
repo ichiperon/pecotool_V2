@@ -34,6 +34,13 @@ export function useThumbnailPanel() {
   const thumbnailsRef = useRef<Map<string, string>>(new Map());
   // アイテムごとの購読コールバック: index → Set<forceUpdate>
   const itemListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
+  // issue #68: アクティブページ変更通知も index 単位で購読する。
+  // 全アイテムに prop drill すると、Virtuoso 可視範囲全件が再レンダされる。
+  // active 状態が変わるのは "前のアクティブ" と "新しいアクティブ" の 2 件だけなので
+  // その 2 件だけにピンポイント通知する。
+  const activeListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
+  // 現在の active page index を ref で保持（リスナーが pull する形）。
+  const activePageRef = useRef<number>(0);
 
   const [loadEpoch, setLoadEpoch] = useState(0);
 
@@ -92,6 +99,33 @@ export function useThumbnailPanel() {
   const getThumbnail = useCallback((index: number) => {
     return thumbnailsRef.current.get(makeKey(epochRef.current, index));
   }, []);
+
+  // issue #68: アイテムが自分の active 状態を購読する。
+  // subscribeThumbnail と同形のため、ThumbnailItemNode 側で同じパターンで使える。
+  const subscribeActivePage = useCallback((index: number, cb: () => void) => {
+    if (!activeListenersRef.current.has(index)) {
+      activeListenersRef.current.set(index, new Set());
+    }
+    activeListenersRef.current.get(index)!.add(cb);
+    return () => {
+      activeListenersRef.current.get(index)?.delete(cb);
+    };
+  }, []);
+
+  // アイテムが自分の active 状態を取得する
+  const getIsActivePage = useCallback((index: number) => {
+    return activePageRef.current === index;
+  }, []);
+
+  // currentPageIndex 変更時、変化した 2 件 (旧アクティブ / 新アクティブ) だけに通知する。
+  // これにより Virtuoso 可視範囲の全 ThumbnailItemNode が再レンダされる問題を回避する。
+  useEffect(() => {
+    const prev = activePageRef.current;
+    if (prev === currentPageIndex) return;
+    activePageRef.current = currentPageIndex;
+    activeListenersRef.current.get(prev)?.forEach(cb => cb());
+    activeListenersRef.current.get(currentPageIndex)?.forEach(cb => cb());
+  }, [currentPageIndex]);
 
   // ページをワーカーに分散してサムネイル生成
   const generateViaWorker = useCallback((pageIdx: number): Promise<string | null> => {
@@ -397,5 +431,5 @@ export function useThumbnailPanel() {
     ? { totalPages: document.totalPages, pages: document.pages }
     : null;
 
-  return { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument, triggerThumbnailLoad };
+  return { loadEpoch, subscribeThumbnail, getThumbnail, subscribeActivePage, getIsActivePage, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument, triggerThumbnailLoad };
 }

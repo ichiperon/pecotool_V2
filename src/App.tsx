@@ -116,7 +116,7 @@ function App() {
   // --- External Hooks ---
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
-  const { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
+  const { loadEpoch, subscribeThumbnail, getThumbnail, subscribeActivePage, getIsActivePage, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
   const {
     isOcrRunning,
     ocrProgress,
@@ -509,6 +509,8 @@ function App() {
           onRequestThumbnail={requestThumbnail}
           onSubscribeThumbnail={subscribeThumbnail}
           onGetThumbnail={getThumbnail}
+          onSubscribeActivePage={subscribeActivePage}
+          onGetIsActivePage={getIsActivePage}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
         <section
