@@ -23,10 +23,15 @@ interface ShortcutActions {
 export function useKeyboardShortcuts(actions: ShortcutActions) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const tag = target?.tagName;
+      const isFormEditing = tag === 'INPUT' || tag === 'TEXTAREA';
+      const isContentEditing = !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
+      const isEditing = isFormEditing || isContentEditing;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !isEditing) {
         if (e.shiftKey) actions.redo();
         else actions.undo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y' && !isEditing) {
         actions.redo();
       } else if ((e.ctrlKey || e.metaKey) && e.key === '0') {
         e.preventDefault();

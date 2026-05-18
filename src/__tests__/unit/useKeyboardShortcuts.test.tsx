@@ -24,12 +24,13 @@ function makeActions() {
   };
 }
 
-function press(target: EventTarget, key: string) {
+function press(target: EventTarget, key: string, options: KeyboardEventInit = {}) {
   const event = new KeyboardEvent('keydown', {
     key,
     ctrlKey: true,
     bubbles: true,
     cancelable: true,
+    ...options,
   });
   target.dispatchEvent(event);
   return event;
@@ -99,5 +100,58 @@ describe('useKeyboardShortcuts: BB操作ショートカット', () => {
     expect(actions.toggleDrawingMode).not.toHaveBeenCalled();
     expect(actions.toggleSplitMode).not.toHaveBeenCalled();
     expect(actions.handleGroup).not.toHaveBeenCalled();
+  });
+});
+
+describe('useKeyboardShortcuts: Undo/Redo の編集中ガード', () => {
+  it('contentEditable 内で Ctrl+Z 押下時にアプリ undo が呼ばれない', () => {
+    const actions = makeActions();
+    const content = document.createElement('div');
+    content.setAttribute('contenteditable', 'true');
+    document.body.appendChild(content);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    content.focus();
+
+    press(content, 'z');
+    expect(actions.undo).not.toHaveBeenCalled();
+  });
+
+  it('contentEditable 内で Ctrl+Y / Ctrl+Shift+Z 押下時にアプリ redo が呼ばれない', () => {
+    const actions = makeActions();
+    const content = document.createElement('div');
+    content.setAttribute('contenteditable', 'true');
+    document.body.appendChild(content);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    content.focus();
+
+    press(content, 'y');
+    press(content, 'z', { shiftKey: true });
+    expect(actions.redo).not.toHaveBeenCalled();
+  });
+
+  it('INPUT/TEXTAREA 内で Ctrl+Z/Ctrl+Y 押下時にアプリ undo/redo が呼ばれない', () => {
+    const actions = makeActions();
+    const input = document.createElement('input');
+    const textarea = document.createElement('textarea');
+    document.body.appendChild(input);
+    document.body.appendChild(textarea);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(input, 'z');
+    press(textarea, 'y');
+    expect(actions.undo).not.toHaveBeenCalled();
+    expect(actions.redo).not.toHaveBeenCalled();
+  });
+
+  it('編集中でない場合は Ctrl+Z/Ctrl+Y でアプリ undo/redo が呼ばれる', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'z');
+    press(window, 'y');
+    expect(actions.undo).toHaveBeenCalledTimes(1);
+    expect(actions.redo).toHaveBeenCalledTimes(1);
   });
 });
