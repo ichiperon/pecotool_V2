@@ -337,13 +337,12 @@ function App() {
     const handleF5 = (e: KeyboardEvent) => {
       if (e.key === 'F5') {
         e.preventDefault();
-        const doc = usePecoStore.getState().document;
-        if (doc?.filePath) handleOpen(doc.filePath);
+        handleReload();
       }
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
-  }, [handleOpen]);
+  }, [handleReload]);
 
   useEffect(() => {
     if (!isSaving) return;
