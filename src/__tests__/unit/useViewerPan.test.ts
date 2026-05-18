@@ -8,6 +8,11 @@
  *  - #49: <button>/<a>/[role="button"] に focus がある状態の Space で
  *         preventDefault が走ると、ブラウザ既定のクリック動作が抑止されて
  *         ボタンが押せなくなる。これらも isInteractiveTarget で除外する。
+ *  - #64: #49 修正で keyup 側にも isInteractiveTarget 早期 return を入れた結果、
+ *         Space 押下 → Tab で button focus → Space release で keyup の target が
+ *         button になり、isSpacePressed / isPanning が永久に true で残るリグレッション。
+ *         keyup 側の早期 return は外し、setState の関数形での参照同一化のみで
+ *         再レンダを抑止する。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -186,5 +191,70 @@ describe('useViewerPan: Space keyup の state 更新ガード (#19)', () => {
       dispatchKey('keyup', 'Enter', document.body);
     });
     expect(result.current.isSpacePressed).toBe(true);
+  });
+});
+
+describe('useViewerPan: Space 押下中の focus 移動 keyup リグレッション (#64)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('body で Space 押下 → button focus → button 上で Space release で isSpacePressed が false に戻る', () => {
+    const btn = document.createElement('button');
+    document.body.appendChild(btn);
+
+    const { result } = renderViewerPan();
+
+    // 1. body 上で Space 押下 → state は true
+    act(() => {
+      dispatchKey('keydown', 'Space', document.body);
+    });
+    expect(result.current.isSpacePressed).toBe(true);
+
+    // 2. Tab で focus が button に移ったあとに Space release。
+    //    target が button (インタラクティブ) になるが、keyup 側で早期 return すると
+    //    state が true のまま残るのが #64。修正後は false に戻る。
+    act(() => {
+      dispatchKey('keyup', 'Space', btn);
+    });
+    expect(result.current.isSpacePressed).toBe(false);
+    expect(result.current.isPanning).toBe(false);
+  });
+
+  it('Space 押下 → [role="button"] の子要素上で Space release でも state が false に戻る', () => {
+    const wrap = document.createElement('div');
+    wrap.setAttribute('role', 'button');
+    const inner = document.createElement('span');
+    wrap.appendChild(inner);
+    document.body.appendChild(wrap);
+
+    const { result } = renderViewerPan();
+
+    act(() => {
+      dispatchKey('keydown', 'Space', document.body);
+    });
+    expect(result.current.isSpacePressed).toBe(true);
+
+    act(() => {
+      dispatchKey('keyup', 'Space', inner);
+    });
+    expect(result.current.isSpacePressed).toBe(false);
+  });
+
+  it('Space 押下 → INPUT focus → Space release でも state が false に戻る', () => {
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+
+    const { result } = renderViewerPan();
+
+    act(() => {
+      dispatchKey('keydown', 'Space', document.body);
+    });
+    expect(result.current.isSpacePressed).toBe(true);
+
+    act(() => {
+      dispatchKey('keyup', 'Space', input);
+    });
+    expect(result.current.isSpacePressed).toBe(false);
   });
 });

@@ -26,11 +26,13 @@ export function useViewerPan(viewerRef: React.RefObject<HTMLDivElement | null>) 
       }
     };
     const handleKeyUpGlob = (e: KeyboardEvent) => {
-      // keydown と非対称に無条件で state を更新すると、編集中などフォーカスが
-      // インタラクティブ要素にある状態の Space 連打で毎回再レンダを誘発する (#19)。
-      // keydown と同じ抑止条件を適用し、さらに prev===false の場合は同一参照を返して
-      // 余計な setState を回避する。
-      if (e.code !== 'Space' || isInteractiveTarget(e.target)) return;
+      // keyup では isInteractiveTarget で早期 return しない (#64):
+      // Space 押下 (body) → Tab で button へ focus 移動 → Space release だと
+      // release 時の target が button になるため、isInteractiveTarget で弾くと
+      // isSpacePressed / isPanning が永久に true で残ってしまう。
+      // 不要な setState は setState の関数形 (prev ? false : prev) が
+      // 同一参照を返すことで抑止し、再レンダを防ぐ (#19)。
+      if (e.code !== 'Space') return;
       setIsSpacePressed((prev) => (prev ? false : prev));
       setIsPanning((prev) => (prev ? false : prev));
     };
