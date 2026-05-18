@@ -36,14 +36,15 @@ export function useTauriCloseGuard() {
           const hasDirtyPages = Array.from(state.document?.pages.values() || []).some((p) => p.isDirty);
           if (state.isDirty || hasDirtyPages) {
             // ask() が返らないと閉じ不能になるため 8 秒でタイムアウト。
-            // タイムアウト時は「閉じてよい」扱い (true) で進める。
+            // タイムアウト時は安全側に倒して「キャンセル」扱い (false) で進める。
+            // タイムアウトで閉じてしまうと未保存変更がそのまま消えるため、ユーザーに再操作させる。
             const confirmed = await withTimeout(
               ask('未保存の変更があります。終了してもよろしいですか？', {
                 title: '終了の確認',
                 kind: 'warning',
               }),
               8000,
-              true,
+              false,
               'ask()'
             );
             if (!confirmed) {
