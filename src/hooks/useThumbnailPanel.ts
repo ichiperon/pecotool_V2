@@ -19,12 +19,19 @@ function toAssetUrl(filePath: string): string {
   return url;
 }
 
+// issue #11: thumbnails Map のキーを epoch:pageIndex 複合キーに。
+// ファイル切替直後の Race で「前ファイルの pageIndex 0 を新ファイルの 0 として hit させる」事故を防ぐ。
+function makeKey(epoch: number, pageIndex: number): string {
+  return `${epoch}:${pageIndex}`;
+}
+
 export function useThumbnailPanel() {
   const document = usePecoStore(selectDocument);
   const currentPageIndex = usePecoStore(selectCurrentPageIndex);
 
   // サムネイルデータはRefで保持（Reactの外）— 更新時に全アイテム再レンダリングを防ぐ
-  const thumbnailsRef = useRef<Map<number, string>>(new Map());
+  // キーは makeKey(epoch, pageIndex) (issue #11)。
+  const thumbnailsRef = useRef<Map<string, string>>(new Map());
   // アイテムごとの購読コールバック: index → Set<forceUpdate>
   const itemListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
 
@@ -60,10 +67,11 @@ export function useThumbnailPanel() {
         URL.revokeObjectURL(url);
         continue;
       }
-      if (thumbnailsRef.current.has(idx)) {
+      const key = makeKey(batchEpoch, idx);
+      if (thumbnailsRef.current.has(key)) {
         URL.revokeObjectURL(url);
       } else {
-        thumbnailsRef.current.set(idx, url);
+        thumbnailsRef.current.set(key, url);
         itemListenersRef.current.get(idx)?.forEach(cb => cb());
       }
     }
@@ -82,7 +90,7 @@ export function useThumbnailPanel() {
 
   // アイテムが自分のサムネイルデータを取得する
   const getThumbnail = useCallback((index: number) => {
-    return thumbnailsRef.current.get(index);
+    return thumbnailsRef.current.get(makeKey(epochRef.current, index));
   }, []);
 
   // ページをワーカーに分散してサムネイル生成
@@ -365,7 +373,9 @@ export function useThumbnailPanel() {
   }, [document?.filePath, processThumbnailQueue]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
-    if (thumbnailsRef.current.has(pageIndex)) return;
+    // issue #11: 現在 epoch のエントリだけをキャッシュヒットとして扱う。
+    // 前ファイルの遺残エントリは無視して新規キューイングする。
+    if (thumbnailsRef.current.has(makeKey(epochRef.current, pageIndex))) return;
     if (!queueRef.current.includes(pageIndex)) {
       queueRef.current.push(pageIndex);
     }
