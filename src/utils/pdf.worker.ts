@@ -286,7 +286,9 @@ function getRotationCm(
     case 180:
       return [concatTransformationMatrix(-1, 0, 0, -1, pageW, pageH)] as const;
     case 270:
-      return [concatTransformationMatrix(0, -1, 1, 0, pageH - pageW, pageW)] as const;
+      // Critical 数式誤りを修正。pdfjs convertToPdfPoint の R=270 は user(pageW - y_v, pageH - x_v)。
+      // 旧 [.. pageH-pageW pageW] は OCR テキストを画面外に描画していた (#71 の regression)。
+      return [concatTransformationMatrix(0, -1, 1, 0, 0, pageH)] as const;
     default:
       return [] as const;
   }

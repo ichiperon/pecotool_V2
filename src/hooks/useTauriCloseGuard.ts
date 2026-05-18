@@ -19,7 +19,19 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T, label: str
 }
 
 // Tauriウィンドウのクローズ要求時に未保存変更を確認するガード
-export function useTauriCloseGuard() {
+interface UseTauriCloseGuardOptions {
+  /**
+   * issue #74 / 保存中ガード用の ref。
+   * 保存中 (replace_pdf_file の rename 進行中) に window.destroy を許すと
+   * 元 PDF が `.pecotool-backup-<stamp>.tmp` に退避されたまま target が消える
+   * リスクがあるため、close 要求自体を suppress する。
+   * 省略可 (旧 API 互換)。
+   */
+  isSavingRef?: React.RefObject<boolean>;
+}
+
+export function useTauriCloseGuard(options: UseTauriCloseGuardOptions = {}) {
+  const { isSavingRef } = options;
   useEffect(() => {
     if (window.location.hash === '#preview') return;
     const currentWindow = getCurrentWindow();
@@ -28,6 +40,13 @@ export function useTauriCloseGuard() {
     const setupCloseListener = async () => {
       const closeUnlisten = await currentWindow.onCloseRequested(async (event) => {
         event.preventDefault();
+        // 保存中は close 要求を握りつぶす (再操作してもらう)。
+        // rename(target→backup) 後 rename(temp→target) の間に destroy が走ると
+        // target が消失する可能性があるため。
+        if (isSavingRef?.current) {
+          console.warn('[useTauriCloseGuard] close suppressed: save in progress');
+          return;
+        }
         // 「ユーザーが明示的にキャンセル」した場合のみ true。
         // それ以外 (正常フロー / 例外 / タイムアウト) では finally で必ず main を destroy する。
         let cancelled = false;

@@ -332,18 +332,25 @@ function App() {
   });
 
   // --- Effects ---
-  useTauriCloseGuard();
+  // issue (CloseGuard): 保存中の close を suppress するため isSavingRef を渡す。
+  useTauriCloseGuard({ isSavingRef });
+
+  // issue #74: F5 を modal / restore 中も握りつぶす ref をここで isSaving の最新値に同期。
+  const isSavingRef = useRef(isSaving);
+  isSavingRef.current = isSaving;
 
   useEffect(() => {
     const handleF5 = (e: KeyboardEvent) => {
-      if (e.key === 'F5') {
-        e.preventDefault();
-        handleReload();
-      }
+      if (e.key !== 'F5') return;
+      e.preventDefault();
+      // issue #74: バックアップ復元中 / モーダル表示中は F5 を握りつぶす。
+      // 復元中の二重 open でデータ消失、モーダル表示中の意図せぬ消去を防ぐ。
+      if (processingBackupPath || helpModal || showOcrSettings || pendingBackups.length > 0) return;
+      handleReload();
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
-  }, [handleReload]);
+  }, [handleReload, processingBackupPath, helpModal, showOcrSettings, pendingBackups.length]);
 
   useEffect(() => {
     if (!isSaving) return;

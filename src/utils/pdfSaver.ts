@@ -302,12 +302,12 @@ function replacePageTextContentStreams(
  * 導出: viewport(x_v, y_v) → user(u_x, u_y) を pdfjs convertToPdfPoint と同じ式に従う:
  *   R=90  → user(y_v, x_v)
  *   R=180 → user(pageW - x_v, y_v)
- *   R=270 → user(pageH - y_v, pageW - x_v)
+ *   R=270 → user(pageW - y_v, pageH - x_v)   ← 旧コメントは pageH/pageW を取り違えていた
  *
  * これを translate(bbox.x, vh - bbox.y) の出力に M を掛けて満たすよう連立方程式を解いた結果:
  *   R=90:  M = [0 1 -1 0 pageW 0]
  *   R=180: M = [-1 0 0 -1 pageW pageH]
- *   R=270: M = [0 -1 1 0 (pageH - pageW) pageW]
+ *   R=270: M = [0 -1 1 0 0 pageH]   ← 旧 [.. pageH-pageW pageW] は数式誤り (Critical, データ消失)
  *
  * 文字向きも M の linear 部分 + /Rotate の合成で R=0 と同じ「画面右=+x_text、画面上=+y_text」に
  * なる (検証済み)。drawText の rotate 引数追加は不要。
@@ -325,7 +325,7 @@ function getRotationCm(
     case 180:
       return [concatTransformationMatrix(-1, 0, 0, -1, pageW, pageH)] as const;
     case 270:
-      return [concatTransformationMatrix(0, -1, 1, 0, pageH - pageW, pageW)] as const;
+      return [concatTransformationMatrix(0, -1, 1, 0, 0, pageH)] as const;
     default:
       return [] as const;
   }

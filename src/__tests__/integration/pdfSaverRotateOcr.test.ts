@@ -129,7 +129,7 @@ function viewportToUserSpace(x_v: number, y_v: number, rotation: number, pageW: 
     case 0: return [x_v, pageH - y_v];
     case 90: return [y_v, x_v];
     case 180: return [pageW - x_v, y_v];
-    case 270: return [pageH - y_v, pageW - x_v];
+    case 270: return [pageW - y_v, pageH - x_v];
     default: return [x_v, pageH - y_v];
   }
 }
