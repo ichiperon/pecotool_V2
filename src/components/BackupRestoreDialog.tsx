@@ -163,9 +163,12 @@ export function BackupRestoreDialog({
         <div style={{
           padding: '10px 16px',
           borderTop: '1px solid #3b3b52',
-          fontSize: '11px', color: '#585b70', textAlign: 'right',
+          fontSize: '11px', color: isAnyProcessing ? '#f9e2af' : '#585b70', textAlign: 'right',
         }}>
-          ✕ で閉じると次回起動時にも復元候補として表示されます
+          {/* #83: 処理中は close 自体が disabled なので、文言も整合させる。 */}
+          {isAnyProcessing
+            ? '復元処理中はダイアログを閉じられません'
+            : '✕ で閉じると次回起動時にも復元候補として表示されます'}
         </div>
     </Modal>
   );
