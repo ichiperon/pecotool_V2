@@ -221,7 +221,13 @@ function replacePageTextContentStreams(
 
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
-    if (!(stream instanceof PDFRawStream)) return;
+    if (!(stream instanceof PDFRawStream)) {
+      // issue #44: see pdfSaver.ts comment.
+      console.warn('[pdf.worker] Skipping text strip: page content stream is not a PDFRawStream', {
+        streamType: stream?.constructor?.name ?? typeof stream,
+      });
+      return;
+    }
     const decoded = decodeStreamContents(stream);
     if (decoded === null) {
       cleanContentStream(stream);
@@ -426,6 +432,9 @@ async function handleSavePdf(
     support: makeFontSupportSet(font),
   }));
 
+  // issue #54: Form XObject 共有時に同じ ref を複数回 strip しないよう全ページで visited を共有。
+  const sharedVisitedFormRefs = new Set<string>();
+
   for (const [pageIndex, pageData] of pageEntriesToWrite) {
 
     const sortedBlocks: RepairTextBlock[] = [...pageData.textBlocks]
@@ -445,7 +454,7 @@ async function handleSavePdf(
 
     // --- Surgical Text Stripping ---
     pruneStalePecoToolResources(page.node as unknown as { Resources?: () => PDFDict | undefined });
-    cleanFormXObjectsInResources(page.node.Resources?.(), pdfDoc.context);
+    cleanFormXObjectsInResources(page.node.Resources?.(), pdfDoc.context, sharedVisitedFormRefs);
     replacePageTextContentStreams(
       page.node as unknown as {
         get?: (key: PDFName) => PDFObject | undefined;

@@ -232,7 +232,15 @@ function replacePageTextContentStreams(
 
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
-    if (!(stream instanceof PDFRawStream)) return;
+    if (!(stream instanceof PDFRawStream)) {
+      // issue #44: 暗号化 PDF や indirect chain で stream が PDFRawStream 以外になる
+      // ケースがあり、その場合 text strip が silent でスキップされて Double OCR が
+      // 残る。原因切り分けのため警告を出す。
+      console.warn('[pdfSaver] Skipping text strip: page content stream is not a PDFRawStream', {
+        streamType: stream?.constructor?.name ?? typeof stream,
+      });
+      return;
+    }
     const decoded = decodeStreamContents(stream);
     if (decoded === null) {
       cleanContentStream(stream);
@@ -493,8 +501,13 @@ export async function buildPdfDocument(
     support: makeFontSupportSet(font),
   }));
 
+  // issue #54: Form XObject は複数ページで共有されている (Acrobat の typical な造り) ことが多く、
+  // ページごとに new Set() を作ると同じバイト列を複数回 deflate してファイル肥大化する。
+  // 全ページで visited ref を共有する。
+  const sharedVisitedFormRefs = new Set<string>();
+
   for (const [pageIndex, pageData] of pageEntriesToWrite) {
-    
+
     const sortedBlocks = [...pageData.textBlocks]
       .map((block) => ({ ...block, text: sanitizeTextForPdfCopy(block.text, skippedChars, pageIndex) }))
       .sort((a, b) => a.order - b.order);
@@ -511,7 +524,7 @@ export async function buildPdfDocument(
 
     // --- Surgical Text Stripping ---
     pruneStalePecoToolResources(page.node as unknown as { Resources?: () => PDFDict | undefined });
-    cleanFormXObjectsInResources(page.node.Resources?.(), pdfDoc.context);
+    cleanFormXObjectsInResources(page.node.Resources?.(), pdfDoc.context, sharedVisitedFormRefs);
     replacePageTextContentStreams(
       page.node as unknown as {
         get?: (key: PDFName) => PDFObject | undefined;
