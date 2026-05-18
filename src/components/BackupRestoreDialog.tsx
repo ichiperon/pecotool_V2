@@ -1,5 +1,6 @@
 import { X, RotateCcw, Trash2 } from 'lucide-react';
-import { PendingBackup } from '../hooks/useAutoBackup';
+import type { PendingBackup } from '../hooks/useAutoBackup';
+import { Modal, useModalTitleId } from './ui/Modal';
 
 interface BackupRestoreDialogProps {
   backups: PendingBackup[];
@@ -7,6 +8,8 @@ interface BackupRestoreDialogProps {
   onDiscard: (backup: PendingBackup) => void;
   onClose: () => void;
   processingFilePath?: string | null;
+  /** Issue #42: 処理中に close 要求が来た時の通知 (Toast) ハンドラ */
+  onCloseSuppressed?: () => void;
 }
 
 function formatTimestamp(iso: string): string {
@@ -30,14 +33,26 @@ export function BackupRestoreDialog({
   onDiscard,
   onClose,
   processingFilePath,
+  onCloseSuppressed,
 }: BackupRestoreDialogProps) {
+  const titleId = useModalTitleId();
+  // Issue #42: 復元 or 破棄処理が進行中なら、Esc / backdrop / ✕ どれでも閉じさせない
+  const isAnyProcessing = processingFilePath != null;
+
   return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 9999,
-      background: 'rgba(0,0,0,0.55)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <div style={{
+    <Modal
+      onClose={onClose}
+      titleId={titleId}
+      disableClose={isAnyProcessing}
+      onCloseSuppressed={onCloseSuppressed}
+      backdropClassName="backup-restore-backdrop"
+      dialogClassName="backup-restore-dialog"
+      backdropStyle={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+      dialogStyle={{
         background: '#1e1e2e',
         border: '1px solid #3b3b52',
         borderRadius: '8px',
@@ -46,21 +61,36 @@ export function BackupRestoreDialog({
         boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
         color: '#cdd6f4',
         fontFamily: 'inherit',
-      }}>
+      }}
+    >
         {/* ヘッダー */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px',
           borderBottom: '1px solid #3b3b52',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 600 }}>
+          <div id={titleId} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 600 }}>
             <span style={{ fontSize: '16px' }}>⚠️</span>
             未保存の内容があります
           </div>
           <button
-            onClick={onClose}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6c7086', padding: '2px' }}
-            title="閉じる（破棄しない）"
+            onClick={() => {
+              // Issue #42: 処理中は ✕ も握りつぶす (UI が disabled 表現も持つ)
+              if (isAnyProcessing) {
+                onCloseSuppressed?.();
+                return;
+              }
+              onClose();
+            }}
+            disabled={isAnyProcessing}
+            aria-label="閉じる"
+            style={{
+              background: 'none', border: 'none',
+              cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
+              color: '#6c7086', padding: '2px',
+              opacity: isAnyProcessing ? 0.4 : 1,
+            }}
+            title={isAnyProcessing ? '復元中は閉じられません' : '閉じる（破棄しない）'}
           >
             <X size={18} />
           </button>
@@ -75,7 +105,6 @@ export function BackupRestoreDialog({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {backups.map((backup) => {
               const isProcessing = processingFilePath === backup.file_path;
-              const isAnyProcessing = processingFilePath != null;
               return (
                 <div key={backup.file_path} style={{
                   background: '#181825',
@@ -138,7 +167,6 @@ export function BackupRestoreDialog({
         }}>
           ✕ で閉じても、バックアップファイルは削除されません
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

@@ -1,0 +1,182 @@
+import { ReactNode, useEffect, useId, useRef } from 'react';
+
+/**
+ * 共通モーダル抽象 (Issue #40).
+ *
+ * すべてのアプリ内モーダル/ダイアログはこのコンポーネントで包み、
+ *   - Esc キーで onClose
+ *   - role="dialog" + aria-modal="true" + aria-labelledby
+ *   - 開いた瞬間にモーダル内の最初の focus 可能要素へ自動 focus
+ *   - Tab/Shift+Tab を内部にトラップ (外の DOM へ遷移しない)
+ *   - backdrop クリックで onClose
+ * を一律に提供する。
+ *
+ * 各モーダルは見た目を司る className (modal-backdrop / modal-overlay 等) と
+ * 中身を渡すだけで A11y が成立する。
+ */
+
+export interface ModalProps {
+  /** ダイアログを閉じる要求 (Esc / backdrop クリック / ✕ ボタンから呼ぶ) */
+  onClose: () => void;
+  /** aria-labelledby に紐づくタイトル要素の表示テキスト。aria 用と視覚 header 兼用するケースで使う */
+  titleId?: string;
+  /** aria-label として直接渡したい場合 (タイトル要素を別管理する場合) */
+  ariaLabel?: string;
+  /** backdrop に当てる className (例: "modal-backdrop", "save-dialog-backdrop") */
+  backdropClassName: string;
+  /** 中央のダイアログ本体に当てる className (例: "modal", "save-dialog") */
+  dialogClassName: string;
+  /** ダイアログ本体に追加で渡したい style (BackupRestoreDialog 等は inline style に依存) */
+  dialogStyle?: React.CSSProperties;
+  /** backdrop に追加で渡したい style */
+  backdropStyle?: React.CSSProperties;
+  /**
+   * true の場合、Esc / backdrop クリックでの close を抑止する。
+   * Issue #42: バックアップ復元処理中は ✕ も Esc も無視するために使う。
+   * onClose 自体は親で disable しても良いが、ここで一段ガードしておく。
+   */
+  disableClose?: boolean;
+  /** disableClose で close 要求が握り潰された時に呼ばれる (Toast 表示などに使う) */
+  onCloseSuppressed?: () => void;
+  children: ReactNode;
+}
+
+/** focusable な要素を列挙するためのセレクタ。Tab トラップで使う。 */
+const FOCUSABLE_SELECTOR =
+  'a[href], area[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+export function Modal({
+  onClose,
+  titleId,
+  ariaLabel,
+  backdropClassName,
+  dialogClassName,
+  dialogStyle,
+  backdropStyle,
+  disableClose = false,
+  onCloseSuppressed,
+  children,
+}: ModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // 最新の onClose / disableClose を ref で参照することで、effect の再登録を避ける。
+  const onCloseRef = useRef(onClose);
+  const onCloseSuppressedRef = useRef(onCloseSuppressed);
+  const disableCloseRef = useRef(disableClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    onCloseSuppressedRef.current = onCloseSuppressed;
+    disableCloseRef.current = disableClose;
+  }, [onClose, onCloseSuppressed, disableClose]);
+
+  // Esc リスナー + Tab トラップ
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (disableCloseRef.current) {
+          // Issue #42: 処理中の Esc は無視 + 通知だけ通す
+          e.preventDefault();
+          e.stopPropagation();
+          onCloseSuppressedRef.current?.();
+          return;
+        }
+        // Issue #47 互換: 保存中の global ブロッカは Escape を素通りさせるので、
+        // ここで preventDefault してから onClose を呼ぶ。
+        e.preventDefault();
+        e.stopPropagation();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key === 'Tab') {
+        // フォーカストラップ: モーダル内 focusable をリストアップして循環させる
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const focusables = Array.from(
+          dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+        ).filter((el) => !el.hasAttribute('inert'));
+        if (focusables.length === 0) {
+          e.preventDefault();
+          dialog.focus();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        // dialog 外に focus がある or focus が無い → 先頭/末尾に当てる
+        if (!active || !dialog.contains(active)) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus();
+          return;
+        }
+        if (e.shiftKey && active === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    // capture: true にして、他の global keydown (例: useKeyboardShortcuts) より先に Esc を捕まえる。
+    // Esc を渡してしまうと PDF 編集モード解除等の副作用が走ってしまう。
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, []);
+
+  // 初期フォーカス: 最初の focusable を当てる。無ければ dialog 自身に focus。
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    // 既にモーダル内にフォーカスが入っている (autoFocus 等) なら尊重する
+    const active = document.activeElement as HTMLElement | null;
+    if (active && dialog.contains(active)) return;
+    const focusables = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+    if (focusables.length > 0) {
+      focusables[0].focus();
+    } else {
+      dialog.focus();
+    }
+  }, []);
+
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    // backdrop 自身がクリックされた場合のみ close (内側クリックは無視)
+    if (e.target !== e.currentTarget) return;
+    if (disableClose) {
+      onCloseSuppressed?.();
+      return;
+    }
+    onClose();
+  };
+
+  return (
+    <div
+      className={backdropClassName}
+      style={backdropStyle}
+      onClick={handleBackdropClick}
+    >
+      <div
+        ref={dialogRef}
+        className={dialogClassName}
+        style={dialogStyle}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-label={titleId ? undefined : ariaLabel}
+        // dialog 自身を focusable にしておき、focusable 子要素ゼロのケースで focus 先を担保する
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * モーダル内で一意な title id を払い出す。
+ * 各モーダルで `const titleId = useModalTitleId();` のように使い、
+ * <h3 id={titleId}> と <Modal titleId={titleId}> を結びつける。
+ */
+export function useModalTitleId(): string {
+  const id = useId();
+  return `modal-title-${id}`;
+}

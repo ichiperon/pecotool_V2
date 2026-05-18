@@ -479,7 +479,14 @@ export function useFileOperations(
     return { size: savedBytes.length, skippedChars };
   };
 
-  const handleSave = async () => {
+  /**
+   * Ctrl+S 経路と「フォルダ OCR の自動上書き保存」(#48) の共通エントリ。
+   * - 成功時: true
+   * - 失敗 / アボート (PDF 未オープン、保存中ロック、_executeSave が null、例外) は false
+   *
+   * フォルダ OCR ループは false を見て即時中止できる。
+   */
+  const handleSave = async (): Promise<boolean> => {
     // Ctrl+S が届いていることを可視化するため、開始時に必ずトースト表示。
     // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
     console.log('[save] handleSave invoked');
@@ -487,12 +494,12 @@ export function useFileOperations(
     const { document } = usePecoStore.getState();
     if (!document) {
       showToast("PDFが開かれていません。", true);
-      return;
+      return false;
     }
 
     if (isSavingRef.current) {
       showToast("保存処理が進行中です。");
-      return;
+      return false;
     }
 
     isSavingRef.current = true;
@@ -505,7 +512,9 @@ export function useFileOperations(
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
         invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
+        return true;
       }
+      return false;
     } catch (err) {
       console.error("Failed to save:", err);
       const msg = err instanceof Error ? err.message : String(err);
@@ -526,6 +535,7 @@ export function useFileOperations(
       } else {
         showToast(`保存に失敗しました: ${msg}`, true);
       }
+      return false;
     } finally {
       isSavingRef.current = false;
       setIsSaving?.(false);

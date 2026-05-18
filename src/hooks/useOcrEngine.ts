@@ -6,7 +6,7 @@ import { writeFile, remove } from '@tauri-apps/plugin-fs';
 import { tempDir, join } from '@tauri-apps/api/path';
 import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
-import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
+import { TextBlock, OcrResult, OcrResultBlock, PecoDocument, BoundingBox } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
 import { logger } from '../utils/logger';
@@ -17,8 +17,14 @@ const RENDER_SCALE = 2.0;
 /**
  * Render a page from an isolated PDF document (not the shared LRU cache)
  * so it never conflicts with PdfCanvas's concurrent render on the same proxy.
+ *
+ * 戻り値: (テンポラリ画像パス, scale=1.0 の rotation 適用済み viewport)。
+ * viewport は OCR 結果 BB の PDF user space 変換 (#50) に使用する。
  */
-async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex: number): Promise<string> {
+async function renderPageToTempFile(
+  ocrPdf: pdfjsLib.PDFDocumentProxy,
+  pageIndex: number,
+): Promise<{ tempPath: string; unscaledViewport: pdfjsLib.PageViewport }> {
   const page = await ocrPdf.getPage(pageIndex + 1);
   const canvas = document.createElement('canvas');
   try {
@@ -39,7 +45,10 @@ async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex
     const fileName = `peco_ocr_${pageIndex}_${Date.now()}.png`;
     const tempPath = await join(tmp, fileName);
     await writeFile(tempPath, bytes);
-    return tempPath;
+    // pdfSaver は PDF user space で bbox を扱うため、render scale=1.0 ベースの viewport を返す。
+    // rotation はそのまま継承される (scale を変えても /Rotate 情報は同一)。
+    const unscaledViewport = page.getViewport({ scale: 1.0 });
+    return { tempPath, unscaledViewport };
   } finally {
     canvas.width = 0;
     canvas.height = 0;
@@ -47,19 +56,65 @@ async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex
   }
 }
 
-function toTextBlocks(blocks: OcrResultBlock[], settings: OcrSortSettings): TextBlock[] {
+/**
+ * Rust 側から返ってくる OCR BB は「画像ピクセルを render_scale で割った値」=
+ * `viewport.getViewport({ scale: 1.0 })` のスクリーン座標系（/Rotate 適用後）。
+ * pdfSaver は PDF user space で bbox を扱うため、回転ページではここで変換しないと
+ * 描画位置がページ外へ飛ぶ (#50)。
+ *
+ * 4 隅を `viewport.convertToPdfPoint()` で PDF user space に戻し、
+ * 軸整列 (axis-aligned) bbox を再構成する。
+ */
+function convertViewportBBoxToPdfUserSpace(
+  bbox: BoundingBox,
+  viewport: pdfjsLib.PageViewport,
+): BoundingBox {
+  // 回転なしならスクリーン座標と PDF user space は y 軸方向だけ反転する関係なので
+  // convertToPdfPoint を通せば自動的に正しく変換される。
+  // 4 隅を変換してから min/max を取ることで回転後も AABB を維持できる。
+  const corners: Array<[number, number]> = [
+    [bbox.x, bbox.y],
+    [bbox.x + bbox.width, bbox.y],
+    [bbox.x, bbox.y + bbox.height],
+    [bbox.x + bbox.width, bbox.y + bbox.height],
+  ];
+  const transformed = corners.map(([x, y]) => viewport.convertToPdfPoint(x, y));
+  const xs = transformed.map((p) => p[0]);
+  const ys = transformed.map((p) => p[1]);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
+function toTextBlocks(
+  blocks: OcrResultBlock[],
+  settings: OcrSortSettings,
+  viewport?: pdfjsLib.PageViewport | null,
+): TextBlock[] {
   const filtered = blocks.filter((b) => b.text.trim() !== '');
   const sorted = sortOcrBlocks(filtered, settings);
-  return sorted.map((b, i) => ({
+  return sorted.map((b, i) => {
+    // viewport が無い場合 (テスト等で省略) は変換せずそのまま使う。
+    // 通常経路では viewport は必ず渡される。
+    const bbox = viewport ? convertViewportBBoxToPdfUserSpace(b.bbox, viewport) : b.bbox;
+    return {
       id: crypto.randomUUID(),
       text: b.text,
       originalText: b.text,
-      bbox: b.bbox,
+      bbox,
       writingMode: b.writingMode,
       order: i,
       isNew: true,
       isDirty: true,
-    }));
+    };
+  });
 }
 
 async function runOcrForPage(
@@ -68,10 +123,13 @@ async function runOcrForPage(
   pageIndex: number,
   pageWidth: number,
   pageHeight: number,
-): Promise<OcrResult> {
+): Promise<{ result: OcrResult; unscaledViewport: pdfjsLib.PageViewport | null }> {
   let tempPath: string | null = null;
+  let unscaledViewport: pdfjsLib.PageViewport | null = null;
   try {
-    tempPath = await renderPageToTempFile(ocrPdf, pageIndex);
+    const rendered = await renderPageToTempFile(ocrPdf, pageIndex);
+    tempPath = rendered.tempPath;
+    unscaledViewport = rendered.unscaledViewport;
     const raw = await invoke<string>('run_ocr', {
       imagePath: tempPath,
       pageWidth,
@@ -82,9 +140,12 @@ async function runOcrForPage(
     try {
       parsed = JSON.parse(raw) as OcrResult;
     } catch (e) {
-      return { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` };
+      return {
+        result: { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` },
+        unscaledViewport,
+      };
     }
-    return parsed;
+    return { result: parsed, unscaledViewport };
   } finally {
     if (tempPath) {
       remove(tempPath).catch((e) => {
@@ -104,7 +165,12 @@ type OcrProgress = {
 
 interface FolderOcrCallbacks {
   openPdf?: (filePath: string) => Promise<boolean>;
-  savePdf?: () => Promise<void>;
+  /**
+   * #48: 戻り値で保存成功/失敗を明示的に返す。フォルダ OCR ループは false を
+   * 受け取ったら即座に中止する。store の isDirty を後追いで判定するのは
+   * IDB の async save が non-atomic で残るため false positive が出る。
+   */
+  savePdf?: () => Promise<boolean>;
 }
 
 export function useOcrEngine(
@@ -179,7 +245,13 @@ export function useOcrEngine(
         }
 
         try {
-          const result = await runOcrForPage(ocrPdf, doc.filePath, i, size.pageWidth, size.pageHeight);
+          const { result, unscaledViewport } = await runOcrForPage(
+            ocrPdf,
+            doc.filePath,
+            i,
+            size.pageWidth,
+            size.pageHeight,
+          );
           if (!isCurrentDocument(doc.filePath)) {
             cancelTokenRef.current = true;
             showToast('OCRを中止しました（別のPDFが開かれました）。', true);
@@ -190,7 +262,9 @@ export function useOcrEngine(
             continue;
           }
           const settings = useOcrSettingsStore.getState();
-          const newBlocks = toTextBlocks(result.blocks ?? [], settings);
+          // #50: 回転ページでは OCR の BB が rotated viewport 座標で返るため、
+          // PDF user space へ変換してから store に入れる。
+          const newBlocks = toTextBlocks(result.blocks ?? [], settings, unscaledViewport);
           usePecoStore.getState().updatePageData(i, {
             textBlocks: newBlocks,
             isDirty: true,
@@ -257,7 +331,13 @@ export function useOcrEngine(
     try {
       if (!isCurrentDocument(doc.filePath)) return;
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
-      const result = await runOcrForPage(ocrPdf, doc.filePath, pageIdx, pageData.width, pageData.height);
+      const { result, unscaledViewport } = await runOcrForPage(
+        ocrPdf,
+        doc.filePath,
+        pageIdx,
+        pageData.width,
+        pageData.height,
+      );
       if (!isCurrentDocument(doc.filePath)) {
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
         return;
@@ -269,7 +349,9 @@ export function useOcrEngine(
       }
 
       const settings = useOcrSettingsStore.getState();
-      const newBlocks = toTextBlocks(result.blocks ?? [], settings);
+      // #50: 回転ページでは OCR の BB が rotated viewport 座標で返るため、
+      // PDF user space へ変換してから store に入れる。
+      const newBlocks = toTextBlocks(result.blocks ?? [], settings, unscaledViewport);
       usePecoStore.getState().updatePageData(pageIdx, {
         textBlocks: newBlocks,
         isDirty: true,
@@ -387,11 +469,12 @@ export function useOcrEngine(
         if (cancelTokenRef.current) break;
 
         setOcrProgress({ current: doc.totalPages, total: doc.totalPages, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName });
-        await callbacks.savePdf();
-        const state = usePecoStore.getState();
-        const hasDirtyPages = Array.from(state.document?.pages.values() || []).some((p) => p.isDirty);
-        if (state.isDirty || hasDirtyPages) {
-          showToast(`${fileName} の保存に失敗した可能性があります。フォルダOCRを中止します。`, true);
+        // #48: savePdf の戻り値で成功/失敗を明示判定する。
+        // 旧実装は store の isDirty を見ていたが、saveTemporaryPageData の async は
+        // non-atomic で残るため false positive 中止が起きていた。
+        const saved = await callbacks.savePdf();
+        if (!saved) {
+          showToast(`${fileName} の保存に失敗しました。フォルダOCRを中止します。`, true);
           cancelTokenRef.current = true;
           break;
         }

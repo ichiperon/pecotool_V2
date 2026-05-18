@@ -108,7 +108,8 @@ function App() {
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
   const folderOpenPdfRef = useRef<(filePath: string) => Promise<boolean>>(async () => false);
-  const folderSavePdfRef = useRef<() => Promise<void>>(async () => {});
+  // #48: フォルダ OCR ループが保存失敗で即時中止できるよう Promise<boolean> を返す。
+  const folderSavePdfRef = useRef<() => Promise<boolean>>(async () => false);
 
   const [reorderThreshold, setReorderThreshold] = useState(() => readReorderThreshold());
 
@@ -427,8 +428,18 @@ function App() {
             backups={pendingBackups}
             onRestore={handleRestoreBackup}
             onDiscard={handleDiscardBackup}
-            onClose={() => setPendingBackups([])}
+            onClose={() => {
+              // Issue #42: 復元/破棄処理中は閉じない (中途半端な状態で保存されてしまう)
+              if (processingBackupPath) {
+                showToast('復元処理中はダイアログを閉じられません。完了までお待ちください。', true);
+                return;
+              }
+              setPendingBackups([]);
+            }}
             processingFilePath={processingBackupPath}
+            onCloseSuppressed={() =>
+              showToast('復元処理中はダイアログを閉じられません。完了までお待ちください。', true)
+            }
           />
         </Suspense>
       )}
