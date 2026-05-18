@@ -128,13 +128,17 @@ export const perf: PerfLogger = {
 
   mark(label, extra) {
     if (!state.enabled) return;
-    try {
-      if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
-        // performance.mark は同一 label を複数回受け付けるので sessionId をサフィックス化して衝突回避
-        performance.mark(label);
+    // production では performance.mark を呼ばない。User Timing バッファに無制限蓄積する
+    // メモリリーク (高頻度操作: bbox ドラッグ等) を防ぐため、開発時のみ DevTools 連携用に発火させる。
+    if (import.meta.env.DEV) {
+      try {
+        if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+          // performance.mark は同一 label を複数回受け付けるので sessionId をサフィックス化して衝突回避
+          performance.mark(label);
+        }
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* ignore */
     }
     pushEntry(label, extra);
     if (state.verbose) {
