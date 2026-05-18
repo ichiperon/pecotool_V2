@@ -117,8 +117,17 @@ export function useAutoBackup(
 
   // 編集タイミングの追跡: store の document.pages 参照が変化したら lastEditTimeRef を更新する。
   // updatePageData は毎回 newPages Map を生成するため、参照変化 = 編集発生とみなせる。
+  // ただし setDocument による新規 PDF オープンも pages 参照変化を伴うため、
+  // filePath が同一 (= 既存ドキュメントへの編集) であることも併せて要求する (#67)。
+  // これにより新規 PDF オープン直後の quietPeriodMs (60s) 期間中も
+  // 編集発生時には正しく lastEditTimeRef が更新され、バックアップが取得できる。
   useEffect(() => {
     const unsubscribe = usePecoStore.subscribe((state, prev) => {
+      const prevPath = prev.document?.filePath;
+      const currPath = state.document?.filePath;
+      // filePath が変わった (setDocument) 場合は編集とみなさない
+      if (prevPath !== currPath) return;
+      // filePath が同一かつ pages 参照が変わった = updatePageData 等による編集
       if (state.document?.pages !== prev.document?.pages) {
         lastEditTimeRef.current = Date.now();
       }

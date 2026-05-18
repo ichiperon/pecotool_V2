@@ -369,8 +369,13 @@ describe('useAutoBackup performBackup (#24 早期スキップ / debounce)', () =
     const quietMs = 60_000;
     const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
 
-    // store に document をセットして編集発生をシミュレート → lastEditTimeRef が「今」になる
-    usePecoStore.setState({ document: makeDoc(new Map([[0, makePage({ isDirty: true })]])), isDirty: true });
+    // 先に setDocument 相当 (filePath が null→test.pdf) を発行 → lastEditTimeRef は更新されない (#67)
+    usePecoStore.setState({ document: makeDoc(), isDirty: false });
+    // 続いて同じ filePath 上で pages 参照を変えて編集発生をシミュレート → lastEditTimeRef が「今」になる
+    usePecoStore.setState({
+      document: makeDoc(new Map([[0, makePage({ isDirty: true })]])),
+      isDirty: true,
+    });
 
     await act(async () => {
       await result.current.performBackup();
@@ -391,9 +396,16 @@ describe('useAutoBackup performBackup (#24 早期スキップ / debounce)', () =
 
     const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
 
-    // 編集発生を t=1000 として subscribe 側に通知 → lastEditTimeRef = 1000
+    // 先に setDocument 相当 (filePath が null→test.pdf) を発行 → lastEditTimeRef は更新されない (#67)
+    nowSpy.mockReturnValue(500);
+    usePecoStore.setState({ document: makeDoc(), isDirty: false });
+
+    // 編集発生を t=1000 として subscribe 側に通知 (filePath 同一で pages 参照変化) → lastEditTimeRef = 1000
     nowSpy.mockReturnValue(1000);
-    usePecoStore.setState({ document: makeDoc(new Map([[0, makePage({ isDirty: true })]])), isDirty: true });
+    usePecoStore.setState({
+      document: makeDoc(new Map([[0, makePage({ isDirty: true })]])),
+      isDirty: true,
+    });
 
     // 60s 経過後に performBackup → Date.now() - 1000 = 60001 > 60000
     nowSpy.mockReturnValue(1000 + quietMs + 1);
@@ -403,6 +415,143 @@ describe('useAutoBackup performBackup (#24 早期スキップ / debounce)', () =
 
     const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
     expect(saveCalls).toHaveLength(1);
+
+    nowSpy.mockRestore();
+  });
+});
+
+// ── #67: 新規 PDF オープン直後 (setDocument) は lastEditTime を更新しない ──
+
+describe('useAutoBackup lastEditTime tracking (#67 setDocument を編集とみなさない)', () => {
+  beforeEach(() => {
+    resetStore();
+    vi.mocked(getAllTemporaryPageData).mockReset().mockResolvedValue(new Map());
+    vi.mocked(saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(clearTemporaryChanges).mockReset().mockResolvedValue(undefined);
+  });
+
+  // #67 主回帰テスト: 新規 PDF オープン直後 (filePath が変わる setDocument) は
+  // 「直近編集」とみなさない → quietPeriodMs を経過しても lastEdit===0 のままで performBackup は走らない。
+  it('S-67-01: setDocument のみでは lastEditTime を更新しない (lastEdit=0 のままで backup skip)', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+
+    // t=1000: setDocument 相当 (null → test.pdf) を発行
+    nowSpy.mockReturnValue(1000);
+    usePecoStore.setState({ document: makeDoc(), isDirty: false });
+
+    // 修正前は lastEditTimeRef=1000 となり、以降 quietMs=60s 編集できなくても 60s 後に backup が走ってしまっていた。
+    // 修正後は lastEditTimeRef=0 のままなので、編集なしのままどれだけ経過しても performBackup はスキップされる。
+    nowSpy.mockReturnValue(1000 + quietMs + 1);
+    // 「編集はしていないが isDirty は true」のシナリオは現実には起きないが、
+    // 仮にそうであっても lastEdit===0 であれば performBackup は走らないことを確認する
+    usePecoStore.setState({ isDirty: true });
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(0);
+    // lastEdit===0 で早期 return されるため IDB 走査にも進まない
+    expect(vi.mocked(getAllTemporaryPageData)).not.toHaveBeenCalled();
+
+    nowSpy.mockRestore();
+  });
+
+  // #67: filePath 同一で pages 参照のみ更新された場合 (= updatePageData) は
+  // 編集発生とみなして lastEditTime を更新する。
+  it('S-67-02: filePath 同一で pages 更新時のみ lastEditTime を更新する', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+
+    // t=500: 新規 PDF オープン (setDocument) → lastEditTime は更新されない
+    nowSpy.mockReturnValue(500);
+    usePecoStore.setState({ document: makeDoc(), isDirty: false });
+
+    // t=1000: ユーザー編集発生 (filePath 同一, pages 参照だけ変わる) → lastEditTime=1000
+    nowSpy.mockReturnValue(1000);
+    usePecoStore.setState({
+      document: makeDoc(new Map([[0, makePage({ isDirty: true })]])),
+      isDirty: true,
+    });
+
+    // t=1000 + quietMs + 1: 60s 静かにしてから performBackup → 走る
+    nowSpy.mockReturnValue(1000 + quietMs + 1);
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(1);
+
+    nowSpy.mockRestore();
+  });
+
+  // #67 retrospective: 新規 PDF を開いた "直後" (60s 以内) の編集が確実にバックアップされる。
+  // 修正前: setDocument が lastEdit を更新するため、編集してから残り 30s しかなく
+  //   60s 後に performBackup されても 30s 静止していない → スキップになる可能性があった。
+  // 修正後: setDocument では lastEdit が更新されないので、編集から 60s 静止で backup される。
+  it('S-67-03: 新規 PDF オープン直後 30 秒で編集し 60 秒待てば backup が走る', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+
+    // t=1: 新規 PDF オープン (sentinel 回避のため 0 ではなく 1)
+    nowSpy.mockReturnValue(1);
+    usePecoStore.setState({ document: makeDoc(), isDirty: false });
+
+    // t=30_000: ユーザー編集 (filePath 同一で pages 参照更新) → lastEditTime=30000
+    nowSpy.mockReturnValue(30_000);
+    usePecoStore.setState({
+      document: makeDoc(new Map([[0, makePage({ isDirty: true })]])),
+      isDirty: true,
+    });
+
+    // t=30_000 + 60_001: 編集から 60s 経過 → backup 走る
+    nowSpy.mockReturnValue(30_000 + quietMs + 1);
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(1);
+
+    nowSpy.mockRestore();
+  });
+
+  // #67 negative: 別 PDF への切替 (filePath が変わる setDocument) も編集とみなさない。
+  // 切替後に編集してから quietPeriodMs 静止して初めて backup される。
+  it('S-67-04: 別 PDF への切替時も setDocument 単独では lastEditTime を更新しない', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+
+    // t=1000: file1 を開く
+    nowSpy.mockReturnValue(1000);
+    const file1 = { ...makeDoc(), filePath: 'file1.pdf', fileName: 'file1.pdf' };
+    usePecoStore.setState({ document: file1, isDirty: false });
+
+    // t=2000: file2 に切り替え (setDocument, filePath 変化) → lastEditTime は 0 のまま
+    nowSpy.mockReturnValue(2000);
+    const file2 = { ...makeDoc(), filePath: 'file2.pdf', fileName: 'file2.pdf' };
+    usePecoStore.setState({ document: file2, isDirty: false });
+
+    // t=2000 + quietMs + 1: isDirty=true でも lastEdit===0 (sentinel) で skip
+    nowSpy.mockReturnValue(2000 + quietMs + 1);
+    usePecoStore.setState({ isDirty: true });
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(0);
 
     nowSpy.mockRestore();
   });
