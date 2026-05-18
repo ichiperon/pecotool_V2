@@ -1,4 +1,4 @@
-import { render, fireEvent, cleanup } from '@testing-library/react'
+import { render, fireEvent, cleanup, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { PdfCanvas } from '../../components/PdfCanvas'
 import { usePecoStore } from '../../store/pecoStore'
@@ -119,6 +119,70 @@ describe('PdfCanvas', () => {
     expect(state.selectedIds.has('')).toBe(false);
     expect(state.lastSelectedId).toBe(null);
   });
+
+  // ── C-PC-AUTOSCROLL: 自動スクロールは bbox 変化時のみ (issue #73) ────
+  describe('auto-scroll effect (issue #73)', () => {
+    function makePanel(): HTMLDivElement {
+      const panel = window.document.createElement('div')
+      panel.className = 'pdf-viewer-panel'
+      panel.getBoundingClientRect = vi.fn().mockReturnValue({
+        left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600, x: 0, y: 0, toJSON: () => ({}),
+      })
+      window.document.body.appendChild(panel)
+      return panel
+    }
+
+    it('updatePageData による thumbnail のみ更新では scrollTo を再発火しない', () => {
+      usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+
+      const panel = makePanel()
+      const scrollSpy = vi.fn()
+      panel.scrollTo = scrollSpy as unknown as typeof panel.scrollTo
+
+      render(<PdfCanvas pageIndex={0} />)
+
+      // 初回マウント effect の同期実行で 1 回 scrollTo
+      const initialCalls = scrollSpy.mock.calls.length
+
+      // bbox を変更せずに thumbnail だけ更新 (PageData 参照は変わるが textBlocks 参照は同一)
+      const before = usePecoStore.getState().document!.pages.get(0)!
+      act(() => {
+        usePecoStore.getState().updatePageData(0, { thumbnail: 'dummy' } as any, false)
+      })
+      const after = usePecoStore.getState().document!.pages.get(0)!
+      // 前提確認: textBlocks 参照は保たれていること
+      expect(after.textBlocks).toBe(before.textBlocks)
+
+      // textBlocks が変わっていないので scrollTo は追加で呼ばれない (issue #73)
+      expect(scrollSpy.mock.calls.length).toBe(initialCalls)
+
+      panel.remove()
+    })
+
+    it('updatePageData で textBlocks の bbox が変わると scrollTo は再発火する (sanity)', () => {
+      usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+
+      const panel = makePanel()
+      const scrollSpy = vi.fn()
+      panel.scrollTo = scrollSpy as unknown as typeof panel.scrollTo
+
+      render(<PdfCanvas pageIndex={0} />)
+      const initialCalls = scrollSpy.mock.calls.length
+
+      // 新しい textBlocks 配列で bbox 変更
+      act(() => {
+        usePecoStore.getState().updatePageData(0, {
+          textBlocks: [
+            { id: 'b1', bbox: { x: 200, y: 200, width: 100, height: 50 }, text: 'Test', order: 0, pageIndex: 0 } as any,
+          ],
+        } as any, false)
+      })
+
+      expect(scrollSpy.mock.calls.length).toBeGreaterThan(initialCalls)
+
+      panel.remove()
+    })
+  })
 
   it('should enter drawing mode and allow drawing a new block', () => {
     usePecoStore.setState({ isDrawingMode: true } as any);

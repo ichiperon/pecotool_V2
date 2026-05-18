@@ -119,4 +119,25 @@ describe('perfLogger', () => {
     expect(typeof perf.enabled).toBe('boolean');
     expect(perf.enabled).toBe(true);
   });
+
+  it('U-PL-06: production でも localStorage 未設定なら default は disabled (issue #76)', async () => {
+    // pecoPerf 未設定 / location.hash も #perf なし → opt-in されていない
+    const { perf } = await loadPerf({ dev: false, localStorage: null });
+    expect(perf.enabled).toBe(false);
+
+    // mark しても push されない (hot path での object allocation を防ぐ)
+    perf.mark('prod.default.x', { foo: 'bar' });
+    expect(perf.getEntries()).toEqual([]);
+    expect(perfMarkSpy).toHaveBeenCalledTimes(0);
+  });
+
+  it('U-PL-07: development でも localStorage 未設定なら default は disabled', async () => {
+    const { perf } = await loadPerf({ dev: true, localStorage: null });
+    expect(perf.enabled).toBe(false);
+  });
+
+  it('U-PL-08: localStorage.pecoPerf=1 で PROD でも opt-in 可能', async () => {
+    const { perf } = await loadPerf({ dev: false, localStorage: '1' });
+    expect(perf.enabled).toBe(true);
+  });
 });

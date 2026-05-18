@@ -212,7 +212,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false })),
 
   updatePageData: (pageIndex, data, undoable = true) => {
-    perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
+    if (perf.enabled) perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
     // LRU退避時のIndexedDB保存をset()の外で非同期実行するためペンディングリストを収集
     const pendingSaves: Array<{ filePath: string; idx: number; page: PageData }> = [];
 
@@ -302,7 +302,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
       pendingIdbSaves.add(tracked);
     }
-    perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
+    if (perf.enabled) perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
   },
 
   resetDirty: () => set((state) => {

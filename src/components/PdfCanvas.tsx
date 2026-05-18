@@ -7,7 +7,6 @@ import {
   selectSelectedIds,
   selectIsDrawingMode,
   selectIsSplitMode,
-  selectCurrentPage,
   selectCurrentPageTextBlocks,
 } from "../store/pecoStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
@@ -29,7 +28,6 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
   const renderOverlaysRef = useRef<(() => void) | null>(null);
 
   const document = usePecoStore((s) => s.document);
-  const currentPage = usePecoStore(selectCurrentPage);
   // overlay 再描画 effect は textBlocks のみを依存とし、PageData の他フィールド
   // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
   // 再描画 effect が走らないようにする (issue #22)。
@@ -93,12 +91,15 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
     };
   };
 
-  // 選択されたブロックへの自動スクロール
+  // 選択されたブロックへの自動スクロール。
+  // 依存に `currentPage` (PageData 全体) を入れると updatePageData による
+  // テキスト編集 / dirty flag / thumbnail 更新でも effect が走り、user scroll を
+  // 中断してしまう。textBlocks のみを購読すれば bbox が変わったときだけ再実行
+  // される (issue #73)。
   useEffect(() => {
     if (selectedIds.size !== 1 || drag.draggedId) return;
     const selectedId = Array.from(selectedIds)[0];
-    const pageData = currentPage;
-    const block = pageData?.textBlocks.find((b) => b.id === selectedId);
+    const block = currentTextBlocks?.find((b) => b.id === selectedId);
     if (!block) return;
 
     const container = window.document.querySelector(".pdf-viewer-panel");
@@ -119,7 +120,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
       top: Math.max(0, targetY),
       behavior: "smooth",
     });
-  }, [selectedIds, zoom, currentPage, pageIndex, drag.draggedId]);
+  }, [selectedIds, zoom, currentTextBlocks, pageIndex, drag.draggedId]);
 
   // Overlay Layer Rendering
   const overlayRafRef = useRef<number | null>(null);

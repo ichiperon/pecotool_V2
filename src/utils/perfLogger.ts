@@ -66,9 +66,10 @@ function detectEnabled(): { enabled: boolean; verbose: boolean } {
   } catch {
     // localStorage アクセス不可 (SSR 等) は無効
   }
-  // プロダクションビルドではデフォルトで有効化 (操作ログ常時収集。
-  // mark 単位のオーバーヘッドはサブμ秒、5000 件のリングバッファで頭打ち)
-  if (import.meta.env.PROD) return { enabled: true, verbose: false };
+  // production / development どちらも default は無効。
+  // hot path (bbox ドラッグ / テキスト編集 / 高速スクロール) で extra object
+  // allocation が GC pressure を起こすため、必要時のみ #perf または
+  // localStorage.pecoPerf=1 / 'verbose' で明示的に opt-in する (issue #76)。
   return { enabled: false, verbose: false };
 }
 

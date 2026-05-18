@@ -155,13 +155,13 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           wrapperRef.current.style.height = `${h}px`;
         }
         context.drawImage(cached.bitmap, 0, 0);
-        perf.mark('render.drawn', { page: pageIndex, cacheHit: true });
+        if (perf.enabled) perf.mark('render.drawn', { page: pageIndex, cacheHit: true });
         if (hasCalledFirstRenderRef.current !== filePath) {
           hasCalledFirstRenderRef.current = filePath ?? null;
           onFirstRender?.();
         }
         renderOverlaysRef.current?.();
-        perf.mark('render.complete', { page: pageIndex, cacheHit: true });
+        if (perf.enabled) perf.mark('render.complete', { page: pageIndex, cacheHit: true });
         onRenderComplete?.();
         return;
       }
@@ -185,12 +185,12 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         renderTaskRef.current.cancel();
       }
       if ((pdfPage as any)._transport?.destroyed) return;
-      perf.mark('render.start', { page: pageIndex, zoom, w, h });
+      if (perf.enabled) perf.mark('render.start', { page: pageIndex, zoom, w, h });
       renderTaskRef.current = pdfPage.render(renderContext);
 
       try {
         await renderTaskRef.current.promise;
-        perf.mark('render.taskDone', { page: pageIndex });
+        if (perf.enabled) perf.mark('render.taskDone', { page: pageIndex });
       } catch (err: any) {
         if (err.name === "RenderingCancelledException") return;
         if (err instanceof TypeError && err.message.includes("sendWithPromise")) return;
@@ -221,7 +221,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         wrapperRef.current.style.height = `${h}px`;
       }
       context.drawImage(offscreen, 0, 0);
-      perf.mark('render.drawn', { page: pageIndex });
+      if (perf.enabled) perf.mark('render.drawn', { page: pageIndex });
 
       if (hasCalledFirstRenderRef.current !== filePath) {
         hasCalledFirstRenderRef.current = filePath ?? null;
@@ -236,7 +236,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       }
 
       renderOverlaysRef.current?.();
-      perf.mark('render.complete', { page: pageIndex, cacheHit: false });
+      if (perf.enabled) perf.mark('render.complete', { page: pageIndex, cacheHit: false });
       onRenderComplete?.();
       // prefetch は pdfjs worker のタスクキューを占有して現在ページ描画を遅延させるため廃止
     };
