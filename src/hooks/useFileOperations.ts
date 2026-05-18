@@ -253,12 +253,22 @@ export function useFileOperations(
     return [];
   };
 
+  // issue #21: localStorage.setItem は quota / プライベートモードで QuotaExceededError を投げる。
+  // 開いている PDF とは無関係のエラーなのでユーザー向けにはサイレント、ログだけ残す。
+  const safeWriteRecent = (next: string[]) => {
+    try {
+      localStorage.setItem('peco-recent-files', JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
+    } catch (e) {
+      console.warn('[useFileOperations] recent-files storage write failed:', e);
+    }
+  };
+
   const addToRecent = (path: string) => {
     // issue #37: アプリ再起動後も履歴を残すため localStorage に保存する。
     // ファイルフルパスは機密性があるため、最大件数を 10 件に抑える。
     const recent = [path, ...readRecent().filter((p) => p !== path)].slice(0, 10);
-    localStorage.setItem('peco-recent-files', JSON.stringify(recent));
-    window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
+    safeWriteRecent(recent);
   };
 
   // Recent Files から指定パスを除去する。読み込み失敗時の自動クリーンアップで使用。
@@ -267,8 +277,7 @@ export function useFileOperations(
     const current = readRecent();
     const next = current.filter((p) => p !== path);
     if (next.length === current.length) return; // 変化なしなら storage 書き込みもイベントも発火しない
-    localStorage.setItem('peco-recent-files', JSON.stringify(next));
-    window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
+    safeWriteRecent(next);
   };
 
   const handleOpen = async (explicitPath?: string): Promise<boolean> => {
