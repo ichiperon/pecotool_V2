@@ -949,6 +949,76 @@ describe('pecoStore', () => {
     })
   })
 
+  // ── issue #3: Undo/Redo IDB 整合性 ─────────────────────────────
+
+  describe('issue #3: LRU 退避ページに対する undo()/redo() が IDB を同期更新する', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+    })
+
+    it('undo() で IDB の該当ページが action.before に書き換わる (saveTemporaryPageDataBatch が呼ばれる)', async () => {
+      const beforePage = makePage({ pageIndex: 0, isDirty: false, textBlocks: [makeBlock({ text: 'before' })] })
+      const afterPage = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock({ text: 'after' })] })
+      const doc = makeDoc(new Map([[0, afterPage]]))
+      const action: Action = { type: 'update_page', pageIndex: 0, before: beforePage, after: afterPage }
+
+      usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [] })
+      usePecoStore.getState().undo()
+
+      // 非同期 IDB 書き込みの完了を待つ
+      await waitForPendingIdbSaves()
+
+      // メモリ Map は巻き戻されている
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(beforePage)
+      // IDB にも before が書き込まれている (LRU 退避フローと対称)
+      const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
+      const allEntries = calls.flatMap((c) => c[0])
+      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageIndex === 0)
+      expect(matched).toBeDefined()
+      expect(matched!.data).toEqual(beforePage)
+    })
+
+    it('redo() で IDB の該当ページが action.after に書き換わる', async () => {
+      const beforePage = makePage({ pageIndex: 0, isDirty: false, textBlocks: [makeBlock({ text: 'before' })] })
+      const afterPage = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock({ text: 'after' })] })
+      const doc = makeDoc(new Map([[0, beforePage]]))
+      const action: Action = { type: 'update_page', pageIndex: 0, before: beforePage, after: afterPage }
+
+      usePecoStore.setState({ document: doc, undoStack: [], redoStack: [action] })
+      usePecoStore.getState().redo()
+
+      await waitForPendingIdbSaves()
+
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(afterPage)
+      const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
+      const allEntries = calls.flatMap((c) => c[0])
+      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageIndex === 0)
+      expect(matched).toBeDefined()
+      expect(matched!.data).toEqual(afterPage)
+    })
+
+    it('LRU 退避済み (メモリ Map から削除) ページの undo() でも IDB に before が書き込まれる', async () => {
+      // ページ 0 が LRU で退避され、メモリには無いがアクションは残っている状態
+      const beforePage = makePage({ pageIndex: 0, isDirty: false, textBlocks: [makeBlock({ text: 'evicted-before' })] })
+      const afterPage = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock({ text: 'evicted-after' })] })
+      const doc = makeDoc(new Map()) // page 0 は退避済み
+      const action: Action = { type: 'update_page', pageIndex: 0, before: beforePage, after: afterPage }
+
+      usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [] })
+      usePecoStore.getState().undo()
+
+      await waitForPendingIdbSaves()
+
+      // IDB へ before が書き込まれている (save 時のマージで before が反映される)
+      const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
+      const allEntries = calls.flatMap((c) => c[0])
+      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageIndex === 0)
+      expect(matched).toBeDefined()
+      expect(matched!.data).toEqual(beforePage)
+    })
+  })
+
   // ── S-15: ウィンドウクローズ時の pendingIdbSaves 待機 ─────────
 
   describe('S-15: ウィンドウクローズ時の pendingIdbSaves 待機', () => {

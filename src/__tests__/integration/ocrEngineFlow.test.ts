@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   removeMock: vi.fn(),
   getCachedPageProxyMock: vi.fn(),
   openFreshPdfDocMock: vi.fn(),
+  getTemporaryPageDataMock: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: h.invokeMock, convertFileSrc: (p: string) => p }));
@@ -59,6 +60,7 @@ vi.mock('../../utils/pdfLoader', () => ({
   loadPDF: vi.fn(),
   destroySharedPdfProxy: vi.fn(),
   getAllTemporaryPageData: vi.fn(async () => new Map()),
+  getTemporaryPageData: h.getTemporaryPageDataMock,
   clearTemporaryChanges: vi.fn(async () => {}),
 }));
 
@@ -108,6 +110,7 @@ beforeEach(() => {
   h.removeMock.mockReset().mockResolvedValue(undefined);
   h.getCachedPageProxyMock.mockReset().mockResolvedValue(makeMockPage());
   h.openFreshPdfDocMock.mockReset().mockResolvedValue(makeMockPdf(3));
+  h.getTemporaryPageDataMock.mockReset().mockResolvedValue(null);
 
   usePecoStore.setState({
     document: null,
@@ -280,5 +283,35 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     expect(h.invokeMock.mock.calls.length).toBeGreaterThan(0);
     // キャンセル toast が存在
     expect(toasts.some((t) => t.msg.includes('キャンセル'))).toBe(true);
+  });
+
+  it('issue #9: LRU 退避ページに対する runOcrCurrentPage で IDB 既存 textBlocks があれば上書き確認が出る', async () => {
+    // 1 ページの doc を作るが、メモリ Map からは pageIndex=0 を削除して LRU 退避状態を模倣
+    const doc = makeDoc(1);
+    doc.pages.delete(0);
+    usePecoStore.getState().setDocument(doc);
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    // IDB 側には退避済み textBlocks が残っている状態を mock で再現
+    const evictedBlock: TextBlock = {
+      id: 'evicted', text: 'EVICTED_EDIT', originalText: 'EVICTED_EDIT',
+      bbox: { x: 0, y: 0, width: 10, height: 10 },
+      writingMode: 'horizontal', order: 0, isNew: false, isDirty: true,
+    };
+    h.getTemporaryPageDataMock.mockResolvedValue({
+      pageIndex: 0, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock],
+    });
+
+    // ユーザーは上書きをキャンセル
+    h.askMock.mockResolvedValue(false);
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    // 上書き確認 ask() が呼ばれ、IDB 退避済み textBlocks がチェックされている
+    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 0);
+    expect(h.askMock).toHaveBeenCalled();
+    // ユーザーがキャンセルしたので invoke('run_ocr') は走らない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
   });
 });

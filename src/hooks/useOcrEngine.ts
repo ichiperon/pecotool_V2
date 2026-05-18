@@ -5,7 +5,7 @@ import { ask, open } from '@tauri-apps/plugin-dialog';
 import { writeFile, remove } from '@tauri-apps/plugin-fs';
 import { tempDir, join } from '@tauri-apps/api/path';
 import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
-import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc } from '../utils/pdfLoader';
+import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
@@ -229,7 +229,21 @@ export function useOcrEngine(
       }
     }
 
-    if ((pageData.textBlocks?.length ?? 0) > 0) {
+    // メモリ上の textBlocks に加えて、LRU 退避済みページが IDB に残しているかも確認する。
+    // (issue #9: LRU 退避ページに対する OCR が既存編集を黙って上書きする)
+    let hasExistingBlocks = (pageData.textBlocks?.length ?? 0) > 0;
+    if (!hasExistingBlocks) {
+      try {
+        const idbData = await getTemporaryPageData(doc.filePath, pageIdx);
+        if ((idbData?.textBlocks?.length ?? 0) > 0) {
+          hasExistingBlocks = true;
+        }
+      } catch (e) {
+        console.warn(`[OCR] IDB 退避データの確認に失敗 (page ${pageIdx + 1}):`, e);
+      }
+    }
+
+    if (hasExistingBlocks) {
       const confirmed = await ask(
         'このページには既存のOCRデータがあります。上書きしますか？',
         { title: 'OCR上書き確認', kind: 'warning' }

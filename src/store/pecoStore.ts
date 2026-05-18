@@ -14,6 +14,32 @@ export function waitForPendingIdbSaves(): Promise<void> {
   return Promise.all(Array.from(pendingIdbSaves)).then(() => {});
 }
 
+/**
+ * IDB 一時データへの書き込みを pendingIdbSaves に登録した上で発火する。
+ * undo/redo など、メモリ Map を変更したあと LRU 退避済み IDB エントリと
+ * 同期する用途で使う共通ヘルパ。
+ */
+function schedulePendingIdbWrite(
+  entries: Array<{ filePath: string; pageIndex: number; data: Partial<PageData> }>,
+  set: (partial: Partial<PecoState>) => void,
+  get: () => PecoState,
+): void {
+  if (entries.length === 0) return;
+  const work = saveTemporaryPageDataBatch(entries)
+    .then(() => {
+      if (get().lastIdbError) set({ lastIdbError: null });
+    })
+    .catch((e: unknown) => {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.error('[Store] schedulePendingIdbWrite 失敗:', err);
+      set({ lastIdbError: err });
+    });
+  const tracked: Promise<void> = work.finally(() => {
+    pendingIdbSaves.delete(tracked);
+  });
+  pendingIdbSaves.add(tracked);
+}
+
 interface PecoState {
   document: PecoDocument | null;
   originalBytes: Uint8Array | null;
@@ -382,12 +408,17 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (action.type === 'update_page') {
       const newPages = new Map(document.pages);
       newPages.set(action.pageIndex, action.before);
+      const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true
       });
+      // LRU 退避済みページが IDB に残っている可能性があるため、
+      // 巻き戻し後の状態を IDB へも書き込んでメモリと完全同期させる。
+      // (issue #3: undo が LRU 退避ページの IDB と非整合になる)
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }], set, get);
     }
   },
 
@@ -402,12 +433,15 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (action.type === 'update_page') {
       const newPages = new Map(document.pages);
       newPages.set(action.pageIndex, action.after);
+      const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true
       });
+      // undo と対称: redo 後の状態を IDB へも書き込んで整合性を担保
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }], set, get);
     }
   },
 
