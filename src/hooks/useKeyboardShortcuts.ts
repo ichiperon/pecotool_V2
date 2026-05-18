@@ -47,6 +47,14 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
     };
     const handleWheel = (e: WheelEvent) => {
       if (e.altKey || e.ctrlKey) {
+        // issue #51: IME 変換候補スクロール中の Ctrl 押下や検索ボックスでのホイール操作で
+        // ページがズームしないよう、編集対象 / 検索ボックスは preventDefault も発火させない。
+        const target = e.target instanceof HTMLElement ? e.target : null;
+        const tag = target?.tagName;
+        const isFormEditing = tag === 'INPUT' || tag === 'TEXTAREA';
+        const isContentEditing = !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
+        const isSearchBox = !!target?.closest('.search-box');
+        if (isFormEditing || isContentEditing || isSearchBox) return;
         e.preventDefault();
         const ac = actionsRef.current;
         ac.setIsAutoFit(false);
