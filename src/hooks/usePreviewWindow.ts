@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
 import { emit, listen } from '@tauri-apps/api/event';
@@ -30,6 +30,11 @@ export function usePreviewWindow() {
     }
     return text;
   }, [currentPage]);
+
+  // listen() の再登録を避けるため最新 previewText を ref に保持。
+  // 編集 1 文字ごとに useEffect が走って Tauri IPC が 4 ラウンドトリップ発火するのを止める。
+  const previewTextRef = useRef(previewText);
+  previewTextRef.current = previewText;
 
   const initPreviewWindow = useCallback(async () => {
     try {
@@ -82,7 +87,7 @@ export function usePreviewWindow() {
     let unlistenFn: (() => void) | undefined;
     const setupListener = async () => {
       const un1 = await listen('request-preview', () => {
-        emit('preview-update', previewText).catch(logUnlessTauriWindowNotFound);
+        emit('preview-update', previewTextRef.current).catch(logUnlessTauriWindowNotFound);
       });
       const un2 = await listen('preview-hidden', () => {
         setIsPreviewOpen(false);
@@ -97,7 +102,7 @@ export function usePreviewWindow() {
       cancelled = true;
       unlistenFn?.();
     };
-  }, [previewText]);
+  }, []);
 
   return { isPreviewOpen, togglePreviewWindow };
 }
