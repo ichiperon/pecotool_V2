@@ -6,7 +6,8 @@ import { ReactNode, useEffect, useId, useRef } from 'react';
  * すべてのアプリ内モーダル/ダイアログはこのコンポーネントで包み、
  *   - Esc キーで onClose
  *   - role="dialog" + aria-modal="true" + aria-labelledby
- *   - 開いた瞬間にモーダル内の最初の focus 可能要素へ自動 focus
+ *   - 開いた瞬間 dialog 本体 (tabIndex=-1) に自動 focus。
+ *     data-autofocus 属性付きの要素があればそちらを優先 (Issue #69)。
  *   - Tab/Shift+Tab を内部にトラップ (外の DOM へ遷移しない)
  *   - backdrop クリックで onClose
  * を一律に提供する。
@@ -122,19 +123,24 @@ export function Modal({
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, []);
 
-  // 初期フォーカス: 最初の focusable を当てる。無ければ dialog 自身に focus。
+  // 初期フォーカス (Issue #69):
+  //   - 既にモーダル内に focus が入っていればそれを尊重 (autoFocus 等)
+  //   - data-autofocus が付いた要素があれば最優先
+  //   - それ以外は dialog 本体 (tabIndex=-1) に当てる
+  // ※ 旧実装は「最初の focusable」を当てていたため、ヘッダ先頭の ✕ 閉じるボタンに
+  //   focus が落ちて Enter で即閉じる事故が起きていた。閉じる/キャンセル系は
+  //   default focus の対象から外し、明示指定 (data-autofocus) を必要とする。
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    // 既にモーダル内にフォーカスが入っている (autoFocus 等) なら尊重する
     const active = document.activeElement as HTMLElement | null;
     if (active && dialog.contains(active)) return;
-    const focusables = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
-    if (focusables.length > 0) {
-      focusables[0].focus();
-    } else {
-      dialog.focus();
+    const explicit = dialog.querySelector<HTMLElement>('[data-autofocus]');
+    if (explicit) {
+      explicit.focus();
+      return;
     }
+    dialog.focus();
   }, []);
 
   const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {

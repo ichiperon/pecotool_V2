@@ -61,13 +61,61 @@ describe('Modal (Issue #40): A11y 属性とフォーカス', () => {
     expect(screen.getByRole('dialog', { name: 'テストタイトル' })).toBeTruthy();
   });
 
-  it('初期 focus はモーダル内の最初の focusable 要素に当たる', () => {
+  // Issue #69 regression: 旧実装は「最初の focusable (=多くの場合 ✕ 閉じるボタン)」に
+  // 自動 focus していたため、モーダルを開いた直後の Enter で即閉じる事故があった。
+  // 新しい契約は「default focus は dialog 本体に当てる。明示が必要なら data-autofocus」。
+  it('初期 focus は dialog 本体に当たる (data-autofocus 指定が無い場合)', () => {
     render(<Harness onClose={() => {}} />);
-    expect(document.activeElement?.getAttribute('data-testid')).toBe('first');
+    expect(document.activeElement?.getAttribute('role')).toBe('dialog');
   });
 
-  it('focusable 要素が無ければ dialog 自体に focus する', () => {
+  it('focusable 要素が無くても dialog 自体に focus する', () => {
     render(<Harness onClose={() => {}} withButtons={false} />);
+    expect(document.activeElement?.getAttribute('role')).toBe('dialog');
+  });
+
+  it('data-autofocus が付いた要素があれば、そこに focus する (Issue #69)', () => {
+    function HarnessWithAutoFocus() {
+      const titleId = useModalTitleId();
+      return (
+        <Modal
+          onClose={() => {}}
+          titleId={titleId}
+          backdropClassName="test-backdrop"
+          dialogClassName="test-dialog"
+        >
+          <h2 id={titleId}>タイトル</h2>
+          <button data-testid="close" className="modal-close">✕</button>
+          <button data-testid="primary" data-autofocus>OK</button>
+          <button data-testid="other">other</button>
+        </Modal>
+      );
+    }
+    render(<HarnessWithAutoFocus />);
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('primary');
+  });
+
+  it('閉じるボタン (modal-close) には default focus が当たらない (Issue #69)', () => {
+    // 実モーダル (HelpModal, OcrSettingsModal) と同じ構造: ヘッダー先頭に閉じるボタン。
+    function HarnessWithCloseFirst() {
+      const titleId = useModalTitleId();
+      return (
+        <Modal
+          onClose={() => {}}
+          titleId={titleId}
+          backdropClassName="test-backdrop"
+          dialogClassName="test-dialog"
+        >
+          <h2 id={titleId}>タイトル</h2>
+          <button data-testid="close" className="modal-close" aria-label="閉じる">✕</button>
+          <button data-testid="body">body</button>
+        </Modal>
+      );
+    }
+    render(<HarnessWithCloseFirst />);
+    // 旧実装ではここで data-testid="close" になっており、
+    // Enter で即 onClose() が呼ばれていた。
+    expect(document.activeElement?.getAttribute('data-testid')).not.toBe('close');
     expect(document.activeElement?.getAttribute('role')).toBe('dialog');
   });
 });
