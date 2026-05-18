@@ -73,6 +73,9 @@ export function Modal({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // Issue #65: IME 変換中の Esc は変換キャンセル用なのでモーダル close へ奪わない。
+        // Chromium/WebKit は composing 中に keydown を 229 (e.keyCode) で配送する。
+        if (e.isComposing || e.keyCode === 229) return;
         if (disableCloseRef.current) {
           // Issue #42: 処理中の Esc は無視 + 通知だけ通す
           e.preventDefault();
@@ -123,24 +126,40 @@ export function Modal({
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, []);
 
-  // 初期フォーカス (Issue #69):
-  //   - 既にモーダル内に focus が入っていればそれを尊重 (autoFocus 等)
-  //   - data-autofocus が付いた要素があれば最優先
-  //   - それ以外は dialog 本体 (tabIndex=-1) に当てる
+  // 初期フォーカス (Issue #69) + close 時の focus 復元 (Issue #77):
+  //   - mount 時点の document.activeElement を保存 (モーダルを開く直前にユーザが触っていた要素)
+  //   - 初期 focus は dialog 本体 (data-autofocus があればそれ)
+  //   - unmount 時に保存しておいた要素へ focus を戻す
   // ※ 旧実装は「最初の focusable」を当てていたため、ヘッダ先頭の ✕ 閉じるボタンに
   //   focus が落ちて Enter で即閉じる事故が起きていた。閉じる/キャンセル系は
   //   default focus の対象から外し、明示指定 (data-autofocus) を必要とする。
   useEffect(() => {
     const dialog = dialogRef.current;
-    if (!dialog) return;
-    const active = document.activeElement as HTMLElement | null;
-    if (active && dialog.contains(active)) return;
-    const explicit = dialog.querySelector<HTMLElement>('[data-autofocus]');
-    if (explicit) {
-      explicit.focus();
-      return;
+    // Issue #77: モーダルを開く直前に focus を持っていた要素を保存し、close 時に戻す。
+    //   - document.activeElement が body の場合は復元しない (アンカーが無い)
+    //   - 保存後にその要素が DOM から外されているケースもあるので focus() 前に isConnected をチェック
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    if (dialog) {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || !dialog.contains(active)) {
+        const explicit = dialog.querySelector<HTMLElement>('[data-autofocus]');
+        if (explicit) {
+          explicit.focus();
+        } else {
+          dialog.focus();
+        }
+      }
     }
-    dialog.focus();
+    return () => {
+      if (
+        previouslyFocused &&
+        previouslyFocused !== document.body &&
+        previouslyFocused.isConnected &&
+        typeof previouslyFocused.focus === 'function'
+      ) {
+        previouslyFocused.focus();
+      }
+    };
   }, []);
 
   const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {

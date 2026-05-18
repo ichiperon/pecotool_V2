@@ -200,6 +200,103 @@ describe('Modal (Issue #40): フォーカストラップ', () => {
   });
 });
 
+describe('Modal (Issue #65): IME 変換中の Esc はモーダルを閉じない', () => {
+  // 日本語/中国語等の IME 変換中に押す Esc は「変換キャンセル」用なので、
+  // モーダル close へ奪うと「変換をキャンセルしようとしてモーダルごと閉じる」事故が起きる。
+  // Chromium/WebKit は composing 中の keydown を e.isComposing===true / e.keyCode===229 で配送する。
+
+  it('e.isComposing=true の Esc は onClose を呼ばない', () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    const evt = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    // jsdom には isComposing が無いので defineProperty で擬似的に true にする
+    Object.defineProperty(evt, 'isComposing', { value: true });
+    window.dispatchEvent(evt);
+    expect(onClose).not.toHaveBeenCalled();
+    // preventDefault も走らない (IME 側に Esc を渡したいので)
+    expect(evt.defaultPrevented).toBe(false);
+  });
+
+  it('e.keyCode=229 の Esc も onClose を呼ばない (isComposing が立たない環境向け fallback)', () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    const evt = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+    } as KeyboardEventInit);
+    window.dispatchEvent(evt);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(evt.defaultPrevented).toBe(false);
+  });
+
+  it('IME composing 中でなければ Esc は通常通り onClose を呼ぶ (回帰防止)', () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    const evt = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    // isComposing は明示しない (= undefined / false)
+    window.dispatchEvent(evt);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Modal (Issue #77): close 時に元のフォーカス位置へ復元する', () => {
+  it('unmount 時に、モーダルを開く直前 focus されていた要素へ focus が戻る', () => {
+    // モーダルを開く前にユーザが触っていた「外側の」要素 (例: ツールバーボタン) を再現
+    const trigger = document.createElement('button');
+    trigger.textContent = 'モーダルを開く';
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const { unmount } = render(<Harness onClose={() => {}} />);
+    // モーダル側に focus が移っていることを確認
+    expect(document.activeElement?.getAttribute('role')).toBe('dialog');
+
+    unmount();
+
+    // 復元: trigger に戻る
+    expect(document.activeElement).toBe(trigger);
+    document.body.removeChild(trigger);
+  });
+
+  it('開く前の focus 要素が DOM から外されていても落ちず、focus を奪わない', () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    const { unmount } = render(<Harness onClose={() => {}} />);
+
+    // モーダル open 中に trigger を DOM から外す (例: 親 React コンポーネントが
+    // モーダル open のついでに UI を切り替えたケース)
+    document.body.removeChild(trigger);
+
+    // unmount で例外を吐かない (isConnected ガード)
+    expect(() => unmount()).not.toThrow();
+    // body に focus が残るのは許容 (body は復元対象外)
+  });
+
+  it('開く前 focus が body だった場合は focus を動かさない', () => {
+    // body 上のリンクや button が無い純粋な状態
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    const { unmount } = render(<Harness onClose={() => {}} />);
+    unmount();
+
+    // 復元対象が無いので body のまま (副作用で別 element に飛ばない)
+    expect(document.activeElement).toBe(document.body);
+  });
+});
+
 describe('Modal (Issue #42): disableClose=true で close を抑止する', () => {
   it('Esc で onClose を呼ばず、onCloseSuppressed を呼ぶ', () => {
     const onClose = vi.fn();
