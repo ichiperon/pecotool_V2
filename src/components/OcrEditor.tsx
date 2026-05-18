@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -9,6 +9,7 @@ import {
   useSensors,
   DragEndEvent,
   DragStartEvent,
+  MeasuringStrategy,
 } from '@dnd-kit/core';
 import {
   arrayMove,
@@ -17,6 +18,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { useState } from 'react';
+import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import { usePecoStore } from '../store/pecoStore';
 import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
@@ -40,8 +42,15 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
 
-  // 各カードへの ref 配列
-  const cardRefs = useRef<(OcrCardHandle | null)[]>([]);
+  // 仮想化対応: マウント/アンマウントされる各カードへの ref を id でひける Map に保持。
+  // Virtuoso は可視範囲外のカードをアンマウントするので index ベースの配列は使えない。
+  const cardRefs = useRef<Map<string, OcrCardHandle>>(new Map());
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+
+  const setCardRef = useCallback((id: string, handle: OcrCardHandle | null) => {
+    if (handle) cardRefs.current.set(id, handle);
+    else cardRefs.current.delete(id);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -135,14 +144,46 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
   // 抽出完了前 (isTextExtracted !== true) は textBlocks がプレースホルダの空配列か
    // 古いデータの可能性があるため、検索 filter を走らせない。
   const isExtracting = !!currentPage && currentPage.isTextExtracted !== true;
-  const filteredBlocks = (!isExtracting && currentPage?.textBlocks
-    ? currentPage.textBlocks.filter(b =>
-        b.text.toLowerCase().includes(searchTerm.toLowerCase())
-      )
-    : []);
+  const filteredBlocks = useMemo(
+    () =>
+      !isExtracting && currentPage?.textBlocks
+        ? currentPage.textBlocks.filter(b =>
+            b.text.toLowerCase().includes(searchTerm.toLowerCase())
+          )
+        : [],
+    [isExtracting, currentPage?.textBlocks, searchTerm]
+  );
+
+  // SortableContext には全ての id を渡す必要があるため、フィルタ後 id 配列を memo 化。
+  const filteredBlockIds = useMemo(
+    () => filteredBlocks.map(b => b.id),
+    [filteredBlocks]
+  );
+
+  // 仮想化中はカードがアンマウントされている可能性があるため、フォーカス先にスクロールしてから focus する。
+  const focusBlockByIndex = useCallback((index: number) => {
+    const targetId = filteredBlocks[index]?.id;
+    if (!targetId) return;
+    const existing = cardRefs.current.get(targetId);
+    if (existing) {
+      existing.focusContent();
+      return;
+    }
+    // 可視範囲外: Virtuoso にスクロールさせてからマウント後に focus
+    virtuosoRef.current?.scrollIntoView({
+      index,
+      behavior: 'auto',
+      done: () => {
+        // マウント完了を待ってから focus（scrollIntoView 直後はまだ DOM が無いことがある）
+        setTimeout(() => {
+          cardRefs.current.get(targetId)?.focusContent();
+        }, 50);
+      },
+    });
+  }, [filteredBlocks]);
 
   // ↑↓キーナビゲーション：選択 + フォーカス移動
-  const handleNavigate = (currentBlockId: string, direction: 'up' | 'down') => {
+  const handleNavigate = useCallback((currentBlockId: string, direction: 'up' | 'down') => {
     const currentIndex = filteredBlocks.findIndex(b => b.id === currentBlockId);
     if (currentIndex === -1) return;
 
@@ -154,11 +195,11 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
 
     // 少し待ってからフォーカスを移動（scrollIntoView と競合しないように）
     setTimeout(() => {
-      cardRefs.current[nextIndex]?.focusContent();
+      focusBlockByIndex(nextIndex);
     }, 50);
-  };
+  }, [filteredBlocks, toggleSelection, focusBlockByIndex]);
 
-  const handleExtendSelection = (currentBlockId: string, direction: 'up' | 'down') => {
+  const handleExtendSelection = useCallback((currentBlockId: string, direction: 'up' | 'down') => {
     const currentIndex = filteredBlocks.findIndex(b => b.id === currentBlockId);
     if (currentIndex === -1) return;
 
@@ -178,9 +219,9 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     setSelectedIds([...newIds, nextBlock.id]);
 
     setTimeout(() => {
-      cardRefs.current[nextIndex]?.focusContent();
+      focusBlockByIndex(nextIndex);
     }, 50);
-  };
+  }, [filteredBlocks, selectedIds, setSelectedIds, focusBlockByIndex]);
 
   useEffect(() => {
     const getAnchorId = () => {
@@ -219,7 +260,7 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     return () => window.removeEventListener('keydown', handleWindowKeyDown);
   }, [handleNavigate, handleExtendSelection, lastSelectedId, selectedIds]);
 
-  const handleSelect = (id: string, ctrl: boolean, shift: boolean) => {
+  const handleSelect = useCallback((id: string, ctrl: boolean, shift: boolean) => {
     if (shift && lastSelectedId) {
       const startIdx = filteredBlocks.findIndex(b => b.id === lastSelectedId);
       const endIdx = filteredBlocks.findIndex(b => b.id === id);
@@ -227,7 +268,7 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
         const min = Math.min(startIdx, endIdx);
         const max = Math.max(startIdx, endIdx);
         const rangeIds = filteredBlocks.slice(min, max + 1).map(b => b.id);
-        
+
         if (ctrl) {
           const newSet = new Set(selectedIds);
           rangeIds.forEach(rId => newSet.add(rId));
@@ -239,7 +280,33 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
       }
     }
     toggleSelection(id, ctrl || shift);
-  };
+  }, [filteredBlocks, lastSelectedId, selectedIds, setSelectedIds, toggleSelection]);
+
+  // dnd-kit に必須: 仮想化中はカードがマウント/アンマウントされるため、
+  // measuring を常時走らせて drop 計算に最新の rect を使わせる。
+  const measuring = useMemo(
+    () => ({ droppable: { strategy: MeasuringStrategy.Always } }),
+    []
+  );
+
+  // Virtuoso の item レンダラ。memo化された SortableOcrCard へ stable な props を渡す。
+  const renderItem = useCallback(
+    (index: number) => {
+      const block = filteredBlocks[index];
+      if (!block) return null;
+      return (
+        <SortableOcrCard
+          ref={(el) => setCardRef(block.id, el)}
+          block={block}
+          pageIndex={currentPageIndex}
+          onNavigate={(dir) => handleNavigate(block.id, dir)}
+          onExtendSelection={(dir) => handleExtendSelection(block.id, dir)}
+          onSelect={handleSelect}
+        />
+      );
+    },
+    [filteredBlocks, currentPageIndex, handleNavigate, handleExtendSelection, handleSelect, setCardRef]
+  );
 
   return (
     <aside className="editor-panel" style={{ width: `${width}px` }}>
@@ -273,26 +340,23 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
+            measuring={measuring}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
             <SortableContext
-              items={filteredBlocks.map(b => b.id)}
+              items={filteredBlockIds}
               strategy={verticalListSortingStrategy}
             >
-              <div className="ocr-card-list">
-                {filteredBlocks.map((block, index) => (
-                  <SortableOcrCard
-                    key={block.id}
-                    ref={(el) => { cardRefs.current[index] = el; }}
-                    block={block}
-                    pageIndex={currentPageIndex}
-                    onNavigate={(dir) => handleNavigate(block.id, dir)}
-                    onExtendSelection={(dir) => handleExtendSelection(block.id, dir)}
-                    onSelect={handleSelect}
-                  />
-                ))}
-              </div>
+              <Virtuoso
+                ref={virtuosoRef}
+                className="ocr-card-list"
+                style={{ height: '100%' }}
+                totalCount={filteredBlocks.length}
+                itemContent={renderItem}
+                overscan={400}
+                increaseViewportBy={{ top: 400, bottom: 400 }}
+              />
             </SortableContext>
             {activeId && selectedIds.has(activeId) && selectedIds.size > 1 && (() => {
               const activeBlock = filteredBlocks.find(b => b.id === activeId);

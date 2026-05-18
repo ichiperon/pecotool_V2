@@ -28,6 +28,7 @@ vi.mock('@dnd-kit/core', () => ({
   PointerSensor: class {},
   useSensor: vi.fn().mockReturnValue(null),
   useSensors: vi.fn().mockReturnValue([]),
+  MeasuringStrategy: { Always: 'always', BeforeDragging: 'before-dragging', WhileDragging: 'while-dragging' },
 }))
 
 vi.mock('@dnd-kit/sortable', () => ({
@@ -54,6 +55,25 @@ vi.mock('@dnd-kit/sortable', () => ({
 vi.mock('@dnd-kit/utilities', () => ({
   CSS: { Transform: { toString: vi.fn().mockReturnValue('') } },
 }))
+
+// jsdom には layout が無いため Virtuoso は実行時 0 items しか描画しない。
+// テストでは itemContent を全件展開する単純な div に差し替える。
+vi.mock('react-virtuoso', () => {
+  const React = require('react') as typeof import('react')
+  const Virtuoso = React.forwardRef(function Virtuoso(
+    { totalCount, itemContent, className, style }: any,
+    _ref: any
+  ) {
+    const items = []
+    for (let i = 0; i < totalCount; i++) {
+      items.push(
+        React.createElement('div', { key: i, 'data-virtuoso-index': i }, itemContent(i))
+      )
+    }
+    return React.createElement('div', { className, style }, items)
+  })
+  return { Virtuoso }
+})
 
 vi.mock('lucide-react', () => ({
   GripVertical: () => null,
@@ -548,6 +568,34 @@ describe('OcrEditor', () => {
       expect(pageIdx).toBe(0)
       expect(patch.isDirty).toBe(true)
       expect(Array.isArray(patch.textBlocks)).toBe(true)
+    })
+  })
+
+  // ── V-01: 仮想化 + キーボードナビ整合 (issue #20) ────────────────
+  describe('V-01: 仮想化リストでもキーボードナビゲーションが機能する', () => {
+    it('大量ブロックでも Virtuoso 経由で全カードが描画され Shift+ArrowDown が動作する', () => {
+      // モックされた Virtuoso は totalCount 全件を render するため、仮想化境界の代わりに
+      // SortableContext へ全 id が渡され、キーボードナビが index ベースで通ることを検証する
+      const manyBlocks: TextBlock[] = []
+      for (let i = 0; i < 50; i++) {
+        manyBlocks.push(makeBlock(`v${i}`, `block ${i}`, i))
+      }
+      const { container } = setup(manyBlocks, ['v10'])
+
+      const contents = getCardContents(container)
+      expect(contents.length).toBe(50)
+
+      fireEvent.keyDown(contents[10], { key: 'ArrowDown', shiftKey: true })
+      expectSelectedIds(['v10', 'v11'])
+    })
+
+    it('Virtuoso ラッパー (.ocr-card-list) 配下にカードが描画される', () => {
+      const { container } = setup()
+      // OcrEditor 内では Virtuoso が ocr-card-list クラスのコンテナを描画する
+      const list = container.querySelector('.ocr-card-list')
+      expect(list).not.toBeNull()
+      // フィルタなしの 3 カード全てが list 配下にある
+      expect(list!.querySelectorAll('.ocr-card-content').length).toBe(3)
     })
   })
 
