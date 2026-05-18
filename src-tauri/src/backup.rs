@@ -79,10 +79,11 @@ fn clear_backup_targets(backup_dir: &PathBuf, file_path: &str) -> Vec<PathBuf> {
 }
 
 fn readable_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> PathBuf {
-    if let Some(path) = direct_backup_file_path(backup_dir, file_path) {
-        return path;
-    }
-
+    // SECURITY #63: direct backup file path 経路は意図的に除外する。
+    // Webview から `invoke('load_backup', { filePath: '<backup_dir>/任意.json' })` で
+    // 他バックアップ JSON が読み出される脆弱性 (#63) を防ぐため、
+    // 元 PDF パスのハッシュ計算経由 (現行 hash + legacy hash) に限定する。
+    // (clear_backup_targets と同じポリシー)
     let current = backup_file_path(backup_dir, file_path);
     if current.exists() {
         return current;
