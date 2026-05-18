@@ -215,8 +215,10 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
       newSet.add(currentBlock.id);
       newSet.add(nextBlock.id);
     }
-    const newIds = Array.from(newSet).filter(id => id !== nextBlock.id);
-    setSelectedIds([...newIds, nextBlock.id]);
+    // issue #15: Set の挿入順序ではなく nextBlock を明示的に anchor として store に渡す。
+    // 旧実装は末尾再追加で順序を整えていたが、その結果次回の Shift+↑↓ の anchor 計算が
+    // 末尾 id 依存になり、戻る操作で意図しないブロックに飛ぶケースがあった。
+    setSelectedIds(Array.from(newSet), nextBlock.id);
 
     setTimeout(() => {
       focusBlockByIndex(nextIndex);

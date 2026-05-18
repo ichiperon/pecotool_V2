@@ -87,7 +87,8 @@ interface PecoState {
   resetDirty: () => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
-  setSelectedIds: (ids: string[]) => void;
+  // issue #15: lastSelectedId を明示できるようにする (省略時は末尾 id を anchor とする)。
+  setSelectedIds: (ids: string[], lastSelectedId?: string | null) => void;
   clearSelection: () => void;
   copySelected: () => void;
   pasteClipboard: (targetCenter?: { x: number; y: number }) => void;
@@ -331,7 +332,13 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     return { selectedIds: newSelection, lastSelectedId: newLastId };
   }),
 
-  setSelectedIds: (ids) => set({ selectedIds: new Set(ids), lastSelectedId: ids[ids.length - 1] || null }),
+  setSelectedIds: (ids, lastSelectedId) =>
+    set({
+      selectedIds: new Set(ids),
+      // 明示 anchor が来ればそれを採用 (issue #15 の Shift+↑↓ 拡張で必要)。
+      // 省略 / undefined のときは従来通り末尾 id を anchor にする (後方互換)。
+      lastSelectedId: lastSelectedId !== undefined ? lastSelectedId : (ids[ids.length - 1] || null),
+    }),
 
   clearSelection: () => set({ selectedIds: new Set(), lastSelectedId: null }),
 
