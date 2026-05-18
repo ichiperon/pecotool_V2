@@ -8,6 +8,7 @@ import {
   selectIsDrawingMode,
   selectIsSplitMode,
   selectCurrentPage,
+  selectCurrentPageTextBlocks,
 } from "../store/pecoStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
@@ -29,6 +30,10 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
 
   const document = usePecoStore((s) => s.document);
   const currentPage = usePecoStore(selectCurrentPage);
+  // overlay 再描画 effect は textBlocks のみを依存とし、PageData の他フィールド
+  // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
+  // 再描画 effect が走らないようにする (issue #22)。
+  const currentTextBlocks = usePecoStore(selectCurrentPageTextBlocks);
   const zoom = usePecoStore(selectZoom);
   const showOcr = usePecoStore(selectShowOcr);
   const ocrOpacity = usePecoStore(selectOcrOpacity);
@@ -129,9 +134,9 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
 
       context.clearRect(0, 0, canvas.width, canvas.height);
 
-      const pageData = currentPage;
-      if (showOcr && pageData && pageData.textBlocks) {
-        pageData.textBlocks.forEach((block) => {
+      const textBlocks = currentTextBlocks;
+      if (showOcr && textBlocks) {
+        textBlocks.forEach((block) => {
           const isSelected = selectedIds.has(block.id);
           context.strokeStyle = isSelected ? "rgba(0, 120, 255, 0.8)" : "rgba(255, 0, 0, 0.3)";
           context.lineWidth = isSelected ? 2 : 1;
@@ -288,7 +293,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
     };
   }, [
     zoom,
-    currentPage,
+    currentTextBlocks,
     pageIndex,
     showOcr,
     ocrOpacity,

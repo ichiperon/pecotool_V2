@@ -42,7 +42,6 @@ function schedulePendingIdbWrite(
 
 interface PecoState {
   document: PecoDocument | null;
-  originalBytes: Uint8Array | null;
   pageAccessOrder: number[]; // For page data LRU (1000ページ対応)
   currentPageIndex: number;
   zoom: number;
@@ -76,7 +75,6 @@ interface PecoState {
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
   setDocument: (doc: PecoDocument | null) => void;
-  setOriginalBytes: (bytes: Uint8Array) => void;
   setDocumentFilePath: (filePath: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
@@ -105,7 +103,6 @@ const MAX_CACHED_PAGES = 50;
 
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
-  originalBytes: null,
   pageAccessOrder: [],
   currentPageIndex: 0,
   zoom: 100,
@@ -131,7 +128,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     set({ currentPageProxy: proxy, currentPageProxyKey: proxy ? key : null });
   },
   clearCurrentPageProxy: () => set({ currentPageProxy: null, currentPageProxyKey: null }),
-  setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
   setDocumentFilePath: (filePath) => set((state) => {
     if (!state.document) return state;
     const fileName = filePath.split(/[\\/]/).pop() || state.document.fileName;
@@ -144,8 +140,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     set({
       document: doc,
-      // originalBytes は保存時に lazy fetch するため、ファイル切替時は null にリセット
-      originalBytes: null,
       pageAccessOrder: [],
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく
@@ -498,6 +492,13 @@ export const selectUndoStack = (s: PecoState) => s.undoStack;
 export const selectRedoStack = (s: PecoState) => s.redoStack;
 export const selectCurrentPage = (s: PecoState) =>
   s.document?.pages.get(s.currentPageIndex) ?? null;
+// 現在ページの textBlocks のみを購読するためのセレクタ。
+// PageData 自体は updatePageData のたびに別参照になるが、textBlocks 配列は
+// 更新したフィールドが textBlocks 以外（thumbnail / isTextExtracted など）の
+// 場合は前回と同じ参照のままなので、購読側の再レンダリング/effect 再実行が抑えられる。
+// (issue #22)
+export const selectCurrentPageTextBlocks = (s: PecoState) =>
+  s.document?.pages.get(s.currentPageIndex)?.textBlocks ?? null;
 export const selectLastIdbError = (s: PecoState) => s.lastIdbError;
 export const selectCurrentPageProxy = (s: PecoState) => s.currentPageProxy;
 export const selectCurrentPageProxyKey = (s: PecoState) => s.currentPageProxyKey;

@@ -1,10 +1,13 @@
 /**
- * S-10 (追加): useFileOperations の sessionStorage JSON.parse narrow を検証する。
- * - handleOpen 内部の addToRecent が sessionStorage を読み書きする際、
+ * S-10 (追加): useFileOperations の localStorage JSON.parse narrow を検証する。
+ * - handleOpen 内部の addToRecent が localStorage を読み書きする際、
  *   不正 JSON / 型違反値を安全に弾けることを確認する。
  *
  * #8: writeFileChunked が空 Uint8Array でも write_pdf_chunk を 1 回呼ぶこと
  * #34: explicitPath での読み込み失敗時に Recent から該当パスが除去されること
+ * #29: originalBytes が zustand store に保持されず module-level cache へ移行されていること
+ * #37: Recent Files が localStorage に保存されてリロード後も残ること
+ * #53: writeFileAtomically が EACCES 系エラーで失敗した場合、saveAs アクション付きトーストが出ること
  *
  * 重い依存 (loadPDF / fs / dialog / fontLoader / store) は全て mock する。
  */
@@ -53,7 +56,7 @@ vi.mock('../../hooks/useFontLoader', () => ({
 
 // pecoStore は本物を使うが、必要最小限の状態だけ。
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
-import { useFileOperations } from '../../hooks/useFileOperations';
+import { useFileOperations, __originalBytesCacheForTest, isWriteAccessError } from '../../hooks/useFileOperations';
 import { loadPDF } from '../../utils/pdfLoader';
 import { savePDF } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
@@ -61,7 +64,11 @@ import { invoke } from '@tauri-apps/api/core';
 import type { PecoDocument, PageData } from '../../types';
 
 beforeEach(() => {
+  // issue #37: Recent Files は localStorage に保存される。両方クリアして検証ノイズを排除。
   sessionStorage.clear();
+  localStorage.clear();
+  // issue #29: module-level cache も毎テストでクリーンに
+  __originalBytesCacheForTest.clear();
   vi.clearAllMocks();
   // loadPDF mock を毎回リセット
   (loadPDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -74,14 +81,15 @@ beforeEach(() => {
 });
 
 function readRecent(): unknown {
-  const raw = sessionStorage.getItem('peco-recent-files');
+  // issue #37: Recent Files は localStorage 経路へ移行
+  const raw = localStorage.getItem('peco-recent-files');
   return raw === null ? null : JSON.parse(raw);
 }
 
-describe('useFileOperations addToRecent (sessionStorage narrow)', () => {
+describe('useFileOperations addToRecent (localStorage narrow)', () => {
   it('S-10-09a: 既存値が string[] でなく数値混在配列の場合、空配列扱いで上書きされる', async () => {
-    // 改ざんされた sessionStorage を仕込む
-    sessionStorage.setItem('peco-recent-files', '[123, "/path"]');
+    // 改ざんされた localStorage を仕込む
+    localStorage.setItem('peco-recent-files', '[123, "/path"]');
 
     const showToast = vi.fn();
     const { result } = renderHook(() => useFileOperations(showToast));
@@ -97,7 +105,7 @@ describe('useFileOperations addToRecent (sessionStorage narrow)', () => {
   });
 
   it('S-10-09b: 既存値がオブジェクト ({foo: 1}) でも narrow で reject される', async () => {
-    sessionStorage.setItem('peco-recent-files', '{"foo":1}');
+    localStorage.setItem('peco-recent-files', '{"foo":1}');
 
     const showToast = vi.fn();
     const { result } = renderHook(() => useFileOperations(showToast));
@@ -110,7 +118,7 @@ describe('useFileOperations addToRecent (sessionStorage narrow)', () => {
   });
 
   it('S-10-10: 既存値が JSON ではない (壊れた文字列) 場合、空配列にフォールバック', async () => {
-    sessionStorage.setItem('peco-recent-files', 'not-json{{{');
+    localStorage.setItem('peco-recent-files', 'not-json{{{');
 
     const showToast = vi.fn();
     const { result } = renderHook(() => useFileOperations(showToast));
@@ -123,7 +131,7 @@ describe('useFileOperations addToRecent (sessionStorage narrow)', () => {
   });
 
   it('既存値が正常な string[] の場合、先頭に追加されて重複が除去される', async () => {
-    sessionStorage.setItem(
+    localStorage.setItem(
       'peco-recent-files',
       JSON.stringify(['/old.pdf', '/dup.pdf']),
     );
@@ -157,9 +165,11 @@ describe('useFileOperations writeFileChunked (issue #8 空 Uint8Array 対応)', 
     } as unknown as PecoDocument;
     usePecoStore.setState({
       document: doc,
-      originalBytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]), // %PDF
       isDirty: true,
     });
+    // issue #29: originalBytes は zustand store から外れ module-level cache へ移行したため
+    // テスト側でも __originalBytesCacheForTest 経由で投入する。
+    __originalBytesCacheForTest.set('/save/target.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
 
     // savePDF が空 Uint8Array を返すケース (#8 の再現条件)
     (savePDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Uint8Array(0));
@@ -205,10 +215,11 @@ describe('useFileOperations writeFileChunked (issue #8 空 Uint8Array 対応)', 
 describe('useFileOperations handleOpen Recent クリーンアップ (issue #34)', () => {
   it('#34: explicitPath で開いて loadPDF が失敗した場合、その path が Recent から除去され peco-recent-files-updated が発火する', async () => {
     // pecoStore をクリーンに
-    usePecoStore.setState({ document: null, originalBytes: null, isDirty: false });
+    usePecoStore.setState({ document: null, isDirty: false });
 
     // 事前に Recent に '/missing.pdf' と '/keep.pdf' を入れておく
-    sessionStorage.setItem(
+    // issue #37: localStorage 経路へ移行済み
+    localStorage.setItem(
       'peco-recent-files',
       JSON.stringify(['/missing.pdf', '/keep.pdf']),
     );
@@ -243,8 +254,8 @@ describe('useFileOperations handleOpen Recent クリーンアップ (issue #34)'
   });
 
   it('#34: ダイアログ経由 (explicitPath なし) で失敗した場合は Recent を変更しない', async () => {
-    usePecoStore.setState({ document: null, originalBytes: null, isDirty: false });
-    sessionStorage.setItem(
+    usePecoStore.setState({ document: null, isDirty: false });
+    localStorage.setItem(
       'peco-recent-files',
       JSON.stringify(['/existing.pdf']),
     );
@@ -265,6 +276,178 @@ describe('useFileOperations handleOpen Recent クリーンアップ (issue #34)'
 
     // Recent はそのまま (explicitPath ではないので除去対象外)
     expect(readRecent()).toEqual(['/existing.pdf']);
+  });
+});
+
+describe('useFileOperations originalBytes module-level cache (issue #29)', () => {
+  it('#29: originalBytes は zustand store に保持されない (store には key 自体が無い)', () => {
+    const state = usePecoStore.getState() as unknown as Record<string, unknown>;
+    expect('originalBytes' in state).toBe(false);
+    expect('setOriginalBytes' in state).toBe(false);
+  });
+
+  it('#29: 保存時に originalBytes が無ければ readFile → module-level cache へ格納される', async () => {
+    // dirty page を 1 件持たせて loadRepairPages 分岐を回避
+    const dirtyPage = { textBlocks: [], imageBlocks: [], isDirty: true } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/cache/test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+
+    // cache は空のはずなので readFile が走る
+    expect(__originalBytesCacheForTest.get('/cache/test.pdf')).toBeUndefined();
+
+    const { readFile } = await import('@tauri-apps/plugin-fs');
+    (readFile as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // 保存後は writePath をキーに savedBytes がキャッシュされる
+    expect(__originalBytesCacheForTest.get('/cache/test.pdf')).toBeDefined();
+  });
+
+  it('#29: setOriginalBytesCache の MAX=1 制限により古いファイルのキャッシュは破棄される', () => {
+    __originalBytesCacheForTest.set('/old.pdf', new Uint8Array([1]));
+    expect(__originalBytesCacheForTest.size()).toBe(1);
+    __originalBytesCacheForTest.set('/new.pdf', new Uint8Array([2]));
+    expect(__originalBytesCacheForTest.size()).toBe(1);
+    expect(__originalBytesCacheForTest.get('/old.pdf')).toBeUndefined();
+    expect(__originalBytesCacheForTest.get('/new.pdf')).toBeDefined();
+  });
+});
+
+describe('useFileOperations Recent Files 永続化 (issue #37)', () => {
+  it('#37: addToRecent は localStorage へ書き込む (sessionStorage には書き込まない)', async () => {
+    expect(localStorage.getItem('peco-recent-files')).toBeNull();
+    expect(sessionStorage.getItem('peco-recent-files')).toBeNull();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleOpen('/persisted.pdf');
+    });
+
+    // 永続化 (localStorage) されている
+    expect(localStorage.getItem('peco-recent-files')).toBe(JSON.stringify(['/persisted.pdf']));
+    // sessionStorage には残らない
+    expect(sessionStorage.getItem('peco-recent-files')).toBeNull();
+  });
+
+  it('#37: アプリ「再起動」相当 (sessionStorage クリア) 後も localStorage の Recent は維持される', async () => {
+    // 1 度開いて履歴を作る
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleOpen('/survives.pdf');
+    });
+    expect(readRecent()).toEqual(['/survives.pdf']);
+
+    // 再起動相当: sessionStorage だけクリア (旧仕様では Recent もここに居て消えていた)
+    sessionStorage.clear();
+
+    // localStorage 側に残っているため Recent は健在
+    expect(readRecent()).toEqual(['/survives.pdf']);
+  });
+});
+
+describe('useFileOperations writeFileAtomically EACCES フォールバック (issue #53)', () => {
+  it('#53: isWriteAccessError が EACCES/EBUSY/access denied/sharing violation を正しく検出する', () => {
+    expect(isWriteAccessError('EACCES: permission denied')).toBe(true);
+    expect(isWriteAccessError('EBUSY: resource busy')).toBe(true);
+    expect(isWriteAccessError('Access is denied. (os error 5)')).toBe(true);
+    expect(isWriteAccessError('The process cannot access the file because it is being used by another process. (os error 32)')).toBe(true);
+    expect(isWriteAccessError('open failed: sharing violation')).toBe(true);
+    expect(isWriteAccessError('write failed: lock violation')).toBe(true);
+    // 関係ないエラーは false
+    expect(isWriteAccessError('ENOENT: no such file')).toBe(false);
+    expect(isWriteAccessError('out of memory')).toBe(false);
+  });
+
+  it('#53: replace_pdf_file が EACCES で失敗したら、saveAs アクション付きトーストが表示される', async () => {
+    // dirty page を 1 件用意
+    const dirtyPage = { textBlocks: [], imageBlocks: [], isDirty: true } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/locked.pdf',
+      fileName: 'locked.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/locked.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    // replace_pdf_file が Acrobat ロック相当のエラーで reject される
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') {
+        return Promise.reject(new Error(
+          'rename target->backup failed: Access is denied. (os error 5)',
+        ));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // saveAs フォールバック用の action 付き Toast が呼ばれている
+    const errorCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] === true);
+    expect(errorCalls.length).toBeGreaterThan(0);
+    const lastErrorCall = errorCalls[errorCalls.length - 1];
+    expect(lastErrorCall[0]).toMatch(/別プロセスがロック中|保存先のファイル/);
+    expect(lastErrorCall[2]).toBeDefined();
+    expect(lastErrorCall[2].label).toBe('別名で保存');
+    expect(typeof lastErrorCall[2].onClick).toBe('function');
+  });
+
+  it('#53: 通常のエラー (EACCES でない) は action なしのエラートースト', async () => {
+    const dirtyPage = { textBlocks: [], imageBlocks: [], isDirty: true } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/normal.pdf',
+      fileName: 'normal.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/normal.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') {
+        return Promise.reject(new Error('disk full: ENOSPC'));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // 失敗トーストは action 引数なしで呼ばれている
+    const errorCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] === true);
+    expect(errorCalls.length).toBeGreaterThan(0);
+    const lastErrorCall = errorCalls[errorCalls.length - 1];
+    expect(lastErrorCall[2]).toBeUndefined();
   });
 });
 
