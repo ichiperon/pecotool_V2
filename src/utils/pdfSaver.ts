@@ -7,7 +7,7 @@ import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import { deflate, inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
-import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
+import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import type {
   SavePdfSource,
@@ -318,28 +318,60 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
   return { width, height };
 }
 
+/**
+ * 修正 (#33): Resources の Font 辞書登録と pageLike state の同期を分離する。
+ *
+ * 旧実装:
+ *   `pageLike.font = font;` を毎回無条件で代入し、その後 `pageLike.fontKey` を
+ *   key 取得時のみ条件付きで代入していた。fallback で `pageLike.setFont?.(font)`
+ *   を呼ぶ経路では setFont 内部で `newFontDictionary` がさらに呼ばれ、同じ font
+ *   ref に対し Resources の Font dict に複数のユニークキーが追加される多重 alias
+ *   が発生する余地があった (Meiryo ⇄ IPAmjMincho を 1 ページで切り替えるケース)。
+ *
+ * 新実装:
+ *   1. `getOrRegisterPageFontKey()` — 同じ font には常に同じ key を返す純粋関数。
+ *      cache hit なら何もしない。miss のときだけ 1 度だけ newFontDictionary を呼ぶ。
+ *   2. `syncPageFontState()` — pageLike.font / pageLike.fontKey をペアで上書き。
+ *      key が無いときは何も書かない (drawText で誤キー出力を防ぐ)。
+ */
+function getOrRegisterPageFontKey(
+  page: unknown,
+  font: PDFFont,
+  fontKeys: Map<PDFFont, PDFName>,
+): PDFName | undefined {
+  const cached = fontKeys.get(font);
+  if (cached) return cached;
+
+  const pageLike = page as {
+    fontKey?: PDFName;
+    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
+    setFont?: (font: PDFFont) => void;
+  };
+  let key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
+  if (!key) {
+    // fallback 経路: setFont は newFontDictionary を内部で呼ぶため、上の newFontDictionary
+    // が成功しているときは絶対に踏まないように上の if で gating する。
+    pageLike.setFont?.(font);
+    key = pageLike.fontKey;
+  }
+  if (key) fontKeys.set(font, key);
+  return key;
+}
+
+function syncPageFontState(page: unknown, font: PDFFont, key: PDFName | undefined): void {
+  const pageLike = page as { font?: PDFFont; fontKey?: PDFName };
+  if (!key) return; // key が解決できなければ pageLike の前回 state を維持 (誤キー出力防止)
+  pageLike.font = font;
+  pageLike.fontKey = key;
+}
+
 function setPageFontWithStableKey(
   page: unknown,
   font: PDFFont,
   fontKeys: Map<PDFFont, PDFName>,
 ): void {
-  const pageLike = page as {
-    font?: PDFFont;
-    fontKey?: PDFName;
-    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
-    setFont?: (font: PDFFont) => void;
-  };
-  let key = fontKeys.get(font);
-  if (!key) {
-    key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
-    if (!key) {
-      pageLike.setFont?.(font);
-      key = pageLike.fontKey;
-    }
-    if (key) fontKeys.set(font, key);
-  }
-  pageLike.font = font;
-  if (key) pageLike.fontKey = key;
+  const key = getOrRegisterPageFontKey(page, font, fontKeys);
+  syncPageFontState(page, font, key);
 }
 
 /**
@@ -583,6 +615,10 @@ export async function buildPdfDocument(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
+  // 修正 (#30): Catalog の /Version を消す。Acrobat は header と Catalog /Version の
+  // 最大値で実効バージョンを判定するため、header だけ 1.6 に戻しても Catalog の
+  // /Version 1.7 が残っていると Acrobat 7 では開けない。save() 前に削除する。
+  if (originalVersion) stripCatalogVersion(pdfDoc);
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
   // save() 全書き換え経路。pdf-lib は streaming serializer で、ベンチ実測では
   // 100MB PDF でも 91ms で完了する (disk write は別段の writeFileChunked で処理)。

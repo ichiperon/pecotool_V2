@@ -6,7 +6,7 @@ import {
 import fontkit from '@pdf-lib/fontkit';
 import { deflate, inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
-import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
+import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import type {
   SavePdfWorkerRequest,
@@ -307,28 +307,46 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
   return { width, height };
 }
 
+/**
+ * 修正 (#33): Resources の Font 辞書登録と pageLike state の同期を分離する。
+ * 詳細コメントは pdfSaver.ts 側参照。
+ */
+function getOrRegisterPageFontKey(
+  page: unknown,
+  font: PDFFont,
+  fontKeys: Map<PDFFont, PDFName>,
+): PDFName | undefined {
+  const cached = fontKeys.get(font);
+  if (cached) return cached;
+
+  const pageLike = page as {
+    fontKey?: PDFName;
+    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
+    setFont?: (font: PDFFont) => void;
+  };
+  let key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
+  if (!key) {
+    pageLike.setFont?.(font);
+    key = pageLike.fontKey;
+  }
+  if (key) fontKeys.set(font, key);
+  return key;
+}
+
+function syncPageFontState(page: unknown, font: PDFFont, key: PDFName | undefined): void {
+  const pageLike = page as { font?: PDFFont; fontKey?: PDFName };
+  if (!key) return;
+  pageLike.font = font;
+  pageLike.fontKey = key;
+}
+
 function setPageFontWithStableKey(
   page: unknown,
   font: PDFFont,
   fontKeys: Map<PDFFont, PDFName>,
 ): void {
-  const pageLike = page as {
-    font?: PDFFont;
-    fontKey?: PDFName;
-    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
-    setFont?: (font: PDFFont) => void;
-  };
-  let key = fontKeys.get(font);
-  if (!key) {
-    key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
-    if (!key) {
-      pageLike.setFont?.(font);
-      key = pageLike.fontKey;
-    }
-    if (key) fontKeys.set(font, key);
-  }
-  pageLike.font = font;
-  if (key) pageLike.fontKey = key;
+  const key = getOrRegisterPageFontKey(page, font, fontKeys);
+  syncPageFontState(page, font, key);
 }
 
 async function handleSavePdf(
@@ -517,6 +535,8 @@ async function handleSavePdf(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
+  // 修正 (#30): Catalog の /Version を消す (詳細は pdfSaver.ts 側コメント参照)。
+  if (originalVersion) stripCatalogVersion(pdfDoc);
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
   // save() 全書き換え経路 (incremental の fontkit subset 破損を回避)。
   const saveOptions: Parameters<typeof pdfDoc.save>[0] = {

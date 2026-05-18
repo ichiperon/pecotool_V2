@@ -2,6 +2,7 @@
  * S-10 (追加): pdfMetadataLoader の JSON.parse narrow を検証する。
  * - PDF メタデータに偽装した不正 JSON を食わせ、reject されることを確認。
  * - prototype 汚染攻撃 / bbox の非有限値などが弾かれること。
+ * - #36: custom.PecoToolBBoxes が空/非文字列でも info.PecoToolBBoxes に fallback される
  */
 import { describe, it, expect } from 'vitest';
 import { loadPecoToolBBoxMeta } from '../../utils/pdfMetadataLoader';
@@ -11,6 +12,28 @@ function makeFakePdf(rawMeta: string | null) {
   return {
     getMetadata: async () => ({
       info: rawMeta === null ? {} : { PecoToolBBoxes: rawMeta },
+      metadata: null,
+      contentDispositionFilename: null,
+      contentLength: null,
+    }),
+  } as any;
+}
+
+/** custom / info の両方を独立に指定するスタブ */
+function makeFakePdfWithCustom(opts: {
+  customRaw?: unknown;
+  infoRaw?: unknown;
+}) {
+  const info: Record<string, unknown> = {};
+  if (opts.customRaw !== undefined) {
+    info.Custom = { PecoToolBBoxes: opts.customRaw };
+  }
+  if (opts.infoRaw !== undefined) {
+    info.PecoToolBBoxes = opts.infoRaw;
+  }
+  return {
+    getMetadata: async () => ({
+      info,
       metadata: null,
       contentDispositionFilename: null,
       contentLength: null,
@@ -110,5 +133,50 @@ describe('loadPecoToolBBoxMeta', () => {
   it('PecoToolBBoxes が存在しない場合は null を返す', async () => {
     const result = await loadPecoToolBBoxMeta(makeFakePdf(null));
     expect(result).toBeNull();
+  });
+
+  // ── #36: empty-string / non-string fallback regression ──────────────────────
+  it('#36: custom.PecoToolBBoxes が空文字でも info.PecoToolBBoxes (有効 JSON) に fallback', async () => {
+    const validJson = JSON.stringify({ '0': [validEntry] });
+    const result = await loadPecoToolBBoxMeta(
+      makeFakePdfWithCustom({ customRaw: '', infoRaw: validJson }),
+    );
+    expect(result).not.toBeNull();
+    expect(result?.['0']).toHaveLength(1);
+    expect(result?.['0'][0].text).toBe('hello');
+  });
+
+  it('#36: custom.PecoToolBBoxes が非文字列 (object) でも info に fallback', async () => {
+    // 旧 `||` は object 値を truthy として採用してしまい typeof チェックで null 返却していた。
+    const validJson = JSON.stringify({ '0': [validEntry] });
+    const result = await loadPecoToolBBoxMeta(
+      makeFakePdfWithCustom({ customRaw: { unexpected: true }, infoRaw: validJson }),
+    );
+    expect(result).not.toBeNull();
+    expect(result?.['0']).toHaveLength(1);
+  });
+
+  it('#36: custom.PecoToolBBoxes が数値 0 でも info に fallback', async () => {
+    const validJson = JSON.stringify({ '0': [validEntry] });
+    const result = await loadPecoToolBBoxMeta(
+      makeFakePdfWithCustom({ customRaw: 0, infoRaw: validJson }),
+    );
+    expect(result).not.toBeNull();
+  });
+
+  it('#36: custom と info 両方が空文字なら null を返す', async () => {
+    const result = await loadPecoToolBBoxMeta(
+      makeFakePdfWithCustom({ customRaw: '', infoRaw: '' }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('#36: custom が有効 JSON / info が空文字なら custom を採用', async () => {
+    const validJson = JSON.stringify({ '0': [validEntry] });
+    const result = await loadPecoToolBBoxMeta(
+      makeFakePdfWithCustom({ customRaw: validJson, infoRaw: '' }),
+    );
+    expect(result).not.toBeNull();
+    expect(result?.['0'][0].text).toBe('hello');
   });
 });
