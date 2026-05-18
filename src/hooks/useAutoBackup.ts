@@ -20,6 +20,12 @@ export interface BackupData {
 
 /** デフォルトバックアップ間隔: 5分 */
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
+/**
+ * 直近編集からこの時間以上経過していないとバックアップを実行しない（debounce）。
+ * 5分間隔の固定タイマー (#24) で大型 PDF 編集中に UI スレッドを掴まないよう、
+ * 「ユーザーが直近 N ms 操作していないとき」に限定する。
+ */
+const DEFAULT_QUIET_PERIOD_MS = 60 * 1000;
 
 // プロトタイプ汚染攻撃を防ぐため、キー名として危険なものを拒否する
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -52,6 +58,10 @@ function isValidBackupData(data: unknown): data is BackupData {
   for (const page of Object.values(pages)) {
     if (typeof page !== 'object' || page === null) return false;
     const p = page as Record<string, unknown>;
+    // ネスト深部でのプロトタイプ汚染を防止: 各 page オブジェクトの own key も検証する (#18)
+    for (const key of Object.keys(p)) {
+      if (DANGEROUS_KEYS.has(key)) return false;
+    }
     // pages は Partial<PageData> のため全フィールドは必須ではない
     if (p.textBlocks !== undefined) {
       if (!Array.isArray(p.textBlocks)) return false;
@@ -84,8 +94,12 @@ function isValidBackupData(data: unknown): data is BackupData {
 export function useAutoBackup(
   onBackupsFound: (backups: PendingBackup[]) => void,
   intervalMs = DEFAULT_INTERVAL_MS,
+  quietPeriodMs = DEFAULT_QUIET_PERIOD_MS,
 ) {
   const isSavingRef = useRef(false);
+  // 直近編集時刻 (epoch ms)。store の document.pages 参照が変わったタイミングで更新する。
+  // 0 のときは「まだ編集なし」を意味し、performBackup はスキップする。
+  const lastEditTimeRef = useRef(0);
   // コールバックを ref に保持して Effect の依存配列の問題を回避する
   const onBackupsFoundRef = useRef(onBackupsFound);
   onBackupsFoundRef.current = onBackupsFound;
@@ -101,6 +115,17 @@ export function useAutoBackup(
       .catch((e) => console.warn('[AutoBackup] 起動時チェック失敗:', e));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 編集タイミングの追跡: store の document.pages 参照が変化したら lastEditTimeRef を更新する。
+  // updatePageData は毎回 newPages Map を生成するため、参照変化 = 編集発生とみなせる。
+  useEffect(() => {
+    const unsubscribe = usePecoStore.subscribe((state, prev) => {
+      if (state.document?.pages !== prev.document?.pages) {
+        lastEditTimeRef.current = Date.now();
+      }
+    });
+    return () => { unsubscribe(); };
+  }, []);
+
   /** ダーティページを収集してバックアップファイルへ書き出す */
   const performBackup = useCallback(async () => {
     if (isSavingRef.current) return;
@@ -108,8 +133,13 @@ export function useAutoBackup(
     const state = usePecoStore.getState();
     const { document, isDirty } = state;
 
-    // ダーティデータがなければスキップ
+    // ダーティデータがなければスキップ (#24-b: Map 走査・stringify の前に早期 return)
     if (!document || !isDirty) return;
+
+    // debounce: 直近編集から quietPeriodMs 以内なら待機 (#24-c)
+    // ユーザーが連続編集中は重い JSON.stringify を走らせない。
+    const lastEdit = lastEditTimeRef.current;
+    if (lastEdit === 0 || Date.now() - lastEdit < quietPeriodMs) return;
 
     isSavingRef.current = true;
     try {
@@ -154,7 +184,7 @@ export function useAutoBackup(
     } finally {
       isSavingRef.current = false;
     }
-  }, []);
+  }, [quietPeriodMs]);
 
   // 定期実行タイマーの設定
   useEffect(() => {
