@@ -323,7 +323,10 @@ export function ThumbnailWindow() {
         thumbnailsRef.current = new Map();
         pageGenerationRef.current = new Map();
         storedGenerationRef.current = new Map();
+        // #79: 通知後に Map を clear。file-close/open を繰り返しても listener Set が
+        // 単調増加しないように。再マウントは無いため明示的に解放する必要がある。
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
+        itemListenersRef.current.clear();
 
         setTotalPages(total);
         setCurrentPageIndex(page);
@@ -381,7 +384,10 @@ export function ThumbnailWindow() {
         thumbnailsRef.current = new Map();
         pageGenerationRef.current = new Map();
         storedGenerationRef.current = new Map();
+        // #79: 通知後に Map を clear。file-close/open を繰り返しても listener Set が
+        // 単調増加しないように。再マウントは無いため明示的に解放する必要がある。
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
+        itemListenersRef.current.clear();
         setTotalPages(0);
         setCurrentPageIndex(0);
         setDirtyPages(new Set());
