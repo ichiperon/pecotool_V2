@@ -2,7 +2,7 @@ import { renderHook, cleanup } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
-function makeActions() {
+function makeActions(overrides: Partial<{ isOcrRunning: boolean; openReplace: () => void }> = {}) {
   return {
     undo: vi.fn(),
     redo: vi.fn(),
@@ -21,6 +21,9 @@ function makeActions() {
     zoom: 100,
     setIsAutoFit: vi.fn(),
     searchInputRef: { current: null },
+    openReplace: vi.fn(),
+    isOcrRunning: false,
+    ...overrides,
   };
 }
 
@@ -153,5 +156,48 @@ describe('useKeyboardShortcuts: Undo/Redo の編集中ガード', () => {
     press(window, 'y');
     expect(actions.undo).toHaveBeenCalledTimes(1);
     expect(actions.redo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('useKeyboardShortcuts: OCR 実行中ガード (issue #102 / #103)', () => {
+  it('#102: isOcrRunning=true なら Ctrl+O で handleOpen が呼ばれない', () => {
+    const actions = makeActions({ isOcrRunning: true });
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, 'o');
+
+    // preventDefault は通っているが handleOpen は呼ばれない
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.handleOpen).not.toHaveBeenCalled();
+  });
+
+  it('#102: isOcrRunning=false なら Ctrl+O で handleOpen が通常通り呼ばれる', () => {
+    const actions = makeActions({ isOcrRunning: false });
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'o');
+
+    expect(actions.handleOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it('#103: isOcrRunning=true なら Ctrl+H で openReplace が呼ばれない', () => {
+    const openReplace = vi.fn();
+    const actions = makeActions({ isOcrRunning: true, openReplace });
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, 'h');
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(openReplace).not.toHaveBeenCalled();
+  });
+
+  it('#103: isOcrRunning=false なら Ctrl+H で openReplace が呼ばれる', () => {
+    const openReplace = vi.fn();
+    const actions = makeActions({ isOcrRunning: false, openReplace });
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'h');
+
+    expect(openReplace).toHaveBeenCalledTimes(1);
   });
 });

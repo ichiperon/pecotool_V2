@@ -11,8 +11,9 @@
  *  ここに切り出して、ReplaceDialog から薄く呼べるようにしている。
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { usePecoStore } from '../store/pecoStore';
+import { getAllTemporaryPageData } from '../utils/pdfLoader';
 import type { PageData, WritingMode } from '../types';
 
 export type ReplaceScope = 'selection' | 'current' | 'all';
@@ -77,8 +78,42 @@ export function buildRegexOrError(query: ReplaceQuery): { re: RegExp } | { error
 }
 
 /**
+ * issue #104: scope='all' で IDB 退避ページも走査するため、in-memory pages と IDB の
+ * Partial<PageData> をマージして「textBlocks を持つ」見かけ上の Map を作る。
+ *  - in-memory に存在するページはそちらを優先 (最新)
+ *  - IDB は退避されているページ (textBlocks を持っている entry のみ) を補完
+ *  - 戻り値は本物の PageData (in-memory) と、最小限のフィールドを補った PageData の混在
+ */
+function mergeIdbPages(
+  pagesMap: Map<number, PageData> | undefined,
+  idbPages: Map<number, Partial<PageData>> | undefined,
+): Map<number, PageData> | undefined {
+  if (!pagesMap) return pagesMap;
+  if (!idbPages || idbPages.size === 0) return pagesMap;
+  const merged = new Map(pagesMap);
+  for (const [idx, partial] of idbPages.entries()) {
+    if (merged.has(idx)) continue;
+    if (!partial.textBlocks) continue;
+    merged.set(idx, {
+      pageIndex: idx,
+      width: partial.width ?? 0,
+      height: partial.height ?? 0,
+      textBlocks: partial.textBlocks,
+      isDirty: partial.isDirty ?? false,
+      thumbnail: partial.thumbnail ?? null,
+      isTextExtracted: partial.isTextExtracted,
+      ocrCleared: partial.ocrCleared,
+    });
+  }
+  return merged;
+}
+
+/**
  * 与えられた検索 RegExp + scope に対して、現在の document/state からヒット件数を算出する。
  * store からデータを read-only で読み出すので副作用は無い。
+ *
+ * issue #104: scope='all' のときは LRU 退避ページも対象にするため idbPages を受け取る。
+ * 未指定なら in-memory pagesMap のみで集計する (selection/current では IDB 不要)。
  */
 export function countMatches(params: {
   re: RegExp;
@@ -86,15 +121,19 @@ export function countMatches(params: {
   pagesMap: Map<number, PageData> | undefined;
   currentPageIndex: number;
   selectedIds: ReadonlySet<string>;
+  idbPages?: Map<number, Partial<PageData>>;
 }): ReplaceCounts {
-  const { re, scope, pagesMap, currentPageIndex, selectedIds } = params;
+  const { re, scope, pagesMap, currentPageIndex, selectedIds, idbPages } = params;
   if (!pagesMap) return { hits: 0, blocks: 0, pages: 0 };
+
+  const effective = scope === 'all' ? mergeIdbPages(pagesMap, idbPages) : pagesMap;
+  if (!effective) return { hits: 0, blocks: 0, pages: 0 };
 
   let pageIndices: number[];
   if (scope === 'selection' || scope === 'current') {
     pageIndices = [currentPageIndex];
   } else {
-    pageIndices = Array.from(pagesMap.keys());
+    pageIndices = Array.from(effective.keys());
   }
 
   let hits = 0;
@@ -102,7 +141,7 @@ export function countMatches(params: {
   let pages = 0;
 
   for (const idx of pageIndices) {
-    const page = pagesMap.get(idx);
+    const page = effective.get(idx);
     if (!page) continue;
     let pageHasHit = false;
     for (const b of page.textBlocks) {
@@ -143,6 +182,8 @@ export function buildMatchPreview(params: {
   currentPageIndex: number;
   selectedIds: ReadonlySet<string>;
   maxItems?: number;
+  /** issue #104: scope='all' で IDB 退避ページも走査対象に含める */
+  idbPages?: Map<number, Partial<PageData>>;
 }): MatchPreview {
   const {
     re,
@@ -153,23 +194,27 @@ export function buildMatchPreview(params: {
     currentPageIndex,
     selectedIds,
     maxItems = 20,
+    idbPages,
   } = params;
 
   const empty: MatchPreview = { items: [], totalBlocks: 0, truncated: false };
   if (!pagesMap) return empty;
 
+  const effective = scope === 'all' ? mergeIdbPages(pagesMap, idbPages) : pagesMap;
+  if (!effective) return empty;
+
   let pageIndices: number[];
   if (scope === 'selection' || scope === 'current') {
     pageIndices = [currentPageIndex];
   } else {
-    pageIndices = Array.from(pagesMap.keys()).sort((a, b) => a - b);
+    pageIndices = Array.from(effective.keys()).sort((a, b) => a - b);
   }
 
   const items: MatchPreviewItem[] = [];
   let totalBlocks = 0;
 
   for (const idx of pageIndices) {
-    const page = pagesMap.get(idx);
+    const page = effective.get(idx);
     if (!page) continue;
     for (const b of page.textBlocks) {
       if (scope === 'selection' && !selectedIds.has(b.id)) continue;
@@ -190,6 +235,7 @@ export function buildMatchPreview(params: {
       if (items.length < maxItems) {
         // after 文字列とハイライト位置を構築
         // useRegex=false の時は $ の特殊扱いを避けるため文字列ベースで結合する
+        // (これは buildMatchPreview の元実装どおりで、issue #105 の literal 保証と一致する)
         let after = '';
         const afterRanges: Array<{ start: number; end: number }> = [];
         let cursor = 0;
@@ -230,6 +276,10 @@ export function buildMatchPreview(params: {
 /**
  * UI から使うフック。検索条件とスコープを渡すと、件数 (プレビュー) と
  * regexError の文字列を返す。実行系は store.replaceText を呼び出す。
+ *
+ * issue #104: scope='all' のとき LRU 退避ページ (IDB 退避) も走査対象に含めるため、
+ * filePath をキーに getAllTemporaryPageData を非同期で読み込み、結果が来たら counts /
+ * preview を再計算する。IDB 読み込み中は in-memory のみで仮表示する (UI の応答性優先)。
  */
 export function useFindReplace(
   query: ReplaceQuery,
@@ -245,6 +295,32 @@ export function useFindReplace(
 
   const regexResult = useMemo(() => buildRegexOrError(query), [query]);
 
+  // issue #104: scope='all' のときだけ IDB 退避ページを取得する。
+  // filePath / scope / pages Map 更新で再フェッチして件数を最新化する。
+  const filePath = document?.filePath ?? null;
+  const pagesMapRef = document?.pages;
+  const [idbPages, setIdbPages] = useState<Map<number, Partial<PageData>> | undefined>(undefined);
+
+  useEffect(() => {
+    if (scope !== 'all' || !filePath) {
+      setIdbPages(undefined);
+      return;
+    }
+    let cancelled = false;
+    getAllTemporaryPageData(filePath)
+      .then((m) => {
+        if (!cancelled) setIdbPages(m);
+      })
+      .catch(() => {
+        if (!cancelled) setIdbPages(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // pagesMapRef を deps に入れることで store 側の置換 / undo / redo の後で
+    // IDB 側もリフレッシュされる
+  }, [scope, filePath, pagesMapRef]);
+
   const counts = useMemo<ReplaceCounts>(() => {
     if ('error' in regexResult) return { hits: 0, blocks: 0, pages: 0 };
     return countMatches({
@@ -253,8 +329,9 @@ export function useFindReplace(
       pagesMap: document?.pages,
       currentPageIndex,
       selectedIds,
+      idbPages,
     });
-  }, [regexResult, scope, document?.pages, currentPageIndex, selectedIds]);
+  }, [regexResult, scope, document?.pages, currentPageIndex, selectedIds, idbPages]);
 
   const preview = useMemo<MatchPreview>(() => {
     if ('error' in regexResult) return { items: [], totalBlocks: 0, truncated: false };
@@ -267,8 +344,9 @@ export function useFindReplace(
       currentPageIndex,
       selectedIds,
       maxItems: previewMaxItems,
+      idbPages,
     });
-  }, [regexResult, replacement, query.useRegex, scope, document?.pages, currentPageIndex, selectedIds, previewMaxItems]);
+  }, [regexResult, replacement, query.useRegex, scope, document?.pages, currentPageIndex, selectedIds, previewMaxItems, idbPages]);
 
   // 構文エラー: 空 pattern の場合は表示しない (error='' で返している)
   const regexError = 'error' in regexResult && regexResult.error ? regexResult.error : null;

@@ -641,3 +641,134 @@ describe('useBlockDragResize: issue #91 ドラッグ中は textBlocks を触ら�
     expect(lastCall).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// issue #106: Redo が効かない (Action.after が before と同じ snapshot)
+// ─────────────────────────────────────────────────────────────
+//
+// 背景: PdfCanvas.tsx の getPageData は以前 `document?.pages.get(pageIndex)` という
+//       render 時点の state を closure 保持する形だった。finishDragResize 内で
+//       updatePageData() 直後に getPageData() を呼ぶと、closure は古い snapshot を
+//       返すため Action.after が before と同じになり Redo が無効化されていた。
+//       本テストは「getPageData が常に最新 state を返す」ことを再現し、Action.after
+//       がドラッグ後 bbox を正しく持つことを保証する。
+// ─────────────────────────────────────────────────────────────
+describe('useBlockDragResize: issue #106 Redo round-trip (Action.after が最新 state を持つ)', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('finishDragResize 後の pushAction.before と after は別の bbox を持つ (Redo が有効)', () => {
+    const block = makeBlock();
+    // 「最新 state」を保持する可変な参照。updatePageData が呼ばれたら更新する。
+    let currentPage: PageData = makePage([block]);
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      currentPage = { ...currentPage, ...partial };
+    });
+    const pushAction = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        // 修正後の PdfCanvas.tsx と同様、最新 state を毎回返す getPageData
+        getPageData: () => currentPage,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+        setDragPreviewBboxes,
+      })
+    );
+
+    // ドラッグ開始
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    act(() => {
+      result.current.updateDragResize({ x: 150, y: 130 });
+    });
+    act(() => { flushRaf(); });
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const action = pushAction.mock.calls[0][0];
+    expect(action.type).toBe('update_page');
+
+    // before: ドラッグ前の bbox
+    const beforeBbox = action.before.textBlocks[0].bbox;
+    expect(beforeBbox.x).toBe(100);
+    expect(beforeBbox.y).toBe(100);
+
+    // after: ドラッグ後の bbox (dx=40, dy=20)
+    const afterBbox = action.after.textBlocks[0].bbox;
+    expect(afterBbox.x).toBe(140);
+    expect(afterBbox.y).toBe(120);
+
+    // 回帰防止の本命: before と after が「同じ snapshot」になっていないこと
+    // (closure stale だと両方とも beforeBbox になり Redo が無効化される)
+    expect(afterBbox.x).not.toBe(beforeBbox.x);
+    expect(afterBbox.y).not.toBe(beforeBbox.y);
+  });
+
+  it('回帰防止: stale な getPageData (旧 closure 実装) を渡すと Redo が破綻する (バグ再現)', () => {
+    // 旧 PdfCanvas.tsx の挙動を模擬: getPageData は render 時の snapshot 参照を
+    // 常に返し、updatePageData では実 store を更新しない。
+    // 期待: action.after.bbox が action.before.bbox と同じになり Redo が無効化される。
+    // これは「修正前の振る舞いを保存し、もし将来 closure 化に戻ったら検知する」役割。
+    const block = makeBlock();
+    const staleSnapshot = makePage([block]);
+    const updatePageData = vi.fn(); // 実 store 更新を再現しない
+    const pushAction = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => staleSnapshot, // 常に同じ snapshot 参照を返す
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+        setDragPreviewBboxes,
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    act(() => {
+      result.current.updateDragResize({ x: 150, y: 130 });
+    });
+    act(() => { flushRaf(); });
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const action = pushAction.mock.calls[0][0];
+    const beforeBbox = action.before.textBlocks[0].bbox;
+    const afterBbox = action.after.textBlocks[0].bbox;
+
+    // バグ再現: stale な getPageData では after が before と同じ snapshot になる。
+    // これが Redo 無効化の根本原因。修正は PdfCanvas 側で getPageData を
+    // usePecoStore.getState() 化し最新 state を返すこと (issue #106)。
+    expect(afterBbox.x).toBe(beforeBbox.x);
+    expect(afterBbox.y).toBe(beforeBbox.y);
+  });
+});

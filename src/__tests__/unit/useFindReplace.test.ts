@@ -14,6 +14,7 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../../utils/pdfLoader', () => ({
   saveTemporaryPageDataBatch: vi.fn().mockResolvedValue(undefined),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
 }));
 
 import {
@@ -475,5 +476,173 @@ describe('buildMatchPreview (issue #98)', () => {
     // 最初の 20 件は page index の昇順
     expect(r.items[0].pageIndex).toBe(0);
     expect(r.items[19].pageIndex).toBe(1);
+  });
+});
+
+// ── issue #104: countMatches / buildMatchPreview が IDB 退避ページも含める ──
+describe('issue #104: countMatches / buildMatchPreview の IDB マージ', () => {
+  it('countMatches scope=all で in-memory + IDB 両方のページが集計される', () => {
+    const inMem = makePage(0, [makeBlock({ id: 'm0', text: 'foo' })]);
+    const idbPages = new Map<number, Partial<PageData>>([
+      [1, {
+        pageIndex: 1,
+        width: 595,
+        height: 842,
+        textBlocks: [makeBlock({ id: 'idb1', text: 'foo foo' })],
+        isDirty: true,
+        thumbnail: null,
+      }],
+    ]);
+    const re = /foo/g;
+    const r = countMatches({
+      re,
+      scope: 'all',
+      pagesMap: buildPagesMap([inMem]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+      idbPages,
+    });
+    // in-memory 1 hit + idb 2 hit
+    expect(r).toEqual({ hits: 3, blocks: 2, pages: 2 });
+  });
+
+  it('countMatches scope=current は IDB を見ない', () => {
+    const inMem = makePage(0, [makeBlock({ id: 'm0', text: 'foo' })]);
+    const idbPages = new Map<number, Partial<PageData>>([
+      [1, {
+        pageIndex: 1,
+        width: 595,
+        height: 842,
+        textBlocks: [makeBlock({ id: 'idb1', text: 'foo foo' })],
+        isDirty: true,
+        thumbnail: null,
+      }],
+    ]);
+    const re = /foo/g;
+    const r = countMatches({
+      re,
+      scope: 'current',
+      pagesMap: buildPagesMap([inMem]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+      idbPages,
+    });
+    // current page (0) のみ
+    expect(r).toEqual({ hits: 1, blocks: 1, pages: 1 });
+  });
+
+  it('buildMatchPreview scope=all で IDB 退避ページの items も生成される', () => {
+    const inMem = makePage(0, [makeBlock({ id: 'm0', text: 'foo' })]);
+    const idbPages = new Map<number, Partial<PageData>>([
+      [2, {
+        pageIndex: 2,
+        width: 595,
+        height: 842,
+        textBlocks: [makeBlock({ id: 'idb2', text: 'foo' })],
+        isDirty: true,
+        thumbnail: null,
+      }],
+    ]);
+    const re = /foo/g;
+    const r = buildMatchPreview({
+      re,
+      replacement: 'bar',
+      useRegex: false,
+      scope: 'all',
+      pagesMap: buildPagesMap([inMem]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+      idbPages,
+    });
+    expect(r.items.length).toBe(2);
+    expect(r.items.map((it) => it.pageIndex).sort()).toEqual([0, 2]);
+    // IDB の item でも after は正しい
+    const idbItem = r.items.find((it) => it.pageIndex === 2)!;
+    expect(idbItem.before).toBe('foo');
+    expect(idbItem.after).toBe('bar');
+  });
+
+  it('IDB エントリに textBlocks が無い場合はマージ対象から外れる (defensive)', () => {
+    const inMem = makePage(0, [makeBlock({ id: 'm0', text: 'foo' })]);
+    const idbPages = new Map<number, Partial<PageData>>([
+      // textBlocks 未設定 (例: isDirty フラグだけ持つ stub)
+      [1, { pageIndex: 1, isDirty: true }],
+    ]);
+    const re = /foo/g;
+    const r = countMatches({
+      re,
+      scope: 'all',
+      pagesMap: buildPagesMap([inMem]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+      idbPages,
+    });
+    expect(r).toEqual({ hits: 1, blocks: 1, pages: 1 });
+  });
+
+  it('in-memory に同 idx がある場合 IDB は上書きしない (in-memory 優先)', () => {
+    const inMem = makePage(1, [makeBlock({ id: 'mem1', text: 'foo' })]);
+    const idbPages = new Map<number, Partial<PageData>>([
+      // 同じ idx=1 に古い IDB スナップショット (textBlocks=[]) があっても in-memory 優先
+      [1, {
+        pageIndex: 1,
+        textBlocks: [],
+        isDirty: false,
+      }],
+    ]);
+    const re = /foo/g;
+    const r = countMatches({
+      re,
+      scope: 'all',
+      pagesMap: buildPagesMap([inMem]),
+      currentPageIndex: 1,
+      selectedIds: new Set(),
+      idbPages,
+    });
+    expect(r.hits).toBe(1);
+  });
+});
+
+// ── issue #105: buildMatchPreview useRegex=false で $ が literal ──
+describe('issue #105: buildMatchPreview と replaceText の literal $ 一致', () => {
+  it('useRegex=false で replacement="$&" は literal "$&" として after に入る (preview)', () => {
+    const p0 = makePage(0, [makeBlock({ id: 'b1', text: 'abc' })]);
+    const re = /abc/g;
+    const r = buildMatchPreview({
+      re,
+      replacement: '$&',
+      useRegex: false,
+      scope: 'current',
+      pagesMap: buildPagesMap([p0]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+    });
+    expect(r.items[0].after).toBe('$&');
+  });
+
+  it('useRegex=false で replacement="$$" / "$1" も literal で入る (preview と実置換の一致根拠)', () => {
+    const p0 = makePage(0, [makeBlock({ id: 'b1', text: 'foo' })]);
+    const re = /foo/g;
+    const r1 = buildMatchPreview({
+      re: new RegExp(re.source, re.flags),
+      replacement: '$$',
+      useRegex: false,
+      scope: 'current',
+      pagesMap: buildPagesMap([p0]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+    });
+    expect(r1.items[0].after).toBe('$$');
+
+    const r2 = buildMatchPreview({
+      re: new RegExp(re.source, re.flags),
+      replacement: '$1',
+      useRegex: false,
+      scope: 'current',
+      pagesMap: buildPagesMap([p0]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+    });
+    expect(r2.items[0].after).toBe('$1');
   });
 });

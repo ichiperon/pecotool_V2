@@ -541,4 +541,87 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     expect(bb.width).toBeCloseTo(20, 6);
     expect(bb.height).toBeCloseTo(30, 6);
   });
+
+  // ─────────────────────────────────────────────────────────────
+  // #102: 全ページ OCR 中に「同じ filePath のまま document 参照だけ差し替わった」
+  // (= F5/Ctrl+O で再ロード) ケースで、古い OCR 結果が新 doc に書き込まれないこと。
+  // 旧実装は filePath 一致のみで isCurrentDocument を判定していたため汚染が起きた。
+  // 修正後: doc reference identity で判定。
+  // ─────────────────────────────────────────────────────────────
+  it('issue #102: OCR 中に同 filePath で document 参照が差し替わったら新 doc に書き込まれない', async () => {
+    const initialDoc = makeDoc(3);
+    usePecoStore.getState().setDocument(initialDoc);
+    h.openFreshPdfDocMock.mockResolvedValue(makeMockPdf(3));
+    h.askMock.mockResolvedValue(true);
+
+    // 1 ページ目処理完了直後に、同じ filePath '/t.pdf' のまま別オブジェクトに差し替え。
+    let processed = 0;
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      processed++;
+      await new Promise((r) => setTimeout(r, 0));
+      if (processed === 1) {
+        // F5 相当: 同 filePath のまま新 PecoDocument にすり替え (reference identity が変わる)
+        const reloadedDoc = makeDoc(3);
+        usePecoStore.getState().setDocument(reloadedDoc);
+      }
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [
+          { text: `P${processed}`, bbox: { x: 0, y: 0, width: 10, height: 10 },
+            writingMode: 'horizontal', confidence: 1 },
+        ],
+      });
+    });
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    await act(async () => { await result.current.runOcrAllPages(); });
+
+    // 新 doc (現在の document) には何も書き込まれていない
+    const liveDoc = usePecoStore.getState().document!;
+    expect(liveDoc).not.toBe(initialDoc);
+    for (let i = 0; i < liveDoc.totalPages; i++) {
+      const page = liveDoc.pages.get(i);
+      expect(page?.textBlocks ?? []).toHaveLength(0);
+    }
+
+    // 別 PDF への切替を検知して中断 toast が出ている
+    expect(toasts.some((t) => t.msg.includes('別のPDF'))).toBe(true);
+  });
+
+  it('issue #102: runOcrCurrentPage 中に doc 参照が差し替わったら新 doc に書き込まれない', async () => {
+    const initialDoc = makeDoc(1);
+    usePecoStore.getState().setDocument(initialDoc);
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    // invoke('run_ocr') の最中に doc 参照を差し替え (同じ filePath, 別オブジェクト)
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      await new Promise((r) => setTimeout(r, 0));
+      const newDoc = makeDoc(1);
+      usePecoStore.getState().setDocument(newDoc);
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [
+          { text: 'STALE', bbox: { x: 0, y: 0, width: 10, height: 10 },
+            writingMode: 'horizontal', confidence: 1 },
+        ],
+      });
+    });
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    // 新 doc には STALE が書き込まれていない
+    const liveDoc = usePecoStore.getState().document!;
+    expect(liveDoc).not.toBe(initialDoc);
+    const p0 = liveDoc.pages.get(0)!;
+    expect(p0.textBlocks ?? []).toHaveLength(0);
+    // 破棄通知の toast が出ている
+    expect(toasts.some((t) => t.err === true && t.msg.includes('破棄'))).toBe(true);
+  });
 });

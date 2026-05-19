@@ -451,6 +451,80 @@ describe('useFileOperations writeFileAtomically EACCES フォールバック (is
   });
 });
 
+describe('useFileOperations handleOpen OCR 実行中ガード (issue #102)', () => {
+  it('#102: isOcrRunningRef.current=true なら handleOpen は loadPDF を呼ばず false を返す', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true } as React.MutableRefObject<boolean>;
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef),
+    );
+
+    let opened = true;
+    await act(async () => {
+      opened = await result.current.handleOpen('/new.pdf');
+    });
+
+    expect(opened).toBe(false);
+    expect(loadPDF).not.toHaveBeenCalled();
+    // Toast にOCR実行中である旨が出る
+    expect(showToast).toHaveBeenCalled();
+    expect(showToast.mock.calls[0][0]).toMatch(/OCR.*開けません/);
+  });
+
+  it('#102: bypassOcrGuard=true ならフォルダ OCR 経由として handleOpen は素通り (loadPDF が呼ばれる)', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true } as React.MutableRefObject<boolean>;
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef),
+    );
+
+    let opened = false;
+    await act(async () => {
+      opened = await result.current.handleOpen('/folder.pdf', { bypassOcrGuard: true });
+    });
+
+    expect(opened).toBe(true);
+    expect(loadPDF).toHaveBeenCalledTimes(1);
+  });
+
+  it('#102: isOcrRunningRef.current=false なら handleOpen は通常通り動く', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: false } as React.MutableRefObject<boolean>;
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef),
+    );
+
+    let opened = false;
+    await act(async () => {
+      opened = await result.current.handleOpen('/normal.pdf');
+    });
+
+    expect(opened).toBe(true);
+    expect(loadPDF).toHaveBeenCalledTimes(1);
+  });
+
+  it('#102: isOcrRunningRef 未指定 (旧来呼び出し) でも従来通り動作 (loadPDF が呼ばれる)', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let opened = false;
+    await act(async () => {
+      opened = await result.current.handleOpen('/legacy.pdf');
+    });
+
+    expect(opened).toBe(true);
+    expect(loadPDF).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('useFileOperations selector subscription (re-render avoidance)', () => {
   it('actions だけを subscribe しているため document 更新で再 render しない', () => {
     // pecoStore を一旦リセットしてから初期 doc を投入

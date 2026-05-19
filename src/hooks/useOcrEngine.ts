@@ -149,8 +149,14 @@ export function useOcrEngine(
   const hasDocument = usePecoStore(selectHasDocument);
   const currentPageIndex = usePecoStore(selectCurrentPageIndex);
 
-  const isCurrentDocument = (filePath: string) =>
-    usePecoStore.getState().document?.filePath === filePath;
+  // #102: filePath 一致だけでは F5 (再読み込み) で「同じパスの別 doc 参照」に
+  // 古い OCR 結果が書き込まれる事故が発生する。
+  // updatePageData は document を新オブジェクトに置き換えるため reference identity も
+  // 使えない (1 ページ書き込んだ瞬間に doc が変わる)。
+  // 解決策: setDocument 時のみ +1 される documentEpoch を比較する。
+  // OCR ループ開始時点の epoch を保持し、毎ステップで getState().documentEpoch と一致するか判定。
+  const isCurrentDocument = (capturedEpoch: number) =>
+    usePecoStore.getState().documentEpoch === capturedEpoch;
 
   const setOcrRunning = (running: boolean) => {
     isOcrRunningRef.current = running;
@@ -183,11 +189,16 @@ export function useOcrEngine(
     doc: PecoDocument,
     progressForPage?: (pageIndex: number) => OcrProgress,
   ) => {
+    // #102: 開始時点の epoch を captured epoch として保持。
+    // ループ内で getState().documentEpoch と比較し、F5 / Ctrl+O 経由で document が
+    // 差し替えられた瞬間に検知して停止する (filePath 一致でも doc 自体は別物のため)。
+    // updatePageData による document 差し替えは epoch を増やさないので、書き込みは正常に続く。
+    const capturedEpoch = usePecoStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       for (let i = 0; i < doc.totalPages; i++) {
         if (cancelTokenRef.current) break;
-        if (!isCurrentDocument(doc.filePath)) {
+        if (!isCurrentDocument(capturedEpoch)) {
           cancelTokenRef.current = true;
           showToast('OCRを中止しました（別のPDFが開かれました）。', true);
           break;
@@ -213,7 +224,7 @@ export function useOcrEngine(
             size.pageWidth,
             size.pageHeight,
           );
-          if (!isCurrentDocument(doc.filePath)) {
+          if (!isCurrentDocument(capturedEpoch)) {
             cancelTokenRef.current = true;
             showToast('OCRを中止しました（別のPDFが開かれました）。', true);
             break;
@@ -288,9 +299,12 @@ export function useOcrEngine(
 
     setOcrRunning(true);
     perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
+    // #102: 開始時点の documentEpoch を保持。F5 等で同パスの別 doc に置き換わった際は
+    // epoch がインクリメントされるため、古い結果を書き込む前に検知できる。
+    const capturedEpoch = usePecoStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
-      if (!isCurrentDocument(doc.filePath)) return;
+      if (!isCurrentDocument(capturedEpoch)) return;
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
       const { result } = await runOcrForPage(
         ocrPdf,
@@ -299,7 +313,7 @@ export function useOcrEngine(
         pageData.width,
         pageData.height,
       );
-      if (!isCurrentDocument(doc.filePath)) {
+      if (!isCurrentDocument(capturedEpoch)) {
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
         return;
       }
@@ -454,6 +468,10 @@ export function useOcrEngine(
 
   const checkAndPromptOcrZero = async (doc: PecoDocument) => {
     if (isOcrRunningRef.current) return;
+    // #102: doc を渡された瞬間の epoch を保持。ask() の待機中に別 PDF へ切り替わったら
+    // runOcrAllPages を起動しない (旧実装は filePath 一致のみ確認していたため、
+    // 同 filePath で再ロードされた別 doc に対しても OCR を実行していた)。
+    const capturedEpoch = usePecoStore.getState().documentEpoch;
     try {
       const pdf = await getSharedPdfProxy(doc.filePath);
       const page0 = await pdf.getPage(1);
@@ -474,7 +492,7 @@ export function useOcrEngine(
           'このPDFにはOCRデータが含まれていません。全ページOCRを実行しますか？',
           { title: 'OCR実行の提案', kind: 'info' }
         );
-        if (confirmed && isCurrentDocument(doc.filePath)) await runOcrAllPages();
+        if (confirmed && isCurrentDocument(capturedEpoch)) await runOcrAllPages();
       }
     } catch (e) {
       console.error('[OCR] OCRゼロ検出に失敗:', e);

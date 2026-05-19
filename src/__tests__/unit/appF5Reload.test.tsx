@@ -73,3 +73,89 @@ describe('Issue #38: F5 routes through handleReload (isSaving guard)', () => {
     expect(handleReload).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Issue #102: handleReload は OCR 実行中の場合、handleOpen を呼ばずに早期 return する。
+ * App.tsx の handleReload 仕様を JS 関数として複製して isOcrRunning ガードの契約を担保する。
+ * 仕様変更時はここと App.tsx を同時に修正する。
+ */
+function makeHandleReload({
+  isSaving,
+  isOcrRunning,
+  filePath,
+  showToast,
+  handleOpen,
+}: {
+  isSaving: boolean;
+  isOcrRunning: boolean;
+  filePath: string | undefined;
+  showToast: (msg: string) => void;
+  handleOpen: (path: string) => Promise<boolean>;
+}) {
+  return async () => {
+    if (isSaving) {
+      showToast('保存中は再読み込みできません。');
+      return;
+    }
+    if (isOcrRunning) {
+      showToast('OCR実行中は再読み込みできません。OCRを中止してから再度お試しください。');
+      return;
+    }
+    if (!filePath) return;
+    await handleOpen(filePath);
+  };
+}
+
+describe('Issue #102: handleReload は OCR 実行中なら handleOpen を呼ばない', () => {
+  it('#102: isOcrRunning=true なら handleOpen は呼ばれず Toast が出る', async () => {
+    const showToast = vi.fn();
+    const handleOpen = vi.fn().mockResolvedValue(true);
+    const reload = makeHandleReload({
+      isSaving: false,
+      isOcrRunning: true,
+      filePath: '/path.pdf',
+      showToast,
+      handleOpen,
+    });
+
+    await reload();
+
+    expect(handleOpen).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast.mock.calls[0][0]).toMatch(/OCR.*再読み込み/);
+  });
+
+  it('#102: isOcrRunning=false なら handleOpen は呼ばれる', async () => {
+    const showToast = vi.fn();
+    const handleOpen = vi.fn().mockResolvedValue(true);
+    const reload = makeHandleReload({
+      isSaving: false,
+      isOcrRunning: false,
+      filePath: '/path.pdf',
+      showToast,
+      handleOpen,
+    });
+
+    await reload();
+
+    expect(handleOpen).toHaveBeenCalledWith('/path.pdf');
+  });
+
+  it('#102: isSaving が優先される (両方 true でも保存中メッセージが先に出る)', async () => {
+    const showToast = vi.fn();
+    const handleOpen = vi.fn().mockResolvedValue(true);
+    const reload = makeHandleReload({
+      isSaving: true,
+      isOcrRunning: true,
+      filePath: '/path.pdf',
+      showToast,
+      handleOpen,
+    });
+
+    await reload();
+
+    expect(handleOpen).not.toHaveBeenCalled();
+    // isSaving チェックが先に走るので保存中メッセージが出る
+    expect(showToast.mock.calls[0][0]).toMatch(/保存中/);
+  });
+});

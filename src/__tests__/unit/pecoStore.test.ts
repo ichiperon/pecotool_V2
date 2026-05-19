@@ -11,6 +11,7 @@ import type { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../
 vi.mock('../../utils/pdfLoader', () => ({
   saveTemporaryPageDataBatch: vi.fn().mockResolvedValue(undefined),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
 }))
 
 // ── ヘルパー ──────────────────────────────────────────────────
@@ -1162,9 +1163,10 @@ describe('pecoStore', () => {
     beforeEach(() => {
       vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
       vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
     })
 
-    it('U-FR-01: 現ページ全 BB の "あ" を "い" に置換し件数を返す', () => {
+    it('U-FR-01: 現ページ全 BB の "あ" を "い" に置換し件数を返す', async () => {
       const b1 = makeBlock({ id: 'b1', text: 'あああ' })
       const b2 = makeBlock({ id: 'b2', text: 'あい' })
       const b3 = makeBlock({ id: 'b3', text: 'う' })
@@ -1175,7 +1177,7 @@ describe('pecoStore', () => {
         isDirty: false,
       })
 
-      const result = usePecoStore.getState().replaceText({
+      const result = await usePecoStore.getState().replaceText({
         scope: 'current',
         pattern: 'あ',
         replacement: 'い',
@@ -1201,7 +1203,7 @@ describe('pecoStore', () => {
       expect(usePecoStore.getState().isDirty).toBe(true)
     })
 
-    it('U-FR-02: selection スコープは選択 ID のブロックだけ置換する', () => {
+    it('U-FR-02: selection スコープは選択 ID のブロックだけ置換する', async () => {
       const b1 = makeBlock({ id: 'b1', text: 'あ' })
       const b2 = makeBlock({ id: 'b2', text: 'あ' })
       const page = makePage({ pageIndex: 0, textBlocks: [b1, b2] })
@@ -1211,7 +1213,7 @@ describe('pecoStore', () => {
         selectedIds: new Set(['b1']),
       })
 
-      const result = usePecoStore.getState().replaceText({
+      const result = await usePecoStore.getState().replaceText({
         scope: 'selection',
         pattern: 'あ',
         replacement: 'い',
@@ -1225,7 +1227,7 @@ describe('pecoStore', () => {
       expect(blocks[1].text).toBe('あ') // 選択外
     })
 
-    it('U-FR-03: 全ページスコープは pages Map に存在する全ページを対象にする', () => {
+    it('U-FR-03: 全ページスコープは pages Map に存在する全ページを対象にする', async () => {
       const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo' })] })
       const page1 = makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p1b', text: 'foo foo' })] })
       const page2 = makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p2b', text: 'no match' })] })
@@ -1234,7 +1236,7 @@ describe('pecoStore', () => {
         currentPageIndex: 0,
       })
 
-      const result = usePecoStore.getState().replaceText({
+      const result = await usePecoStore.getState().replaceText({
         scope: 'all',
         pattern: 'foo',
         replacement: 'bar',
@@ -1250,7 +1252,7 @@ describe('pecoStore', () => {
       expect(pages.get(2)!.textBlocks[0].text).toBe('no match')
     })
 
-    it('U-FR-04: caseSensitive=true で大文字小文字を区別する', () => {
+    it('U-FR-04: caseSensitive=true で大文字小文字を区別する', async () => {
       const b = makeBlock({ id: 'b', text: 'Hello hello HELLO' })
       const page = makePage({ pageIndex: 0, textBlocks: [b] })
       usePecoStore.setState({
@@ -1258,7 +1260,7 @@ describe('pecoStore', () => {
         currentPageIndex: 0,
       })
 
-      const result = usePecoStore.getState().replaceText({
+      const result = await usePecoStore.getState().replaceText({
         scope: 'current',
         pattern: 'Hello',
         replacement: 'X',
@@ -1271,7 +1273,7 @@ describe('pecoStore', () => {
       expect(blocks[0].text).toBe('X hello HELLO')
     })
 
-    it('U-FR-05: useRegex=true で正規表現が機能し、構文エラーは throw する', () => {
+    it('U-FR-05: useRegex=true で正規表現が機能し、構文エラーは throw する', async () => {
       const b = makeBlock({ id: 'b', text: 'abc123 def456' })
       const page = makePage({ pageIndex: 0, textBlocks: [b] })
       usePecoStore.setState({
@@ -1279,7 +1281,7 @@ describe('pecoStore', () => {
         currentPageIndex: 0,
       })
 
-      const result = usePecoStore.getState().replaceText({
+      const result = await usePecoStore.getState().replaceText({
         scope: 'current',
         pattern: '\\d+',
         replacement: '#',
@@ -1291,17 +1293,19 @@ describe('pecoStore', () => {
       const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
       expect(blocks[0].text).toBe('abc# def#')
 
-      // 構文エラーは throw
-      expect(() => usePecoStore.getState().replaceText({
-        scope: 'current',
-        pattern: '[invalid',
-        replacement: 'x',
-        caseSensitive: false,
-        useRegex: true,
-      })).toThrow()
+      // 構文エラーは throw (async なので rejects.toThrow)
+      await expect(
+        usePecoStore.getState().replaceText({
+          scope: 'current',
+          pattern: '[invalid',
+          replacement: 'x',
+          caseSensitive: false,
+          useRegex: true,
+        }),
+      ).rejects.toThrow()
     })
 
-    it('U-FR-06: 1 回の replaceText は 1 つの update_pages Action として undo / redo できる', () => {
+    it('U-FR-06: 1 回の replaceText は 1 つの update_pages Action として undo / redo できる', async () => {
       const b0 = makeBlock({ id: 'b0', text: 'foo' })
       const b1 = makeBlock({ id: 'b1', text: 'foo bar' })
       const page0 = makePage({ pageIndex: 0, textBlocks: [b0] })
@@ -1313,7 +1317,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().replaceText({
+      await usePecoStore.getState().replaceText({
         scope: 'all',
         pattern: 'foo',
         replacement: 'X',
@@ -1349,7 +1353,7 @@ describe('pecoStore', () => {
       expect(s.redoStack).toHaveLength(0)
     })
 
-    it('U-FR-07: skipBlockIds で指定したブロックは置換されず、skippedBlocks として件数返却される', () => {
+    it('U-FR-07: skipBlockIds で指定したブロックは置換されず、skippedBlocks として件数返却される', async () => {
       const b0 = makeBlock({ id: 'editing', text: 'foo' })
       const b1 = makeBlock({ id: 'safe', text: 'foo' })
       const page = makePage({ pageIndex: 0, textBlocks: [b0, b1] })
@@ -1358,7 +1362,7 @@ describe('pecoStore', () => {
         currentPageIndex: 0,
       })
 
-      const result = usePecoStore.getState().replaceText({
+      const result = await usePecoStore.getState().replaceText({
         scope: 'current',
         pattern: 'foo',
         replacement: 'X',
@@ -1374,7 +1378,7 @@ describe('pecoStore', () => {
       expect(blocks[1].text).toBe('X')
     })
 
-    it('U-FR-08: 検索文字列が空 or ヒット 0 のときは undo にも積まれず no-op', () => {
+    it('U-FR-08: 検索文字列が空 or ヒット 0 のときは undo にも積まれず no-op', async () => {
       const b = makeBlock({ id: 'b', text: 'hello' })
       const page = makePage({ pageIndex: 0, textBlocks: [b] })
       usePecoStore.setState({
@@ -1384,7 +1388,7 @@ describe('pecoStore', () => {
       })
 
       // 空 pattern
-      const r1 = usePecoStore.getState().replaceText({
+      const r1 = await usePecoStore.getState().replaceText({
         scope: 'current', pattern: '', replacement: 'x',
         caseSensitive: false, useRegex: false,
       })
@@ -1392,7 +1396,7 @@ describe('pecoStore', () => {
       expect(usePecoStore.getState().undoStack).toHaveLength(0)
 
       // ヒットしない pattern
-      const r2 = usePecoStore.getState().replaceText({
+      const r2 = await usePecoStore.getState().replaceText({
         scope: 'current', pattern: 'NOT_FOUND', replacement: 'x',
         caseSensitive: false, useRegex: false,
       })
@@ -1401,6 +1405,259 @@ describe('pecoStore', () => {
       expect(usePecoStore.getState().undoStack).toHaveLength(0)
       // 元 text のまま
       expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe('hello')
+    })
+  })
+
+  // ── issue #104: replaceText scope='all' で IDB 退避ページも対象 ──
+  describe('issue #104: replaceText all-scope は LRU 退避ページも置換する', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
+    })
+
+    it('U-FR-09: in-memory に無いが IDB に退避されたページも all スコープで置換対象になる', async () => {
+      // in-memory には page 0 だけ。page 1 は LRU 退避済み (IDB に textBlocks 持ち)
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo on memory' })] })
+      const evictedBlock = makeBlock({ id: 'p1b', text: 'foo on idb' })
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockResolvedValueOnce(
+        new Map<number, Partial<PageData>>([
+          [1, {
+            pageIndex: 1,
+            width: 595,
+            height: 842,
+            textBlocks: [evictedBlock],
+            isDirty: true,
+            thumbnail: null,
+          }],
+        ]),
+      )
+
+      usePecoStore.setState({
+        document: {
+          filePath: 'test.pdf',
+          fileName: 'test.pdf',
+          totalPages: 2,
+          metadata: {},
+          pages: new Map([[0, page0]]),
+        },
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'all',
+        pattern: 'foo',
+        replacement: 'bar',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      // 2 ページとも 1 件ずつヒット
+      expect(result).toEqual({ hits: 2, blocks: 2, pages: 2, skippedBlocks: 0 })
+
+      const pages = usePecoStore.getState().document!.pages
+      // 退避ページも in-memory に積まれている (after の状態)
+      expect(pages.get(0)!.textBlocks[0].text).toBe('bar on memory')
+      expect(pages.get(1)!.textBlocks[0].text).toBe('bar on idb')
+
+      // IDB へ saveTemporaryPageDataBatch が両ページ分書かれている
+      await waitForPendingIdbSaves()
+      const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
+      const allEntries = calls.flatMap((c) => c[0])
+      const pageIndices = new Set(allEntries.map((e) => e.pageIndex))
+      expect(pageIndices.has(0)).toBe(true)
+      expect(pageIndices.has(1)).toBe(true)
+    })
+
+    it('U-FR-10: undo / redo で IDB 退避ページも巻き戻る (update_pages entries が IDB ページ含む)', async () => {
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo' })] })
+      const evictedBlock = makeBlock({ id: 'p1b', text: 'foo' })
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockResolvedValueOnce(
+        new Map<number, Partial<PageData>>([
+          [1, {
+            pageIndex: 1,
+            width: 595,
+            height: 842,
+            textBlocks: [evictedBlock],
+            isDirty: true,
+            thumbnail: null,
+          }],
+        ]),
+      )
+      usePecoStore.setState({
+        document: {
+          filePath: 'test.pdf',
+          fileName: 'test.pdf',
+          totalPages: 2,
+          metadata: {},
+          pages: new Map([[0, page0]]),
+        },
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      await usePecoStore.getState().replaceText({
+        scope: 'all',
+        pattern: 'foo',
+        replacement: 'X',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      // update_pages に両ページの entry が入る
+      let s = usePecoStore.getState()
+      expect(s.undoStack).toHaveLength(1)
+      if (s.undoStack[0].type === 'update_pages') {
+        expect(s.undoStack[0].entries.map(e => e.pageIndex).sort()).toEqual([0, 1])
+      }
+      expect(s.document!.pages.get(1)!.textBlocks[0].text).toBe('X')
+
+      // undo: 退避ページも 'foo' に戻る
+      usePecoStore.getState().undo()
+      s = usePecoStore.getState()
+      expect(s.document!.pages.get(0)!.textBlocks[0].text).toBe('foo')
+      expect(s.document!.pages.get(1)!.textBlocks[0].text).toBe('foo')
+
+      // redo: 再び 'X'
+      usePecoStore.getState().redo()
+      s = usePecoStore.getState()
+      expect(s.document!.pages.get(0)!.textBlocks[0].text).toBe('X')
+      expect(s.document!.pages.get(1)!.textBlocks[0].text).toBe('X')
+
+      // IDB にも before/after が書き戻されている (undo / redo それぞれ呼ばれる)
+      await waitForPendingIdbSaves()
+      const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
+      const allEntries = calls.flatMap((c) => c[0])
+      expect(allEntries.some((e) => e.pageIndex === 1)).toBe(true)
+    })
+
+    it('U-FR-11: scope=current では IDB を読まない (getAllTemporaryPageData が呼ばれない)', async () => {
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo' })] })
+      usePecoStore.setState({
+        document: {
+          filePath: 'test.pdf', fileName: 'test.pdf', totalPages: 1, metadata: {},
+          pages: new Map([[0, page0]]),
+        },
+        currentPageIndex: 0,
+      })
+
+      await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: 'foo',
+        replacement: 'bar',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      expect(vi.mocked(pdfLoader.getAllTemporaryPageData)).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── issue #105: useRegex=false で $ replacement が literal ──
+  describe('issue #105: $ replacement の literal 扱い', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
+    })
+
+    it('U-FR-12: useRegex=false で replacement="$&" は literal "$&" として挿入される', async () => {
+      const b = makeBlock({ id: 'b', text: 'abc' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: 'abc',
+        replacement: '$&',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      expect(result.hits).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      // 元バグ: '$&' が match 文字列 'abc' に展開され 'abc' になる
+      // 修正後: '$&' はそのまま literal で入る
+      expect(blocks[0].text).toBe('$&')
+    })
+
+    it('U-FR-13: useRegex=false で replacement="$1" / "$$" も literal', async () => {
+      const page = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'b1', text: 'foo' })] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      await usePecoStore.getState().replaceText({
+        scope: 'current', pattern: 'foo', replacement: '$1',
+        caseSensitive: false, useRegex: false,
+      })
+      const after1 = usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text
+      expect(after1).toBe('$1')
+
+      // 連続置換のため state を作り直す
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, makePage({ pageIndex: 0, textBlocks: [
+          makeBlock({ id: 'x1', text: 'foo' }),
+        ] })]])),
+        currentPageIndex: 0,
+        undoStack: [], redoStack: [],
+      })
+
+      await usePecoStore.getState().replaceText({
+        scope: 'current', pattern: 'foo', replacement: '$$',
+        caseSensitive: false, useRegex: false,
+      })
+      // '$$' は literal で '$$' となるべき (元バグでは '$' に折り畳まれる)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('$$')
+    })
+
+    it('U-FR-14: useRegex=true では $1 backreference が機能する', async () => {
+      const b = makeBlock({ id: 'b', text: 'abc 123' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '(\\w+) (\\d+)',
+        replacement: '$2-$1',
+        caseSensitive: false,
+        useRegex: true,
+      })
+
+      expect(result.hits).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('123-abc')
+    })
+
+    it('U-FR-15: useRegex=true では $& が match 全体に展開される (regex 経路は維持)', async () => {
+      const b = makeBlock({ id: 'b', text: 'abc' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: 'abc',
+        replacement: '[$&]',
+        caseSensitive: false,
+        useRegex: true,
+      })
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('[abc]')
     })
   })
 })
