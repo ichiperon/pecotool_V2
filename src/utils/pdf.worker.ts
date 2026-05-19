@@ -9,6 +9,12 @@ import { deflate, inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
+import {
+  PECO_FONT_KEY_TAG,
+  isPecoToolFontKey,
+  isPecoToolGraphicsStateKey,
+} from './pdfPecoToolMarkers';
+import { sweepUnreachableObjects } from './pdfReachabilityGc';
 import type {
   SavePdfWorkerRequest,
   SavePdfWorkerResponse,
@@ -81,22 +87,6 @@ function concatWithNewlines(chunks: Uint8Array[]): Uint8Array {
     out[offset++] = 0x0a;
   }
   return out;
-}
-
-function isPecoToolFontKey(key: PDFName): boolean {
-  const name = key.toString();
-  return (
-    name.startsWith('/IPAexGothic-') ||
-    name.startsWith('/IPAmjMincho-') ||
-    name.startsWith('/NotoSansCJKjp-') ||
-    name.startsWith('/NotoSans-') ||
-    name.startsWith('/NotoSansSymbols-') ||
-    name.startsWith('/NotoSansSymbols2-')
-  );
-}
-
-function isPecoToolGraphicsStateKey(key: PDFName): boolean {
-  return /^\/GS-\d+$/.test(key.toString());
 }
 
 function isPdfRef(value: unknown): value is PDFRef {
@@ -390,7 +380,8 @@ function findExistingFontKey(page: unknown, font: PDFFont): PDFName | undefined 
   if (!fontDict) return undefined;
 
   const targetRefKey = font.ref.toString();
-  const tagPrefix = `/${font.name}-`;
+  // issue #96 Fix 1: 統一タグ PECO_FONT_KEY_TAG で生成されたキーのみ再利用対象とする。
+  const tagPrefix = `/${PECO_FONT_KEY_TAG}-`;
   for (const [key, value] of fontDict.entries()) {
     if (!isPdfRef(value)) continue;
     if (value.toString() !== targetRefKey) continue;
@@ -426,7 +417,8 @@ function getOrRegisterPageFontKey(
     node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
     setFont?: (font: PDFFont) => void;
   };
-  let key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
+  // issue #96 Fix 1: PECO_FONT_KEY_TAG を渡して `/PecoF-<random>` 形式の key を生成。
+  let key = pageLike.node?.newFontDictionary?.(PECO_FONT_KEY_TAG, font.ref);
   if (!key) {
     pageLike.setFont?.(font);
     key = pageLike.fontKey;
@@ -657,6 +649,17 @@ async function handleSavePdf(
     useObjectStreams: false,
     addDefaultPage: false,
   };
+
+  // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
+  // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
+  // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
+  const sweepResult = sweepUnreachableObjects(pdfDoc);
+  if (sweepResult.dropped > 0) {
+    console.log(
+      `[pdf.worker] GC: dropped ${sweepResult.dropped} unreachable objects`,
+    );
+  }
+
   // pdf-lib save() が pdf-lib 内部で hang する edge case 対策として 90s timeout を設定。
   const savePromise = pdfDoc.save(saveOptions);
   const saveTimeout = new Promise<never>((_, reject) => {
@@ -664,6 +667,20 @@ async function handleSavePdf(
   });
   const savedBytes = await Promise.race([savePromise, saveTimeout]);
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
+
+  // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。
+  if (process.env.NODE_ENV !== 'production') {
+    const pageCount = pdfDoc.getPageCount();
+    if (pageCount > 0) {
+      const avgPerPage = savedBytes.byteLength / pageCount;
+      if (avgPerPage > 2 * 1024 * 1024) {
+        console.warn(
+          `[pdf.worker] WARN: Avg page size ${(avgPerPage / 1024 / 1024).toFixed(2)} MB exceeds 2MB threshold (issue #96 regression?)`,
+        );
+      }
+    }
+  }
+
   return { savedBytes, skippedChars: getSkippedTextChars(skippedChars) };
 }
 

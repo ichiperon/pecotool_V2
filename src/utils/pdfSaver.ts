@@ -10,6 +10,12 @@ import { deflate, inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
+import {
+  PECO_FONT_KEY_TAG,
+  isPecoToolFontKey,
+  isPecoToolGraphicsStateKey,
+} from './pdfPecoToolMarkers';
+import { sweepUnreachableObjects } from './pdfReachabilityGc';
 import type {
   SavePdfSource,
   SavePdfWorkerRequest,
@@ -92,22 +98,6 @@ function concatWithNewlines(chunks: Uint8Array[]): Uint8Array {
     out[offset++] = 0x0a;
   }
   return out;
-}
-
-function isPecoToolFontKey(key: PDFName): boolean {
-  const name = key.toString();
-  return (
-    name.startsWith('/IPAexGothic-') ||
-    name.startsWith('/IPAmjMincho-') ||
-    name.startsWith('/NotoSansCJKjp-') ||
-    name.startsWith('/NotoSans-') ||
-    name.startsWith('/NotoSansSymbols-') ||
-    name.startsWith('/NotoSansSymbols2-')
-  );
-}
-
-function isPecoToolGraphicsStateKey(key: PDFName): boolean {
-  return /^\/GS-\d+$/.test(key.toString());
 }
 
 function isPdfRef(value: unknown): value is PDFRef {
@@ -456,9 +446,11 @@ function findExistingFontKey(page: unknown, font: PDFFont): PDFName | undefined 
   if (!fontDict) return undefined;
 
   const targetRefKey = font.ref.toString();
-  // 既存 key の tag prefix は `/<font.name>-<random>` 形式 (pdf-lib の uniqueKey 仕様)。
-  // postscriptName に prefix 一致 + ref 一致の両方を満たすキーのみを再利用する。
-  const tagPrefix = `/${font.name}-`;
+  // 既存 key の tag prefix は `/<PECO_FONT_KEY_TAG>-<random>` 形式
+  // (pdf-lib の uniqueKey 仕様 + issue #96 Fix 1 で導入した統一タグ)。
+  // PecoTool が登録した key のみ ref 一致で再利用対象とし、原本フォント (`/F1` 等)
+  // への誤マッチを避ける。
+  const tagPrefix = `/${PECO_FONT_KEY_TAG}-`;
   for (const [key, value] of fontDict.entries()) {
     if (!isPdfRef(value)) continue;
     if (value.toString() !== targetRefKey) continue;
@@ -509,7 +501,10 @@ function getOrRegisterPageFontKey(
     node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
     setFont?: (font: PDFFont) => void;
   };
-  let key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
+  // PECO_FONT_KEY_TAG をそのまま渡す。pdf-lib 内部で `<tag>-<random>` 形式の
+  // PDFName が生成され、次回保存時に isPecoToolFontKey() で確実に検出できる
+  // （issue #96 Fix 1）。
+  let key = pageLike.node?.newFontDictionary?.(PECO_FONT_KEY_TAG, font.ref);
   if (!key) {
     // fallback 経路: setFont は newFontDictionary を内部で呼ぶため、上の newFontDictionary
     // が成功しているときは絶対に踏まないように上の if で gating する。
@@ -540,6 +535,8 @@ function setPageFontWithStableKey(
  * Common PDF building logic.
  * Uses incremental update to only write changed pages.
  * Performs surgical removal of old text layers to prevent "Double OCR".
+ * Sweeps unreachable indirect objects before save (issue #96)
+ *   so that re-loading and re-saving a bloated PDF converges to a normal size.
  * Powered by @cantoo/pdf-lib.
  */
 
@@ -813,8 +810,34 @@ export async function buildPdfDocument(
     useObjectStreams: false,
     addDefaultPage: false,
   };
+
+  // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
+  // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
+  // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
+  const sweepResult = sweepUnreachableObjects(pdfDoc);
+  if (sweepResult.dropped > 0) {
+    console.log(
+      `[buildPdfDocument] GC: dropped ${sweepResult.dropped} unreachable objects`,
+    );
+  }
+
   const savedBytes = await pdfDoc.save(saveOptions);
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
+
+  // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。
+  // フォントや到達可能オブジェクト再検証は重いので、平均サイズチェックのみで十分。
+  if (process.env.NODE_ENV !== 'production') {
+    const pageCount = pdfDoc.getPageCount();
+    if (pageCount > 0) {
+      const avgPerPage = savedBytes.byteLength / pageCount;
+      if (avgPerPage > 2 * 1024 * 1024) {
+        console.warn(
+          `[buildPdfDocument] WARN: Avg page size ${(avgPerPage / 1024 / 1024).toFixed(2)} MB exceeds 2MB threshold (issue #96 regression?)`,
+        );
+      }
+    }
+  }
+
   onSkippedChars?.(getSkippedTextChars(skippedChars));
   return savedBytes;
 }
