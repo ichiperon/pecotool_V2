@@ -914,7 +914,24 @@ export async function buildPdfDocument(
             continue;
           }
 
-          const baselineY = vh - block.bbox.y - textHeight * sy * 0.8;
+          // 横書き baselineY: 縦書き (#28) と同じく primary font の ascent 比から動的計算する (#99 副因対策)。
+          // 旧実装は textHeight * sy * 0.8 のマジックナンバーで baseline 位置を決めていたため、
+          // primary font の actual ascent ratio (NotoSansJP では heightAtSize / heightAtSize(no descender) で
+          // descentRatio ≈ 0.2) との誤差が bbox 上端で目視可能な縦ずれを生んでいた。
+          //
+          // 動的式 (縦書きと同形):
+          //   descentRatio = (runHeight - runAscent) / runHeight  ... primary font 代表値
+          //   baselineY    = vh - bbox.y - textHeight * sy * (1 - descentRatio)
+          //
+          // 0.8 リテラルとの差分は数 % 程度だが、保存→再読込のラウンドトリップで蓄積すると
+          // ユーザー体験上 BB がずれて見える。primary font の代表値で十分 (混在 run でも
+          // primary font のメトリクスで cm を発行している)。
+          const primaryRunHeight = customFont.heightAtSize(fontSize);
+          const primaryRunAscent = customFont.heightAtSize(fontSize, { descender: false });
+          const descentRatio = primaryRunHeight > 0
+            ? (primaryRunHeight - primaryRunAscent) / primaryRunHeight
+            : 0.2;
+          const baselineY = vh - block.bbox.y - textHeight * sy * (1 - descentRatio);
 
           page.pushOperators(
             pushGraphicsState(),

@@ -74,19 +74,27 @@ export function usePageNavigation({
 
       if (signal.aborted) return;
 
-      // bboxMetaが未取得の場合、1ページ目表示をブロックせずバックグラウンドで取得する。
-      // 取得した meta は bboxMetaRef.current に保持し、以降の loadPage 呼び出し
-      // (行 107, 151) で利用する。
-      // 注意: 200 ページ級 PDF で全ページ loadPage を forEach で発火すると
-      //       getTextContent() が単一 pdfjs worker に 200 件同時投入され、
-      //       現在ページ含む全 getTextContent が順番待ちで詰まる。
-      //       そのため先行一括ロードは行わず、実際にそのページを表示・プリフェッチ
-      //       する時 (ナビゲーション時の ±1/±2 プリフェッチ経由) に限定する。
+      // bboxMeta は loadPage の text/bbox 復元経路に必須。await して確実に解決してから
+      // loadPage を呼ぶ (#99 主因対策)。
+      //
+      // 旧実装は fire-and-forget で bboxMetaRef を後埋めしていたため、初回ナビゲーション時
+      // bboxMeta=null のまま loadPage が走り、pdfjs textItems から bbox を再計算する fallback
+      // 経路 (pdfTextExtractor.ts の ascent=thickness*1.16) を取った。結果として保存時の
+      // viewport-space bbox とは別の値が描画され、再読込で bbox.height * 0.36 程度の上方ずれが
+      // 発生していた。さらに IDB キャッシュにこの誤った bbox が固着し、以降の再読込でも
+      // 同じズレが残る固着問題があった。
+      //
+      // 注意: 200 ページ級 PDF で全ページ loadPage を forEach で発火すると getTextContent()
+      //       が単一 pdfjs worker に同時投入されて詰まる。そのため bboxMeta 取得後の先行
+      //       一括ロードは行わず、実際にそのページを表示する時のみ loadPage する。
+      //       meta 取得自体は metadata stream 1 回読みのみで getTextContent には介入しない。
       if (bboxMetaRef.current === undefined) {
-        bboxMetaRef.current = null;
-        loadPecoToolBBoxMeta(pdf).then((meta) => {
-          bboxMetaRef.current = meta;
-        }).catch(() => {});
+        try {
+          bboxMetaRef.current = await loadPecoToolBBoxMeta(pdf);
+        } catch {
+          bboxMetaRef.current = null;
+        }
+        if (signal.aborted) return;
       }
 
       // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）

@@ -17,7 +17,14 @@ export async function loadPage(
   }>> | null,
   mtime?: number
 ): Promise<PageData> {
-  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
+  // #99: meta 有無でキャッシュキーを分離する。
+  // meta なしで pdfjs textItems の transform から bbox を fallback 計算した結果は、
+  // meta あり経路 (保存メタの viewport-space bbox) と数学的に別物 (ascent ratio や
+  // thickness の扱いが異なる)。同一キーで保存すると、初回 meta-未解決ロード後に
+  // meta が利用可能になっても古い fallback bbox が IDB から再生され続けて固着する。
+  // savedMeta の有無 (`m1` / `m0`) を mix-in して分離する。
+  const hasMeta = !!(bboxMeta && bboxMeta[String(pageIndex)] && bboxMeta[String(pageIndex)].length > 0);
+  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}:${hasMeta ? 'm1' : 'm0'}`;
   const [cached, tempEdited] = await Promise.all([
     getCachedPage(cacheKey),
     getTemporaryPageData(filePath, pageIndex),

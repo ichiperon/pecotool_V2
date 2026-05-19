@@ -341,10 +341,16 @@ describe('I-06: 縦書きPDFの保存', () => {
       drawText:     m.drawText,
       drawImage:    m.drawImage,
       pushOperators: m.pushOperators,
-      node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+      node: {
+        Contents: vi.fn().mockReturnValue(null),
+        set: vi.fn(),
+        get: vi.fn().mockReturnValue(null),
+        Resources: vi.fn().mockReturnValue(undefined),
+      },
       getWidth: () => 595,
       getHeight: () => 842,
       getSize: () => ({ width: 595, height: 842 }),
+      getRotation: () => ({ angle: 0 }),
     }
     const mockPdfDoc = {
       registerFontkit: m.registerFontkit,
@@ -352,15 +358,25 @@ describe('I-06: 縦書きPDFの保存', () => {
       removePage:  m.removePage,
       insertPage:  m.insertPage,
       getPage:     vi.fn().mockReturnValue(mockPage),
+      getPages:    vi.fn().mockReturnValue([mockPage]),
+      getPageCount: vi.fn().mockReturnValue(1),
       embedJpg:    m.embedJpg,
       save:        m.save,
     commit:        m.save,
-      context: { lookup: vi.fn() },
+      context: {
+        lookup: vi.fn(),
+        delete: vi.fn(),
+        enumerateIndirectObjects: vi.fn().mockReturnValue([]),
+        trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
+      },
       getInfoDict: vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
     }
     m.embedFont.mockResolvedValue({
       widthOfTextAtSize: vi.fn().mockReturnValue(10),
-      heightAtSize: vi.fn().mockReturnValue(1.448),
+      // #99: heightAtSize(size, { descender: false }) は ascent のみを返す。
+      heightAtSize: vi.fn().mockImplementation((_size: number, opts?: { descender?: boolean }) => {
+        return opts?.descender === false ? 1.448 * 0.8 : 1.448
+      }),
     })
     m.insertPage.mockReturnValue(mockPage)
     m.embedJpg.mockResolvedValue({ width: 1, height: 1 })

@@ -709,7 +709,14 @@ async function handleSavePdf(
 
           if (!isFinite(sx) || !isFinite(sy)) continue;
 
-          const baselineY = vh - block.bbox.y - textHeight * sy * 0.8;
+          // 横書き baselineY: 縦書き (#28) と同じく primary font の ascent 比から動的計算する (#99 副因対策)。
+          // 詳細コメントは pdfSaver.ts 側参照。
+          const primaryRunHeight = customFont.heightAtSize(fontSize);
+          const primaryRunAscent = customFont.heightAtSize(fontSize, { descender: false });
+          const descentRatio = primaryRunHeight > 0
+            ? (primaryRunHeight - primaryRunAscent) / primaryRunHeight
+            : 0.2;
+          const baselineY = vh - block.bbox.y - textHeight * sy * (1 - descentRatio);
           page.pushOperators(
             pushGraphicsState(),
             ...rotationCm,
