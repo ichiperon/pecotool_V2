@@ -53,7 +53,13 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
   // issue #91: ドラッグ中のみ非 null。動的層 overlay で選択 BB の bbox を上書きする。
   const dragPreviewBboxes = usePecoStore(selectDragPreviewBboxes);
 
-  const getPageData = () => document?.pages.get(pageIndex);
+  // issue #106: render 時点の `document` state を closure 保持すると、
+  // 同一 React tick 内で updatePageData() 直後に再度呼んだ getPageData が
+  // 「更新前」の値を返してしまい、useBlockDragResize.finishDragResize の
+  // Action.after が before と同じ snapshot になる → Redo が無効化される。
+  // 常に最新 state を store から直接読み出すことで、書き込み直後の after を
+  // 正しく取得できるようにする。
+  const getPageData = () => usePecoStore.getState().document?.pages.get(pageIndex);
 
   const { pdfPage, loadError, setLoadError, retry } = usePdfRendering({
     pdfCanvasRef,
