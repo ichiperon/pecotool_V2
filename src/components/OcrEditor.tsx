@@ -315,23 +315,38 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
     []
   );
 
+  // Issue #92: renderItem を mount 1 回限りの stable callback にするため、
+  // 毎レンダー変化する値 (filteredBlocks / currentPageIndex / handleSelect 等) を ref 経由で参照する。
+  // これにより Virtuoso の itemContent identity が変化せず、SortableOcrCard 内 memo が機能して
+  // 1 文字編集ごとに全 mounted カードが再評価される無駄を防ぐ (issue #27 / #68 と同パターン)。
+  // 注: itemContent は render フェーズで Virtuoso 内部から呼ばれる可能性があるため、
+  // useEffect ではなくレンダー中に直接代入して常に最新値が読めるようにする。
+  const filteredBlocksRef = useRef(filteredBlocks);
+  const currentPageIndexRef = useRef(currentPageIndex);
+  const handleSelectRef = useRef(handleSelect);
+  filteredBlocksRef.current = filteredBlocks;
+  currentPageIndexRef.current = currentPageIndex;
+  handleSelectRef.current = handleSelect;
+
   // Virtuoso の item レンダラ。memo化された SortableOcrCard へ stable な props を渡す。
+  // setCardRef は空依存 useCallback で安定しているため、ここの依存配列は空にして
+  // renderItem の identity を mount 中固定にする (Virtuoso itemContent の memoization 維持)。
   const renderItem = useCallback(
     (index: number) => {
-      const block = filteredBlocks[index];
+      const block = filteredBlocksRef.current[index];
       if (!block) return null;
       return (
         <SortableOcrCard
           ref={(el) => setCardRef(block.id, el)}
           block={block}
-          pageIndex={currentPageIndex}
-          onNavigate={(dir) => handleNavigate(block.id, dir)}
-          onExtendSelection={(dir) => handleExtendSelection(block.id, dir)}
-          onSelect={handleSelect}
+          pageIndex={currentPageIndexRef.current}
+          onNavigate={(dir) => handleNavigateRef.current(block.id, dir)}
+          onExtendSelection={(dir) => handleExtendSelectionRef.current(block.id, dir)}
+          onSelect={(id, ctrl, shift) => handleSelectRef.current(id, ctrl, shift)}
         />
       );
     },
-    [filteredBlocks, currentPageIndex, handleNavigate, handleExtendSelection, handleSelect, setCardRef]
+    []
   );
 
   return (

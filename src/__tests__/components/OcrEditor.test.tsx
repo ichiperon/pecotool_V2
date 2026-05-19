@@ -58,12 +58,15 @@ vi.mock('@dnd-kit/utilities', () => ({
 
 // jsdom には layout が無いため Virtuoso は実行時 0 items しか描画しない。
 // テストでは itemContent を全件展開する単純な div に差し替える。
+// issue #92: renderItem の identity を検証するため、最後に渡された itemContent を
+// globalThis に保持してテストから参照できるようにする。
 vi.mock('react-virtuoso', () => {
   const React = require('react') as typeof import('react')
   const Virtuoso = React.forwardRef(function Virtuoso(
     { totalCount, itemContent, className, style }: any,
     _ref: any
   ) {
+    ;(globalThis as any).__lastVirtuosoItemContent = itemContent
     const items = []
     for (let i = 0; i < totalCount; i++) {
       items.push(
@@ -768,6 +771,93 @@ describe('OcrEditor', () => {
 
       fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
       expectSelectedIds(['b2'])
+    })
+  })
+
+  // ── P-92: issue #92 renderItem identity 安定 (Virtuoso memoization 維持) ───────────
+  describe('P-92 (issue #92): renderItem / itemContent は再レンダーで identity が変わらない', () => {
+    it('テキスト編集で textBlocks 参照が変わっても itemContent callback の identity は不変', () => {
+      const editBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(editBlocks)
+
+      const initialItemContent = (globalThis as any).__lastVirtuosoItemContent
+      expect(typeof initialItemContent).toBe('function')
+
+      // 1 文字編集相当: textBlocks 配列の参照を新規生成
+      act(() => {
+        const doc = usePecoStore.getState().document!
+        const page = doc.pages.get(0)!
+        const newBlocks = page.textBlocks.map((b, i) =>
+          i === 0 ? { ...b, text: 'edited' } : b
+        )
+        const newPages = new Map(doc.pages)
+        newPages.set(0, { ...page, textBlocks: newBlocks })
+        usePecoStore.setState({ document: { ...doc, pages: newPages } } as any)
+      })
+
+      const afterEditItemContent = (globalThis as any).__lastVirtuosoItemContent
+      // 再レンダー後も itemContent の identity が同一であること
+      expect(afterEditItemContent).toBe(initialItemContent)
+
+      // さらに選択状態を変えても同じ
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2']), lastSelectedId: 'b2' } as any)
+      })
+      expect((globalThis as any).__lastVirtuosoItemContent).toBe(initialItemContent)
+    })
+
+    it('itemContent は ref 経由で最新の filteredBlocks を読む (検索フィルター後も正しく描画)', async () => {
+      const user = userEvent.setup()
+      const editBlocks = [
+        makeBlock('b1', 'apple fruit', 0),
+        makeBlock('b2', 'banana fruit', 1),
+        makeBlock('b3', 'cherry', 2),
+      ]
+      const { container } = setup(editBlocks)
+
+      const initialItemContent = (globalThis as any).__lastVirtuosoItemContent
+
+      // 検索 → filteredBlocks の中身が変化
+      await user.type(screen.getByPlaceholderText('検索...'), 'cherry')
+
+      // itemContent identity は同じ (mount 中固定)
+      expect((globalThis as any).__lastVirtuosoItemContent).toBe(initialItemContent)
+
+      // それでも表示内容は最新 filteredBlocks (cherry のみ)
+      const cards = container.querySelectorAll('.ocr-card-content')
+      expect(cards.length).toBe(1)
+      expect(cards[0].textContent).toBe('cherry')
+    })
+
+    it('renderItem が ref 経由で最新の handleSelect を呼び、テキスト編集後もクリック選択が壊れない', () => {
+      const editBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      const { container } = setup(editBlocks)
+
+      // テキスト編集 → textBlocks 参照変化 → 旧実装なら handleSelect 再生成 → renderItem も再生成
+      // 新実装では renderItem は安定だが ref 経由で最新 handleSelect を呼ぶ
+      act(() => {
+        const doc = usePecoStore.getState().document!
+        const page = doc.pages.get(0)!
+        const newBlocks = page.textBlocks.map((b, i) =>
+          i === 1 ? { ...b, text: 'edited' } : b
+        )
+        const newPages = new Map(doc.pages)
+        newPages.set(0, { ...page, textBlocks: newBlocks })
+        usePecoStore.setState({ document: { ...doc, pages: newPages } } as any)
+      })
+
+      // 編集後にクリック選択が動作することを確認 (handleSelect が ref 経由で最新版を呼ぶ)
+      const cards = container.querySelectorAll('.ocr-card')
+      fireEvent.click(cards[2])
+      expect(usePecoStore.getState().selectedIds.has('b3')).toBe(true)
     })
   })
 
