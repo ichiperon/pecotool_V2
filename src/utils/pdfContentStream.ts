@@ -388,11 +388,180 @@ function textOperatorOperandCount(data: Uint8Array, i: number): { length: number
 }
 
 /**
+ * 描画オペレータ（PDF 1.7 §8.5 path painting, §8.6 color, §8.8 XObject 等）の判定。
+ *
+ * これらが q...Q ブロック内に**含まれない**場合、その q...Q は「グラフィックスステートを
+ * 変更するだけで何も描画しない」空ブロックとみなして安全に削除できる。
+ *
+ * 描画扱いするもの: S s f F (f-star) B (B-star) b (b-star) Tj TJ ' " Do sh BI
+ * 描画扱いしないもの: cm, q/Q(ネスト), CTM, Tf, Td, w, J, j, d, gs, g, rg, m, l,
+ *                    c, v, y, h, re, n, W (clipping), マークドコンテンツ
+ *                    (MP, DP, BMC, BDC, EMC), 互換性タグ (BX, EX)
+ *
+ * 注: n は「パス描画破棄」演算子で実際の描画出力は無いので空扱いとして問題ない。
+ *
+ * 戻り値: 描画オペレータならその長さ（バイト）、そうでなければ 0。
+ */
+function drawingOperatorLength(data: Uint8Array, i: number): number {
+  // 2 文字オペレータを先に判定（部分一致による誤判定を避けるため）
+  const two: string[] = ['Tj', 'TJ', 'f*', 'B*', 'b*', 'Do', 'sh'];
+  for (const op of two) {
+    if (matchesOperator(data, i, op)) return op.length;
+  }
+  const one: string[] = ['S', 's', 'f', 'F', 'B', 'b', "'", '"'];
+  for (const op of one) {
+    if (matchesOperator(data, i, op)) return op.length;
+  }
+  return 0;
+}
+
+/**
+ * NORMAL 状態で `q` または `Q` の単独トークン（delimiter 境界付き）を判定。
+ */
+function matchesQToken(data: Uint8Array, i: number, lower: boolean): boolean {
+  const ch = lower ? 0x71 /* q */ : 0x51 /* Q */;
+  if (data[i] !== ch) return false;
+  const prev = i === 0 ? undefined : data[i - 1];
+  const next = i + 1 >= data.length ? undefined : data[i + 1];
+  return isDelimiterOrEnd(prev) && isDelimiterOrEnd(next);
+}
+
+/**
+ * 空の `q ... Q` グラフィックスステートブロックを削除する第 2 パス。
+ *
+ * stripTextBlocks の 1st pass で BT...ET ブロックを削除すると、PecoTool が
+ * テキストレイヤーを包むために発行している `q / cm / cm / Q` ラッパーだけが
+ * 取り残されて累積する（毎回保存ごとに約 27,000 件/ページ）。本関数はこれらの
+ * 「描画オペレータを一切含まない q...Q ペア」を破棄して content stream を
+ * 縮小する。ネストした q/Q にも対応し、内側が空で除去された結果として外側も
+ * 空になるケースを再帰的に縮約する（スタックを使って 1-pass で処理）。
+ *
+ * 文字列リテラル `(...)` / hex `<...>` / コメント `%` / inline image `BI...EI`
+ * の中にある "q" "Q" バイトは状態機械により誤認識されない。
+ */
+/**
+ * issue #96 要件2: BT...ET 削除を伴わない単独パス。未編集ページの軽量クリーンアップ用。
+ * 描画オペレータを含まない `q...Q` バランス対のみ除去する。
+ * 描画への影響は無いため (空 q-Q は no-op)、任意のページに安全に適用可能。
+ */
+export function stripEmptyGraphicsStateBlocksOnly(decoded: Uint8Array): Uint8Array {
+  return stripEmptyGraphicsStateBlocks(decoded);
+}
+
+function stripEmptyGraphicsStateBlocks(decoded: Uint8Array): Uint8Array {
+  const len = decoded.length;
+  const result = new Uint8Array(len);
+  let resultIdx = 0;
+
+  let state: State = 'NORMAL';
+  let stringDepth = 0;
+  let i = 0;
+
+  // q...Q ブロックのスタック。各エントリは「q を書き出した直前の resultIdx」と
+  // 「ブロック内で描画オペレータを観測したか」のフラグを保持する。
+  const stack: Array<{ startInResult: number; hasDrawing: boolean }> = [];
+
+  const markDrawing = () => {
+    if (stack.length > 0) stack[stack.length - 1].hasDrawing = true;
+  };
+
+  while (i < len) {
+    if (state === 'NORMAL') {
+      // inline image はそのまま温存し、描画扱いとする
+      if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+        markDrawing();
+        const copied = copyInlineImage(decoded, i, result, resultIdx);
+        i = copied.inputIdx;
+        resultIdx = copied.resultIdx;
+        continue;
+      }
+
+      // q トークン → スタックに候補ブロックを push
+      if (matchesQToken(decoded, i, true)) {
+        stack.push({ startInResult: resultIdx, hasDrawing: false });
+        result[resultIdx++] = decoded[i];
+        i += 1;
+        continue;
+      }
+
+      // Q トークン → スタックを pop
+      if (matchesQToken(decoded, i, false)) {
+        if (stack.length > 0) {
+          const entry = stack.pop()!;
+          if (entry.hasDrawing) {
+            // 描画ありなのでブロックを保持し、`Q` を書き出す
+            result[resultIdx++] = decoded[i];
+            // 外側ブロックにも描画があったとマークする
+            markDrawing();
+          } else {
+            // 描画なし → q から Q 直前までを破棄し、`Q` 自体も書かない
+            resultIdx = entry.startInResult;
+          }
+          i += 1;
+          continue;
+        }
+        // アンバランスな Q はそのまま書き写す（壊れた入力に対する保険）
+        result[resultIdx++] = decoded[i];
+        i += 1;
+        continue;
+      }
+
+      // 描画オペレータの判定
+      const drawLen = drawingOperatorLength(decoded, i);
+      if (drawLen > 0) {
+        markDrawing();
+        for (let k = 0; k < drawLen; k++) result[resultIdx++] = decoded[i + k];
+        i += drawLen;
+        continue;
+      }
+
+      // 非 NORMAL 状態への遷移
+      const entry = enterNonNormalState(decoded, i);
+      if (entry) {
+        result[resultIdx++] = decoded[i];
+        state = entry.state;
+        stringDepth = entry.stringDepth;
+        i += entry.advance;
+        continue;
+      }
+      result[resultIdx++] = decoded[i];
+      i += 1;
+    } else if (state === 'STRING') {
+      const r = scanString(decoded, i, stringDepth);
+      for (let k = 0; k < r.advance && i + k < len; k++) {
+        result[resultIdx++] = decoded[i + k];
+      }
+      state = r.state;
+      stringDepth = r.stringDepth;
+      i += r.advance;
+    } else if (state === 'HEX') {
+      const r = scanHex(decoded, i);
+      result[resultIdx++] = decoded[i];
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    } else {
+      // COMMENT
+      const r = scanComment(decoded, i);
+      result[resultIdx++] = decoded[i];
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    }
+  }
+
+  return result.slice(0, resultIdx);
+}
+
+/**
  * content stream から BT...ET ブロックを安全に削除する。
  *
  * NORMAL 状態で BT トークンを見つけたら、BT 直前までは出力、BT からは「BT 内モード」で
  * 再度状態機械を回しながら ET を探し、ET までまとめて破棄する。文字列リテラル内等に
  * 紛れた "BT"/"ET" バイト列は誤認識しない。
+ *
+ * BT...ET 削除後、2nd pass で「描画オペレータを一切含まない q...Q ブロック」も
+ * 除去する（PecoTool が発行するテキストレイヤラッパーが毎回累積する問題への対策）。
  */
 export function stripTextBlocks(decoded: Uint8Array): Uint8Array {
   const len = decoded.length;
@@ -515,5 +684,6 @@ export function stripTextBlocks(decoded: Uint8Array): Uint8Array {
     }
   }
 
-  return result.slice(0, resultIdx);
+  const intermediate = result.slice(0, resultIdx);
+  return stripEmptyGraphicsStateBlocks(intermediate);
 }

@@ -7,9 +7,15 @@ import {
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import { deflate, inflate } from 'pako';
-import { stripTextBlocks } from './pdfContentStream';
+import { stripTextBlocks, stripEmptyGraphicsStateBlocksOnly } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
+import {
+  PECO_FONT_KEY_TAG,
+  isPecoToolFontKey,
+  isPecoToolGraphicsStateKey,
+} from './pdfPecoToolMarkers';
+import { sweepUnreachableObjects } from './pdfReachabilityGc';
 import type {
   SavePdfSource,
   SavePdfWorkerRequest,
@@ -92,22 +98,6 @@ function concatWithNewlines(chunks: Uint8Array[]): Uint8Array {
     out[offset++] = 0x0a;
   }
   return out;
-}
-
-function isPecoToolFontKey(key: PDFName): boolean {
-  const name = key.toString();
-  return (
-    name.startsWith('/IPAexGothic-') ||
-    name.startsWith('/IPAmjMincho-') ||
-    name.startsWith('/NotoSansCJKjp-') ||
-    name.startsWith('/NotoSans-') ||
-    name.startsWith('/NotoSansSymbols-') ||
-    name.startsWith('/NotoSansSymbols2-')
-  );
-}
-
-function isPecoToolGraphicsStateKey(key: PDFName): boolean {
-  return /^\/GS-\d+$/.test(key.toString());
 }
 
 function isPdfRef(value: unknown): value is PDFRef {
@@ -315,6 +305,44 @@ function replacePageTextContentStreams(
 }
 
 /**
+ * issue #96 要件2: 未編集ページの content stream から「空 q-Q ラッパー」だけを
+ * 除去する軽量パス。BT...ET には触れない（原本の OCR テキストレイヤーを破壊しない）。
+ * フォント辞書も触らない（subset 名の参照不整合を避ける）。
+ *
+ * 過去保存で累積した「描画オペレータ無しの q/cm/cm/q/Q/Q ブロック群」を除去するだけで、
+ * ファイルサイズが目に見えて縮む（実測 1180ページ級では数MB〜十数MBの削減）。
+ *
+ * 安全性: 空 q-Q は PDF 仕様上 no-op（描画副作用なし）。任意のページに適用可能。
+ */
+function stripEmptyQBlocksOnPage(
+  pageNode: {
+    get?: (key: PDFName) => PDFObject | undefined;
+    Contents?: () => PDFObject | undefined;
+    set: (key: PDFName, value: PDFObject) => void;
+  },
+  context: typeof PDFDocument.prototype.context,
+): void {
+  const contentsKey = PDFName.of('Contents');
+  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
+  if (!rawContents) return;
+
+  const resolved = context.lookup(rawContents);
+  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+
+  for (const streamRef of streams) {
+    const stream = context.lookup(streamRef);
+    if (!(stream instanceof PDFRawStream)) continue;
+    const decoded = decodeStreamContents(stream);
+    if (decoded === null) continue;
+    const cleaned = stripEmptyGraphicsStateBlocksOnly(decoded);
+    if (bytesEqual(cleaned, decoded)) continue;
+    stream.updateContents(deflate(cleaned));
+    stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+    stream.dict.delete(PDFName.of('DecodeParms'));
+  }
+}
+
+/**
  * #71: 回転ページで OCR bbox (viewport-space, y-down) を正しく描画するため、
  * 「viewport-aligned drawing frame」を PDF user space にマップする cm (concat matrix) を返す。
  *
@@ -390,6 +418,36 @@ function asPageIndex(value: unknown): number | null {
   return typeof pageIndex === 'number' && Number.isInteger(pageIndex) ? pageIndex : null;
 }
 
+/**
+ * issue #96 Option B: existingBBoxMeta から読み出した 1 ページ分のエントリが
+ * 「再描画に必要な最小情報」を備えているか検証する type guard。
+ *
+ * 検証フィールド:
+ *   - text (string)
+ *   - bbox.{x,y,width,height} (number)
+ *   - writingMode ('horizontal' | 'vertical')
+ *   - order (number)
+ *
+ * 不完全エントリは静かに drop される。検知ロジックは「再描画できる block が
+ * 1 件以上ある」ことを bloated 判定の前提に置くため、ここで落とした結果
+ * repairBlocks が 0 件になった場合は cleanup を諦める。
+ */
+function isRepairTextBlock(value: unknown): value is RepairTextBlock {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.text !== 'string') return false;
+  if (typeof v.order !== 'number') return false;
+  if (v.writingMode !== 'horizontal' && v.writingMode !== 'vertical') return false;
+  const bbox = v.bbox as Record<string, unknown> | null | undefined;
+  if (!bbox || typeof bbox !== 'object') return false;
+  return (
+    typeof bbox.x === 'number' &&
+    typeof bbox.y === 'number' &&
+    typeof bbox.width === 'number' &&
+    typeof bbox.height === 'number'
+  );
+}
+
 function makeFontSupportSet(font: PDFFont): Set<number> | null {
   if (typeof font.getCharacterSet !== 'function') return null;
   return new Set(font.getCharacterSet());
@@ -456,9 +514,11 @@ function findExistingFontKey(page: unknown, font: PDFFont): PDFName | undefined 
   if (!fontDict) return undefined;
 
   const targetRefKey = font.ref.toString();
-  // 既存 key の tag prefix は `/<font.name>-<random>` 形式 (pdf-lib の uniqueKey 仕様)。
-  // postscriptName に prefix 一致 + ref 一致の両方を満たすキーのみを再利用する。
-  const tagPrefix = `/${font.name}-`;
+  // 既存 key の tag prefix は `/<PECO_FONT_KEY_TAG>-<random>` 形式
+  // (pdf-lib の uniqueKey 仕様 + issue #96 Fix 1 で導入した統一タグ)。
+  // PecoTool が登録した key のみ ref 一致で再利用対象とし、原本フォント (`/F1` 等)
+  // への誤マッチを避ける。
+  const tagPrefix = `/${PECO_FONT_KEY_TAG}-`;
   for (const [key, value] of fontDict.entries()) {
     if (!isPdfRef(value)) continue;
     if (value.toString() !== targetRefKey) continue;
@@ -509,7 +569,10 @@ function getOrRegisterPageFontKey(
     node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
     setFont?: (font: PDFFont) => void;
   };
-  let key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
+  // PECO_FONT_KEY_TAG をそのまま渡す。pdf-lib 内部で `<tag>-<random>` 形式の
+  // PDFName が生成され、次回保存時に isPecoToolFontKey() で確実に検出できる
+  // （issue #96 Fix 1）。
+  let key = pageLike.node?.newFontDictionary?.(PECO_FONT_KEY_TAG, font.ref);
   if (!key) {
     // fallback 経路: setFont は newFontDictionary を内部で呼ぶため、上の newFontDictionary
     // が成功しているときは絶対に踏まないように上の if で gating する。
@@ -540,6 +603,8 @@ function setPageFontWithStableKey(
  * Common PDF building logic.
  * Uses incremental update to only write changed pages.
  * Performs surgical removal of old text layers to prevent "Double OCR".
+ * Sweeps unreachable indirect objects before save (issue #96)
+ *   so that re-loading and re-saving a bloated PDF converges to a normal size.
  * Powered by @cantoo/pdf-lib.
  */
 
@@ -630,6 +695,80 @@ export async function buildPdfDocument(
     if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) continue;
     pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
   }
+
+  // issue #96 要件2 (Option B): 「未編集だが明らかに bloated」なページを自動検知して
+  // フルクリーンアップ対象に追加する。
+  //
+  // 背景:
+  //   PR #25 で「未編集ページの content stream を保存しただけで書き換わって原本メタが
+  //   破壊される」のを防ぐため、dirty page のみが pruneStalePecoToolResources /
+  //   replacePageTextContentStreams のフルパスを通るよう制限した。
+  //   しかし過去保存で累積した Meiryo subset 群 (1 ページに 50+ 個) のような bloat は
+  //   live xref 内に残り続け、再読み込み → 保存だけでは縮まない。Option Beta (空 q-Q
+  //   除去) だけでは 115MB → 30MB 止まりで acceptance #1 (<20MB) を満たさない。
+  //
+  // 検知条件 (全て満たすこと):
+  //   (a) まだ dirty 扱いになっていない (pagesToWrite に未登録)
+  //   (b) existingBBoxMeta にこのページのエントリ (TextBlock 配列) がある
+  //       — 無いと再描画すべきテキストが分からないので cleanup 不能
+  //   (c) Font 辞書に PecoTool 由来のフォントエントリが BLOAT_THRESHOLD 個以上ある
+  //       — 通常 1-3 個。58 個も入っているのは過去保存で累積した bloat の証跡
+  //   (d) fontBytes が呼び出し側から渡されている (Japanese 対応フォント有)
+  //       — 無いと Helvetica にフォールバックして Japanese テキストが skip され OCR レイヤー
+  //         を破壊する。fontBytes 無しのケースは bloat も発生しえない (描画してない) ので
+  //         検知 fire しなくて問題ない。
+  //
+  // 副作用 (既存 dirty page と同等):
+  //   pruneStalePecoToolResources で Meiryo subset 群が除去され、
+  //   replacePageTextContentStreams で旧 BT...ET が削除され、
+  //   既存ループで existingBBoxMeta から取り出した TextBlock を新 PecoF subset で再描画する。
+  //   結果: 58 個の Meiryo subset → 1 個の PecoF subset に集約され、大幅縮小。
+  //
+  // PR #25 の不変条件への影響:
+  //   - 通常の pristine PDF (PecoTool 由来フォント無し or existingBBoxMeta 無し) では検知が
+  //     fire しないため、bit-equiv 保存が維持される
+  //   - bloated PDF では既に「原本メタ」が壊れた状態なので、再描画して clean meta を出すことが
+  //     issue #96 の意図そのもの (原本メタ保護より優先される)
+  //   - E2-3c 大容量メタ保存テスト: dirty 0 件 + bloat 検知 fire 無し (existingBBoxMeta から
+  //     populate されないので bloated 判定の (c) が満たされない pristine 状態) の場合は
+  //     既存挙動を維持する。bloated PDF を 2 回保存しても 2 回目は subset 数が <= threshold に
+  //     縮んでいるため (c) を満たさず safe。
+  const BLOAT_DETECTION_FONT_THRESHOLD = 3;
+  if (fontBytes) {
+    for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+      if (pagesToWrite.has(pi)) continue; // (a)
+      const entries = existingBBoxMeta[String(pi)];
+      if (!Array.isArray(entries) || entries.length === 0) continue; // (b)
+
+      const page = pdfDoc.getPage(pi);
+      const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
+      const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+      if (!fontDict) continue;
+
+      let pecoCount = 0;
+      for (const [key] of fontDict.entries()) {
+        if (isPecoToolFontKey(key)) {
+          pecoCount++;
+          if (pecoCount > BLOAT_DETECTION_FONT_THRESHOLD) break;
+        }
+      }
+      if (pecoCount <= BLOAT_DETECTION_FONT_THRESHOLD) continue; // (c)
+
+      // Bloated と判定。dirty 相当として pagesToWrite に追加
+      // (テキストは existingBBoxMeta から復元)。
+      const repairBlocks = entries
+        .filter(isRepairTextBlock)
+        .map((block) => ({
+          text: block.text,
+          bbox: block.bbox,
+          writingMode: block.writingMode,
+          order: block.order,
+        }));
+      if (repairBlocks.length === 0) continue;
+      pagesToWrite.set(pi, { textBlocks: repairBlocks });
+    }
+  }
+
   const pageEntriesToWrite = [...pagesToWrite.entries()].sort(([a], [b]) => a - b);
   
   // Only embed font if we actually have something to draw
@@ -797,6 +936,24 @@ export async function buildPdfDocument(
     }
   }
 
+  // issue #96 要件2: dirty で無いページにも「空 q-Q ラッパー除去」だけは適用する。
+  // フルパス (pruneStalePecoToolResources + replacePageTextContentStreams + drawText 再描画)
+  // と異なり、BT...ET には触れずフォント辞書も触らないため、原本 OCR レイヤーは保持される。
+  // 過去の保存で累積した空 q-Q ブロックを安全に除去でき、再読み込み→保存だけで容量が縮む。
+  const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
+  for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+    if (dirtyPageIndexSet.has(pi)) continue;
+    const page = pdfDoc.getPage(pi);
+    stripEmptyQBlocksOnPage(
+      page.node as unknown as {
+        get?: (key: PDFName) => PDFObject | undefined;
+        Contents?: () => PDFObject | undefined;
+        set: (key: PDFName, value: PDFObject) => void;
+      },
+      pdfDoc.context,
+    );
+  }
+
   if (metaChanged && infoDict) {
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
@@ -813,8 +970,34 @@ export async function buildPdfDocument(
     useObjectStreams: false,
     addDefaultPage: false,
   };
+
+  // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
+  // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
+  // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
+  const sweepResult = sweepUnreachableObjects(pdfDoc);
+  if (sweepResult.dropped > 0) {
+    console.log(
+      `[buildPdfDocument] GC: dropped ${sweepResult.dropped} unreachable objects`,
+    );
+  }
+
   const savedBytes = await pdfDoc.save(saveOptions);
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
+
+  // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。
+  // フォントや到達可能オブジェクト再検証は重いので、平均サイズチェックのみで十分。
+  if (process.env.NODE_ENV !== 'production') {
+    const pageCount = pdfDoc.getPageCount();
+    if (pageCount > 0) {
+      const avgPerPage = savedBytes.byteLength / pageCount;
+      if (avgPerPage > 2 * 1024 * 1024) {
+        console.warn(
+          `[buildPdfDocument] WARN: Avg page size ${(avgPerPage / 1024 / 1024).toFixed(2)} MB exceeds 2MB threshold (issue #96 regression?)`,
+        );
+      }
+    }
+  }
+
   onSkippedChars?.(getSkippedTextChars(skippedChars));
   return savedBytes;
 }
