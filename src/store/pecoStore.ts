@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type * as pdfjsLib from 'pdfjs-dist';
-import { PecoDocument, PageData, Action, TextBlock } from '../types';
+import { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../types';
 import { saveTemporaryPageDataBatch, clearTemporaryChanges } from '../utils/pdfLoader';
 import { perf } from '../utils/perfLogger';
 
@@ -14,9 +14,34 @@ export function waitForPendingIdbSaves(): Promise<void> {
   return Promise.all(Array.from(pendingIdbSaves)).then(() => {});
 }
 
+/**
+ * IDB 一時データへの書き込みを pendingIdbSaves に登録した上で発火する。
+ * undo/redo など、メモリ Map を変更したあと LRU 退避済み IDB エントリと
+ * 同期する用途で使う共通ヘルパ。
+ */
+function schedulePendingIdbWrite(
+  entries: Array<{ filePath: string; pageIndex: number; data: Partial<PageData> }>,
+  set: (partial: Partial<PecoState>) => void,
+  get: () => PecoState,
+): void {
+  if (entries.length === 0) return;
+  const work = saveTemporaryPageDataBatch(entries)
+    .then(() => {
+      if (get().lastIdbError) set({ lastIdbError: null });
+    })
+    .catch((e: unknown) => {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.error('[Store] schedulePendingIdbWrite 失敗:', err);
+      set({ lastIdbError: err });
+    });
+  const tracked: Promise<void> = work.finally(() => {
+    pendingIdbSaves.delete(tracked);
+  });
+  pendingIdbSaves.add(tracked);
+}
+
 interface PecoState {
   document: PecoDocument | null;
-  originalBytes: Uint8Array | null;
   pageAccessOrder: number[]; // For page data LRU (1000ページ対応)
   currentPageIndex: number;
   zoom: number;
@@ -45,12 +70,20 @@ interface PecoState {
   currentPageProxy: pdfjsLib.PDFPageProxy | null;
   currentPageProxyKey: string | null;
 
+  /**
+   * ドラッグ中のみ非 null。ドラッグ対象 BB の id -> 現在の bbox の Map。
+   * issue #91: textBlocks 配列を毎フレーム map() で複製すると BB 1000+ ページで
+   * GC 圧 / オブジェクト割り当てが増えてカクつく。ドラッグ中は textBlocks を
+   * 一切触らずこのフィールドのみ更新し、overlay 描画でこの bbox を優先表示する。
+   * finishDragResize で 1 度だけ textBlocks に確定書き込み + dragPreviewBboxes=null。
+   */
+  dragPreviewBboxes: Map<string, BoundingBox> | null;
+
   // Actions
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
   setDocument: (doc: PecoDocument | null) => void;
-  setOriginalBytes: (bytes: Uint8Array) => void;
   setDocumentFilePath: (filePath: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
@@ -63,7 +96,8 @@ interface PecoState {
   resetDirty: () => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
-  setSelectedIds: (ids: string[]) => void;
+  // issue #15: lastSelectedId を明示できるようにする (省略時は末尾 id を anchor とする)。
+  setSelectedIds: (ids: string[], lastSelectedId?: string | null) => void;
   clearSelection: () => void;
   copySelected: () => void;
   pasteClipboard: (targetCenter?: { x: number; y: number }) => void;
@@ -73,13 +107,34 @@ interface PecoState {
   clearOcrCurrentPage: () => void;
   clearOcrAllPages: () => void;
   clearLastIdbError: () => void;
+  /** ドラッグ中の bbox プレビュー Map をセットする。null でクリア。issue #91 */
+  setDragPreviewBboxes: (bboxes: Map<string, BoundingBox> | null) => void;
+
+  /**
+   * issue #93 (Find & Replace): 一括置換を実行する。
+   * @returns 影響を受けた件数 (置換ヒット数), ブロック数, ページ数
+   * - scope:
+   *   - 'selection': 選択中の BB のみ
+   *   - 'current': 現在ページの全 BB
+   *   - 'all': document.totalPages 全範囲 (LRU 退避ページは pages Map にあるものだけ対象)
+   * - useRegex=true のときの構文エラーは throw する (UI 側でハンドルする)
+   * - skipBlockIds: 編集中などで保護したいブロック ID。スキップしたページに対する skip 数も返す
+   * - undo: 影響を受けた全ページを 1 つの update_pages Action にまとめる
+   */
+  replaceText: (params: {
+    scope: 'selection' | 'current' | 'all';
+    pattern: string;
+    replacement: string;
+    caseSensitive: boolean;
+    useRegex: boolean;
+    skipBlockIds?: ReadonlySet<string>;
+  }) => { hits: number; blocks: number; pages: number; skippedBlocks: number };
 }
 
 const MAX_CACHED_PAGES = 50;
 
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
-  originalBytes: null,
   pageAccessOrder: [],
   currentPageIndex: 0,
   zoom: 100,
@@ -98,6 +153,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   lastIdbError: null,
   currentPageProxy: null,
   currentPageProxyKey: null,
+  dragPreviewBboxes: null,
 
   setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
   setCurrentPageProxy: (filePath, pageIndex, proxy) => {
@@ -105,7 +161,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     set({ currentPageProxy: proxy, currentPageProxyKey: proxy ? key : null });
   },
   clearCurrentPageProxy: () => set({ currentPageProxy: null, currentPageProxyKey: null }),
-  setOriginalBytes: (bytes) => set({ originalBytes: bytes }),
   setDocumentFilePath: (filePath) => set((state) => {
     if (!state.document) return state;
     const fileName = filePath.split(/[\\/]/).pop() || state.document.fileName;
@@ -118,8 +173,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     set({
       document: doc,
-      // originalBytes は保存時に lazy fetch するため、ファイル切替時は null にリセット
-      originalBytes: null,
       pageAccessOrder: [],
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく
@@ -137,6 +190,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // ファイル切替時は古い PDFPageProxy を保持しない (transport が破棄されるため)
       currentPageProxy: null,
       currentPageProxyKey: null,
+      // ファイル切替時にドラッグ状態を持ち越さない
+      dragPreviewBboxes: null,
     });
 
     // IDB一時データのクリアをset()外でawaitして確実に完了させる。
@@ -191,7 +246,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false })),
 
   updatePageData: (pageIndex, data, undoable = true) => {
-    perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
+    if (perf.enabled) perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
     // LRU退避時のIndexedDB保存をset()の外で非同期実行するためペンディングリストを収集
     const pendingSaves: Array<{ filePath: string; idx: number; page: PageData }> = [];
 
@@ -281,7 +336,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
       pendingIdbSaves.add(tracked);
     }
-    perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
+    if (perf.enabled) perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
   },
 
   resetDirty: () => set((state) => {
@@ -311,7 +366,13 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     return { selectedIds: newSelection, lastSelectedId: newLastId };
   }),
 
-  setSelectedIds: (ids) => set({ selectedIds: new Set(ids), lastSelectedId: ids[ids.length - 1] || null }),
+  setSelectedIds: (ids, lastSelectedId) =>
+    set({
+      selectedIds: new Set(ids),
+      // 明示 anchor が来ればそれを採用 (issue #15 の Shift+↑↓ 拡張で必要)。
+      // 省略 / undefined のときは従来通り末尾 id を anchor にする (後方互換)。
+      lastSelectedId: lastSelectedId !== undefined ? lastSelectedId : (ids[ids.length - 1] || null),
+    }),
 
   clearSelection: () => set({ selectedIds: new Set(), lastSelectedId: null }),
 
@@ -382,12 +443,36 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (action.type === 'update_page') {
       const newPages = new Map(document.pages);
       newPages.set(action.pageIndex, action.before);
+      const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true
       });
+      // LRU 退避済みページが IDB に残っている可能性があるため、
+      // 巻き戻し後の状態を IDB へも書き込んでメモリと完全同期させる。
+      // (issue #3: undo が LRU 退避ページの IDB と非整合になる)
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }], set, get);
+    } else if (action.type === 'update_pages') {
+      // issue #93: 全ページスコープの置換等で複数ページを atomic に巻き戻す。
+      const newPages = new Map(document.pages);
+      for (const e of action.entries) {
+        newPages.set(e.pageIndex, e.before);
+      }
+      const filePath = document.filePath;
+      set({
+        document: { ...document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
+      // 全 entry を IDB へまとめて同期 (LRU 退避ページがあっても整合性を担保)
+      schedulePendingIdbWrite(
+        action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.before })),
+        set,
+        get,
+      );
     }
   },
 
@@ -402,12 +487,33 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (action.type === 'update_page') {
       const newPages = new Map(document.pages);
       newPages.set(action.pageIndex, action.after);
+      const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true
       });
+      // undo と対称: redo 後の状態を IDB へも書き込んで整合性を担保
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }], set, get);
+    } else if (action.type === 'update_pages') {
+      // issue #93: 全ページスコープの置換等で複数ページを atomic にやり直す。
+      const newPages = new Map(document.pages);
+      for (const e of action.entries) {
+        newPages.set(e.pageIndex, e.after);
+      }
+      const filePath = document.filePath;
+      set({
+        document: { ...document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
+      schedulePendingIdbWrite(
+        action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+        set,
+        get,
+      );
     }
   },
 
@@ -420,6 +526,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   },
 
   clearLastIdbError: () => set({ lastIdbError: null }),
+
+  setDragPreviewBboxes: (bboxes) => set({ dragPreviewBboxes: bboxes }),
 
   clearOcrAllPages: () => {
     const { document } = get();
@@ -448,6 +556,119 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       };
     });
   },
+
+  replaceText: ({ scope, pattern, replacement, caseSensitive, useRegex, skipBlockIds }) => {
+    const state = get();
+    const document = state.document;
+    if (!document) return { hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 };
+    if (pattern.length === 0) return { hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 };
+
+    // 検索用の RegExp を組み立てる。useRegex=false は escape して flag 'g' を必ず付ける。
+    // useRegex=true の場合は構文エラーが上に伝播する (UI で catch する想定)。
+    const flags = `g${caseSensitive ? '' : 'i'}`;
+    const re = useRegex
+      ? new RegExp(pattern, flags)
+      : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+
+    // 対象ページ idx 集合を決める
+    const targetIndices: number[] = [];
+    if (scope === 'selection' || scope === 'current') {
+      targetIndices.push(state.currentPageIndex);
+    } else {
+      // 全ページ: pages Map に存在するページのみ (LRU 退避ページは UI 側で復元して詰めてもらう)
+      for (const idx of document.pages.keys()) {
+        targetIndices.push(idx);
+      }
+    }
+
+    const selectedIds = state.selectedIds;
+    const skip = skipBlockIds ?? new Set<string>();
+
+    let totalHits = 0;
+    let totalBlocks = 0;
+    let skippedBlocks = 0;
+    const entries: Array<{ pageIndex: number; before: PageData; after: PageData }> = [];
+
+    for (const pageIdx of targetIndices) {
+      const page = document.pages.get(pageIdx);
+      if (!page) continue;
+
+      let pageChanged = false;
+      const newTextBlocks: TextBlock[] = [];
+      for (const b of page.textBlocks) {
+        // selection スコープでは選択 ID のみ対象
+        if (scope === 'selection' && !selectedIds.has(b.id)) {
+          newTextBlocks.push(b);
+          continue;
+        }
+        // 編集中などで保護されたブロックは skip
+        if (skip.has(b.id)) {
+          // それでも本来 hit 候補だったかを数える (UI 警告用)
+          re.lastIndex = 0;
+          if (re.test(b.text)) skippedBlocks++;
+          newTextBlocks.push(b);
+          continue;
+        }
+
+        re.lastIndex = 0;
+        // hit 数の数えと replace を同時に。matchAll は countOnly に高コスト。
+        // ここでは「replace 結果が同じか?」で changed 判定をしてから match 数を数える。
+        const replaced = b.text.replace(re, replacement);
+        if (replaced === b.text) {
+          newTextBlocks.push(b);
+          continue;
+        }
+        // 件数カウントは match() で取得 (replace が走った後でも match の入力は元 text)
+        const matches = b.text.match(re);
+        const hits = matches ? matches.length : 0;
+        totalHits += hits;
+        totalBlocks++;
+        pageChanged = true;
+        newTextBlocks.push({
+          ...b,
+          text: replaced,
+          isDirty: true,
+        });
+      }
+
+      if (pageChanged) {
+        const newPage: PageData = { ...page, textBlocks: newTextBlocks, isDirty: true };
+        entries.push({ pageIndex: pageIdx, before: page, after: newPage });
+      }
+    }
+
+    if (entries.length === 0) {
+      return { hits: 0, blocks: 0, pages: 0, skippedBlocks };
+    }
+
+    // store に反映
+    const filePath = document.filePath;
+    set((s) => {
+      if (!s.document) return s;
+      const newPages = new Map(s.document.pages);
+      for (const e of entries) {
+        newPages.set(e.pageIndex, e.after);
+      }
+      const newAction: Action = { type: 'update_pages', entries };
+      const newUndo = [...s.undoStack, newAction];
+      if (newUndo.length > 100) newUndo.shift();
+      return {
+        document: { ...s.document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: [],
+        isDirty: true,
+      };
+    });
+
+    // LRU 退避済みページの IDB と整合させるため、変更ページ全部を IDB にも書き込む
+    schedulePendingIdbWrite(
+      entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+      set,
+      get,
+    );
+
+    return { hits: totalHits, blocks: totalBlocks, pages: entries.length, skippedBlocks };
+  },
 }));
 
 // ─── Selectors ─── (細粒度購読でApp全体の再レンダリング波及を防ぐ)
@@ -464,7 +685,17 @@ export const selectUndoStack = (s: PecoState) => s.undoStack;
 export const selectRedoStack = (s: PecoState) => s.redoStack;
 export const selectCurrentPage = (s: PecoState) =>
   s.document?.pages.get(s.currentPageIndex) ?? null;
+// 現在ページの textBlocks のみを購読するためのセレクタ。
+// PageData 自体は updatePageData のたびに別参照になるが、textBlocks 配列は
+// 更新したフィールドが textBlocks 以外（thumbnail / isTextExtracted など）の
+// 場合は前回と同じ参照のままなので、購読側の再レンダリング/effect 再実行が抑えられる。
+// (issue #22)
+export const selectCurrentPageTextBlocks = (s: PecoState) =>
+  s.document?.pages.get(s.currentPageIndex)?.textBlocks ?? null;
 export const selectLastIdbError = (s: PecoState) => s.lastIdbError;
 export const selectCurrentPageProxy = (s: PecoState) => s.currentPageProxy;
 export const selectCurrentPageProxyKey = (s: PecoState) => s.currentPageProxyKey;
 export const selectHasDocument = (s: PecoState) => s.document !== null;
+// issue #91: ドラッグ中の bbox プレビュー。overlay 描画でドラッグ中 BB の bbox を
+// 上書きするための入口。ドラッグ非実行中は null。
+export const selectDragPreviewBboxes = (s: PecoState) => s.dragPreviewBboxes;

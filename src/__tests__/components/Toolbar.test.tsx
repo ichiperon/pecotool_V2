@@ -25,6 +25,7 @@ vi.mock('lucide-react', () => {
     X: s('X'),
     Loader2: s('Loader2'),
     FileX: s('FileX'),
+    Replace: s('Replace'),
   }
 })
 
@@ -80,6 +81,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> =
     onCancelOcr: vi.fn(),
     onClearOcrCurrentPage: vi.fn(),
     onClearOcrAllPages: vi.fn(),
+    onOpenReplace: vi.fn(),
     ...overrides,
   }
 }

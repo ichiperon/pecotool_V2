@@ -1,13 +1,22 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { readFileSync } from "node:fs";
 /// <reference types="vitest" />
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
+// tauri.conf.json をビルド時に読み込んでアプリバージョンを埋め込む (issue #43)。
+// HelpModal の「バージョン情報」表示で `__APP_VERSION__` 経由で参照する。
+const tauriConf = JSON.parse(readFileSync("./src-tauri/tauri.conf.json", "utf-8"));
+const appVersion: string = tauriConf.version ?? "0.0.0";
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/__tests__/setup.ts'],

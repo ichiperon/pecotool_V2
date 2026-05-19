@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   removeMock: vi.fn(),
   getCachedPageProxyMock: vi.fn(),
   openFreshPdfDocMock: vi.fn(),
+  getTemporaryPageDataMock: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: h.invokeMock, convertFileSrc: (p: string) => p }));
@@ -40,14 +41,71 @@ vi.mock('@tauri-apps/api/path', () => ({
 }));
 
 // pdfLoader: 最小限の PDFDocumentProxy 風 mock
-const makeMockPage = (width = 595, height = 842) => ({
-  getViewport: vi.fn(() => ({ width, height })),
+//
+// #50 検証用に getViewport は rotation (0/90/180/270) を考慮した
+// convertToPdfPoint を返す。pdfjs と同じ式で実装。
+//   rot=0   : [x_pdf, height - y_screen]
+//   rot=90  : [y_screen, x_screen]          (回転後の画面は元 PDF の縦長を横にしたもの)
+//   rot=180 : [width - x_screen, y_screen]
+//   rot=270 : [height - y_screen, width - x_screen]
+// width/height は PDF user space 寸法 (rotation=0 のときの幅・高さ)。
+type ViewportMock = {
+  width: number;
+  height: number;
+  scale: number;
+  rotation: number;
+  convertToPdfPoint: (x: number, y: number) => [number, number];
+};
+const makeViewport = (
+  pdfWidth: number,
+  pdfHeight: number,
+  rotation: number,
+  scale: number,
+): ViewportMock => {
+  // 回転後のスクリーン寸法
+  const rot = ((rotation % 360) + 360) % 360;
+  const screenW = (rot === 90 || rot === 270 ? pdfHeight : pdfWidth) * scale;
+  const screenH = (rot === 90 || rot === 270 ? pdfWidth : pdfHeight) * scale;
+  const convertToPdfPoint = (x: number, y: number): [number, number] => {
+    // unscale to viewport-space (scale=1.0)
+    const xu = x / scale;
+    const yu = y / scale;
+    switch (rot) {
+      case 0:
+        // PDF y is up, viewport y is down; pdf_y = pdfHeight - yu
+        return [xu, pdfHeight - yu];
+      case 90:
+        // viewport (x,y) -> pdf (pdfWidth, ?)  Mapping derived from pdfjs:
+        // pdf_x = yu, pdf_y = xu
+        return [yu, xu];
+      case 180:
+        return [pdfWidth - xu, yu];
+      case 270:
+        return [pdfHeight - yu, pdfWidth - xu];
+      default:
+        return [xu, pdfHeight - yu];
+    }
+  };
+  return {
+    width: screenW,
+    height: screenH,
+    scale,
+    rotation: rot,
+    convertToPdfPoint,
+  };
+};
+const makeMockPage = (width = 595, height = 842, rotation = 0) => ({
+  getViewport: vi.fn(({ scale = 1.0 }: { scale?: number } = {}) =>
+    makeViewport(width, height, rotation, scale),
+  ),
   render: vi.fn(() => ({ promise: Promise.resolve() })),
   cleanup: vi.fn(),
 });
-const makeMockPdf = (totalPages: number) => ({
+const makeMockPdf = (totalPages: number, pageOpts: { width?: number; height?: number; rotation?: number } = {}) => ({
   numPages: totalPages,
-  getPage: vi.fn(async () => makeMockPage()),
+  getPage: vi.fn(async () =>
+    makeMockPage(pageOpts.width ?? 595, pageOpts.height ?? 842, pageOpts.rotation ?? 0),
+  ),
   destroy: vi.fn(async () => {}),
   cleanup: vi.fn(async () => {}),
 });
@@ -59,6 +117,7 @@ vi.mock('../../utils/pdfLoader', () => ({
   loadPDF: vi.fn(),
   destroySharedPdfProxy: vi.fn(),
   getAllTemporaryPageData: vi.fn(async () => new Map()),
+  getTemporaryPageData: h.getTemporaryPageDataMock,
   clearTemporaryChanges: vi.fn(async () => {}),
 }));
 
@@ -108,6 +167,7 @@ beforeEach(() => {
   h.removeMock.mockReset().mockResolvedValue(undefined);
   h.getCachedPageProxyMock.mockReset().mockResolvedValue(makeMockPage());
   h.openFreshPdfDocMock.mockReset().mockResolvedValue(makeMockPdf(3));
+  h.getTemporaryPageDataMock.mockReset().mockResolvedValue(null);
 
   usePecoStore.setState({
     document: null,
@@ -280,5 +340,205 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     expect(h.invokeMock.mock.calls.length).toBeGreaterThan(0);
     // キャンセル toast が存在
     expect(toasts.some((t) => t.msg.includes('キャンセル'))).toBe(true);
+  });
+
+  it('issue #9: LRU 退避ページに対する runOcrCurrentPage で IDB 既存 textBlocks があれば上書き確認が出る', async () => {
+    // 1 ページの doc を作るが、メモリ Map からは pageIndex=0 を削除して LRU 退避状態を模倣
+    const doc = makeDoc(1);
+    doc.pages.delete(0);
+    usePecoStore.getState().setDocument(doc);
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    // IDB 側には退避済み textBlocks が残っている状態を mock で再現
+    const evictedBlock: TextBlock = {
+      id: 'evicted', text: 'EVICTED_EDIT', originalText: 'EVICTED_EDIT',
+      bbox: { x: 0, y: 0, width: 10, height: 10 },
+      writingMode: 'horizontal', order: 0, isNew: false, isDirty: true,
+    };
+    h.getTemporaryPageDataMock.mockResolvedValue({
+      pageIndex: 0, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock],
+    });
+
+    // ユーザーは上書きをキャンセル
+    h.askMock.mockResolvedValue(false);
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    // 上書き確認 ask() が呼ばれ、IDB 退避済み textBlocks がチェックされている
+    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 0);
+    expect(h.askMock).toHaveBeenCalled();
+    // ユーザーがキャンセルしたので invoke('run_ocr') は走らない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // #48: フォルダ OCR は savePdf() === false を受けたら即時中止する
+  // ─────────────────────────────────────────────────────────────
+  it('issue #48: フォルダ OCR は savePdf が false を返したら次の PDF へ進まずに中止する', async () => {
+    // 2 ファイル分の PDF を返すフォルダを mock
+    const askDialogMock = (await import('@tauri-apps/plugin-dialog')).open as ReturnType<typeof vi.fn>;
+    askDialogMock.mockResolvedValueOnce('/folder');
+    h.askMock.mockResolvedValue(true); // フォルダOCR確認 OK
+
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_pdf_files_in_folder') return ['/folder/a.pdf', '/folder/b.pdf'];
+      if (cmd === 'run_ocr') {
+        return JSON.stringify({
+          status: 'ok',
+          blocks: [
+            { text: 'X', bbox: { x: 0, y: 0, width: 5, height: 5 },
+              writingMode: 'horizontal', confidence: 1 },
+          ],
+        });
+      }
+      return '';
+    });
+
+    // openPdf は doc を store にセットして true を返す
+    const openCalls: string[] = [];
+    const openPdf = async (filePath: string) => {
+      openCalls.push(filePath);
+      usePecoStore.getState().setDocument({
+        filePath,
+        fileName: filePath.split('/').pop()!,
+        totalPages: 1,
+        metadata: {},
+        pages: new Map([[0, {
+          pageIndex: 0, width: 595, height: 842, textBlocks: [], isDirty: false, thumbnail: null,
+        }]]),
+      });
+      return true;
+    };
+    // 1 ファイル目: savePdf が false → ループ中止、2 ファイル目には進まないはず
+    const savePdf = vi.fn(async () => false);
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() =>
+      useOcrEngine((m, e) => toasts.push({ msg: m, err: e }), { openPdf, savePdf }),
+    );
+
+    await act(async () => { await result.current.runOcrFolder(); });
+
+    // openPdf は 1 ファイル目までしか呼ばれていない
+    expect(openCalls).toEqual(['/folder/a.pdf']);
+    expect(savePdf).toHaveBeenCalledTimes(1);
+    // 保存失敗トーストが出ている
+    expect(toasts.some((t) => t.err === true && /保存に失敗/.test(t.msg))).toBe(true);
+    // ループ中止後にキャンセル toast が出る
+    expect(toasts.some((t) => t.msg.includes('キャンセル'))).toBe(true);
+  });
+
+  it('issue #48: フォルダ OCR は savePdf が true を返したら次の PDF へ進む', async () => {
+    const openDialogMock = (await import('@tauri-apps/plugin-dialog')).open as ReturnType<typeof vi.fn>;
+    openDialogMock.mockResolvedValueOnce('/folder');
+    h.askMock.mockResolvedValue(true);
+
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_pdf_files_in_folder') return ['/folder/a.pdf', '/folder/b.pdf'];
+      if (cmd === 'run_ocr') {
+        return JSON.stringify({
+          status: 'ok',
+          blocks: [{ text: 'OK', bbox: { x: 0, y: 0, width: 5, height: 5 },
+            writingMode: 'horizontal', confidence: 1 }],
+        });
+      }
+      return '';
+    });
+
+    const openCalls: string[] = [];
+    const openPdf = async (filePath: string) => {
+      openCalls.push(filePath);
+      usePecoStore.getState().setDocument({
+        filePath,
+        fileName: filePath.split('/').pop()!,
+        totalPages: 1,
+        metadata: {},
+        pages: new Map([[0, {
+          pageIndex: 0, width: 595, height: 842, textBlocks: [], isDirty: false, thumbnail: null,
+        }]]),
+      });
+      return true;
+    };
+    const savePdf = vi.fn(async () => true);
+
+    const { result } = renderHook(() => useOcrEngine(() => {}, { openPdf, savePdf }));
+    await act(async () => { await result.current.runOcrFolder(); });
+
+    // 2 ファイル全て処理される
+    expect(openCalls).toEqual(['/folder/a.pdf', '/folder/b.pdf']);
+    expect(savePdf).toHaveBeenCalledTimes(2);
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // #71 (regression of #50): /Rotate 90 ページの OCR 結果 BB は viewport 空間のまま保持する
+  // (旧 #50 では useOcrEngine 側で PDF user space に変換していたが、pdfSaver が viewport-y を
+  //  仮定して描画していたため R=90/180/270 で位置がページ外へ飛んでいた。
+  //  修正後: bbox は viewport のまま、pdfSaver が page.getRotation() を読んで cm で補正。)
+  // ─────────────────────────────────────────────────────────────
+  it('issue #71: /Rotate 90 ページの OCR 結果 BB は viewport 空間のまま store に入る', async () => {
+    // 入力 BB (rotated viewport, scale=1.0): x=10, y=10, w=20, h=30
+    // 修正前: convertToPdfPoint で PDF user space に変換 → x=10, y=10, w=30, h=20
+    // 修正後: viewport 座標のまま → x=10, y=10, w=20, h=30
+    const rotated = makeMockPdf(1, { width: 595, height: 842, rotation: 90 });
+    h.openFreshPdfDocMock.mockResolvedValue(rotated);
+    h.getCachedPageProxyMock.mockResolvedValue(makeMockPage(595, 842, 90));
+
+    usePecoStore.getState().setDocument(makeDoc(1));
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [
+          { text: 'R', bbox: { x: 10, y: 10, width: 20, height: 30 },
+            writingMode: 'horizontal', confidence: 1 },
+        ],
+      });
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    const p0 = usePecoStore.getState().document!.pages.get(0)!;
+    expect(p0.textBlocks).toHaveLength(1);
+    const bb = p0.textBlocks[0].bbox;
+    // viewport 座標そのまま (w/h スワップなし)
+    expect(bb.x).toBeCloseTo(10, 6);
+    expect(bb.y).toBeCloseTo(10, 6);
+    expect(bb.width).toBeCloseTo(20, 6);
+    expect(bb.height).toBeCloseTo(30, 6);
+  });
+
+  it('issue #71: /Rotate 0 ページの OCR 結果 BB も viewport 空間のまま保持する (y 軸反転なし)', async () => {
+    // 入力 BB (viewport): x=10, y=10, w=20, h=30
+    // 修正前: y 軸反転で y=802 へ変換
+    // 修正後: viewport 座標のまま (y=10)
+    const unrotated = makeMockPdf(1, { width: 595, height: 842, rotation: 0 });
+    h.openFreshPdfDocMock.mockResolvedValue(unrotated);
+
+    usePecoStore.getState().setDocument(makeDoc(1));
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [
+          { text: 'U', bbox: { x: 10, y: 10, width: 20, height: 30 },
+            writingMode: 'horizontal', confidence: 1 },
+        ],
+      });
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    const bb = usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].bbox;
+    expect(bb.x).toBeCloseTo(10, 6);
+    expect(bb.y).toBeCloseTo(10, 6);
+    expect(bb.width).toBeCloseTo(20, 6);
+    expect(bb.height).toBeCloseTo(30, 6);
   });
 });

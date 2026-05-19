@@ -113,4 +113,28 @@ describe('stripTextBlocks — PDF string literal safety (repro)', () => {
     expect(output).toContain('q');
     expect(output).toContain('Q');
   });
+
+  // #78: replacePageTextContentStreams の per-stream fallback 経路の挙動を再現する。
+  // 旧実装: Contents=[A, B, C] で B が decode 失敗 → 早期 return → A と C の Tj が残存。
+  // 修正後: A と C を個別に stripTextBlocks へ通して in-place strip する。
+  // ここでは stripTextBlocks が「個別 stream 入力」に対しても正しく BT..ET を削除することを確認。
+  it('#78: per-stream strip 経路で個別 stream の BT..ET が削除される (multi-stream 失敗時の代替経路)', () => {
+    const streamA = enc('q\nBT /F1 12 Tf (legacyA) Tj ET\nQ');
+    const streamC = enc('q\nBT /F1 12 Tf (legacyC) Tj ET\nQ');
+
+    // 旧実装は A,C を merge して strip しようとしたが、B 失敗で全て捨てて return していた。
+    // 修正後の per-stream 経路は各 stream を個別に stripTextBlocks へ通す。
+    const cleanedA = dec(stripTextBlocks(streamA));
+    const cleanedC = dec(stripTextBlocks(streamC));
+
+    expect(cleanedA).not.toContain('(legacyA)');
+    expect(cleanedA).not.toMatch(/\bTj\b|\bBT\b|\bET\b/);
+    expect(cleanedA).toContain('q');
+    expect(cleanedA).toContain('Q');
+
+    expect(cleanedC).not.toContain('(legacyC)');
+    expect(cleanedC).not.toMatch(/\bTj\b|\bBT\b|\bET\b/);
+    expect(cleanedC).toContain('q');
+    expect(cleanedC).toContain('Q');
+  });
 });

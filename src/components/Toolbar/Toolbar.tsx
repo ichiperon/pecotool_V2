@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace
 } from "lucide-react";
 import { PageData } from '../../types';
 
@@ -53,6 +53,8 @@ interface ToolbarProps {
   onCancelOcr: () => void;
   onClearOcrCurrentPage: () => void;
   onClearOcrAllPages: () => void;
+  /** issue #93: Find & Replace ダイアログを開く。ファイル未ロードなら disabled */
+  onOpenReplace: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = (props) => {
@@ -96,6 +98,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
         <button onClick={props.onGroup} title="グループ化" disabled={props.selectedIdsCount < 2}><Group size={18} /><span>グループ化</span></button>
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>
         <button onClick={props.onRemoveSpaces} title="スペース削除 (Ctrl+Shift+Space)" disabled={props.selectedIdsCount === 0}><RemoveFormatting size={18} /><span>スペース削除</span></button>
+        <button onClick={props.onOpenReplace} title="検索と置換 (Ctrl+H)" disabled={!props.isFileLoaded}><Replace size={18} /><span>検索と置換</span></button>
         <button onClick={props.onDelete} title="削除" className="danger" disabled={props.selectedIdsCount === 0}><Trash2 size={18} /></button>
       </div>
       

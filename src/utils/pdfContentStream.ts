@@ -271,13 +271,66 @@ function findNameStart(data: Uint8Array, end: number): number | null {
   return null;
 }
 
-function findSimpleOperandStart(data: Uint8Array, end: number): number | null {
+/**
+ * 修正 (#41): numeric operand 専用パーサ。後方から `[+-]?\d*\.?\d+` を一致させる。
+ *
+ * 旧実装は「直前の delimiter までを丸ごと operand と見なす」緩い実装だったため、
+ *  - `/.3` のようなドット先頭小数 (PDF 仕様で valid な数値リテラル) で、
+ *    `/` を delimiter と認識して `.3` 部分だけ drop した結果、`/` だけ残してしまう
+ *    (削るオフセットがズレる)
+ *  - text operator の operand 数が想定よりも多く、numeric ではない直前トークン
+ *    (オペレータ・名前) まで誤って drop する
+ * といったコーナーケースが起きていた。本関数は厳密に numeric token としての
+ * 一致だけを認める。
+ *
+ * 受理する形:
+ *   `42`, `+42`, `-42`, `0.5`, `+0.5`, `-0.5`, `.3`, `-.3`, `3.`, `3.14`
+ * 拒否する形:
+ *   `Foo` (文字列), `Tw` (オペレータ), `1.2.3` (二重ドット), 単独 `.` `+` `-`
+ *
+ * 後方マッチのアルゴリズム:
+ *   1. trim 後の末尾から、digit / dot / sign を区別しつつ前方へ走査
+ *   2. 走査中に複数 dot や、digit の前に sign 以外の非数字が来たら不一致
+ *   3. 直前 byte は delimiter or 先頭であること
+ *   4. 一致したトークンに digit が最低 1 つあること (`.` `+` `-` 単独は拒否)
+ */
+function findNumericOperandStart(data: Uint8Array, end: number): number | null {
   const trimmedEnd = trimTrailingWhitespace(data, end);
   if (trimmedEnd <= 0) return null;
+
   let i = trimmedEnd - 1;
-  while (i >= 0 && !isDelimiterOrEnd(data[i])) i -= 1;
-  return i + 1 < trimmedEnd ? i + 1 : null;
+  let hasDigit = false;
+  let dotCount = 0;
+  while (i >= 0) {
+    const b = data[i];
+    if (b >= 0x30 /* 0 */ && b <= 0x39 /* 9 */) {
+      hasDigit = true;
+      i -= 1;
+      continue;
+    }
+    if (b === 0x2e /* . */) {
+      dotCount += 1;
+      if (dotCount > 1) return null;
+      i -= 1;
+      continue;
+    }
+    if (b === 0x2b /* + */ || b === 0x2d /* - */) {
+      // sign は token 先頭にしか現れない。直前バイトが delimiter or 先頭であること。
+      const prev = i === 0 ? undefined : data[i - 1];
+      if (!isDelimiterOrEnd(prev)) return null;
+      if (!hasDigit) return null; // `+` `-` 単独は拒否
+      return i;
+    }
+    break; // 数字でも記号でも無いバイトに遭遇したら停止
+  }
+  if (!hasDigit) return null;
+
+  // 一致した token の先頭バイトの直前が delimiter (or 先頭) であることを確認
+  const prev = i < 0 ? undefined : data[i];
+  if (i >= 0 && !isDelimiterOrEnd(prev)) return null;
+  return i + 1;
 }
+
 
 function dropTrailingOperand(data: Uint8Array, resultIdx: number): number {
   const end = trimTrailingWhitespace(data, resultIdx);
@@ -289,7 +342,7 @@ function dropTrailingOperand(data: Uint8Array, resultIdx: number): number {
   if (arrayStart !== null) return arrayStart;
   const nameStart = findNameStart(data, end);
   if (nameStart !== null) return nameStart;
-  return findSimpleOperandStart(data, end) ?? resultIdx;
+  return findNumericOperandStart(data, end) ?? resultIdx;
 }
 
 function dropTrailingOperands(data: Uint8Array, resultIdx: number, count: number): number {

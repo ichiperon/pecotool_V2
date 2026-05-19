@@ -56,12 +56,29 @@ export interface PecoDocument {
   mtime?: number;
 }
 
-export interface Action {
+export interface UpdatePageAction {
   type: 'update_page';
   pageIndex: number;
   before: PageData;
   after: PageData;
 }
+
+/**
+ * 複数ページに跨る単一の atomic な変更を表す Action。
+ * issue #93 (Find & Replace): 全ページスコープでの一括置換を 1 回の undo で
+ * まとめて巻き戻すために導入した。entries は変更があったページのみを記録する
+ * (before/after 同値のページは含めない)。
+ */
+export interface UpdatePagesAction {
+  type: 'update_pages';
+  entries: Array<{
+    pageIndex: number;
+    before: PageData;
+    after: PageData;
+  }>;
+}
+
+export type Action = UpdatePageAction | UpdatePagesAction;
 
 export interface OcrResultBlock {
   text: string;

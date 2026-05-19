@@ -107,11 +107,14 @@ export async function loadPage(
             height: Math.max(...vys) - Math.min(...vys),
           };
 
-          // Determine writing mode from screen-space text run direction.
-          // Using bbox shape would misclassify short vertical runs (e.g. single char)
-          // where ascent > run length. The direction vector is always reliable.
-          const [vDirX, vDirY] = viewport.convertToViewportPoint(tx[4] + ux, tx[5] + uy);
-          const isVertical = Math.abs(vDirY - vc[0][1]) > Math.abs(vDirX - vc[0][0]);
+          // 修正 (#39): writing mode は PDF 座標系 (ux, uy) だけで判定する。
+          // 旧実装は viewport.convertToViewportPoint() を通したスクリーン座標で比較
+          // していたが、ページが /Rotate 270 (または 90) の場合 viewport 変換は
+          // 軸を入れ替えるため、PDF 上で横書き (ux≈1, uy≈0) の run がスクリーン上では
+          // 縦方向に見え、誤って vertical 判定される逆転が起きていた。
+          // run 方向は PDF user space のフォント行列に保存されているので、
+          // PDF 座標で |uy| > |ux| を見ればページ回転に依らず正しく分類できる。
+          const isVertical = Math.abs(uy) > Math.abs(ux);
 
           return {
             id: crypto.randomUUID(),

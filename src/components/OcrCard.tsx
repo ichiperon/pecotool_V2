@@ -23,6 +23,10 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   function OcrCard({ block, pageIndex, dragListeners, onNavigate, onExtendSelection, onSelect }, ref) {
   // selectedIds全体ではなく、このブロックのisSelectedのみ購読（200回の再レンダリングを防ぐ）
   const isSelected = usePecoStore(state => state.selectedIds.has(block.id));
+  // 自カードが anchor (= lastSelectedId) かどうかのみを購読する。複数選択時に
+  // 全カードが scrollIntoView を同時発火して N 個の smooth-scroll が衝突する
+  // のを防ぐため、anchor だけが auto-scroll する (issue #70)。
+  const isAnchor = usePecoStore(state => state.lastSelectedId === block.id);
   // 細粒度selectorで購読: action参照は不変。
   // document 全体は購読せず handleBlur/toggleWritingMode 内で getState() から直接読むことで、
   // どのページのどの編集でも全 200 枚の OcrCard が再評価されるのを防ぐ。
@@ -71,12 +75,16 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
     }
   }));
 
-  // 選択されたら自動スクロール
+  // 選択されたら自動スクロール (anchor のみ / behavior:'auto')。
+  // - lastSelectedId 以外のカードはスクロールを起動しない。50+ 件一括選択時に
+  //   N 個の smooth-scroll が同時発火してメインスレッドが詰まるのを防ぐ。
+  // - 'smooth' から 'auto' に変更し、Virtuoso 側 scroll と二重発火しても
+  //   アニメーションの競合が起きないようにする (issue #70)。
   useEffect(() => {
-    if (isSelected && cardRef.current) {
-      cardRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (isSelected && isAnchor && cardRef.current) {
+      cardRef.current.scrollIntoView({ behavior: 'auto', block: 'nearest' });
     }
-  }, [isSelected]);
+  }, [isSelected, isAnchor]);
 
   // contentEditable の内容は React children ではなく DOM API で同期する
   useEffect(() => {
@@ -91,7 +99,7 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   }, [block.text]);
 
   const handleBlur = () => {
-    perf.mark('edit.blur', { page: pageIndex, blockId: block.id });
+    if (perf.enabled) perf.mark('edit.blur', { page: pageIndex, blockId: block.id });
     // キャレット位置を保存（次回 focus 時に復元する）
     const sel = window.getSelection();
     if (sel && sel.rangeCount > 0 && contentRef.current?.contains(sel.anchorNode)) {
@@ -131,6 +139,9 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    // Issue #45: OcrCard 上の右クリックは App.tsx の onContextMenu に伝播させない
+    // (背後の HelpMenu が開いてしまうのを防ぐ)
+    e.stopPropagation();
     if (!isSelected) {
       toggleSelection(block.id, false);
     }

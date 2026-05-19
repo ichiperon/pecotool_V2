@@ -1354,6 +1354,45 @@ body, #root {
 .console-log-message {
   flex: 1;
   min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-height: 12em;
+  overflow-y: auto;
+}
+
+.console-panel-filters {
+  display: flex;
+  gap: 8px;
+  margin-left: 12px;
+  align-items: center;
+}
+
+.console-panel-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #9ca3af;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.console-panel-filter input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.console-panel-filter.error { color: #f48771; }
+.console-panel-filter.warn  { color: #dcdcaa; }
+.console-panel-filter.log   { color: #569cd6; }
+
+.console-panel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .console-toggle-btn {

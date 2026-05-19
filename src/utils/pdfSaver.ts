@@ -1,13 +1,14 @@
 import {
   PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState,
-  translate, scale, PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray,
+  translate, scale, concatTransformationMatrix,
+  PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray,
   PDFDict
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import { deflate, inflate } from 'pako';
 import { stripTextBlocks } from './pdfContentStream';
-import { extractPdfVersion, restorePdfVersion } from './pdfVersion';
+import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import type {
   SavePdfSource,
@@ -167,6 +168,31 @@ function isFormXObject(stream: PDFRawStream): boolean {
   return subtype instanceof PDFName && subtype.asString() === '/Form';
 }
 
+/**
+ * Form XObject (Subtype=/Form) を再帰的に走査し、BT...ET ブロックを strip する。
+ *
+ * #82 visited Set の不変条件 (将来回帰防止のため明示):
+ *   1. **冪等性**: `stripTextBlocks` は純粋な状態機械で副作用なし。同じ入力に
+ *      対して同じ出力を返し、複数回呼んでも結果は変わらない。
+ *   2. **早期 return**: `cleanContentStream` は strip 結果が原本とバイト等価なら
+ *      `updateContents` を呼ばずに false を返す。すなわち「2 回目以降の strip は
+ *      物理的に no-op」になる。
+ *   3. **deep-first add**: 子 Resources を再帰する直前ではなく entries() ループの先頭で
+ *      `visitedRefs.add(refKey)` する。つまり「visited に入っている ref は、本体・
+ *      子 Resources 含めて既に処理済み」が保証される。
+ *
+ * 上記 (1)(2)(3) の合成により、`visitedRefs` を全ページで共有 (`sharedVisitedFormRefs`)
+ * しても「あるページで処理した Form XObject を別ページで二重処理してしまう」可能性は
+ * ない。共有することで:
+ *   - 複数ページに跨る共有 Form XObject (Acrobat の typical 構造) を 1 回だけ deflate
+ *     できファイル肥大化を防ぐ (issue #54)。
+ *   - サイクリック参照があっても無限再帰しない (cycle detection)。
+ *
+ * もし将来「page 毎に Form XObject に対して別処理 (例: per-page font 登録) を行う」
+ * 変更が入る場合、その処理は visited skip より前に書く必要がある (もしくは visited
+ * の semantics をその処理用に分離する)。本関数の責務は「BT...ET strip 1 回だけ」
+ * なので現状の共有で正しい。
+ */
 function cleanFormXObjectsInResources(
   resources: PDFDict | undefined,
   context: typeof PDFDocument.prototype.context,
@@ -178,6 +204,8 @@ function cleanFormXObjectsInResources(
   for (const [, value] of xObjectDict.entries()) {
     const refKey = isPdfRef(value) ? value.toString() : null;
     if (refKey !== null) {
+      // 上の不変条件 (3) を満たすため、recurse する手前で先に mark する。
+      // 既存マークありなら本体+子 Resources は前回処理で完結している。
       if (visitedRefs.has(refKey)) continue;
       visitedRefs.add(refKey);
     }
@@ -228,20 +256,54 @@ function replacePageTextContentStreams(
 
   const resolved = context.lookup(rawContents);
   const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
-  const decodedStreams: Uint8Array[] = [];
+  type ResolvedEntry = { ref: unknown; stream: PDFRawStream; decoded: Uint8Array };
+  const resolvedEntries: ResolvedEntry[] = [];
 
+  // #78: 旧実装は途中 1 つの stream が decode 失敗すると early return しており、
+  // それより前に decodedStreams へ積まれた stream が merge/strip されないまま元のまま残り、
+  // 後段で部分書換 (B のみ書き換え + A,C は原本) になって Double OCR が部分残存していた。
+  // 修正後: decode 失敗の stream は個別 in-place で cleanContentStream を試み、
+  // 成功した stream のみ per-stream strip する。merge 経路は decode 失敗が無い場合のみ。
+  let anyDecodeFailed = false;
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
-    if (!(stream instanceof PDFRawStream)) return;
-    const decoded = decodeStreamContents(stream);
-    if (decoded === null) {
-      cleanContentStream(stream);
+    if (!(stream instanceof PDFRawStream)) {
+      // issue #44: 暗号化 PDF や indirect chain で stream が PDFRawStream 以外になる
+      // ケースがあり、その場合 text strip が silent でスキップされて Double OCR が
+      // 残る。原因切り分けのため警告を出す。
+      // #78: ここで return すると他 stream の strip もスキップされ部分書換になるが、
+      //       より厳しい原本維持を選ぶ (warning は維持)。
+      console.warn('[pdfSaver] Skipping text strip: page content stream is not a PDFRawStream', {
+        streamType: stream?.constructor?.name ?? typeof stream,
+      });
       return;
     }
-    decodedStreams.push(decoded);
+    const decoded = decodeStreamContents(stream);
+    if (decoded === null) {
+      // この stream は decode 不能。in-place で個別 strip を試みる。
+      // 失敗時は何もしない (フィルタチェーン未対応等は元のまま残る) ので、他 stream への
+      // 影響は無い。merge 経路には進まないので anyDecodeFailed を立てる。
+      cleanContentStream(stream);
+      anyDecodeFailed = true;
+      continue;
+    }
+    resolvedEntries.push({ ref: streamRef, stream, decoded });
   }
 
-  const merged = concatWithNewlines(decodedStreams);
+  // 1 つでも decode 失敗があれば merge 経路は取らない (array 構造を維持する必要がある)。
+  // 代わりに decode 成功 stream を個別に strip して in-place 書き戻す。
+  if (anyDecodeFailed) {
+    for (const entry of resolvedEntries) {
+      const cleaned = stripTextBlocks(entry.decoded);
+      if (bytesEqual(cleaned, entry.decoded)) continue;
+      entry.stream.updateContents(deflate(cleaned));
+      entry.stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+      entry.stream.dict.delete(PDFName.of('DecodeParms'));
+    }
+    return;
+  }
+
+  const merged = concatWithNewlines(resolvedEntries.map((e) => e.decoded));
   const cleaned = stripTextBlocks(merged);
   if (!bytesEqual(cleaned, merged)) {
     pageNode.set(contentsKey, context.register(context.flateStream(cleaned)));
@@ -250,6 +312,61 @@ function replacePageTextContentStreams(
       deleteIfUniqueRef(context, streamRef, contentRefCounts);
     }
   }
+}
+
+/**
+ * #71: 回転ページで OCR bbox (viewport-space, y-down) を正しく描画するため、
+ * 「viewport-aligned drawing frame」を PDF user space にマップする cm (concat matrix) を返す。
+ *
+ * - OCR / pdfjs が返す bbox は viewport 座標 (rotated screen, origin upper-left, y-down)。
+ * - pdfSaver は元々 translate(bbox.x, vh - bbox.y) を user-space と仮定して描画していた。
+ *   これは R=0 のときだけ偶然正しく、R≠0 では位置がページ外/対角へ飛んでいた (#50 regression)。
+ * - 修正: per-block で cm M を push し、その下で「viewport coords を user space と仮定した」
+ *   既存ロジックをそのまま動かす。M は /Rotate 適用時に正しい viewport 位置に着地するよう設計。
+ *
+ * 戻り値: cm operator 配列 (R=0 なら空配列)。pageW/pageH は page.getSize() の原 PDF 寸法。
+ *
+ * 導出: viewport(x_v, y_v) → user(u_x, u_y) を pdfjs convertToPdfPoint と同じ式に従う:
+ *   R=90  → user(y_v, x_v)
+ *   R=180 → user(pageW - x_v, y_v)
+ *   R=270 → user(pageW - y_v, pageH - x_v)   ← 旧コメントは pageH/pageW を取り違えていた
+ *
+ * これを translate(bbox.x, vh - bbox.y) の出力に M を掛けて満たすよう連立方程式を解いた結果:
+ *   R=90:  M = [0 1 -1 0 pageW 0]
+ *   R=180: M = [-1 0 0 -1 pageW pageH]
+ *   R=270: M = [0 -1 1 0 0 pageH]   ← 旧 [.. pageH-pageW pageW] は数式誤り (Critical, データ消失)
+ *
+ * 文字向きも M の linear 部分 + /Rotate の合成で R=0 と同じ「画面右=+x_text、画面上=+y_text」に
+ * なる (検証済み)。drawText の rotate 引数追加は不要。
+ */
+function getRotationCm(
+  rotation: number,
+  pageW: number,
+  pageH: number,
+) {
+  switch (rotation) {
+    case 0:
+      return [] as const;
+    case 90:
+      return [concatTransformationMatrix(0, 1, -1, 0, pageW, 0)] as const;
+    case 180:
+      return [concatTransformationMatrix(-1, 0, 0, -1, pageW, pageH)] as const;
+    case 270:
+      return [concatTransformationMatrix(0, -1, 1, 0, 0, pageH)] as const;
+    default:
+      return [] as const;
+  }
+}
+
+/** /Rotate を 0..360 に正規化 (負値も対応) */
+function normalizeRotation(angle: number): number {
+  return ((Math.round(angle) % 360) + 360) % 360;
+}
+
+/** 回転後の viewport 寸法。R=90/270 で width/height swap。 */
+function getViewportSize(rotation: number, pageW: number, pageH: number): { vw: number; vh: number } {
+  if (rotation === 90 || rotation === 270) return { vw: pageH, vh: pageW };
+  return { vw: pageW, vh: pageH };
 }
 
 interface FontRun {
@@ -271,20 +388,6 @@ interface RepairPageData {
 function asPageIndex(value: unknown): number | null {
   const pageIndex = typeof value === 'string' ? parseInt(value, 10) : value;
   return typeof pageIndex === 'number' && Number.isInteger(pageIndex) ? pageIndex : null;
-}
-
-function isRepairTextBlock(value: unknown): value is RepairTextBlock {
-  const block = value as Partial<RepairTextBlock> | undefined;
-  const bbox = block?.bbox;
-  return (
-    typeof block?.text === 'string' &&
-    typeof block.order === 'number' &&
-    (block.writingMode === 'horizontal' || block.writingMode === 'vertical') &&
-    typeof bbox?.x === 'number' &&
-    typeof bbox.y === 'number' &&
-    typeof bbox.width === 'number' &&
-    typeof bbox.height === 'number'
-  );
 }
 
 function makeFontSupportSet(font: PDFFont): Set<number> | null {
@@ -332,28 +435,105 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
   return { width, height };
 }
 
+/**
+ * #80: Resources.Font dict を scan して、すでに同じ font.ref が登録されていれば
+ * その key を再利用する。タグ prefix が `font.name` (postscriptName) と一致するもの
+ * のみを再利用対象とし、誤マッチを避ける。
+ *
+ * 戻り値: 既存 key (再利用可能) または undefined (新規登録が必要)。
+ *
+ * これにより:
+ *   - pruneStalePecoToolResources が削除しきれなかった非 PecoTool 経路の同 ref 登録を
+ *     再利用できる (alias 重複を防ぐ)。
+ *   - pdf-lib 内部 `newFontDictionary` API への直接依存が「miss 時のみ」に縮小される。
+ */
+function findExistingFontKey(page: unknown, font: PDFFont): PDFName | undefined {
+  const pageLike = page as {
+    node?: { Resources?: () => PDFDict | undefined };
+  };
+  const resources = pageLike.node?.Resources?.();
+  const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+  if (!fontDict) return undefined;
+
+  const targetRefKey = font.ref.toString();
+  // 既存 key の tag prefix は `/<font.name>-<random>` 形式 (pdf-lib の uniqueKey 仕様)。
+  // postscriptName に prefix 一致 + ref 一致の両方を満たすキーのみを再利用する。
+  const tagPrefix = `/${font.name}-`;
+  for (const [key, value] of fontDict.entries()) {
+    if (!isPdfRef(value)) continue;
+    if (value.toString() !== targetRefKey) continue;
+    if (!key.toString().startsWith(tagPrefix)) continue;
+    return key;
+  }
+  return undefined;
+}
+
+/**
+ * 修正 (#33, #80): Resources の Font 辞書登録と pageLike state の同期を分離する。
+ *
+ * 旧実装 (#33 修正前):
+ *   `pageLike.font = font;` を毎回無条件で代入し、その後 `pageLike.fontKey` を
+ *   key 取得時のみ条件付きで代入していた。fallback で `pageLike.setFont?.(font)`
+ *   を呼ぶ経路では setFont 内部で `newFontDictionary` がさらに呼ばれ、同じ font
+ *   ref に対し Resources の Font dict に複数のユニークキーが追加される多重 alias
+ *   が発生する余地があった (Meiryo ⇄ IPAmjMincho を 1 ページで切り替えるケース)。
+ *
+ * 新実装:
+ *   1. `getOrRegisterPageFontKey()` — 同じ font には常に同じ key を返す純粋関数。
+ *      探索順:
+ *        a. in-page cache (Map<PDFFont, PDFName>) — same-page の高速 path
+ *        b. Resources.Font dict scan — 既存 ref+name 一致を再利用 (#80)
+ *        c. `newFontDictionary` を 1 回だけ呼んで新規登録 (miss 時のみ)
+ *      pdf-lib 内部 API への直接依存は (c) のフォールバックだけに縮約された。
+ *   2. `syncPageFontState()` — pageLike.font / pageLike.fontKey をペアで上書き。
+ *      key が無いときは何も書かない (drawText で誤キー出力を防ぐ)。
+ */
+function getOrRegisterPageFontKey(
+  page: unknown,
+  font: PDFFont,
+  fontKeys: Map<PDFFont, PDFName>,
+): PDFName | undefined {
+  const cached = fontKeys.get(font);
+  if (cached) return cached;
+
+  // #80: 内部 API を叩く前に Font dict を 1 回 scan して既存 key を再利用する。
+  // 同じ font ref に対する重複登録を防ぎ、newFontDictionary 直接依存を最小化する。
+  const existing = findExistingFontKey(page, font);
+  if (existing) {
+    fontKeys.set(font, existing);
+    return existing;
+  }
+
+  const pageLike = page as {
+    fontKey?: PDFName;
+    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
+    setFont?: (font: PDFFont) => void;
+  };
+  let key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
+  if (!key) {
+    // fallback 経路: setFont は newFontDictionary を内部で呼ぶため、上の newFontDictionary
+    // が成功しているときは絶対に踏まないように上の if で gating する。
+    pageLike.setFont?.(font);
+    key = pageLike.fontKey;
+  }
+  if (key) fontKeys.set(font, key);
+  return key;
+}
+
+function syncPageFontState(page: unknown, font: PDFFont, key: PDFName | undefined): void {
+  const pageLike = page as { font?: PDFFont; fontKey?: PDFName };
+  if (!key) return; // key が解決できなければ pageLike の前回 state を維持 (誤キー出力防止)
+  pageLike.font = font;
+  pageLike.fontKey = key;
+}
+
 function setPageFontWithStableKey(
   page: unknown,
   font: PDFFont,
   fontKeys: Map<PDFFont, PDFName>,
 ): void {
-  const pageLike = page as {
-    font?: PDFFont;
-    fontKey?: PDFName;
-    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
-    setFont?: (font: PDFFont) => void;
-  };
-  let key = fontKeys.get(font);
-  if (!key) {
-    key = pageLike.node?.newFontDictionary?.(font.name, font.ref);
-    if (!key) {
-      pageLike.setFont?.(font);
-      key = pageLike.fontKey;
-    }
-    if (key) fontKeys.set(font, key);
-  }
-  pageLike.font = font;
-  if (key) pageLike.fontKey = key;
+  const key = getOrRegisterPageFontKey(page, font, fontKeys);
+  syncPageFontState(page, font, key);
 }
 
 /**
@@ -438,21 +618,13 @@ export async function buildPdfDocument(
   const bboxMeta = { ...existingBBoxMeta };
   let metaChanged = false;
 
+  // 修正 (#25): existingBBoxMeta から pagesToWrite を pre-populate しない。
+  // 以前は existingBBoxMeta の全ページを pagesToWrite に登録していたため、
+  // 未編集ページに対しても pruneStalePecoToolResources / replacePageTextContentStreams
+  // が走り、保存しただけで content stream が書き換わって原本のメタが破壊されていた。
+  // dirty page が無い場合は metaChanged も false のままで infoDict.set は呼ばれず、
+  // 既存メタはバイト等価で保持される (E2-3c 大容量メタ保存テストが要求する不変条件)。
   const pagesToWrite = new Map<number, RepairPageData>();
-  for (const [pageIndexStr, entries] of Object.entries(existingBBoxMeta)) {
-    const pageIndex = asPageIndex(pageIndexStr);
-    if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount() || !Array.isArray(entries)) continue;
-    pagesToWrite.set(pageIndex, {
-      textBlocks: entries
-        .filter(isRepairTextBlock)
-        .map((block) => ({
-          text: block.text,
-          bbox: block.bbox,
-          writingMode: block.writingMode,
-          order: block.order,
-        })),
-    });
-  }
   for (const [pageIndexValue, pageData] of dirtyPages) {
     const pageIndex = asPageIndex(pageIndexValue);
     if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) continue;
@@ -483,8 +655,13 @@ export async function buildPdfDocument(
     support: makeFontSupportSet(font),
   }));
 
+  // issue #54: Form XObject は複数ページで共有されている (Acrobat の typical な造り) ことが多く、
+  // ページごとに new Set() を作ると同じバイト列を複数回 deflate してファイル肥大化する。
+  // 全ページで visited ref を共有する。
+  const sharedVisitedFormRefs = new Set<string>();
+
   for (const [pageIndex, pageData] of pageEntriesToWrite) {
-    
+
     const sortedBlocks = [...pageData.textBlocks]
       .map((block) => ({ ...block, text: sanitizeTextForPdfCopy(block.text, skippedChars, pageIndex) }))
       .sort((a, b) => a.order - b.order);
@@ -497,11 +674,18 @@ export async function buildPdfDocument(
     metaChanged = true;
 
     const page = pdfDoc.getPage(pageIndex);
-    const { height } = page.getSize();
+    const { width: pageW, height: pageH } = page.getSize();
+    // #71: bbox は OCR / 既存テキスト経由いずれも viewport 空間 (rotated screen, y-down)。
+    // pdfSaver は元々 R=0 を仮定して translate(bbox.x, pageH - bbox.y) していたため、
+    // R=90/180/270 では位置がページ外へ飛んでいた (#50 regression)。
+    // 修正方針: viewport 寸法 (vw/vh) を使い、rotation に応じた cm を per-block push する。
+    const rotation = normalizeRotation(page.getRotation().angle);
+    const { vh } = getViewportSize(rotation, pageW, pageH);
+    const rotationCm = getRotationCm(rotation, pageW, pageH);
 
     // --- Surgical Text Stripping ---
     pruneStalePecoToolResources(page.node as unknown as { Resources?: () => PDFDict | undefined });
-    cleanFormXObjectsInResources(page.node.Resources?.(), pdfDoc.context);
+    cleanFormXObjectsInResources(page.node.Resources?.(), pdfDoc.context, sharedVisitedFormRefs);
     replacePageTextContentStreams(
       page.node as unknown as {
         get?: (key: PDFName) => PDFObject | undefined;
@@ -531,44 +715,74 @@ export async function buildPdfDocument(
           pageIndex,
         );
         const { width: textWidth, height: textHeight } = measureRuns(runs, fontSize);
-        
+
         if (textWidth === 0 || textHeight === 0) {
           console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (zero font metrics) text="${block.text.slice(0, 20)}"`);
           continue;
         }
 
         if (block.writingMode === 'vertical') {
-          const sx = block.bbox.width / textHeight;
-          const sy = block.bbox.height / textWidth;
-
-          if (!isFinite(sx) || !isFinite(sy)) {
-            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx} sy=${sy}) text="${block.text.slice(0, 20)}"`);
+          // 修正 (#23, #28, #75): 縦書きは run ごとに pushGraphicsState を切り替え、
+          // フォント別の ascent から baselineX を算出する (Meiryo 0.2 マジックナンバーを廃止)。
+          //  - sx_outer / sy_outer: ブロック全体で共通のスケール。Σ run advance = bbox.height。
+          //  - baselineX_run: 各 run の ascent/descent 比から導出
+          //  - offsetInPage: ページ座標で累積する縦方向 advance
+          //
+          // #75 修正: 旧実装は per-run sx_run (heightAtSize 別) + 共通 sy_outer の組み合わせで
+          // cm を発行していたため、混在フォントで heightAtSize の異なる run の glyph が
+          // 視覚的に揃わず "重なる/隙間ができる" バグがあった。
+          // 修正後: cm 内 scale を完全に共通化 (sx_outer = bbox.width / textHeight, sy_outer)。
+          // 全 run が同一スケールで描画され、advance は `widthOfTextAtSize * sy_outer` で一貫する。
+          // Σ widthOfTextAtSize = textWidth なので Σ advance = textWidth * sy_outer = bbox.height。
+          const sx_outer = block.bbox.width / textHeight;
+          const sy_outer = block.bbox.height / textWidth;
+          if (!isFinite(sx_outer) || !isFinite(sy_outer)) {
+            console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx_outer} sy=${sy_outer}) text="${block.text.slice(0, 20)}"`);
             continue;
           }
-
-          const baselineX = block.bbox.x + textHeight * sx * 0.2;
-          const baselineY = height - block.bbox.y;
-
-          page.pushOperators(pushGraphicsState(), translate(baselineX, baselineY), scale(sx, sy));
-          let offset = 0;
+          let offsetInPage = 0;
+          let renderedAny = false;
           for (const run of runs) {
+            const runHeight = run.font.heightAtSize(fontSize);
+            if (runHeight === 0) continue;
+            const runTextWidth = run.font.widthOfTextAtSize(run.text, fontSize);
+            if (runTextWidth === 0) continue;
+            const runAscent = run.font.heightAtSize(fontSize, { descender: false });
+            const descentRatio = (runHeight - runAscent) / runHeight;
+            const baselineX_run = block.bbox.x + descentRatio * block.bbox.width;
+            const baselineY_run = vh - block.bbox.y - offsetInPage;
             setPageFontWithStableKey(page, run.font, pageFontKeys);
-            page.drawText(run.text, { x: 0, y: offset, size: fontSize, rotate: degrees(-90), renderMode: 3 });
-            offset += run.font.widthOfTextAtSize(run.text, fontSize);
+            page.pushOperators(
+              pushGraphicsState(),
+              ...rotationCm,
+              translate(baselineX_run, baselineY_run),
+              scale(sx_outer, sy_outer),
+            );
+            page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
+            page.pushOperators(popGraphicsState());
+            // #75: per-run advance は runTextWidth * sy_outer (共通スケール)。
+            // Σ advance = textWidth * sy_outer = bbox.height で完全に bbox を埋める。
+            offsetInPage += runTextWidth * sy_outer;
+            renderedAny = true;
           }
-          page.pushOperators(popGraphicsState());
+          if (!renderedAny) continue;
         } else {
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
-          
+
           if (!isFinite(sx) || !isFinite(sy)) {
             console.warn(`[buildPdfDocument] Page ${pageIndex}: skipped block (non-finite scale sx=${sx} sy=${sy}) text="${block.text.slice(0, 20)}"`);
             continue;
           }
 
-          const baselineY = height - block.bbox.y - textHeight * sy * 0.8;
+          const baselineY = vh - block.bbox.y - textHeight * sy * 0.8;
 
-          page.pushOperators(pushGraphicsState(), translate(block.bbox.x, baselineY), scale(sx, sy));
+          page.pushOperators(
+            pushGraphicsState(),
+            ...rotationCm,
+            translate(block.bbox.x, baselineY),
+            scale(sx, sy),
+          );
           let offset = 0;
           for (const run of runs) {
             setPageFontWithStableKey(page, run.font, pageFontKeys);
@@ -587,6 +801,11 @@ export async function buildPdfDocument(
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
   }
 
+  // 修正 (#30): Catalog の /Version を消す。Acrobat は header と Catalog /Version の
+  // 最大値で実効バージョンを判定するため、header だけ 1.6 に戻しても Catalog の
+  // /Version 1.7 が残っていると Acrobat 7 では開けない。save() 前に削除する。
+  // #85: originalVersion を渡して header >= catalog の場合のみ削除させる。
+  if (originalVersion) stripCatalogVersion(pdfDoc, originalVersion);
   // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
   // save() 全書き換え経路。pdf-lib は streaming serializer で、ベンチ実測では
   // 100MB PDF でも 91ms で完了する (disk write は別段の writeFileChunked で処理)。

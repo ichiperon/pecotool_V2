@@ -54,6 +54,9 @@ const BackupRestoreDialog = lazy(() =>
 const HelpModal = lazy(() =>
   import("./components/HelpModal").then(m => ({ default: m.HelpModal }))
 );
+const ReplaceDialog = lazy(() =>
+  import("./components/ReplaceDialog").then(m => ({ default: m.ReplaceDialog }))
+);
 const ConsolePanel = lazy(() =>
   import("./components/Console/ConsolePanel").then(m => ({ default: m.ConsolePanel }))
 );
@@ -91,10 +94,11 @@ function App() {
   // --- 分割された責務（フック群） ---
   const { leftWidth, rightWidth, startResizeLeft, startResizeRight } = useLayoutPanels();
   const {
-    notification, helpMenu, setHelpMenu,
+    notification, setNotification, helpMenu, setHelpMenu,
     showSettingsDropdown, setShowSettingsDropdown,
     helpModal, setHelpModal,
     showOcrSettings, setShowOcrSettings,
+    showReplace, setShowReplace,
     showToast,
   } = useDialogState();
   const { zoom, setZoom, isAutoFit, setIsAutoFit, viewerRef, fitToScreen } =
@@ -108,14 +112,15 @@ function App() {
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
   const folderOpenPdfRef = useRef<(filePath: string) => Promise<boolean>>(async () => false);
-  const folderSavePdfRef = useRef<() => Promise<void>>(async () => {});
+  // #48: フォルダ OCR ループが保存失敗で即時中止できるよう Promise<boolean> を返す。
+  const folderSavePdfRef = useRef<() => Promise<boolean>>(async () => false);
 
   const [reorderThreshold, setReorderThreshold] = useState(() => readReorderThreshold());
 
   // --- External Hooks ---
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
-  const { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
+  const { loadEpoch, subscribeThumbnail, getThumbnail, subscribeActivePage, getIsActivePage, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
   const {
     isOcrRunning,
     ocrProgress,
@@ -297,6 +302,66 @@ function App() {
     updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
   };
 
+  // issue #93: Find & Replace \u306e\u5b9f\u884c\u30cf\u30f3\u30c9\u30e9\u3002
+  //  - \u5168\u30da\u30fc\u30b8\u30b9\u30b3\u30fc\u30d7 \u00d7 50 \u4ef6\u8d85\u306e\u3068\u304d\u3060\u3051 ask() \u78ba\u8a8d\u3092\u631f\u3080
+  //  - contentEditable \u306b focus \u304c\u3042\u308b\u7de8\u96c6\u4e2d\u30d6\u30ed\u30c3\u30af\u306f blur() \u3057\u3066\u304b\u3089\u5b9f\u884c
+  //    (\u672c\u5b9f\u88c5\u3067\u306f editor \u306f currentPage \u306e\u5404 BB \u3092 contentEditable \u3067\u63cf\u753b\u3059\u308b\u305f\u3081\u3001
+  //     focus \u3055\u308c\u3066\u3044\u308b DOM \u306e data-block-id \u3092\u898b\u3066 skipBlockIds \u3092\u69cb\u7bc9\u3059\u308b)
+  const handleReplaceConfirm = useCallback(async (params: {
+    scope: 'selection' | 'current' | 'all';
+    pattern: string;
+    replacement: string;
+    caseSensitive: boolean;
+    useRegex: boolean;
+    expectedHits: number;
+  }) => {
+    if (params.scope === 'all' && params.expectedHits > 50) {
+      const confirmed = await ask(
+        `\u5168\u30da\u30fc\u30b8\u3067 ${params.expectedHits} \u4ef6\u306e\u7f6e\u63db\u3092\u5b9f\u884c\u3057\u307e\u3059\u3002\u3088\u308d\u3057\u3044\u3067\u3059\u304b\uff1f`,
+        { title: '\u691c\u7d22\u3068\u7f6e\u63db', kind: 'warning' },
+      );
+      if (!confirmed) return;
+    }
+
+    // \u7de8\u96c6\u4e2d\u30d6\u30ed\u30c3\u30af\u691c\u51fa: ocr-card-content \u306b focus \u304c\u3042\u308b\u5834\u5408\u306f blur() \u3057\u3066\u30c7\u30fc\u30bf\u3092\u78ba\u5b9a\u3055\u305b\u308b\u3002
+    // \u53cd\u6620\u3067\u304d\u306a\u3044 (= isEditing) \u30d6\u30ed\u30c3\u30af\u306f skipBlockIds \u306b\u6e21\u3057\u3001\u4ef6\u6570\u3092 toast \u8b66\u544a\u3059\u308b\u3002
+    const active = window.document.activeElement as HTMLElement | null;
+    const editingEl =
+      active && active.classList?.contains('ocr-card-content') ? active : null;
+    const skipBlockIds = new Set<string>();
+    if (editingEl) {
+      const blockId = editingEl.closest('[data-block-id]')?.getAttribute('data-block-id');
+      if (blockId) skipBlockIds.add(blockId);
+      // blur \u3057\u3066\u3082 DOM \u540c\u671f\u304c\u9593\u306b\u5408\u308f\u306a\u3044\u305f\u3081\u3001\u5bfe\u8c61\u30d6\u30ed\u30c3\u30af\u306f\u5b89\u5168\u5074\u3067 skip \u3057\u3066\u304a\u304f\u3002
+      editingEl.blur();
+    }
+
+    perf.mark('ui.replaceTextExecute', {
+      scope: params.scope,
+      hits: params.expectedHits,
+    });
+    const result = usePecoStore.getState().replaceText({
+      scope: params.scope,
+      pattern: params.pattern,
+      replacement: params.replacement,
+      caseSensitive: params.caseSensitive,
+      useRegex: params.useRegex,
+      skipBlockIds,
+    });
+
+    if (result.skippedBlocks > 0) {
+      showToast(
+        `${result.hits} \u4ef6\u7f6e\u63db\u3057\u307e\u3057\u305f (\u7de8\u96c6\u4e2d\u306e ${result.skippedBlocks} \u30d6\u30ed\u30c3\u30af\u306f\u30b9\u30ad\u30c3\u30d7)\u3002`,
+        true,
+      );
+    } else {
+      showToast(
+        `${result.hits} \u4ef6 / ${result.blocks} \u30d6\u30ed\u30c3\u30af / ${result.pages} \u30da\u30fc\u30b8 \u3092\u7f6e\u63db\u3057\u307e\u3057\u305f\u3002`,
+      );
+    }
+    setShowReplace(false);
+  }, [setShowReplace, showToast]);
+
   const getVisiblePdfCenter = useCallback(() => {
     const viewer = viewerRef.current;
     const wrapper = viewer?.querySelector<HTMLElement>('.canvas-wrapper');
@@ -328,26 +393,37 @@ function App() {
     handleGroup, setZoom, zoom, setIsAutoFit,
     searchInputRef, handleRemoveSpaces,
     handleOpen,
+    // issue #93: Ctrl+H で Find & Replace 起動 (ファイル未ロード時は no-op)
+    openReplace: () => { if (isFileLoaded) setShowReplace(true); },
   });
 
+  // issue #74 / CloseGuard: isSaving の最新値を ref に同期。
+  // useTauriCloseGuard と F5 ガードに渡す前に宣言する必要がある (TDZ 回避)。
+  const isSavingRef = useRef(isSaving);
+  isSavingRef.current = isSaving;
+
   // --- Effects ---
-  useTauriCloseGuard();
+  // CloseGuard: 保存中の close を suppress するため isSavingRef を渡す (Critical: rename race のデータロス回避)。
+  useTauriCloseGuard({ isSavingRef });
 
   useEffect(() => {
     const handleF5 = (e: KeyboardEvent) => {
-      if (e.key === 'F5') {
-        e.preventDefault();
-        const doc = usePecoStore.getState().document;
-        if (doc?.filePath) handleOpen(doc.filePath);
-      }
+      if (e.key !== 'F5') return;
+      e.preventDefault();
+      // issue #74: バックアップ復元中 / モーダル表示中は F5 を握りつぶす。
+      // 復元中の二重 open でデータ消失、モーダル表示中の意図せぬ消去を防ぐ。
+      if (processingBackupPath || helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
+      handleReload();
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
-  }, [handleOpen]);
+  }, [handleReload, processingBackupPath, helpModal, showOcrSettings, showReplace, pendingBackups.length]);
 
   useEffect(() => {
     if (!isSaving) return;
     const blockKeys = (e: KeyboardEvent) => {
+      // Issue #47: 保存中でも Esc は通す (モーダル/ダイアログから抜けられないと UX が詰む)
+      if (e.key === 'Escape') return;
       e.preventDefault();
       e.stopPropagation();
     };
@@ -406,7 +482,12 @@ function App() {
   return (
     <div
       className="app-container"
-      onContextMenu={(e) => { e.preventDefault(); setHelpMenu({ x: e.clientX, y: e.clientY, visible: true }); }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        // Issue #45: モーダル/ダイアログ表示中は背後に HelpMenu を重ねて開かない
+        if (helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
+        setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
+      }}
       onClick={() => {
         if (helpMenu.visible) setHelpMenu({ ...helpMenu, visible: false });
         if (showSettingsDropdown) setShowSettingsDropdown(false);
@@ -421,8 +502,18 @@ function App() {
             backups={pendingBackups}
             onRestore={handleRestoreBackup}
             onDiscard={handleDiscardBackup}
-            onClose={() => setPendingBackups([])}
+            onClose={() => {
+              // Issue #42: 復元/破棄処理中は閉じない (中途半端な状態で保存されてしまう)
+              if (processingBackupPath) {
+                showToast('復元処理中はダイアログを閉じられません。完了までお待ちください。', true);
+                return;
+              }
+              setPendingBackups([]);
+            }}
             processingFilePath={processingBackupPath}
+            onCloseSuppressed={() =>
+              showToast('復元処理中はダイアログを閉じられません。完了までお待ちください。', true)
+            }
           />
         </Suspense>
       )}
@@ -437,6 +528,17 @@ function App() {
       {helpModal && (
         <Suspense fallback={null}>
           <HelpModal helpModal={helpModal} onClose={() => setHelpModal(null)} />
+        </Suspense>
+      )}
+
+      {/* issue #93: 検索と置換ダイアログ */}
+      {showReplace && (
+        <Suspense fallback={null}>
+          <ReplaceDialog
+            onClose={() => setShowReplace(false)}
+            onConfirm={handleReplaceConfirm}
+            hasSelection={selectedIds.size > 0}
+          />
         </Suspense>
       )}
 
@@ -479,6 +581,7 @@ function App() {
         onCancelOcr={cancelOcr}
         onClearOcrCurrentPage={handleClearOcrCurrentPage}
         onClearOcrAllPages={handleClearOcrAllPages}
+        onOpenReplace={() => setShowReplace(true)}
       />
 
       <main className="main-content">
@@ -492,6 +595,8 @@ function App() {
           onRequestThumbnail={requestThumbnail}
           onSubscribeThumbnail={subscribeThumbnail}
           onGetThumbnail={getThumbnail}
+          onSubscribeActivePage={subscribeActivePage}
+          onGetIsActivePage={getIsActivePage}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
         <section
@@ -614,7 +719,24 @@ function App() {
           </div>
         </div>
       )}
-      {notification && <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>{notification.message}</div>}
+      {notification && (
+        <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>
+          <span>{notification.message}</span>
+          {notification.action && (
+            <button
+              type="button"
+              className="toast-action-btn"
+              onClick={() => {
+                const action = notification.action;
+                setNotification(null);
+                action?.onClick();
+              }}
+            >
+              {notification.action.label}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

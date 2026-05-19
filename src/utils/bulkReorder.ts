@@ -13,7 +13,8 @@ export function classifyDirection(dx: number, dy: number): DragDirection | null 
   let angle = Math.atan2(-dy, dx) * (180 / Math.PI);
   if (angle < 0) angle += 360;
 
-  if ((angle >= 337.5 && angle <= 360) || (angle >= 0 && angle < 22.5)) return 'left-right';
+  // angle は (-180, 180] → 上で +360 して [0, 360) に正規化済み。境界判定はすべて `< X.5` で統一。
+  if ((angle >= 337.5 && angle < 360) || (angle >= 0 && angle < 22.5)) return 'left-right';
   if (angle >= 22.5 && angle < 67.5) return 'bottomleft-topright';
   if (angle >= 67.5 && angle < 112.5) return 'down-up';
   if (angle >= 112.5 && angle < 157.5) return 'bottomright-topleft';

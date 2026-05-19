@@ -1,21 +1,26 @@
-import React, { useEffect, useReducer, useRef } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import type { PecoDocument } from '../../types';
 
 interface ThumbnailItemProps {
   index: number;
-  currentPageIndex: number;
   isDirty?: boolean;
   loadEpoch: number;
   onSelect: (index: number) => void;
   onRequest: (index: number) => void;
   onSubscribeThumbnail: (index: number, cb: () => void) => () => void;
   onGetThumbnail: (index: number) => string | undefined;
+  // issue #68: active 状態を prop drill せず、index 単位で pub/sub する。
+  // currentPageIndex を prop で受けると、ページ切替で Virtuoso 可視範囲の
+  // 全 ThumbnailItemNode が再レンダされてしまう。
+  onSubscribeActivePage: (index: number, cb: () => void) => () => void;
+  onGetIsActivePage: (index: number) => boolean;
 }
 
 export const ThumbnailItemNode = React.memo(({
-  index, currentPageIndex, isDirty, loadEpoch,
+  index, isDirty, loadEpoch,
   onSelect, onRequest, onSubscribeThumbnail, onGetThumbnail,
+  onSubscribeActivePage, onGetIsActivePage,
 }: ThumbnailItemProps) => {
   const [, forceUpdate] = useReducer(x => x + 1, 0);
 
@@ -24,7 +29,14 @@ export const ThumbnailItemNode = React.memo(({
     return onSubscribeThumbnail(index, forceUpdate);
   }, [index, onSubscribeThumbnail]);
 
+  // issue #68: このアイテム専用の active 状態変化を購読する。
+  // 旧アクティブ / 新アクティブの 2 件のみ通知されるため、他のアイテムは再レンダされない。
+  useEffect(() => {
+    return onSubscribeActivePage(index, forceUpdate);
+  }, [index, onSubscribeActivePage]);
+
   const thumbnailData = onGetThumbnail(index);
+  const isActive = onGetIsActivePage(index);
 
   // サムネイルが未取得 or ファイル切替後に再リクエスト
   useEffect(() => {
@@ -34,7 +46,7 @@ export const ThumbnailItemNode = React.memo(({
   }, [index, thumbnailData, onRequest, loadEpoch]);
 
   return (
-    <div className={`thumbnail-item ${index === currentPageIndex ? 'active' : ''}`} onClick={() => onSelect(index)}>
+    <div className={`thumbnail-item ${isActive ? 'active' : ''}`} onClick={() => onSelect(index)}>
       <div className="thumbnail-box">
         {thumbnailData ? (
           <img src={thumbnailData} alt={`Page ${index + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
@@ -57,17 +69,42 @@ interface ThumbnailPanelProps {
   onRequestThumbnail: (index: number) => void;
   onSubscribeThumbnail: (index: number, cb: () => void) => () => void;
   onGetThumbnail: (index: number) => string | undefined;
+  // issue #68: active 状態は prop drill せず subscribe で配る。
+  onSubscribeActivePage: (index: number, cb: () => void) => () => void;
+  onGetIsActivePage: (index: number) => boolean;
 }
 
 export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   width, document, currentPageIndex, loadEpoch, isOcrRunning,
   onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail,
+  onSubscribeActivePage, onGetIsActivePage,
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
   useEffect(() => {
     virtuosoRef.current?.scrollIntoView({ index: currentPageIndex, behavior: 'smooth', done: () => {} });
   }, [currentPageIndex]);
+
+  // issue #68: itemContent を毎レンダで新規生成すると Virtuoso の memoization が効かず、
+  // 親 (ThumbnailPanel) が再レンダされる度に可視範囲の全アイテムが再レンダされる。
+  // currentPageIndex に依存させない（active 状態は subscribe で配るため）ことで、
+  // ページ切替では itemContent identity を保つ。
+  const itemContent = useCallback(
+    (i: number) => (
+      <ThumbnailItemNode
+        index={i}
+        isDirty={document?.pages.get(i)?.isDirty}
+        loadEpoch={loadEpoch}
+        onSelect={onSelectPage}
+        onRequest={onRequestThumbnail}
+        onSubscribeThumbnail={onSubscribeThumbnail}
+        onGetThumbnail={onGetThumbnail}
+        onSubscribeActivePage={onSubscribeActivePage}
+        onGetIsActivePage={onGetIsActivePage}
+      />
+    ),
+    [document, loadEpoch, onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail, onSubscribeActivePage, onGetIsActivePage],
+  );
 
   return (
     <aside className="thumbnails-panel" style={{ width: `${width}px` }}>
@@ -94,18 +131,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
             ref={virtuosoRef}
             style={{ height: '100%' }}
             totalCount={document.totalPages}
-            itemContent={(i) => (
-              <ThumbnailItemNode
-                index={i}
-                currentPageIndex={currentPageIndex}
-                isDirty={document.pages.get(i)?.isDirty}
-                loadEpoch={loadEpoch}
-                onSelect={onSelectPage}
-                onRequest={onRequestThumbnail}
-                onSubscribeThumbnail={onSubscribeThumbnail}
-                onGetThumbnail={onGetThumbnail}
-              />
-            )}
+            itemContent={itemContent}
           />
         ) : <div className="placeholder">なし</div>}
       </div>

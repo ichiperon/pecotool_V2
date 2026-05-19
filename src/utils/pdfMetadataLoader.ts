@@ -59,9 +59,19 @@ export async function loadPecoToolBBoxMeta(
     const metadata = await pdf.getMetadata();
     const info = metadata.info as Record<string, unknown> | undefined;
     const custom = info?.Custom as Record<string, unknown> | undefined;
-    // R4: `||` にして空文字列でも fallback する旧挙動を維持する
-    const raw = custom?.PecoToolBBoxes || info?.PecoToolBBoxes;
-    if (typeof raw === 'string' && raw.length > 0) {
+    // 修正 (#36): 旧 `||` は custom.PecoToolBBoxes が **非文字列** truthy 値
+    // (例: 空オブジェクト {}, true, 数値) のときに info への fallback を skip し、
+    // typeof チェックで弾かれて null を返してしまっていた。candidates を string
+    // として明示的に length チェックしてから採用するように変える。
+    const candidates: unknown[] = [custom?.PecoToolBBoxes, info?.PecoToolBBoxes];
+    let raw: string | null = null;
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.length > 0) {
+        raw = candidate;
+        break;
+      }
+    }
+    if (raw !== null) {
       const parsed: unknown = JSON.parse(raw);
       if (!isValidBBoxMetaRecord(parsed)) {
         console.warn('[loadPecoToolBBoxMeta] Metadata schema validation failed');

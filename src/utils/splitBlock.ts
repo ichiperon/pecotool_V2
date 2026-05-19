@@ -56,7 +56,8 @@ export function splitBlockAtRatio(block: TextBlock, ratio: number): SplitResult 
   const text2 = graphemes.slice(splitIdx).join("");
 
   const splitAxisSize = isVertical ? block.bbox.height : block.bbox.width;
-  if (!Number.isFinite(splitAxisSize) || splitAxisSize < 2) {
+  // 8px 未満は分割すると Acrobat 上で 1〜2px 幅の子 BB ができ、選択時に空白扱いされる。
+  if (!Number.isFinite(splitAxisSize) || splitAxisSize < 8) {
     return null;
   }
 
