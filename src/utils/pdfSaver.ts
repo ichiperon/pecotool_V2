@@ -7,7 +7,7 @@ import {
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import { deflate, inflate } from 'pako';
-import { stripTextBlocks } from './pdfContentStream';
+import { stripTextBlocks, stripEmptyGraphicsStateBlocksOnly } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import {
@@ -301,6 +301,44 @@ function replacePageTextContentStreams(
     for (const streamRef of streams) {
       deleteIfUniqueRef(context, streamRef, contentRefCounts);
     }
+  }
+}
+
+/**
+ * issue #96 要件2: 未編集ページの content stream から「空 q-Q ラッパー」だけを
+ * 除去する軽量パス。BT...ET には触れない（原本の OCR テキストレイヤーを破壊しない）。
+ * フォント辞書も触らない（subset 名の参照不整合を避ける）。
+ *
+ * 過去保存で累積した「描画オペレータ無しの q/cm/cm/q/Q/Q ブロック群」を除去するだけで、
+ * ファイルサイズが目に見えて縮む（実測 1180ページ級では数MB〜十数MBの削減）。
+ *
+ * 安全性: 空 q-Q は PDF 仕様上 no-op（描画副作用なし）。任意のページに適用可能。
+ */
+function stripEmptyQBlocksOnPage(
+  pageNode: {
+    get?: (key: PDFName) => PDFObject | undefined;
+    Contents?: () => PDFObject | undefined;
+    set: (key: PDFName, value: PDFObject) => void;
+  },
+  context: typeof PDFDocument.prototype.context,
+): void {
+  const contentsKey = PDFName.of('Contents');
+  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
+  if (!rawContents) return;
+
+  const resolved = context.lookup(rawContents);
+  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+
+  for (const streamRef of streams) {
+    const stream = context.lookup(streamRef);
+    if (!(stream instanceof PDFRawStream)) continue;
+    const decoded = decodeStreamContents(stream);
+    if (decoded === null) continue;
+    const cleaned = stripEmptyGraphicsStateBlocksOnly(decoded);
+    if (bytesEqual(cleaned, decoded)) continue;
+    stream.updateContents(deflate(cleaned));
+    stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+    stream.dict.delete(PDFName.of('DecodeParms'));
   }
 }
 
@@ -792,6 +830,24 @@ export async function buildPdfDocument(
         console.warn(`[buildPdfDocument] Page ${pageIndex} block error:`, e);
       }
     }
+  }
+
+  // issue #96 要件2: dirty で無いページにも「空 q-Q ラッパー除去」だけは適用する。
+  // フルパス (pruneStalePecoToolResources + replacePageTextContentStreams + drawText 再描画)
+  // と異なり、BT...ET には触れずフォント辞書も触らないため、原本 OCR レイヤーは保持される。
+  // 過去の保存で累積した空 q-Q ブロックを安全に除去でき、再読み込み→保存だけで容量が縮む。
+  const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
+  for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+    if (dirtyPageIndexSet.has(pi)) continue;
+    const page = pdfDoc.getPage(pi);
+    stripEmptyQBlocksOnPage(
+      page.node as unknown as {
+        get?: (key: PDFName) => PDFObject | undefined;
+        Contents?: () => PDFObject | undefined;
+        set: (key: PDFName, value: PDFObject) => void;
+      },
+      pdfDoc.context,
+    );
   }
 
   if (metaChanged && infoDict) {

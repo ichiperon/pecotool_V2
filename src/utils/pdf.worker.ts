@@ -6,7 +6,7 @@ import {
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { deflate, inflate } from 'pako';
-import { stripTextBlocks } from './pdfContentStream';
+import { stripTextBlocks, stripEmptyGraphicsStateBlocksOnly } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import {
@@ -264,6 +264,36 @@ function replacePageTextContentStreams(
     for (const streamRef of streams) {
       deleteIfUniqueRef(context, streamRef, contentRefCounts);
     }
+  }
+}
+
+/**
+ * issue #96 要件2: 未編集ページの content stream から「空 q-Q ラッパー」だけを除去する軽量パス。
+ * 詳細は pdfSaver.ts 側参照（同一ロジック）。
+ */
+function stripEmptyQBlocksOnPage(
+  pageNode: {
+    get?: (key: PDFName) => PDFObject | undefined;
+    Contents?: () => PDFObject | undefined;
+    set: (key: PDFName, value: PDFObject) => void;
+  },
+  context: typeof PDFDocument.prototype.context,
+): void {
+  const contentsKey = PDFName.of('Contents');
+  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
+  if (!rawContents) return;
+  const resolved = context.lookup(rawContents);
+  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+  for (const streamRef of streams) {
+    const stream = context.lookup(streamRef);
+    if (!(stream instanceof PDFRawStream)) continue;
+    const decoded = decodeStreamContents(stream);
+    if (decoded === null) continue;
+    const cleaned = stripEmptyGraphicsStateBlocksOnly(decoded);
+    if (bytesEqual(cleaned, decoded)) continue;
+    stream.updateContents(deflate(cleaned));
+    stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+    stream.dict.delete(PDFName.of('DecodeParms'));
   }
 }
 
@@ -638,6 +668,21 @@ async function handleSavePdf(
 
   if (metaChanged && infoDict) {
     infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
+  }
+
+  // issue #96 要件2: 未編集ページにも空 q-Q ラッパー除去のみ適用 (詳細は pdfSaver.ts 側参照)。
+  const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
+  for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+    if (dirtyPageIndexSet.has(pi)) continue;
+    const page = pdfDoc.getPage(pi);
+    stripEmptyQBlocksOnPage(
+      page.node as unknown as {
+        get?: (key: PDFName) => PDFObject | undefined;
+        Contents?: () => PDFObject | undefined;
+        set: (key: PDFName, value: PDFObject) => void;
+      },
+      pdfDoc.context,
+    );
   }
 
   // 修正 (#30): Catalog の /Version を消す (詳細は pdfSaver.ts 側コメント参照)。

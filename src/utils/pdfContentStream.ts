@@ -439,6 +439,15 @@ function matchesQToken(data: Uint8Array, i: number, lower: boolean): boolean {
  * 文字列リテラル `(...)` / hex `<...>` / コメント `%` / inline image `BI...EI`
  * の中にある "q" "Q" バイトは状態機械により誤認識されない。
  */
+/**
+ * issue #96 要件2: BT...ET 削除を伴わない単独パス。未編集ページの軽量クリーンアップ用。
+ * 描画オペレータを含まない `q...Q` バランス対のみ除去する。
+ * 描画への影響は無いため (空 q-Q は no-op)、任意のページに安全に適用可能。
+ */
+export function stripEmptyGraphicsStateBlocksOnly(decoded: Uint8Array): Uint8Array {
+  return stripEmptyGraphicsStateBlocks(decoded);
+}
+
 function stripEmptyGraphicsStateBlocks(decoded: Uint8Array): Uint8Array {
   const len = decoded.length;
   const result = new Uint8Array(len);
