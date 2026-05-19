@@ -188,4 +188,29 @@ describe('Toolbar', () => {
     const { container } = renderToolbar({ showSettingsDropdown: true })
     expect(container.querySelector('.ocr-opacity-slider')).toBeTruthy()
   })
+
+  // ── #103: OCR 実行中は検索と置換ボタンを disabled にする ─────────
+  it('C-TB-17 (#103): Replace ボタンは isFileLoaded=true でも isOcrRunning=true なら disabled', () => {
+    renderToolbar({ isFileLoaded: true, isOcrRunning: true, ocrProgress: { current: 1, total: 5 } })
+    expect(getButton('検索と置換 (OCR実行中は無効)').disabled).toBe(true)
+  })
+
+  it('C-TB-18 (#103): Replace ボタンは通常時 (OCR 非実行 + ファイル読込済み) は enabled', () => {
+    renderToolbar({ isFileLoaded: true, isOcrRunning: false })
+    expect(getButton('検索と置換 (Ctrl+H)').disabled).toBe(false)
+  })
+
+  it('C-TB-19 (#103): isOcrRunning=true で disabled、クリックしても onOpenReplace が呼ばれない', () => {
+    const onOpenReplace = vi.fn()
+    renderToolbar({ isFileLoaded: true, isOcrRunning: true, ocrProgress: { current: 1, total: 5 }, onOpenReplace })
+    const btn = getButton('検索と置換 (OCR実行中は無効)')
+    fireEvent.click(btn)
+    // disabled なボタンへの click は handler に届かない
+    expect(onOpenReplace).not.toHaveBeenCalled()
+  })
+
+  it('C-TB-20 (#103): isFileLoaded=false でも (OCR 実行中) Replace は disabled (既存仕様維持)', () => {
+    renderToolbar({ isFileLoaded: false, isOcrRunning: true, ocrProgress: { current: 1, total: 5 } })
+    expect(getButton('検索と置換 (OCR実行中は無効)').disabled).toBe(true)
+  })
 })

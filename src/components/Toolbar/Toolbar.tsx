@@ -98,7 +98,13 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
         <button onClick={props.onGroup} title="グループ化" disabled={props.selectedIdsCount < 2}><Group size={18} /><span>グループ化</span></button>
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>
         <button onClick={props.onRemoveSpaces} title="スペース削除 (Ctrl+Shift+Space)" disabled={props.selectedIdsCount === 0}><RemoveFormatting size={18} /><span>スペース削除</span></button>
-        <button onClick={props.onOpenReplace} title="検索と置換 (Ctrl+H)" disabled={!props.isFileLoaded}><Replace size={18} /><span>検索と置換</span></button>
+        <button
+          onClick={props.onOpenReplace}
+          title={props.isOcrRunning ? '検索と置換 (OCR実行中は無効)' : '検索と置換 (Ctrl+H)'}
+          /* #103: OCR 実行中は Replace を開けないようにする。
+             置換結果が後追い OCR で上書きされる事故を防ぐ。 */
+          disabled={!props.isFileLoaded || props.isOcrRunning}
+        ><Replace size={18} /><span>検索と置換</span></button>
         <button onClick={props.onDelete} title="削除" className="danger" disabled={props.selectedIdsCount === 0}><Trash2 size={18} /></button>
       </div>
       

@@ -20,6 +20,13 @@ interface ShortcutActions {
   searchInputRef: React.RefObject<HTMLInputElement | null>;
   /** issue #93: Ctrl+H で Find & Replace ダイアログを開く。配線されない環境では undefined */
   openReplace?: () => void;
+  /**
+   * #102/#103: OCR 実行中フラグ。Ctrl+O / Ctrl+H 発火前にチェックし、
+   * 走っている場合はアクションを no-op にする (handleOpen / openReplace は
+   * 内部でもガードしているが、ここで preventDefault も含めて止める方が
+   * 編集領域へのキー伝播を確実に防げる)。
+   */
+  isOcrRunning?: boolean;
 }
 
 export function useKeyboardShortcuts(actions: ShortcutActions) {
@@ -85,6 +92,9 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       const isEditing = isFormEditing || isContentEditing;
       if ((e.ctrlKey || e.metaKey) && e.key === 'o' && !isEditing) {
         e.preventDefault();
+        // #102: OCR 実行中の Ctrl+O は no-op (handleOpen 内のガード trustが Toast を出す経路は
+        // useFileOperations 側だが、ここで preventDefault しておくことで編集領域への伝播を防ぐ)
+        if (ac.isOcrRunning) return;
         ac.handleOpen();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
@@ -104,7 +114,9 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
         window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'h' && !isEditing) {
         // issue #93: Ctrl+H で Find & Replace ダイアログ。編集中は素通り (ブラウザ既定の履歴等は出ないが contentEditable では IME 等の衝突を避ける)。
+        // #103: OCR 実行中はそもそも Replace を開かない (置換結果が OCR で後追い上書きされる)。
         e.preventDefault();
+        if (ac.isOcrRunning) return;
         ac.openReplace?.();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'b' && !isEditing) {
         e.preventDefault();
