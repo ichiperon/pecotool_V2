@@ -224,6 +224,12 @@ export function useFileOperations(
   setIsSaving?: (v: boolean) => void,
   setIsLoadingFile?: (v: boolean) => void,
   onOpenComplete?: (doc: import('../types').PecoDocument) => void,
+  /**
+   * issue #102: OCR 実行中の handleOpen ガード用。
+   * App 側で useOcrEngine の isOcrRunning を ref 化して渡す。
+   * folder OCR ループは内部で handleOpen を呼ぶため、bypassOcrGuard option で除外する。
+   */
+  isOcrRunningRef?: React.RefObject<boolean>,
 ) {
   const setDocument = usePecoStore((s) => s.setDocument);
   const setDocumentFilePath = usePecoStore((s) => s.setDocumentFilePath);
@@ -280,11 +286,20 @@ export function useFileOperations(
     safeWriteRecent(next);
   };
 
-  const handleOpen = async (explicitPath?: string): Promise<boolean> => {
+  const handleOpen = async (
+    explicitPath?: string,
+    opts?: { bypassOcrGuard?: boolean },
+  ): Promise<boolean> => {
     perf.mark('open.start', { explicit: !!explicitPath });
     try {
       if (isSavingRef.current) {
         showToast("保存中はPDFを開けません。");
+        return false;
+      }
+      // issue #102: OCR 実行中の Open は古い doc 参照で新ドキュメントへの汚染を起こす。
+      // folder OCR ループは bypassOcrGuard で素通しさせる (内部から再入するため)。
+      if (isOcrRunningRef?.current && !opts?.bypassOcrGuard) {
+        showToast('OCR実行中はPDFを開けません。');
         return false;
       }
 
