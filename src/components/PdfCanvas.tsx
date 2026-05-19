@@ -39,6 +39,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
   const toggleDrawingMode = usePecoStore((s) => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore((s) => s.toggleSplitMode);
   const toggleSelection = usePecoStore((s) => s.toggleSelection);
+  const setSelectedIds = usePecoStore((s) => s.setSelectedIds);
   const clearSelection = usePecoStore((s) => s.clearSelection);
   const pushAction = usePecoStore((s) => s.pushAction);
 
@@ -61,7 +62,9 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
     pageIndex,
     zoom,
     getPageData,
+    selectedIds,
     updatePageData,
+    setSelectedIds,
     toggleDrawingMode,
     toggleSplitMode,
   });

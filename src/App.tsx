@@ -107,6 +107,8 @@ function App() {
   const { recentFiles } = useRecentFiles();
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
+  const folderOpenPdfRef = useRef<(filePath: string) => Promise<boolean>>(async () => false);
+  const folderSavePdfRef = useRef<() => Promise<void>>(async () => {});
 
   const [reorderThreshold, setReorderThreshold] = useState(() => readReorderThreshold());
 
@@ -114,11 +116,24 @@ function App() {
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
   const { loadEpoch, subscribeThumbnail, getThumbnail, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
-  const { isOcrRunning, ocrProgress, runOcrCurrentPage, runOcrAllPages, cancelOcr, checkAndPromptOcrZero } = useOcrEngine(showToast);
+  const {
+    isOcrRunning,
+    ocrProgress,
+    runOcrCurrentPage,
+    runOcrAllPages,
+    runOcrFolder,
+    cancelOcr,
+    checkAndPromptOcrZero
+  } = useOcrEngine(showToast, {
+    openPdf: (path) => folderOpenPdfRef.current(path),
+    savePdf: () => folderSavePdfRef.current(),
+  });
   const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
     (doc) => { checkAndPromptOcrZero(doc); }
   );
+  folderOpenPdfRef.current = handleOpen;
+  folderSavePdfRef.current = handleSave;
 
   const {
     pendingBackups,
@@ -282,10 +297,34 @@ function App() {
     updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
   };
 
+  const getVisiblePdfCenter = useCallback(() => {
+    const viewer = viewerRef.current;
+    const wrapper = viewer?.querySelector<HTMLElement>('.canvas-wrapper');
+    if (!viewer || !wrapper) return undefined;
+
+    const viewerRect = viewer.getBoundingClientRect();
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const left = Math.max(viewerRect.left, wrapperRect.left);
+    const right = Math.min(viewerRect.right, wrapperRect.right);
+    const top = Math.max(viewerRect.top, wrapperRect.top);
+    const bottom = Math.min(viewerRect.bottom, wrapperRect.bottom);
+    if (right <= left || bottom <= top) return undefined;
+
+    const scale = zoom / 100;
+    return {
+      x: ((left + right) / 2 - wrapperRect.left) / scale,
+      y: ((top + bottom) / 2 - wrapperRect.top) / scale,
+    };
+  }, [viewerRef, zoom]);
+
+  const handlePasteClipboard = useCallback(() => {
+    pasteClipboard(getVisiblePdfCenter());
+  }, [getVisiblePdfCenter, pasteClipboard]);
+
   // --- useKeyboardShortcuts ---
   useKeyboardShortcuts({
     undo, redo, fitToScreen, handleSave, handleSaveAs, copySelected,
-    pasteClipboard, handleDelete, toggleDrawingMode, toggleSplitMode,
+    pasteClipboard: handlePasteClipboard, handleDelete, toggleDrawingMode, toggleSplitMode,
     handleGroup, setZoom, zoom, setIsAutoFit,
     searchInputRef, handleRemoveSpaces,
     handleOpen,
@@ -436,6 +475,7 @@ function App() {
         onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
         onRunOcrCurrentPage={runOcrCurrentPage}
         onRunOcrAllPages={runOcrAllPages}
+        onRunOcrFolder={runOcrFolder}
         onCancelOcr={cancelOcr}
         onClearOcrCurrentPage={handleClearOcrCurrentPage}
         onClearOcrAllPages={handleClearOcrAllPages}
@@ -497,7 +537,11 @@ function App() {
             <div className="ocr-processing-overlay">
               <div className="loading-spinner" />
               <div className="loading-message">
-                {ocrProgress ? `OCR処理中... (${ocrProgress.current}/${ocrProgress.total})` : 'OCR処理中...'}
+                {ocrProgress
+                  ? ocrProgress.fileTotal
+                    ? `OCR処理中... (${ocrProgress.fileCurrent}/${ocrProgress.fileTotal}ファイル ${ocrProgress.current}/${ocrProgress.total}ページ)`
+                    : `OCR処理中... (${ocrProgress.current}/${ocrProgress.total})`
+                  : 'OCR処理中...'}
               </div>
             </div>
           )}

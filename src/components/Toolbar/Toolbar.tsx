@@ -23,7 +23,13 @@ interface ToolbarProps {
   isPreviewOpen: boolean;
   showSettingsDropdown: boolean;
   isOcrRunning: boolean;
-  ocrProgress: { current: number; total: number } | null;
+  ocrProgress: {
+    current: number;
+    total: number;
+    fileCurrent?: number;
+    fileTotal?: number;
+    fileName?: string;
+  } | null;
 
   onUndo: () => void;
   onRedo: () => void;
@@ -43,6 +49,7 @@ interface ToolbarProps {
   onToggleSettingsDropdown: (e: React.MouseEvent) => void;
   onRunOcrCurrentPage: () => void;
   onRunOcrAllPages: () => void;
+  onRunOcrFolder: () => void;
   onCancelOcr: () => void;
   onClearOcrCurrentPage: () => void;
   onClearOcrAllPages: () => void;
@@ -132,7 +139,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
           <button
             className={`dropdown-btn ${showOcrDropdown ? 'active' : ''}`}
             onClick={(e) => { e.stopPropagation(); setShowOcrDropdown(!showOcrDropdown); }}
-            disabled={!props.isFileLoaded || props.isOcrRunning}
+            disabled={props.isOcrRunning}
             title="OCR実行"
             style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
           >
@@ -142,7 +149,9 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
             }
             <span>
               {props.isOcrRunning && props.ocrProgress
-                ? `OCR ${props.ocrProgress.current}/${props.ocrProgress.total}`
+                ? props.ocrProgress.fileTotal
+                  ? `OCR ${props.ocrProgress.fileCurrent}/${props.ocrProgress.fileTotal} ${props.ocrProgress.current}/${props.ocrProgress.total}`
+                  : `OCR ${props.ocrProgress.current}/${props.ocrProgress.total}`
                 : 'OCR実行'}
             </span>
             {!props.isOcrRunning && <ChevronDown size={14} style={{ marginLeft: '2px' }} />}
@@ -152,14 +161,22 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
               <div
                 className="recent-item"
                 onClick={() => { setShowOcrDropdown(false); props.onRunOcrCurrentPage(); }}
+                style={!props.isFileLoaded ? { opacity: 0.5, pointerEvents: 'none' } : undefined}
               >
                 現在のページ
               </div>
               <div
                 className="recent-item"
                 onClick={() => { setShowOcrDropdown(false); props.onRunOcrAllPages(); }}
+                style={!props.isFileLoaded ? { opacity: 0.5, pointerEvents: 'none' } : undefined}
               >
                 全ページ
+              </div>
+              <div
+                className="recent-item"
+                onClick={() => { setShowOcrDropdown(false); props.onRunOcrFolder(); }}
+              >
+                フォルダ内PDF
               </div>
             </div>
           )}

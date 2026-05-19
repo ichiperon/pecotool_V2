@@ -1,15 +1,52 @@
+import { invoke } from '@tauri-apps/api/core';
 import { logger } from '../utils/logger';
 
 let fontBytesCache: ArrayBuffer | null = null;
 let fontLoadPromise: Promise<ArrayBuffer | null> | null = null;
 let fallbackFontBytesCache: ArrayBuffer[] | null = null;
 let fallbackFontLoadPromise: Promise<ArrayBuffer[] | null> | null = null;
+let primaryFontKind: 'meiryo' | 'ipamj' | null = null;
+let systemFontDisabledForSession = false;
 
-const FALLBACK_FONT_PATHS = [
+const SYMBOL_FALLBACK_FONT_PATHS = [
   '/fonts/NotoSans-Regular.ttf',
   '/fonts/NotoSansSymbols-Regular.ttf',
   '/fonts/NotoSansSymbols2-Regular.ttf',
 ];
+
+function getFallbackFontPaths(): string[] {
+  if (primaryFontKind === 'meiryo') return ['/fonts/IPAmjMincho.ttf', ...SYMBOL_FALLBACK_FONT_PATHS];
+  return SYMBOL_FALLBACK_FONT_PATHS;
+}
+
+function toArrayBuffer(bytes: number[] | Uint8Array): ArrayBuffer {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+}
+
+export function getPrimaryFontKind(): 'meiryo' | 'ipamj' | null {
+  return primaryFontKind;
+}
+
+export function disableSystemFontForSession(): void {
+  systemFontDisabledForSession = true;
+  fontBytesCache = null;
+  fontLoadPromise = null;
+  fallbackFontBytesCache = null;
+  fallbackFontLoadPromise = null;
+  primaryFontKind = null;
+}
+
+export async function loadBundledIpAmjFontLazy(): Promise<ArrayBuffer | null> {
+  const res = await fetch('/fonts/IPAmjMincho.ttf');
+  if (!res.ok) {
+    console.error('[loadFontLazy] Failed to fetch bundled font: status', res.status);
+    return null;
+  }
+  fontBytesCache = await res.arrayBuffer();
+  primaryFontKind = 'ipamj';
+  return fontBytesCache;
+}
 
 /**
  * フォントを遅延ロードする。初回呼び出し時にfetchし、以降はキャッシュを返す。
@@ -20,20 +57,23 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
 
   fontLoadPromise = (async () => {
     try {
-      // pdf-lib/fontkit は WOFF2 を直接食わせると loca/glyf 出力が破損するため、
-      // ビルド時に decompress しておいた TTF を使う。
-      // public/fonts/IPAexGothic.ttf は wawoff2 で生成 (test-scratch/decompress_font.mjs)。
-      const res = await fetch('/fonts/IPAexGothic.ttf');
-      if (res.ok) {
-        fontBytesCache = await res.arrayBuffer();
-        fontLoadPromise = null;
-        logger.log('[loadFontLazy] Font loaded successfully');
-        return fontBytesCache;
-      } else {
-        console.error('[loadFontLazy] Failed to fetch font: status', res.status);
-        fontLoadPromise = null;
-        return null;
+      if (!systemFontDisabledForSession) {
+        try {
+          const meiryoBytes = await invoke<number[] | Uint8Array>('load_meiryo_font');
+          fontBytesCache = toArrayBuffer(meiryoBytes);
+          primaryFontKind = 'meiryo';
+          fontLoadPromise = null;
+          logger.log('[loadFontLazy] Meiryo font loaded successfully');
+          return fontBytesCache;
+        } catch (err) {
+          console.warn('[loadFontLazy] Meiryo unavailable; falling back to bundled IPAmjMincho:', err);
+        }
       }
+
+      fontBytesCache = await loadBundledIpAmjFontLazy();
+      fontLoadPromise = null;
+      if (fontBytesCache) logger.log('[loadFontLazy] Bundled IPAmjMincho loaded successfully');
+      return fontBytesCache;
     } catch (err) {
       console.error('[loadFontLazy] Error loading font:', err);
       fontLoadPromise = null; // リトライ可能にする
@@ -51,7 +91,7 @@ export async function loadFallbackFontsLazy(): Promise<ArrayBuffer[] | null> {
   fallbackFontLoadPromise = (async () => {
     try {
       const buffers: ArrayBuffer[] = [];
-      for (const path of FALLBACK_FONT_PATHS) {
+      for (const path of getFallbackFontPaths()) {
         const res = await fetch(path);
         if (!res.ok) {
           console.error('[loadFallbackFontsLazy] Failed to fetch font:', path, res.status);

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { usePecoStore } from '../store/pecoStore';
+import { usePecoStore, selectDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { logger } from '../utils/logger';
 import { perf } from '../utils/perfLogger';
@@ -20,7 +20,8 @@ function toAssetUrl(filePath: string): string {
 }
 
 export function useThumbnailPanel() {
-  const { document, currentPageIndex } = usePecoStore();
+  const document = usePecoStore(selectDocument);
+  const currentPageIndex = usePecoStore(selectCurrentPageIndex);
 
   // サムネイルデータはRefで保持（Reactの外）— 更新時に全アイテム再レンダリングを防ぐ
   const thumbnailsRef = useRef<Map<number, string>>(new Map());

@@ -251,6 +251,82 @@ describe('OcrCard', () => {
     })
   })
 
+  describe('C-OC-13: Shift+ArrowUp/Down で選択拡張', () => {
+    it('Shift+ArrowDown → onExtendSelection("down") が呼ばれる', () => {
+      const onNavigate = vi.fn()
+      const onExtendSelection = vi.fn()
+      const { container } = render(
+        <OcrCard
+          block={makeBlock()}
+          pageIndex={0}
+          onNavigate={onNavigate}
+          onExtendSelection={onExtendSelection}
+        />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowDown', shiftKey: true })
+
+      expect(onExtendSelection).toHaveBeenCalledWith('down')
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
+    it('Shift+ArrowUp → onExtendSelection("up") が呼ばれる', () => {
+      const onNavigate = vi.fn()
+      const onExtendSelection = vi.fn()
+      const { container } = render(
+        <OcrCard
+          block={makeBlock()}
+          pageIndex={0}
+          onNavigate={onNavigate}
+          onExtendSelection={onExtendSelection}
+        />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowUp', shiftKey: true })
+
+      expect(onExtendSelection).toHaveBeenCalledWith('up')
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('C-OC-14: Ctrl+Shift+Arrow は Shift 動作を優先', () => {
+    it('Ctrl+Shift+ArrowDown → ナビゲートせず選択拡張する', () => {
+      const onNavigate = vi.fn()
+      const onExtendSelection = vi.fn()
+      const { container } = render(
+        <OcrCard
+          block={makeBlock()}
+          pageIndex={0}
+          onNavigate={onNavigate}
+          onExtendSelection={onExtendSelection}
+        />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowDown', ctrlKey: true, shiftKey: true })
+
+      expect(onExtendSelection).toHaveBeenCalledWith('down')
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
+    it('Ctrl+Shift+ArrowUp → ナビゲートせず選択拡張する', () => {
+      const onNavigate = vi.fn()
+      const onExtendSelection = vi.fn()
+      const { container } = render(
+        <OcrCard
+          block={makeBlock()}
+          pageIndex={0}
+          onNavigate={onNavigate}
+          onExtendSelection={onExtendSelection}
+        />
+      )
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      fireEvent.keyDown(content, { key: 'ArrowUp', ctrlKey: true, shiftKey: true })
+
+      expect(onExtendSelection).toHaveBeenCalledWith('up')
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+  })
+
   describe('C-OC-16: 未選択カードの右クリックで選択', () => {
     it('selectedIds が空の状態で contextMenu → block.id が selectedIds に含まれる', () => {
       usePecoStore.setState({ selectedIds: new Set<string>() })

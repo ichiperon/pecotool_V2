@@ -43,6 +43,7 @@ vi.mock('@tauri-apps/api/path', () => ({
 const makeMockPage = (width = 595, height = 842) => ({
   getViewport: vi.fn(() => ({ width, height })),
   render: vi.fn(() => ({ promise: Promise.resolve() })),
+  cleanup: vi.fn(),
 });
 const makeMockPdf = (totalPages: number) => ({
   numPages: totalPages,

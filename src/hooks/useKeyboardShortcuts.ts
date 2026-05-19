@@ -23,10 +23,15 @@ interface ShortcutActions {
 export function useKeyboardShortcuts(actions: ShortcutActions) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const tag = target?.tagName;
+      const isFormEditing = tag === 'INPUT' || tag === 'TEXTAREA';
+      const isContentEditing = !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
+      const isEditing = isFormEditing || isContentEditing;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !isEditing) {
         if (e.shiftKey) actions.redo();
         else actions.undo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y' && !isEditing) {
         actions.redo();
       } else if ((e.ctrlKey || e.metaKey) && e.key === '0') {
         e.preventDefault();
@@ -53,8 +58,12 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const tag = target?.tagName;
+      const isFormEditing = tag === 'INPUT' || tag === 'TEXTAREA';
+      const isContentEditing = !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
+      const isOcrCardContent = !!target?.closest('.ocr-card-content');
+      const isEditing = isFormEditing || isContentEditing;
       if ((e.ctrlKey || e.metaKey) && e.key === 'o' && !isEditing) {
         e.preventDefault();
         actions.handleOpen();
@@ -74,13 +83,13 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
-      } else if (e.key === 'F10' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'b' && !isEditing) {
         e.preventDefault();
         actions.toggleDrawingMode();
-      } else if (e.key === 'F11' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'x' && !isEditing) {
         e.preventDefault();
         actions.toggleSplitMode();
-      } else if (e.key === 'F12' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'g' && !isFormEditing && (!isContentEditing || isOcrCardContent)) {
         e.preventDefault();
         actions.handleGroup();
       }

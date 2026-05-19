@@ -23,10 +23,12 @@ export function HelpMenu({ helpMenu }: Props) {
         <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd><span>元に戻す</span></div>
         <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd><span>やり直し</span></div>
         <div className="help-divider" />
-        <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F10</kbd><span>追加</span></div>
-        <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F11</kbd><span>分割</span></div>
-        <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F12</kbd><span>グループ化</span></div>
+        <div className="help-item"><kbd>Ctrl</kbd>+<kbd>B</kbd><span>追加</span></div>
+        <div className="help-item"><kbd>Ctrl</kbd>+<kbd>X</kbd><span>分割</span></div>
+        <div className="help-item"><kbd>Ctrl</kbd>+<kbd>G</kbd><span>グループ化</span></div>
         <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd><span>スペース削除</span></div>
+        <div className="help-item"><kbd>Ctrl</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd><span>BB移動</span></div>
+        <div className="help-item"><kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd><span>隣接OCR/BBカード追加選択</span></div>
         <div className="help-divider" />
         <div className="help-item"><kbd>Ctrl</kbd>+<kbd>C</kbd><span>コピー</span></div>
         <div className="help-item"><kbd>Ctrl</kbd>+<kbd>V</kbd><span>貼り付け</span></div>

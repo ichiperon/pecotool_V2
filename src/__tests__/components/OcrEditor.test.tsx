@@ -102,11 +102,24 @@ const blocks = [
   makeBlock('b3', 'cherry', 2),
 ]
 
-function setup() {
-  const doc = makeDoc(blocks)
-  usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
+function setup(testBlocks = blocks, selectedIds: string[] = []) {
+  const doc = makeDoc(testBlocks)
+  usePecoStore.setState({
+    document: doc,
+    currentPageIndex: 0,
+    selectedIds: new Set(selectedIds),
+    lastSelectedId: selectedIds[selectedIds.length - 1] ?? null,
+  } as any)
   const searchInputRef = { current: null }
   return render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
+}
+
+function getCardContents(container: HTMLElement) {
+  return Array.from(container.querySelectorAll('.ocr-card-content')) as HTMLElement[]
+}
+
+function expectSelectedIds(expected: string[]) {
+  expect(Array.from(usePecoStore.getState().selectedIds).sort()).toEqual([...expected].sort())
 }
 
 afterEach(() => cleanup())
@@ -294,6 +307,164 @@ describe('OcrEditor', () => {
       expect(ids.has('b2')).toBe(true)
       expect(ids.has('b3')).toBe(true)
       expect(ids.has('b4')).toBe(false)
+    })
+  })
+
+  describe('C-ED-07: キーボード選択とナビゲーション', () => {
+    const keyboardBlocks = [
+      makeBlock('b1', 'first', 0),
+      makeBlock('b2', 'second', 1),
+      makeBlock('b3', 'third', 2),
+      makeBlock('b4', 'fourth', 3),
+    ]
+
+    it('Shift+ArrowDown → 現在カードと次カードが選択に追加される', () => {
+      const { container } = setup(keyboardBlocks, ['b2'])
+      const contents = getCardContents(container)
+
+      fireEvent.keyDown(contents[1], { key: 'ArrowDown', shiftKey: true })
+
+      expectSelectedIds(['b2', 'b3'])
+    })
+
+    it('Shift+ArrowUp → 現在カードと前カードが選択に追加される', () => {
+      const { container } = setup(keyboardBlocks, ['b3'])
+      const contents = getCardContents(container)
+
+      fireEvent.keyDown(contents[2], { key: 'ArrowUp', shiftKey: true })
+
+      expectSelectedIds(['b2', 'b3'])
+    })
+
+    it('Ctrl+ArrowDown → 従来通り次カードのみを選択する', () => {
+      const { container } = setup(keyboardBlocks, ['b1', 'b3'])
+      const contents = getCardContents(container)
+
+      fireEvent.keyDown(contents[0], { key: 'ArrowDown', ctrlKey: true })
+
+      expectSelectedIds(['b2'])
+    })
+
+    it('Ctrl+Shift+ArrowDown → Ctrl ナビゲーションではなく Shift 選択拡張になる', () => {
+      const { container } = setup(keyboardBlocks, ['b2'])
+      const contents = getCardContents(container)
+
+      fireEvent.keyDown(contents[1], { key: 'ArrowDown', ctrlKey: true, shiftKey: true })
+
+      expectSelectedIds(['b2', 'b3'])
+    })
+
+    it('検索フィルター中の Ctrl+ArrowDown は表示カード間だけを移動する', async () => {
+      const user = userEvent.setup()
+      const filteredNavBlocks = [
+        makeBlock('b1', 'visible match first', 0),
+        makeBlock('b2', 'hidden middle', 1),
+        makeBlock('b3', 'visible match second', 2),
+      ]
+      const { container } = setup(filteredNavBlocks, ['b1'])
+
+      await user.type(screen.getByPlaceholderText('検索...'), 'match')
+      const contents = getCardContents(container)
+      expect(contents.length).toBe(2)
+
+      fireEvent.keyDown(contents[0], { key: 'ArrowDown', ctrlKey: true })
+
+      expectSelectedIds(['b3'])
+    })
+
+    it('先頭で Shift+ArrowUp、末尾で Ctrl+ArrowDown は選択を変えない', () => {
+      const { container } = setup(keyboardBlocks, ['b1'])
+      const contents = getCardContents(container)
+
+      fireEvent.keyDown(contents[0], { key: 'ArrowUp', shiftKey: true })
+      expectSelectedIds(['b1'])
+
+      usePecoStore.setState({ selectedIds: new Set(['b4']), lastSelectedId: 'b4' } as any)
+      fireEvent.keyDown(contents[3], { key: 'ArrowDown', ctrlKey: true })
+
+      expectSelectedIds(['b4'])
+    })
+
+    it('window Ctrl+ArrowDown は lastSelectedId の次カードのみを選択する', () => {
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1', 'b2']), lastSelectedId: 'b2' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+
+      expectSelectedIds(['b3'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b3')
+    })
+
+    it('window Shift+ArrowDown は lastSelectedId から次カードへ選択を拡張する', () => {
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1', 'b2']), lastSelectedId: 'b2' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', shiftKey: true })
+
+      expectSelectedIds(['b1', 'b2', 'b3'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b3')
+    })
+
+    it('window Shift+ArrowUp は下端から逆方向に戻ると選択下端を解除する', () => {
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2', 'b3', 'b4']), lastSelectedId: 'b4' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowUp', shiftKey: true })
+
+      expectSelectedIds(['b2', 'b3'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b3')
+    })
+
+    it('window Shift+ArrowDown は上端から逆方向に戻ると選択上端を解除する', () => {
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1', 'b2', 'b3']), lastSelectedId: 'b1' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', shiftKey: true })
+
+      expectSelectedIds(['b2', 'b3'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b2')
+    })
+
+    it('検索フィルター中の window Ctrl+ArrowDown は表示カード間だけを移動する', async () => {
+      const user = userEvent.setup()
+      const filteredNavBlocks = [
+        makeBlock('b1', 'visible match first', 0),
+        makeBlock('b2', 'hidden middle', 1),
+        makeBlock('b3', 'visible match second', 2),
+      ]
+      setup(filteredNavBlocks)
+
+      await user.type(screen.getByPlaceholderText('検索...'), 'match')
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+
+      expectSelectedIds(['b3'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b3')
+    })
+
+    it('検索入力欄にフォーカスがある場合は window キーハンドラーが動作しない', () => {
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2']), lastSelectedId: 'b2' } as any)
+      })
+      const searchBox = screen.getByPlaceholderText('検索...')
+
+      searchBox.focus()
+      fireEvent.keyDown(searchBox, { key: 'ArrowDown', ctrlKey: true })
+
+      expectSelectedIds(['b2'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b2')
     })
   })
 

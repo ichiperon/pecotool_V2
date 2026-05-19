@@ -20,11 +20,21 @@ export type SavePdfRequestData = {
   fallbackFontBytes?: ArrayBuffer[];
 } & SavePdfSource;
 
+export type SkippedPdfTextReason = 'control-character' | 'unsupported-font';
+
+export interface SkippedPdfTextChar {
+  char: string;
+  codePoint: string;
+  count: number;
+  pages: number[];
+  reason: SkippedPdfTextReason;
+}
+
 // main thread -> Worker (pdf.worker.ts) のメッセージ契約
 export type SavePdfWorkerRequest =
   | { type: 'SAVE_PDF'; data: SavePdfRequestData };
 
 // Worker (pdf.worker.ts) -> main thread のメッセージ契約
 export type SavePdfWorkerResponse =
-  | { type: 'SAVE_PDF_SUCCESS'; data: Uint8Array }
+  | { type: 'SAVE_PDF_SUCCESS'; data: Uint8Array; skippedChars?: SkippedPdfTextChar[] }
   | { type: 'ERROR'; message: string };

@@ -2,12 +2,13 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
-import { usePecoStore } from '../store/pecoStore';
+import { usePecoStore, selectDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
 
 export function useThumbnailWindow() {
   const [isThumbnailOpen, setIsThumbnailOpen] = useState(false);
-  const { document, currentPageIndex } = usePecoStore();
+  const document = usePecoStore(selectDocument);
+  const currentPageIndex = usePecoStore(selectCurrentPageIndex);
   // Dirty なページインデックス一覧を追跡
   const prevDirtyRef = useRef<string>('');
 

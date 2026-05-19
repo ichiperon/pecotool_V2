@@ -46,6 +46,8 @@ vi.mock('../../hooks/useFontLoader', () => ({
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
 import { useFileOperations } from '../../hooks/useFileOperations';
 import { loadPDF } from '../../utils/pdfLoader';
+import { usePecoStore } from '../../store/pecoStore';
+import type { PecoDocument } from '../../types';
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -123,5 +125,50 @@ describe('useFileOperations addToRecent (sessionStorage narrow)', () => {
     });
 
     expect(readRecent()).toEqual(['/dup.pdf', '/old.pdf']);
+  });
+});
+
+describe('useFileOperations selector subscription (re-render avoidance)', () => {
+  it('actions だけを subscribe しているため document 更新で再 render しない', () => {
+    // pecoStore を一旦リセットしてから初期 doc を投入
+    const initialDoc: PecoDocument = {
+      filePath: '/initial.pdf',
+      fileName: 'initial.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map(),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: initialDoc });
+
+    let renderCount = 0;
+    const showToast = vi.fn();
+    renderHook(() => {
+      renderCount++;
+      return useFileOperations(showToast);
+    });
+
+    // 初回 render 後の基準値
+    const baseline = renderCount;
+
+    // document を全く別オブジェクトに差し替える (テキスト編集相当の updatePageData
+    // でも document リファレンスは新オブジェクトになる)
+    act(() => {
+      const nextDoc: PecoDocument = {
+        ...initialDoc,
+        pages: new Map(initialDoc.pages),
+      } as unknown as PecoDocument;
+      usePecoStore.setState({ document: nextDoc });
+    });
+
+    // 直接無関係なフィールドを変えても発火しないこと
+    act(() => {
+      usePecoStore.setState({ zoom: 150 });
+    });
+    act(() => {
+      usePecoStore.setState({ selectedIds: new Set(['x']) });
+    });
+
+    // actions しか subscribe していないので、これらの変更では再 render が発生しない
+    expect(renderCount).toBe(baseline);
   });
 });

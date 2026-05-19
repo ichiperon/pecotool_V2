@@ -15,7 +15,8 @@
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { PDFArray, PDFDict, PDFDocument, PDFName, type PDFObject } from '@cantoo/pdf-lib';
+import { inflate } from 'pako';
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, type PDFObject } from '@cantoo/pdf-lib';
 
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (p: string) => p }));
 vi.mock('@tauri-apps/plugin-fs', () => ({
@@ -45,7 +46,10 @@ const hasRealPdf = REAL_PDF_PATH !== '';
 
 const OUT_INJECTED = outputPath(REAL_PDF_PATH, '_acrobat_compat_injected_input');
 const OUT_REPAIRED = outputPath(REAL_PDF_PATH, '_acrobat_compat_repaired');
+const OUT_FORM_XOBJECT_INJECTED = outputPath(REAL_PDF_PATH, '_acrobat_form_xobject_input');
+const OUT_FORM_XOBJECT_REPAIRED = outputPath(REAL_PDF_PATH, '_acrobat_form_xobject_repaired');
 const OUT_DIRTY_MIXED = outputPath(REAL_PDF_PATH, '_dirty_mixed');
+const BAD_FORM_XOBJECT_NAME = PDFName.of('FmPecoBad');
 
 beforeAll(async () => {
   await ensurePdfjsEnv();
@@ -318,6 +322,82 @@ async function injectAcrobatErrorFragments(realBytes: Uint8Array): Promise<Uint8
   return await doc.save({ useObjectStreams: false, addDefaultPage: false });
 }
 
+function getOrCreatePageResources(doc: PDFDocument, page: ReturnType<PDFDocument['getPage']>): PDFDict {
+  const pageNode = page.node as unknown as {
+    Resources?: () => PDFDict | undefined;
+    set: (key: PDFName, value: PDFObject) => void;
+  };
+  const existing = pageNode.Resources?.();
+  if (existing) return existing;
+  const resources = doc.context.obj({}) as PDFDict;
+  pageNode.set(PDFName.of('Resources'), resources);
+  return resources;
+}
+
+function getOrCreateXObjectDict(doc: PDFDocument, resources: PDFDict): PDFDict {
+  const existing = resources.lookupMaybe(PDFName.of('XObject'), PDFDict);
+  if (existing) return existing;
+  const xObjects = doc.context.obj({}) as PDFDict;
+  resources.set(PDFName.of('XObject'), xObjects);
+  return xObjects;
+}
+
+async function injectAcrobatFormXObjectFragments(realBytes: Uint8Array): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(freshCopy(realBytes), {
+    throwOnInvalidObject: false,
+    ignoreEncryption: true,
+    updateMetadata: false,
+  });
+  const page = doc.getPage(0);
+  const formContent = latin1Bytes(
+    [
+      'q',
+      '(leaked-form) Tj',
+      '[(form) 120 (array)] TJ',
+      'ET',
+      'Q',
+    ].join('\n'),
+  );
+  const formRef = doc.context.register(doc.context.flateStream(formContent, {
+    Type: 'XObject',
+    Subtype: 'Form',
+    FormType: 1,
+    BBox: [0, 0, 200, 200],
+    Resources: {},
+  }));
+  const resources = getOrCreatePageResources(doc, page);
+  getOrCreateXObjectDict(doc, resources).set(BAD_FORM_XOBJECT_NAME, formRef);
+
+  const doStream = doc.context.register(doc.context.flateStream(latin1Bytes('q\n/FmPecoBad Do\nQ')));
+  const contents = page.node.Contents();
+  const resolved = contents ? doc.context.lookup(contents) : undefined;
+  const refs: PDFObject[] = resolved instanceof PDFArray
+    ? resolved.asArray()
+    : contents
+      ? [contents]
+      : [];
+  page.node.set(PDFName.of('Contents'), doc.context.obj([...refs, doStream]));
+  return await doc.save({ useObjectStreams: false, addDefaultPage: false });
+}
+
+function decodeNamedFormXObject(doc: PDFDocument, pageIndex: number, name: PDFName): Uint8Array | null {
+  const page = doc.getPage(pageIndex);
+  const resources = page.node.Resources?.();
+  const xObjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+  const formRef = xObjects?.get(name);
+  if (!formRef) return null;
+  const form = doc.context.lookup(formRef);
+  if (!(form instanceof PDFRawStream)) return null;
+
+  const filter = form.dict.lookup(PDFName.of('Filter'));
+  const raw = form.getContents();
+  if (filter instanceof PDFName && filter.asString() === '/FlateDecode') {
+    try { return inflate(raw); } catch { return null; }
+  }
+  if (!filter) return raw;
+  return null;
+}
+
 function markOnlyPage0Dirty(doc: Awaited<ReturnType<typeof buildPecoDocumentFromRealPdf>>['doc']): void {
   for (const [pageIndex, pageData] of doc.pages.entries()) {
     if (pageIndex !== 0) {
@@ -429,5 +509,35 @@ describe.skipIf(!hasRealPdf)('REAL PDF Acrobat 互換性追加シナリオ (AC)'
 
     const audit = await auditPdfBytes(saved);
     expect(audit.violations).toEqual([]);
+  }, 900_000);
+
+  it('AC-4: Form XObject 内の壊れた Tj/TJ/ET 断片も保存時に清掃される', async () => {
+    const realBytes = new Uint8Array(readFileSync(REAL_PDF_PATH));
+    const injectedBytes = await injectAcrobatFormXObjectFragments(realBytes);
+    writeFileSync(OUT_FORM_XOBJECT_INJECTED, injectedBytes);
+
+    const injectedDoc = await PDFDocument.load(freshCopy(injectedBytes), {
+      throwOnInvalidObject: false,
+      ignoreEncryption: true,
+      updateMetadata: false,
+    });
+    const beforeForm = decodeNamedFormXObject(injectedDoc, 0, BAD_FORM_XOBJECT_NAME);
+    expect(beforeForm).not.toBeNull();
+    expect(auditContentStream(beforeForm!, 0).violations.some((v) => v.includes('outside text object'))).toBe(true);
+
+    const { doc } = await buildPecoDocumentFromRealPdf(injectedBytes, REAL_PDF_PATH);
+    const saved = await savePDF({ bytes: freshCopy(injectedBytes) }, doc, loadFontArrayBuffer());
+    writeFileSync(OUT_FORM_XOBJECT_REPAIRED, saved);
+
+    const savedDoc = await PDFDocument.load(freshCopy(saved), {
+      throwOnInvalidObject: false,
+      ignoreEncryption: true,
+      updateMetadata: false,
+    });
+    const afterForm = decodeNamedFormXObject(savedDoc, 0, BAD_FORM_XOBJECT_NAME);
+    expect(afterForm).not.toBeNull();
+    expect(auditContentStream(afterForm!, 0).violations).toEqual([]);
+    expect(new TextDecoder('latin1').decode(afterForm!)).not.toContain('leaked-form');
+    expect(new TextDecoder('latin1').decode(afterForm!)).not.toContain('[(form)');
   }, 900_000);
 });

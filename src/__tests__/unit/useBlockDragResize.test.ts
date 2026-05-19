@@ -6,10 +6,35 @@
  *       dirtyOnlyPages フィルタは page.isDirty のみを見るため、BB の位置だけ動かした
  *       変更が保存対象から落ちて「保存されない」症状が出ていた。
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBlockDragResize } from '../../hooks/useBlockDragResize';
 import type { PageData, TextBlock } from '../../types';
+
+// updateDragResize は RAF で coalesce されるため、テストでは手動制御可能な
+// requestAnimationFrame mock を入れて 1 フレーム進めるユーティリティを用意する。
+type RafCallback = (t: number) => void;
+let rafQueue: Array<{ id: number; cb: RafCallback }> = [];
+let rafCounter = 0;
+
+function installRafMock() {
+  rafQueue = [];
+  rafCounter = 0;
+  vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
+    const id = ++rafCounter;
+    rafQueue.push({ id, cb });
+    return id;
+  });
+  vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id: number) => {
+    rafQueue = rafQueue.filter((e) => e.id !== id);
+  });
+}
+
+function flushRaf() {
+  const queued = rafQueue;
+  rafQueue = [];
+  for (const { cb } of queued) cb(performance.now());
+}
 
 function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
   return {
@@ -37,6 +62,15 @@ function makePage(blocks: TextBlock[]): PageData {
 }
 
 describe('useBlockDragResize: page.isDirty 伝播', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
   it('BB 移動 (updateDragResize move) は page.isDirty:true を明示して updatePageData を呼ぶ', () => {
     const block = makeBlock();
     const pageData = makePage([block]);
@@ -64,9 +98,13 @@ describe('useBlockDragResize: page.isDirty 伝播', () => {
       );
     });
 
-    // マウス移動
+    // マウス移動 (RAF にスケジュール)
     act(() => {
       result.current.updateDragResize({ x: 130, y: 120 });
+    });
+    // RAF コールバックを実行して実際の updatePageData 呼び出しを起こす
+    act(() => {
+      flushRaf();
     });
 
     expect(updatePageData).toHaveBeenCalled();
@@ -109,11 +147,170 @@ describe('useBlockDragResize: page.isDirty 伝播', () => {
     act(() => {
       result.current.updateDragResize({ x: 200, y: 140 });
     });
+    act(() => {
+      flushRaf();
+    });
 
     expect(updatePageData).toHaveBeenCalled();
     const [, partial] = updatePageData.mock.calls[0];
     expect(partial.isDirty).toBe(true);                 // 回帰対象
     expect(partial.textBlocks[0].isDirty).toBe(true);
     expect(partial.textBlocks[0].bbox.width).toBeGreaterThan(block.bbox.width);
+  });
+});
+
+describe('useBlockDragResize: updateDragResize の RAF coalesce (perf #10)', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('同一フレーム内で複数 mousemove が発生しても updatePageData は 1 回しか呼ばれず、最新 pos が反映される', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+      })
+    );
+
+    // ブロック内クリック → move モードに入る (この呼び出しは store 更新を行わない)
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    // 同一フレーム内で複数 mousemove を発火 (RAF はまだ flush していない)
+    act(() => {
+      result.current.updateDragResize({ x: 115, y: 112 });
+      result.current.updateDragResize({ x: 120, y: 115 });
+      result.current.updateDragResize({ x: 130, y: 120 });
+      result.current.updateDragResize({ x: 140, y: 125 });
+    });
+
+    // RAF flush 前: updatePageData はまだ呼ばれていない
+    expect(updatePageData).not.toHaveBeenCalled();
+    // 同一フレーム内に複数 updateDragResize が来ても RAF キューには 1 件しか積まれない
+    expect(rafQueue.length).toBe(1);
+
+    // RAF コールバックを 1 度だけ実行
+    act(() => {
+      flushRaf();
+    });
+
+    // updatePageData は 1 回しか呼ばれない
+    expect(updatePageData).toHaveBeenCalledTimes(1);
+
+    // 最新の pos (140,125) が反映されている: dragStart=(110,110) なので dx=30, dy=15
+    const [, partial] = updatePageData.mock.calls[0];
+    expect(partial.textBlocks[0].bbox.x).toBe(block.bbox.x + 30);
+    expect(partial.textBlocks[0].bbox.y).toBe(block.bbox.y + 15);
+  });
+
+  it('複数フレームに分かれた mousemove はフレーム毎に 1 回 updatePageData を呼ぶ', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    // フレーム 1
+    act(() => {
+      result.current.updateDragResize({ x: 115, y: 112 });
+      result.current.updateDragResize({ x: 120, y: 115 });
+    });
+    act(() => { flushRaf(); });
+
+    // フレーム 2
+    act(() => {
+      result.current.updateDragResize({ x: 130, y: 120 });
+      result.current.updateDragResize({ x: 140, y: 125 });
+    });
+    act(() => { flushRaf(); });
+
+    expect(updatePageData).toHaveBeenCalledTimes(2);
+  });
+
+  it('finishDragResize は保留中の RAF をキャンセルしつつ最新 pos を flush し、undo は 1 回だけ積む', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const pushAction = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    // mousemove → RAF 未 flush のまま mouseup
+    act(() => {
+      result.current.updateDragResize({ x: 150, y: 130 });
+    });
+    expect(rafQueue.length).toBe(1);
+
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    // finishDragResize で保留中の pos が同期 flush され updatePageData が呼ばれる
+    expect(updatePageData).toHaveBeenCalledTimes(1);
+    const [, partial] = updatePageData.mock.calls[0];
+    expect(partial.textBlocks[0].bbox.x).toBe(block.bbox.x + 40); // dx = 150-110
+    expect(partial.textBlocks[0].bbox.y).toBe(block.bbox.y + 20); // dy = 130-110
+
+    // RAF はキャンセル済み (queue が空)
+    expect(rafQueue.length).toBe(0);
+
+    // undo は 1 回だけ
+    expect(pushAction).toHaveBeenCalledTimes(1);
+
+    // RAF を後から flush しても二重に updatePageData は呼ばれない
+    act(() => { flushRaf(); });
+    expect(updatePageData).toHaveBeenCalledTimes(1);
   });
 });

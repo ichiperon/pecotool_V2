@@ -76,6 +76,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> =
     onToggleSettingsDropdown: vi.fn(),
     onRunOcrCurrentPage: vi.fn(),
     onRunOcrAllPages: vi.fn(),
+    onRunOcrFolder: vi.fn(),
     onCancelOcr: vi.fn(),
     onClearOcrCurrentPage: vi.fn(),
     onClearOcrAllPages: vi.fn(),
@@ -145,6 +146,14 @@ describe('Toolbar', () => {
     renderToolbar()
     fireEvent.click(getButton('OCR実行'))
     expect(screen.getByText('現在のページ')).toBeTruthy()
+  })
+
+  it('C-TB-10b: OCR folder item runs folder OCR', () => {
+    const onRunOcrFolder = vi.fn()
+    renderToolbar({ onRunOcrFolder })
+    fireEvent.click(getButton('OCR実行'))
+    fireEvent.click(screen.getByText('フォルダ内PDF'))
+    expect(onRunOcrFolder).toHaveBeenCalledTimes(1)
   })
 
   it('C-TB-11: OCR button disabled when isOcrRunning=true', () => {
