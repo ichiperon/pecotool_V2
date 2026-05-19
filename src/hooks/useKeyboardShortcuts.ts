@@ -18,6 +18,8 @@ interface ShortcutActions {
   zoom: number;
   setIsAutoFit: (val: boolean) => void;
   searchInputRef: React.RefObject<HTMLInputElement | null>;
+  /** issue #93: Ctrl+H で Find & Replace ダイアログを開く。配線されない環境では undefined */
+  openReplace?: () => void;
 }
 
 export function useKeyboardShortcuts(actions: ShortcutActions) {
@@ -100,6 +102,10 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'h' && !isEditing) {
+        // issue #93: Ctrl+H で Find & Replace ダイアログ。編集中は素通り (ブラウザ既定の履歴等は出ないが contentEditable では IME 等の衝突を避ける)。
+        e.preventDefault();
+        ac.openReplace?.();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'b' && !isEditing) {
         e.preventDefault();
         ac.toggleDrawingMode();

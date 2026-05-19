@@ -26,6 +26,8 @@ export function useDialogState() {
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [helpModal, setHelpModal] = useState<HelpModalKind>(null);
   const [showOcrSettings, setShowOcrSettings] = useState(false);
+  // issue #93: Find & Replace ダイアログ表示フラグ
+  const [showReplace, setShowReplace] = useState(false);
 
   // action 付きトーストはユーザー操作待ちのため、自動消滅させずに表示し続ける。
   // 保存失敗フォールバック (issue #53) のように「別名で保存」ボタンを押されるまで
@@ -69,6 +71,8 @@ export function useDialogState() {
     setHelpModal,
     showOcrSettings,
     setShowOcrSettings,
+    showReplace,
+    setShowReplace,
     showToast,
   };
 }

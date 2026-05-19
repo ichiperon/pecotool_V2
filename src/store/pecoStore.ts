@@ -109,6 +109,26 @@ interface PecoState {
   clearLastIdbError: () => void;
   /** ドラッグ中の bbox プレビュー Map をセットする。null でクリア。issue #91 */
   setDragPreviewBboxes: (bboxes: Map<string, BoundingBox> | null) => void;
+
+  /**
+   * issue #93 (Find & Replace): 一括置換を実行する。
+   * @returns 影響を受けた件数 (置換ヒット数), ブロック数, ページ数
+   * - scope:
+   *   - 'selection': 選択中の BB のみ
+   *   - 'current': 現在ページの全 BB
+   *   - 'all': document.totalPages 全範囲 (LRU 退避ページは pages Map にあるものだけ対象)
+   * - useRegex=true のときの構文エラーは throw する (UI 側でハンドルする)
+   * - skipBlockIds: 編集中などで保護したいブロック ID。スキップしたページに対する skip 数も返す
+   * - undo: 影響を受けた全ページを 1 つの update_pages Action にまとめる
+   */
+  replaceText: (params: {
+    scope: 'selection' | 'current' | 'all';
+    pattern: string;
+    replacement: string;
+    caseSensitive: boolean;
+    useRegex: boolean;
+    skipBlockIds?: ReadonlySet<string>;
+  }) => { hits: number; blocks: number; pages: number; skippedBlocks: number };
 }
 
 const MAX_CACHED_PAGES = 50;
@@ -434,6 +454,25 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // 巻き戻し後の状態を IDB へも書き込んでメモリと完全同期させる。
       // (issue #3: undo が LRU 退避ページの IDB と非整合になる)
       schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }], set, get);
+    } else if (action.type === 'update_pages') {
+      // issue #93: 全ページスコープの置換等で複数ページを atomic に巻き戻す。
+      const newPages = new Map(document.pages);
+      for (const e of action.entries) {
+        newPages.set(e.pageIndex, e.before);
+      }
+      const filePath = document.filePath;
+      set({
+        document: { ...document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
+      // 全 entry を IDB へまとめて同期 (LRU 退避ページがあっても整合性を担保)
+      schedulePendingIdbWrite(
+        action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.before })),
+        set,
+        get,
+      );
     }
   },
 
@@ -457,6 +496,24 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
       // undo と対称: redo 後の状態を IDB へも書き込んで整合性を担保
       schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }], set, get);
+    } else if (action.type === 'update_pages') {
+      // issue #93: 全ページスコープの置換等で複数ページを atomic にやり直す。
+      const newPages = new Map(document.pages);
+      for (const e of action.entries) {
+        newPages.set(e.pageIndex, e.after);
+      }
+      const filePath = document.filePath;
+      set({
+        document: { ...document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
+      schedulePendingIdbWrite(
+        action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+        set,
+        get,
+      );
     }
   },
 
@@ -498,6 +555,119 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         redoStack: [],
       };
     });
+  },
+
+  replaceText: ({ scope, pattern, replacement, caseSensitive, useRegex, skipBlockIds }) => {
+    const state = get();
+    const document = state.document;
+    if (!document) return { hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 };
+    if (pattern.length === 0) return { hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 };
+
+    // 検索用の RegExp を組み立てる。useRegex=false は escape して flag 'g' を必ず付ける。
+    // useRegex=true の場合は構文エラーが上に伝播する (UI で catch する想定)。
+    const flags = `g${caseSensitive ? '' : 'i'}`;
+    const re = useRegex
+      ? new RegExp(pattern, flags)
+      : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+
+    // 対象ページ idx 集合を決める
+    const targetIndices: number[] = [];
+    if (scope === 'selection' || scope === 'current') {
+      targetIndices.push(state.currentPageIndex);
+    } else {
+      // 全ページ: pages Map に存在するページのみ (LRU 退避ページは UI 側で復元して詰めてもらう)
+      for (const idx of document.pages.keys()) {
+        targetIndices.push(idx);
+      }
+    }
+
+    const selectedIds = state.selectedIds;
+    const skip = skipBlockIds ?? new Set<string>();
+
+    let totalHits = 0;
+    let totalBlocks = 0;
+    let skippedBlocks = 0;
+    const entries: Array<{ pageIndex: number; before: PageData; after: PageData }> = [];
+
+    for (const pageIdx of targetIndices) {
+      const page = document.pages.get(pageIdx);
+      if (!page) continue;
+
+      let pageChanged = false;
+      const newTextBlocks: TextBlock[] = [];
+      for (const b of page.textBlocks) {
+        // selection スコープでは選択 ID のみ対象
+        if (scope === 'selection' && !selectedIds.has(b.id)) {
+          newTextBlocks.push(b);
+          continue;
+        }
+        // 編集中などで保護されたブロックは skip
+        if (skip.has(b.id)) {
+          // それでも本来 hit 候補だったかを数える (UI 警告用)
+          re.lastIndex = 0;
+          if (re.test(b.text)) skippedBlocks++;
+          newTextBlocks.push(b);
+          continue;
+        }
+
+        re.lastIndex = 0;
+        // hit 数の数えと replace を同時に。matchAll は countOnly に高コスト。
+        // ここでは「replace 結果が同じか?」で changed 判定をしてから match 数を数える。
+        const replaced = b.text.replace(re, replacement);
+        if (replaced === b.text) {
+          newTextBlocks.push(b);
+          continue;
+        }
+        // 件数カウントは match() で取得 (replace が走った後でも match の入力は元 text)
+        const matches = b.text.match(re);
+        const hits = matches ? matches.length : 0;
+        totalHits += hits;
+        totalBlocks++;
+        pageChanged = true;
+        newTextBlocks.push({
+          ...b,
+          text: replaced,
+          isDirty: true,
+        });
+      }
+
+      if (pageChanged) {
+        const newPage: PageData = { ...page, textBlocks: newTextBlocks, isDirty: true };
+        entries.push({ pageIndex: pageIdx, before: page, after: newPage });
+      }
+    }
+
+    if (entries.length === 0) {
+      return { hits: 0, blocks: 0, pages: 0, skippedBlocks };
+    }
+
+    // store に反映
+    const filePath = document.filePath;
+    set((s) => {
+      if (!s.document) return s;
+      const newPages = new Map(s.document.pages);
+      for (const e of entries) {
+        newPages.set(e.pageIndex, e.after);
+      }
+      const newAction: Action = { type: 'update_pages', entries };
+      const newUndo = [...s.undoStack, newAction];
+      if (newUndo.length > 100) newUndo.shift();
+      return {
+        document: { ...s.document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: [],
+        isDirty: true,
+      };
+    });
+
+    // LRU 退避済みページの IDB と整合させるため、変更ページ全部を IDB にも書き込む
+    schedulePendingIdbWrite(
+      entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+      set,
+      get,
+    );
+
+    return { hits: totalHits, blocks: totalBlocks, pages: entries.length, skippedBlocks };
   },
 }));
 

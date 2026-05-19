@@ -1156,4 +1156,251 @@ describe('pecoStore', () => {
       expect(after).toBe(before)
     })
   })
+
+  // ── issue #93: Find & Replace ──────────────────────────────────
+  describe('issue #93: replaceText', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+    })
+
+    it('U-FR-01: 現ページ全 BB の "あ" を "い" に置換し件数を返す', () => {
+      const b1 = makeBlock({ id: 'b1', text: 'あああ' })
+      const b2 = makeBlock({ id: 'b2', text: 'あい' })
+      const b3 = makeBlock({ id: 'b3', text: 'う' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b1, b2, b3], isDirty: false })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        isDirty: false,
+      })
+
+      const result = usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: 'あ',
+        replacement: 'い',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      // 件数: 'あああ'=3hit, 'あい'=1hit, 'う'=0hit → 計 4 ヒット / 2 ブロック / 1 ページ
+      expect(result).toEqual({ hits: 4, blocks: 2, pages: 1, skippedBlocks: 0 })
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('いいい')
+      expect(blocks[1].text).toBe('いい')
+      expect(blocks[2].text).toBe('う') // 変更なし
+      // 変更ブロックは isDirty=true
+      expect(blocks[0].isDirty).toBe(true)
+      expect(blocks[1].isDirty).toBe(true)
+      // 非変更ブロックの isDirty 元値が保持される
+      expect(blocks[2].isDirty).toBe(false)
+      // page も isDirty
+      expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true)
+      // store global も isDirty
+      expect(usePecoStore.getState().isDirty).toBe(true)
+    })
+
+    it('U-FR-02: selection スコープは選択 ID のブロックだけ置換する', () => {
+      const b1 = makeBlock({ id: 'b1', text: 'あ' })
+      const b2 = makeBlock({ id: 'b2', text: 'あ' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b1, b2] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        selectedIds: new Set(['b1']),
+      })
+
+      const result = usePecoStore.getState().replaceText({
+        scope: 'selection',
+        pattern: 'あ',
+        replacement: 'い',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      expect(result).toEqual({ hits: 1, blocks: 1, pages: 1, skippedBlocks: 0 })
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('い') // 選択された
+      expect(blocks[1].text).toBe('あ') // 選択外
+    })
+
+    it('U-FR-03: 全ページスコープは pages Map に存在する全ページを対象にする', () => {
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo' })] })
+      const page1 = makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p1b', text: 'foo foo' })] })
+      const page2 = makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p2b', text: 'no match' })] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page0], [1, page1], [2, page2]])),
+        currentPageIndex: 0,
+      })
+
+      const result = usePecoStore.getState().replaceText({
+        scope: 'all',
+        pattern: 'foo',
+        replacement: 'bar',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      // ヒット: page0=1, page1=2 → 3 ヒット / 2 ブロック / 2 ページ (page2 は不変)
+      expect(result).toEqual({ hits: 3, blocks: 2, pages: 2, skippedBlocks: 0 })
+      const pages = usePecoStore.getState().document!.pages
+      expect(pages.get(0)!.textBlocks[0].text).toBe('bar')
+      expect(pages.get(1)!.textBlocks[0].text).toBe('bar bar')
+      expect(pages.get(2)!.textBlocks[0].text).toBe('no match')
+    })
+
+    it('U-FR-04: caseSensitive=true で大文字小文字を区別する', () => {
+      const b = makeBlock({ id: 'b', text: 'Hello hello HELLO' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: 'Hello',
+        replacement: 'X',
+        caseSensitive: true,
+        useRegex: false,
+      })
+
+      expect(result.hits).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('X hello HELLO')
+    })
+
+    it('U-FR-05: useRegex=true で正規表現が機能し、構文エラーは throw する', () => {
+      const b = makeBlock({ id: 'b', text: 'abc123 def456' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '\\d+',
+        replacement: '#',
+        caseSensitive: false,
+        useRegex: true,
+      })
+
+      expect(result.hits).toBe(2)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('abc# def#')
+
+      // 構文エラーは throw
+      expect(() => usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '[invalid',
+        replacement: 'x',
+        caseSensitive: false,
+        useRegex: true,
+      })).toThrow()
+    })
+
+    it('U-FR-06: 1 回の replaceText は 1 つの update_pages Action として undo / redo できる', () => {
+      const b0 = makeBlock({ id: 'b0', text: 'foo' })
+      const b1 = makeBlock({ id: 'b1', text: 'foo bar' })
+      const page0 = makePage({ pageIndex: 0, textBlocks: [b0] })
+      const page1 = makePage({ pageIndex: 1, textBlocks: [b1] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page0], [1, page1]])),
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().replaceText({
+        scope: 'all',
+        pattern: 'foo',
+        replacement: 'X',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      // 単一の update_pages action が push されている
+      let s = usePecoStore.getState()
+      expect(s.undoStack).toHaveLength(1)
+      expect(s.undoStack[0].type).toBe('update_pages')
+      if (s.undoStack[0].type === 'update_pages') {
+        expect(s.undoStack[0].entries.map(e => e.pageIndex).sort()).toEqual([0, 1])
+      }
+      // 置換後の text を確認
+      expect(s.document!.pages.get(0)!.textBlocks[0].text).toBe('X')
+      expect(s.document!.pages.get(1)!.textBlocks[0].text).toBe('X bar')
+
+      // undo: 全ページが atomic に巻き戻る
+      usePecoStore.getState().undo()
+      s = usePecoStore.getState()
+      expect(s.document!.pages.get(0)!.textBlocks[0].text).toBe('foo')
+      expect(s.document!.pages.get(1)!.textBlocks[0].text).toBe('foo bar')
+      expect(s.undoStack).toHaveLength(0)
+      expect(s.redoStack).toHaveLength(1)
+
+      // redo: 再度 atomic に適用
+      usePecoStore.getState().redo()
+      s = usePecoStore.getState()
+      expect(s.document!.pages.get(0)!.textBlocks[0].text).toBe('X')
+      expect(s.document!.pages.get(1)!.textBlocks[0].text).toBe('X bar')
+      expect(s.undoStack).toHaveLength(1)
+      expect(s.redoStack).toHaveLength(0)
+    })
+
+    it('U-FR-07: skipBlockIds で指定したブロックは置換されず、skippedBlocks として件数返却される', () => {
+      const b0 = makeBlock({ id: 'editing', text: 'foo' })
+      const b1 = makeBlock({ id: 'safe', text: 'foo' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b0, b1] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: 'foo',
+        replacement: 'X',
+        caseSensitive: false,
+        useRegex: false,
+        skipBlockIds: new Set(['editing']),
+      })
+
+      expect(result.hits).toBe(1)
+      expect(result.skippedBlocks).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('foo') // 編集中扱いで非置換
+      expect(blocks[1].text).toBe('X')
+    })
+
+    it('U-FR-08: 検索文字列が空 or ヒット 0 のときは undo にも積まれず no-op', () => {
+      const b = makeBlock({ id: 'b', text: 'hello' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+      })
+
+      // 空 pattern
+      const r1 = usePecoStore.getState().replaceText({
+        scope: 'current', pattern: '', replacement: 'x',
+        caseSensitive: false, useRegex: false,
+      })
+      expect(r1.hits).toBe(0)
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+
+      // ヒットしない pattern
+      const r2 = usePecoStore.getState().replaceText({
+        scope: 'current', pattern: 'NOT_FOUND', replacement: 'x',
+        caseSensitive: false, useRegex: false,
+      })
+      expect(r2.hits).toBe(0)
+      expect(r2.pages).toBe(0)
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+      // 元 text のまま
+      expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe('hello')
+    })
+  })
 })
