@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type * as pdfjsLib from 'pdfjs-dist';
-import { PecoDocument, PageData, Action, TextBlock } from '../types';
+import { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../types';
 import { saveTemporaryPageDataBatch, clearTemporaryChanges } from '../utils/pdfLoader';
 import { perf } from '../utils/perfLogger';
 
@@ -70,6 +70,15 @@ interface PecoState {
   currentPageProxy: pdfjsLib.PDFPageProxy | null;
   currentPageProxyKey: string | null;
 
+  /**
+   * ドラッグ中のみ非 null。ドラッグ対象 BB の id -> 現在の bbox の Map。
+   * issue #91: textBlocks 配列を毎フレーム map() で複製すると BB 1000+ ページで
+   * GC 圧 / オブジェクト割り当てが増えてカクつく。ドラッグ中は textBlocks を
+   * 一切触らずこのフィールドのみ更新し、overlay 描画でこの bbox を優先表示する。
+   * finishDragResize で 1 度だけ textBlocks に確定書き込み + dragPreviewBboxes=null。
+   */
+  dragPreviewBboxes: Map<string, BoundingBox> | null;
+
   // Actions
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
@@ -98,6 +107,8 @@ interface PecoState {
   clearOcrCurrentPage: () => void;
   clearOcrAllPages: () => void;
   clearLastIdbError: () => void;
+  /** ドラッグ中の bbox プレビュー Map をセットする。null でクリア。issue #91 */
+  setDragPreviewBboxes: (bboxes: Map<string, BoundingBox> | null) => void;
 }
 
 const MAX_CACHED_PAGES = 50;
@@ -122,6 +133,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   lastIdbError: null,
   currentPageProxy: null,
   currentPageProxyKey: null,
+  dragPreviewBboxes: null,
 
   setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
   setCurrentPageProxy: (filePath, pageIndex, proxy) => {
@@ -158,6 +170,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // ファイル切替時は古い PDFPageProxy を保持しない (transport が破棄されるため)
       currentPageProxy: null,
       currentPageProxyKey: null,
+      // ファイル切替時にドラッグ状態を持ち越さない
+      dragPreviewBboxes: null,
     });
 
     // IDB一時データのクリアをset()外でawaitして確実に完了させる。
@@ -456,6 +470,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   clearLastIdbError: () => set({ lastIdbError: null }),
 
+  setDragPreviewBboxes: (bboxes) => set({ dragPreviewBboxes: bboxes }),
+
   clearOcrAllPages: () => {
     const { document } = get();
     if (!document) return;
@@ -510,3 +526,6 @@ export const selectLastIdbError = (s: PecoState) => s.lastIdbError;
 export const selectCurrentPageProxy = (s: PecoState) => s.currentPageProxy;
 export const selectCurrentPageProxyKey = (s: PecoState) => s.currentPageProxyKey;
 export const selectHasDocument = (s: PecoState) => s.document !== null;
+// issue #91: ドラッグ中の bbox プレビュー。overlay 描画でドラッグ中 BB の bbox を
+// 上書きするための入口。ドラッグ非実行中は null。
+export const selectDragPreviewBboxes = (s: PecoState) => s.dragPreviewBboxes;

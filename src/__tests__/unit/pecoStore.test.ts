@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { usePecoStore, waitForPendingIdbSaves, selectCurrentPageTextBlocks } from '../../store/pecoStore'
+import {
+  usePecoStore,
+  waitForPendingIdbSaves,
+  selectCurrentPageTextBlocks,
+  selectDragPreviewBboxes,
+} from '../../store/pecoStore'
 import * as pdfLoader from '../../utils/pdfLoader'
-import type { PecoDocument, PageData, Action, TextBlock } from '../../types'
+import type { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../../types'
 
 vi.mock('../../utils/pdfLoader', () => ({
   saveTemporaryPageDataBatch: vi.fn().mockResolvedValue(undefined),
@@ -47,18 +52,19 @@ function makeDoc(pages: Map<number, PageData> = new Map([[0, makePage()]])): Pec
 }
 
 const INITIAL_STATE = {
-  document:         null,
-  thumbnails:       new Map(),
-  currentPageIndex: 0,
-  zoom:             100,
-  isDirty:          false,
-  showOcr:          true,
-  showTextPreview:  false,
-  isDrawingMode:    false,
-  isSplitMode:      false,
-  selectedIds:      new Set<string>(),
-  undoStack:        [] as Action[],
-  redoStack:        [] as Action[],
+  document:          null,
+  thumbnails:        new Map(),
+  currentPageIndex:  0,
+  zoom:              100,
+  isDirty:           false,
+  showOcr:           true,
+  showTextPreview:   false,
+  isDrawingMode:     false,
+  isSplitMode:       false,
+  selectedIds:       new Set<string>(),
+  undoStack:         [] as Action[],
+  redoStack:         [] as Action[],
+  dragPreviewBboxes: null as Map<string, BoundingBox> | null,
 } as const
 
 // ── setup ──────────────────────────────────────────────────────
@@ -1091,4 +1097,63 @@ describe('pecoStore', () => {
     })
   })
 
+  // ── issue #91: dragPreviewBboxes ───────────────────────────────
+  describe('issue #91: dragPreviewBboxes', () => {
+    it('初期状態では dragPreviewBboxes は null', () => {
+      expect(selectDragPreviewBboxes(usePecoStore.getState())).toBeNull()
+    })
+
+    it('setDragPreviewBboxes(map) で dragPreviewBboxes が更新される', () => {
+      const map = new Map<string, BoundingBox>([
+        ['b1', { x: 10, y: 20, width: 30, height: 40 }],
+      ])
+      usePecoStore.getState().setDragPreviewBboxes(map)
+
+      const got = selectDragPreviewBboxes(usePecoStore.getState())
+      expect(got).toBe(map)
+      expect(got!.get('b1')).toEqual({ x: 10, y: 20, width: 30, height: 40 })
+    })
+
+    it('setDragPreviewBboxes(null) でクリアできる', () => {
+      const map = new Map<string, BoundingBox>([
+        ['b1', { x: 10, y: 20, width: 30, height: 40 }],
+      ])
+      usePecoStore.getState().setDragPreviewBboxes(map)
+      expect(selectDragPreviewBboxes(usePecoStore.getState())).not.toBeNull()
+
+      usePecoStore.getState().setDragPreviewBboxes(null)
+      expect(selectDragPreviewBboxes(usePecoStore.getState())).toBeNull()
+    })
+
+    it('setDocument(doc) は dragPreviewBboxes をクリアする (ファイル切替で持ち越さない)', () => {
+      const map = new Map<string, BoundingBox>([
+        ['b1', { x: 10, y: 20, width: 30, height: 40 }],
+      ])
+      usePecoStore.getState().setDragPreviewBboxes(map)
+      expect(selectDragPreviewBboxes(usePecoStore.getState())).not.toBeNull()
+
+      usePecoStore.getState().setDocument(makeDoc())
+      expect(selectDragPreviewBboxes(usePecoStore.getState())).toBeNull()
+    })
+
+    it('dragPreviewBboxes 更新は textBlocks 参照を変更しない', () => {
+      const blocks: TextBlock[] = [makeBlock({ id: 'b1' })]
+      const page = makePage({ textBlocks: blocks })
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc, currentPageIndex: 0 })
+
+      const before = selectCurrentPageTextBlocks(usePecoStore.getState())
+      expect(before).toBe(blocks)
+
+      // ドラッグ中の preview 書き込みでは textBlocks セレクタは同一参照
+      const previewMap = new Map<string, BoundingBox>([
+        ['b1', { x: 999, y: 999, width: 50, height: 20 }],
+      ])
+      usePecoStore.getState().setDragPreviewBboxes(previewMap)
+
+      const after = selectCurrentPageTextBlocks(usePecoStore.getState())
+      // 動的層 overlay のみ再描画される (静的層 effect は textBlocks 依存なので不発)
+      expect(after).toBe(before)
+    })
+  })
 })

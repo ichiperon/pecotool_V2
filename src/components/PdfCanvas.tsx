@@ -8,6 +8,7 @@ import {
   selectIsDrawingMode,
   selectIsSplitMode,
   selectCurrentPageTextBlocks,
+  selectDragPreviewBboxes,
 } from "../store/pecoStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
@@ -48,6 +49,9 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
   const setSelectedIds = usePecoStore((s) => s.setSelectedIds);
   const clearSelection = usePecoStore((s) => s.clearSelection);
   const pushAction = usePecoStore((s) => s.pushAction);
+  const setDragPreviewBboxes = usePecoStore((s) => s.setDragPreviewBboxes);
+  // issue #91: ドラッグ中のみ非 null。動的層 overlay で選択 BB の bbox を上書きする。
+  const dragPreviewBboxes = usePecoStore(selectDragPreviewBboxes);
 
   const getPageData = () => document?.pages.get(pageIndex);
 
@@ -84,6 +88,7 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
     updatePageData,
     toggleSelection,
     pushAction,
+    setDragPreviewBboxes,
   });
 
   const getMousePos = (e: React.MouseEvent) => {
@@ -268,13 +273,17 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
 
         // 選択された BB のみ描画 (O(|selectedIds|))。textBlocks 全体を走査するが
         // bbox/text 取得は選択分だけで済む。selectedIds が小さければ高速。
+        // issue #91: ドラッグ中は dragPreviewBboxes に動いた bbox が入っているので
+        // それを優先的に参照する (textBlocks 側は finishDragResize まで変わらない)。
         textBlocks.forEach((block) => {
           if (!selectedIds.has(block.id)) return;
 
-          const x = block.bbox.x * scale;
-          const y = block.bbox.y * scale;
-          const w = block.bbox.width * scale;
-          const h = block.bbox.height * scale;
+          const previewBbox = dragPreviewBboxes?.get(block.id);
+          const bbox = previewBbox ?? block.bbox;
+          const x = bbox.x * scale;
+          const y = bbox.y * scale;
+          const w = bbox.width * scale;
+          const h = bbox.height * scale;
 
           const inset = 0;
 
@@ -426,6 +435,8 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
     drag.isAltDragging,
     drag.altDragStart,
     drag.altDragEnd,
+    // issue #91: ドラッグ中の preview bbox 更新で動的層を再描画
+    dragPreviewBboxes,
   ]);
 
   // selectedIds が変化したとき、静的層は selectedIdsRef を介して読むだけで
