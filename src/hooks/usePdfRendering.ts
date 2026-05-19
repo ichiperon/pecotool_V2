@@ -8,6 +8,9 @@ import { perf } from "../utils/perfLogger";
 interface UsePdfRenderingParams {
   pdfCanvasRef: RefObject<HTMLCanvasElement | null>;
   overlayCanvasRef: RefObject<HTMLCanvasElement | null>;
+  // 静的層 (issue #90 で導入)。サイズ同期のために受け取り、optional とする
+  // (既存呼び出しの後方互換と、テストでの省略を許容)。
+  staticOverlayCanvasRef?: RefObject<HTMLCanvasElement | null>;
   wrapperRef: RefObject<HTMLDivElement | null>;
   filePath: string | undefined;
   totalPages: number | undefined;
@@ -41,6 +44,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const {
     pdfCanvasRef,
     overlayCanvasRef,
+    staticOverlayCanvasRef,
     wrapperRef,
     filePath,
     pageIndex,
@@ -143,12 +147,20 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           overlayCanvasRef.current.width = w;
           overlayCanvasRef.current.height = h;
         }
+        if (staticOverlayCanvasRef?.current) {
+          staticOverlayCanvasRef.current.width = w;
+          staticOverlayCanvasRef.current.height = h;
+        }
         canvas.style.width = `${w}px`;
         canvas.style.height = `${h}px`;
         canvas.style.display = "block";
         if (overlayCanvasRef.current) {
           overlayCanvasRef.current.style.width = `${w}px`;
           overlayCanvasRef.current.style.height = `${h}px`;
+        }
+        if (staticOverlayCanvasRef?.current) {
+          staticOverlayCanvasRef.current.style.width = `${w}px`;
+          staticOverlayCanvasRef.current.style.height = `${h}px`;
         }
         if (wrapperRef.current) {
           wrapperRef.current.style.width = `${w}px`;
@@ -209,12 +221,20 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         overlayCanvasRef.current.width = w;
         overlayCanvasRef.current.height = h;
       }
+      if (staticOverlayCanvasRef?.current) {
+        staticOverlayCanvasRef.current.width = w;
+        staticOverlayCanvasRef.current.height = h;
+      }
       canvas.style.width = `${w}px`;
       canvas.style.height = `${h}px`;
       canvas.style.display = "block";
       if (overlayCanvasRef.current) {
         overlayCanvasRef.current.style.width = `${w}px`;
         overlayCanvasRef.current.style.height = `${h}px`;
+      }
+      if (staticOverlayCanvasRef?.current) {
+        staticOverlayCanvasRef.current.style.width = `${w}px`;
+        staticOverlayCanvasRef.current.style.height = `${h}px`;
       }
       if (wrapperRef.current) {
         wrapperRef.current.style.width = `${w}px`;
