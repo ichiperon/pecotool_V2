@@ -114,6 +114,9 @@ function App() {
   const folderOpenPdfRef = useRef<(filePath: string) => Promise<boolean>>(async () => false);
   // #48: フォルダ OCR ループが保存失敗で即時中止できるよう Promise<boolean> を返す。
   const folderSavePdfRef = useRef<() => Promise<boolean>>(async () => false);
+  // #102: useFileOperations.handleOpen / useKeyboardShortcuts に渡す。
+  // 値同期は useOcrEngine の戻り isOcrRunning が変わるたびに行う (下の useEffect)。
+  const isOcrRunningRef = useRef(false);
 
   const [reorderThreshold, setReorderThreshold] = useState(() => readReorderThreshold());
 
@@ -133,11 +136,16 @@ function App() {
     openPdf: (path) => folderOpenPdfRef.current(path),
     savePdf: () => folderSavePdfRef.current(),
   });
+  // #102: isOcrRunning の最新値を ref 同期 (handleOpen 内ガードで参照)。
+  isOcrRunningRef.current = isOcrRunning;
   const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
-    (doc) => { checkAndPromptOcrZero(doc); }
+    (doc) => { checkAndPromptOcrZero(doc); },
+    isOcrRunningRef,
   );
-  folderOpenPdfRef.current = handleOpen;
+  // #102: フォルダ OCR ループ内では openPdf に bypassOcrGuard=true を立てて呼ぶ。
+  // これがないと OCR 中の handleOpen ガードに引っかかってループが進まない。
+  folderOpenPdfRef.current = (path: string) => handleOpen(path, { bypassOcrGuard: true });
   folderSavePdfRef.current = handleSave;
 
   const {
@@ -170,10 +178,17 @@ function App() {
       showToast('保存中は再読み込みできません。');
       return;
     }
+    // #102: OCR 実行中の F5/再読み込みは古い doc に OCR 結果が書き込まれる
+    // 不可逆汚染の原因となるためブロックする。handleOpen 内部にもガードがあるが、
+    // ここでメッセージを明示的に出して UX を整える。
+    if (isOcrRunning) {
+      showToast('OCR実行中は再読み込みできません。OCRを中止してから再度お試しください。');
+      return;
+    }
     if (!filePath) return;
     perf.mark('ui.reload');
     await handleOpen(filePath);
-  }, [filePath, handleOpen, isSaving, showToast]);
+  }, [filePath, handleOpen, isOcrRunning, isSaving, showToast]);
 
   const handleSaveAs = async () => {
     if (!isFileLoaded) return;
@@ -340,7 +355,7 @@ function App() {
       scope: params.scope,
       hits: params.expectedHits,
     });
-    const result = usePecoStore.getState().replaceText({
+    const result = await usePecoStore.getState().replaceText({
       scope: params.scope,
       pattern: params.pattern,
       replacement: params.replacement,
@@ -393,8 +408,18 @@ function App() {
     handleGroup, setZoom, zoom, setIsAutoFit,
     searchInputRef, handleRemoveSpaces,
     handleOpen,
+    // #102/#103: OCR 実行中の Ctrl+O / Ctrl+H をブロックするための最新値参照。
+    isOcrRunning,
     // issue #93: Ctrl+H で Find & Replace 起動 (ファイル未ロード時は no-op)
-    openReplace: () => { if (isFileLoaded) setShowReplace(true); },
+    // #103: OCR 実行中は Replace ダイアログを開けない (置換結果が OCR で上書きされる事故防止)
+    openReplace: () => {
+      if (!isFileLoaded) return;
+      if (isOcrRunning) {
+        showToast('OCR実行中は検索と置換を実行できません。OCRを中止してから再度お試しください。');
+        return;
+      }
+      setShowReplace(true);
+    },
   });
 
   // issue #74 / CloseGuard: isSaving の最新値を ref に同期。
@@ -581,7 +606,15 @@ function App() {
         onCancelOcr={cancelOcr}
         onClearOcrCurrentPage={handleClearOcrCurrentPage}
         onClearOcrAllPages={handleClearOcrAllPages}
-        onOpenReplace={() => setShowReplace(true)}
+        onOpenReplace={() => {
+          // #103: OCR 実行中の Replace は disabled prop で UI レベルでも防いでいるが、
+          // 念のためハンドラ側でも二重ガードする (将来 UI 経路追加時の事故防止)。
+          if (isOcrRunning) {
+            showToast('OCR実行中は検索と置換を実行できません。OCRを中止してから再度お試しください。');
+            return;
+          }
+          setShowReplace(true);
+        }}
       />
 
       <main className="main-content">

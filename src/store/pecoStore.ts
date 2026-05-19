@@ -1,7 +1,11 @@
 import { create } from 'zustand';
 import type * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../types';
-import { saveTemporaryPageDataBatch, clearTemporaryChanges } from '../utils/pdfLoader';
+import {
+  saveTemporaryPageDataBatch,
+  clearTemporaryChanges,
+  getAllTemporaryPageData,
+} from '../utils/pdfLoader';
 import { perf } from '../utils/perfLogger';
 
 // 進行中のLRU退避IDB書き込みPromiseを追跡する。
@@ -42,6 +46,13 @@ function schedulePendingIdbWrite(
 
 interface PecoState {
   document: PecoDocument | null;
+  /**
+   * #102: ドキュメント差し替え (setDocument) のたびに +1 される単調増加カウンタ。
+   * updatePageData による document 再生成では変化しない。
+   * OCR ループのような長時間 async 処理が「処理開始時点と同じドキュメントか」を
+   * 安全に判定するのに使う (reference identity は updatePageData で壊れるため不可)。
+   */
+  documentEpoch: number;
   pageAccessOrder: number[]; // For page data LRU (1000ページ対応)
   currentPageIndex: number;
   zoom: number;
@@ -116,10 +127,14 @@ interface PecoState {
    * - scope:
    *   - 'selection': 選択中の BB のみ
    *   - 'current': 現在ページの全 BB
-   *   - 'all': document.totalPages 全範囲 (LRU 退避ページは pages Map にあるものだけ対象)
+   *   - 'all': document.totalPages 全範囲。issue #104: LRU 退避ページも IDB から読み戻して走査する
    * - useRegex=true のときの構文エラーは throw する (UI 側でハンドルする)
+   *   useRegex=false のとき、replacement 内の $&, $0, $1, $$ などの特殊扱いを避けるため
+   *   String.prototype.replace に渡す前に '$' → '$$' エスケープを行う (issue #105)
    * - skipBlockIds: 編集中などで保護したいブロック ID。スキップしたページに対する skip 数も返す
    * - undo: 影響を受けた全ページを 1 つの update_pages Action にまとめる
+   *
+   * issue #104: scope='all' で IDB 退避ページも対象になるため async に変更。
    */
   replaceText: (params: {
     scope: 'selection' | 'current' | 'all';
@@ -128,13 +143,14 @@ interface PecoState {
     caseSensitive: boolean;
     useRegex: boolean;
     skipBlockIds?: ReadonlySet<string>;
-  }) => { hits: number; blocks: number; pages: number; skippedBlocks: number };
+  }) => Promise<{ hits: number; blocks: number; pages: number; skippedBlocks: number }>;
 }
 
 const MAX_CACHED_PAGES = 50;
 
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
+  documentEpoch: 0,
   pageAccessOrder: [],
   currentPageIndex: 0,
   zoom: 100,
@@ -173,6 +189,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     set({
       document: doc,
+      // #102: ドキュメント差し替えを epoch で示す。OCR ループは開始時点の epoch を
+      // 保持し、ループ内で getState().documentEpoch と比較する。
+      documentEpoch: get().documentEpoch + 1,
       pageAccessOrder: [],
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく
@@ -557,7 +576,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
   },
 
-  replaceText: ({ scope, pattern, replacement, caseSensitive, useRegex, skipBlockIds }) => {
+  replaceText: async ({ scope, pattern, replacement, caseSensitive, useRegex, skipBlockIds }) => {
     const state = get();
     const document = state.document;
     if (!document) return { hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 };
@@ -570,14 +589,44 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       ? new RegExp(pattern, flags)
       : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
 
-    // 対象ページ idx 集合を決める
-    const targetIndices: number[] = [];
+    // issue #105: String.prototype.replace は replacement 内の $&, $0, $1, $$ を
+    // 特殊解釈する。useRegex=false では replacement を literal として扱うため '$' を
+    // '$$' にエスケープする。useRegex=true ではユーザ意図で後方参照を使う想定なのでそのまま。
+    const safeReplacement = useRegex
+      ? replacement
+      : replacement.replace(/\$/g, '$$$$');
+
+    const filePath = document.filePath;
+
+    // issue #104: scope='all' で LRU 退避ページ (in-memory pages Map から外れたもの) も
+    // IDB から読み戻して走査対象に含める。
+    // 各 idx について「走査ベース PageData」を構築する。in-memory 優先、無ければ IDB の
+    // textBlocks を完全 PageData に詰め直す (width/height/thumbnail は欠落しても 0/null で補完)。
+    const basePages = new Map<number, PageData>();
     if (scope === 'selection' || scope === 'current') {
-      targetIndices.push(state.currentPageIndex);
+      const page = document.pages.get(state.currentPageIndex);
+      if (page) basePages.set(state.currentPageIndex, page);
     } else {
-      // 全ページ: pages Map に存在するページのみ (LRU 退避ページは UI 側で復元して詰めてもらう)
-      for (const idx of document.pages.keys()) {
-        targetIndices.push(idx);
+      // in-memory に存在するページを先に積む
+      for (const [idx, page] of document.pages.entries()) {
+        basePages.set(idx, page);
+      }
+      // IDB から退避ページを読み戻し、in-memory に無い idx だけ追加
+      const idbAll = await getAllTemporaryPageData(filePath);
+      for (const [idx, partial] of idbAll.entries()) {
+        if (basePages.has(idx)) continue;
+        if (!partial.textBlocks) continue;
+        const restored: PageData = {
+          pageIndex: idx,
+          width: partial.width ?? 0,
+          height: partial.height ?? 0,
+          textBlocks: partial.textBlocks,
+          isDirty: partial.isDirty ?? false,
+          thumbnail: partial.thumbnail ?? null,
+          isTextExtracted: partial.isTextExtracted,
+          ocrCleared: partial.ocrCleared,
+        };
+        basePages.set(idx, restored);
       }
     }
 
@@ -589,8 +638,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     let skippedBlocks = 0;
     const entries: Array<{ pageIndex: number; before: PageData; after: PageData }> = [];
 
+    // 安定した順序で走査 (in-memory + IDB 復元の順序差を吸収)
+    const targetIndices = Array.from(basePages.keys()).sort((a, b) => a - b);
+
     for (const pageIdx of targetIndices) {
-      const page = document.pages.get(pageIdx);
+      const page = basePages.get(pageIdx);
       if (!page) continue;
 
       let pageChanged = false;
@@ -613,7 +665,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         re.lastIndex = 0;
         // hit 数の数えと replace を同時に。matchAll は countOnly に高コスト。
         // ここでは「replace 結果が同じか?」で changed 判定をしてから match 数を数える。
-        const replaced = b.text.replace(re, replacement);
+        const replaced = b.text.replace(re, safeReplacement);
         if (replaced === b.text) {
           newTextBlocks.push(b);
           continue;
@@ -642,11 +694,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     }
 
     // store に反映
-    const filePath = document.filePath;
     set((s) => {
       if (!s.document) return s;
       const newPages = new Map(s.document.pages);
       for (const e of entries) {
+        // 退避済みページの after も in-memory に積む (LRU で再度退避され得る)
         newPages.set(e.pageIndex, e.after);
       }
       const newAction: Action = { type: 'update_pages', entries };

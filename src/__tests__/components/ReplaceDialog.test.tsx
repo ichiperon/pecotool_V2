@@ -21,6 +21,7 @@ import type { PageData, TextBlock } from '../../types';
 vi.mock('../../utils/pdfLoader', () => ({
   saveTemporaryPageDataBatch: vi.fn().mockResolvedValue(undefined),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
 }));
 
 function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
