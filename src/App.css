@@ -1676,3 +1676,91 @@ body, #root {
   font-size: 11px;
   opacity: 0.7;
 }
+
+/* ReplaceDialog before/after preview (issue #98) */
+.replace-preview-list-wrapper {
+  margin-top: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: #fafafa;
+  overflow: hidden;
+}
+
+.replace-preview-caption {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: #6b7280;
+  border-bottom: 1px solid var(--border-color);
+  background: #f3f4f6;
+}
+
+.replace-preview-truncated {
+  margin-left: 4px;
+  color: #b45309;
+}
+
+.replace-preview-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.replace-preview-item {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.replace-preview-item:last-child {
+  border-bottom: none;
+}
+
+.replace-preview-loc {
+  font-size: 10px;
+  font-weight: 600;
+  color: #6b7280;
+  margin-bottom: 4px;
+  font-family: var(--font-mono, monospace);
+}
+
+.replace-preview-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.replace-preview-label {
+  flex: 0 0 44px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: lowercase;
+  letter-spacing: 0.05em;
+  padding-top: 1px;
+}
+
+.replace-preview-text {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-color);
+}
+
+.replace-preview-vertical {
+  writing-mode: vertical-rl;
+  max-height: 80px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.replace-preview-mark {
+  background: #fde68a;
+  color: #92400e;
+  padding: 0 2px;
+  border-radius: 2px;
+  font-weight: 600;
+}

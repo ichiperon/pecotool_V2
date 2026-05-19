@@ -2,6 +2,8 @@
  * Find & Replace (issue #93) のロジック層。
  *
  *  - countMatches: 現在の検索条件で何件 / 何ブロック / 何ページ ヒットするかを実行前に算出する
+ *  - buildMatchPreview (issue #98): before/after プレビュー用に、置換前後のテキストと
+ *    ハイライト範囲を最大 maxItems ブロック分まで生成する
  *  - buildRegexOrError: 検索条件から RegExp を組み立てつつ、正規表現の構文エラーを文字列で返す
  *  - useFindReplace: 上記をまとめて UI から購読しやすい形に。store の replaceText は呼ばない (UI 側で確認を挟むため)。
  *
@@ -11,7 +13,7 @@
 
 import { useCallback, useMemo } from 'react';
 import { usePecoStore } from '../store/pecoStore';
-import type { PageData } from '../types';
+import type { PageData, WritingMode } from '../types';
 
 export type ReplaceScope = 'selection' | 'current' | 'all';
 
@@ -25,6 +27,34 @@ export interface ReplaceCounts {
   hits: number;
   blocks: number;
   pages: number;
+}
+
+/**
+ * issue #98: 1 ブロック分の before/after プレビュー情報。
+ *
+ *  - before: 置換前のブロックテキスト全体
+ *  - after: 置換後のブロックテキスト全体 (replacement を反映)
+ *  - beforeRanges: before 文字列中のマッチ位置 [start, end) 配列 (UI 側で <mark> 描画用)
+ *  - afterRanges: after 文字列中の置換結果位置 [start, end) 配列 (同上)
+ *  - writingMode: 縦書き/横書き判定 (UI 側で writing-mode 切替に使う)
+ */
+export interface MatchPreviewItem {
+  pageIndex: number;
+  blockId: string;
+  before: string;
+  after: string;
+  beforeRanges: Array<{ start: number; end: number }>;
+  afterRanges: Array<{ start: number; end: number }>;
+  writingMode: WritingMode;
+}
+
+export interface MatchPreview {
+  /** 表示用にスライスされたブロック単位の preview (最大 maxItems 件) */
+  items: MatchPreviewItem[];
+  /** マッチが存在するブロックの総数 (slice 前) */
+  totalBlocks: number;
+  /** maxItems で打ち切られたかどうか */
+  truncated: boolean;
 }
 
 /**
@@ -93,10 +123,122 @@ export function countMatches(params: {
 }
 
 /**
+ * issue #98: before/after プレビュー (最大 maxItems ブロック) を構築する。
+ *
+ * countMatches と同じ走査ロジックだが、各ブロックで:
+ *  - matchAll でマッチ位置を全て収集して beforeRanges を作る
+ *  - 同じ RegExp で replace を実行し、replacement 反映後の after 文字列を作る
+ *  - after 文字列に対しても、replacement の挿入位置から afterRanges を逆算する
+ *
+ * パフォーマンス: 全ページスコープで 1000+ ヒットしてもメインスレッドを止めない
+ * よう、maxItems に達した時点で walking を打ち切る (truncated=true)。
+ * 注意: re は g フラグ前提 (buildRegexOrError で常に g を付けている)。
+ */
+export function buildMatchPreview(params: {
+  re: RegExp;
+  replacement: string;
+  useRegex: boolean;
+  scope: ReplaceScope;
+  pagesMap: Map<number, PageData> | undefined;
+  currentPageIndex: number;
+  selectedIds: ReadonlySet<string>;
+  maxItems?: number;
+}): MatchPreview {
+  const {
+    re,
+    replacement,
+    useRegex,
+    scope,
+    pagesMap,
+    currentPageIndex,
+    selectedIds,
+    maxItems = 20,
+  } = params;
+
+  const empty: MatchPreview = { items: [], totalBlocks: 0, truncated: false };
+  if (!pagesMap) return empty;
+
+  let pageIndices: number[];
+  if (scope === 'selection' || scope === 'current') {
+    pageIndices = [currentPageIndex];
+  } else {
+    pageIndices = Array.from(pagesMap.keys()).sort((a, b) => a - b);
+  }
+
+  const items: MatchPreviewItem[] = [];
+  let totalBlocks = 0;
+
+  for (const idx of pageIndices) {
+    const page = pagesMap.get(idx);
+    if (!page) continue;
+    for (const b of page.textBlocks) {
+      if (scope === 'selection' && !selectedIds.has(b.id)) continue;
+
+      // before のマッチ位置を全列挙
+      re.lastIndex = 0;
+      const beforeRanges: Array<{ start: number; end: number }> = [];
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(b.text)) !== null) {
+        beforeRanges.push({ start: m.index, end: m.index + m[0].length });
+        // ゼロ幅マッチ (例: /(?=x)/) で無限ループにならないよう lastIndex を強制的に進める
+        if (m[0].length === 0) re.lastIndex++;
+      }
+      if (beforeRanges.length === 0) continue;
+
+      totalBlocks++;
+
+      if (items.length < maxItems) {
+        // after 文字列とハイライト位置を構築
+        // useRegex=false の時は $ の特殊扱いを避けるため文字列ベースで結合する
+        let after = '';
+        const afterRanges: Array<{ start: number; end: number }> = [];
+        let cursor = 0;
+        for (let i = 0; i < beforeRanges.length; i++) {
+          const r = beforeRanges[i];
+          after += b.text.slice(cursor, r.start);
+          const matched = b.text.slice(r.start, r.end);
+          const replaced = useRegex
+            ? matched.replace(new RegExp(re.source, re.flags.replace(/g/g, '')), replacement)
+            : replacement;
+          const insertStart = after.length;
+          after += replaced;
+          afterRanges.push({ start: insertStart, end: insertStart + replaced.length });
+          cursor = r.end;
+        }
+        after += b.text.slice(cursor);
+
+        items.push({
+          pageIndex: idx,
+          blockId: b.id,
+          before: b.text,
+          after,
+          beforeRanges,
+          afterRanges,
+          writingMode: b.writingMode,
+        });
+      }
+    }
+  }
+
+  return {
+    items,
+    totalBlocks,
+    truncated: totalBlocks > items.length,
+  };
+}
+
+/**
  * UI から使うフック。検索条件とスコープを渡すと、件数 (プレビュー) と
  * regexError の文字列を返す。実行系は store.replaceText を呼び出す。
  */
-export function useFindReplace(query: ReplaceQuery, scope: ReplaceScope) {
+export function useFindReplace(
+  query: ReplaceQuery,
+  scope: ReplaceScope,
+  /** issue #98: プレビュー生成用に replacement も受け取る (未指定なら空文字 = 削除) */
+  replacement: string = '',
+  /** プレビューの上限件数 (default 20) */
+  previewMaxItems: number = 20,
+) {
   const document = usePecoStore(s => s.document);
   const currentPageIndex = usePecoStore(s => s.currentPageIndex);
   const selectedIds = usePecoStore(s => s.selectedIds);
@@ -113,6 +255,20 @@ export function useFindReplace(query: ReplaceQuery, scope: ReplaceScope) {
       selectedIds,
     });
   }, [regexResult, scope, document?.pages, currentPageIndex, selectedIds]);
+
+  const preview = useMemo<MatchPreview>(() => {
+    if ('error' in regexResult) return { items: [], totalBlocks: 0, truncated: false };
+    return buildMatchPreview({
+      re: regexResult.re,
+      replacement,
+      useRegex: query.useRegex,
+      scope,
+      pagesMap: document?.pages,
+      currentPageIndex,
+      selectedIds,
+      maxItems: previewMaxItems,
+    });
+  }, [regexResult, replacement, query.useRegex, scope, document?.pages, currentPageIndex, selectedIds, previewMaxItems]);
 
   // 構文エラー: 空 pattern の場合は表示しない (error='' で返している)
   const regexError = 'error' in regexResult && regexResult.error ? regexResult.error : null;
@@ -135,6 +291,8 @@ export function useFindReplace(query: ReplaceQuery, scope: ReplaceScope) {
 
   return {
     counts,
+    /** issue #98: before/after プレビュー (最初の previewMaxItems ブロック) */
+    preview,
     regexError,
     /** dialog 側から実引数で replacement を渡すために返す薄いラッパ */
     runReplace: (replacement: string, opts?: { skipBlockIds?: ReadonlySet<string> }) =>
