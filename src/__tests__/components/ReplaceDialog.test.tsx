@@ -249,3 +249,174 @@ describe('ReplaceDialog: 置換実行 onConfirm', () => {
     expect(call.expectedHits).toBe(1);
   });
 });
+
+/**
+ * issue #98: before/after プレビュー一覧 UI テスト。
+ *  - 検索文字列が空のときはプレビュー非表示
+ *  - ヒット時に before/after 行が出る
+ *  - <mark> でマッチ箇所がハイライトされる
+ *  - 20 件上限が機能して "N 件中" 表記が出る
+ *  - 大小区別 / 正規表現でも動く
+ *  - 構文エラー時はプレビュー非表示
+ */
+describe('ReplaceDialog: before/after プレビュー (issue #98)', () => {
+  it('検索文字列が空のときはプレビューを表示しない', () => {
+    setupDocument(
+      new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'foo' })] })]]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+    // before / after ラベルが無いこと
+    expect(screen.queryByText('before')).toBeNull();
+    expect(screen.queryByText('after')).toBeNull();
+  });
+
+  it('ヒットすると before / after 行とハイライトが表示される', () => {
+    setupDocument(
+      new Map([
+        [
+          0,
+          makePage({
+            textBlocks: [makeBlock({ id: 'b3', text: 'こんにちは、あ りがとう' })],
+          }),
+        ],
+      ]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'あ' } });
+    fireEvent.change(screen.getByLabelText('置換文字列'), { target: { value: 'い' } });
+
+    // before / after ラベル
+    expect(screen.getByText('before')).toBeTruthy();
+    expect(screen.getByText('after')).toBeTruthy();
+
+    // <mark> が 2 個 (before 1 + after 1)
+    const marks = window.document.querySelectorAll('mark.replace-preview-mark');
+    expect(marks.length).toBe(2);
+    expect(marks[0].textContent).toBe('あ');
+    expect(marks[1].textContent).toBe('い');
+  });
+
+  it('短縮 blockId とページ番号 (p.1 #xxxxxx) が表示される', () => {
+    setupDocument(
+      new Map([
+        [
+          0,
+          makePage({
+            textBlocks: [makeBlock({ id: 'abcdefghijk', text: 'foo' })],
+          }),
+        ],
+      ]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'foo' } });
+
+    // pageIndex+1 = 1, blockId.slice(0,6)
+    expect(screen.getByText('p.1 #abcdef')).toBeTruthy();
+  });
+
+  it('20 件上限: 25 ブロック中 20 件表示、"N 件中 20 件表示中" が出る', () => {
+    const blocks = [];
+    for (let i = 0; i < 25; i++) {
+      blocks.push(makeBlock({ id: `b${i}`, text: 'foo' }));
+    }
+    setupDocument(new Map([[0, makePage({ textBlocks: blocks })]]));
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'foo' } });
+
+    // 20 個の before 行
+    const beforeLabels = screen.getAllByText('before');
+    expect(beforeLabels.length).toBe(20);
+
+    // truncated notation
+    expect(screen.getByText(/25 件中 20 件表示中/)).toBeTruthy();
+  });
+
+  it('大小区別 ON で hello のみ含むケースを正しくハイライト', () => {
+    setupDocument(
+      new Map([
+        [0, makePage({ textBlocks: [makeBlock({ text: 'Hello HELLO hello' })] })],
+      ]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'hello' } });
+    fireEvent.click(screen.getByLabelText('大小区別'));
+    fireEvent.change(screen.getByLabelText('置換文字列'), { target: { value: 'hi' } });
+
+    // before に 1 つ、after に 1 つ → 計 2 つ
+    const marks = window.document.querySelectorAll('mark.replace-preview-mark');
+    expect(marks.length).toBe(2);
+    expect(marks[0].textContent).toBe('hello'); // before
+    expect(marks[1].textContent).toBe('hi'); // after
+  });
+
+  it('正規表現 ON で \\d+ がマッチして数字部分がハイライト', () => {
+    setupDocument(
+      new Map([
+        [0, makePage({ textBlocks: [makeBlock({ text: 'abc123def' })] })],
+      ]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.click(screen.getByLabelText('正規表現'));
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: '\\d+' } });
+    fireEvent.change(screen.getByLabelText('置換文字列'), { target: { value: 'N' } });
+
+    const marks = window.document.querySelectorAll('mark.replace-preview-mark');
+    expect(marks.length).toBe(2);
+    expect(marks[0].textContent).toBe('123'); // before
+    expect(marks[1].textContent).toBe('N'); // after
+  });
+
+  it('正規表現エラー時はプレビュー非表示', () => {
+    setupDocument(
+      new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'abc' })] })]]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.click(screen.getByLabelText('正規表現'));
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: '[invalid' } });
+
+    // エラー表示はある
+    expect(screen.getByRole('alert')).toBeTruthy();
+    // before / after ラベルは無い
+    expect(screen.queryByText('before')).toBeNull();
+    expect(screen.queryByText('after')).toBeNull();
+  });
+
+  it('XSS: replacement に <script> を入れても escape されてプレーンテキストとして描画', () => {
+    setupDocument(
+      new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'abc' })] })]]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'abc' } });
+    fireEvent.change(screen.getByLabelText('置換文字列'), {
+      target: { value: '<script>x</script>' },
+    });
+
+    // dangerouslySetInnerHTML を使っていないので <script> タグは挿入されない
+    expect(window.document.querySelectorAll('script').length).toBe(0);
+    // テキストとしてプレビューに含まれる (mark の中)
+    const afterMark = window.document.querySelectorAll('mark.replace-preview-mark')[1];
+    expect(afterMark.textContent).toBe('<script>x</script>');
+  });
+
+  it('replacement を変更すると after プレビューが追従する', () => {
+    setupDocument(
+      new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'foo' })] })]]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'foo' } });
+    fireEvent.change(screen.getByLabelText('置換文字列'), { target: { value: 'BAR' } });
+    let marks = window.document.querySelectorAll('mark.replace-preview-mark');
+    expect(marks[1].textContent).toBe('BAR');
+
+    fireEvent.change(screen.getByLabelText('置換文字列'), { target: { value: 'XX' } });
+    marks = window.document.querySelectorAll('mark.replace-preview-mark');
+    expect(marks[1].textContent).toBe('XX');
+  });
+});

@@ -681,6 +681,8 @@ async function handleSavePdf(
           if (!isFinite(sx_outer) || !isFinite(sy_outer)) continue;
           let offsetInPage = 0;
           let renderedAny = false;
+          let lastRunFont: PDFFont | null = null;
+          let lastBaselineX: number = 0;
           for (const run of runs) {
             const runHeight = run.font.heightAtSize(fontSize);
             if (runHeight === 0) continue;
@@ -701,15 +703,38 @@ async function handleSavePdf(
             page.pushOperators(popGraphicsState());
             offsetInPage += runTextWidth * sy_outer;
             renderedAny = true;
+            lastRunFont = run.font;
+            lastBaselineX = baselineX_run;
           }
           if (!renderedAny) continue;
+          // issue #100: 詳細コメントは pdfSaver.ts 側参照。invisible U+0020 で Acrobat の
+          // word-break heuristic を成立させ、Ctrl+A 連結を回避する。
+          if (lastRunFont) {
+            const trailingBaselineY = vh - block.bbox.y - offsetInPage;
+            setPageFontWithStableKey(page, lastRunFont, pageFontKeys);
+            page.pushOperators(
+              pushGraphicsState(),
+              ...rotationCm,
+              translate(lastBaselineX, trailingBaselineY),
+              scale(sx_outer, sy_outer),
+            );
+            page.drawText(' ', { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
+            page.pushOperators(popGraphicsState());
+          }
         } else {
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
 
           if (!isFinite(sx) || !isFinite(sy)) continue;
 
-          const baselineY = vh - block.bbox.y - textHeight * sy * 0.8;
+          // 横書き baselineY: 縦書き (#28) と同じく primary font の ascent 比から動的計算する (#99 副因対策)。
+          // 詳細コメントは pdfSaver.ts 側参照。
+          const primaryRunHeight = customFont.heightAtSize(fontSize);
+          const primaryRunAscent = customFont.heightAtSize(fontSize, { descender: false });
+          const descentRatio = primaryRunHeight > 0
+            ? (primaryRunHeight - primaryRunAscent) / primaryRunHeight
+            : 0.2;
+          const baselineY = vh - block.bbox.y - textHeight * sy * (1 - descentRatio);
           page.pushOperators(
             pushGraphicsState(),
             ...rotationCm,
@@ -717,10 +742,17 @@ async function handleSavePdf(
             scale(sx, sy),
           );
           let offset = 0;
+          let lastRunFont: PDFFont | null = null;
           for (const run of runs) {
             setPageFontWithStableKey(page, run.font, pageFontKeys);
             page.drawText(run.text, { x: offset, y: 0, size: fontSize, renderMode: 3 });
             offset += run.font.widthOfTextAtSize(run.text, fontSize);
+            lastRunFont = run.font;
+          }
+          // issue #100: 詳細コメントは pdfSaver.ts 側参照。invisible U+0020 で Acrobat の
+          // word-break heuristic を成立させ、Ctrl+A 連結を回避する。
+          if (lastRunFont) {
+            page.drawText(' ', { x: offset, y: 0, size: fontSize, renderMode: 3 });
           }
           page.pushOperators(popGraphicsState());
         }

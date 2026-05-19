@@ -13,8 +13,8 @@
  *  - bboxMetaRef は後続 loadPage 呼び出しで使えるよう保持されること
  *  - unmount 後の bboxMeta resolve で追加 loadPage が発火しないこと (既存挙動維持)
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { renderHook, waitFor, cleanup } from '@testing-library/react'
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 
@@ -76,6 +76,12 @@ beforeEach(() => {
   if ('requestIdleCallback' in window) {
     delete (window as any).requestIdleCallback
   }
+})
+
+// 各テスト後に renderHook で mount したコンポーネントを unmount する
+// (前テストが await 中の効果フックを次テストへ残さないように)
+afterEach(() => {
+  cleanup()
 })
 
 describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火しないこと (バルク pre-load 廃止)', () => {
@@ -197,8 +203,111 @@ describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火しない
   })
 })
 
+describe('S-01-06 (#99): loadPage 呼び出し時点で bboxMetaRef が解決済みであること', () => {
+  it('loadPage は bboxMeta が resolve した後にのみ呼ばれ、第4引数に meta が渡る', async () => {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({ document: doc, currentPageIndex: 0 } as any)
+
+    const fakePdf = { numPages: 1 }
+    getSharedPdfProxyMock.mockResolvedValue(fakePdf)
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+
+    // bboxMeta を手動制御。resolve しないと loadPage は呼ばれてはならない。
+    let resolveMeta!: (m: any) => void
+    const metaPromise = new Promise<any>((res) => { resolveMeta = res })
+    loadPecoToolBBoxMetaMock.mockReturnValue(metaPromise)
+
+    loadPageMock.mockImplementation((_pdf, idx) =>
+      Promise.resolve(makePage(idx))
+    )
+
+    const stableShowToast = vi.fn()
+    const stableTriggerThumbnail = vi.fn()
+
+    renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast: stableShowToast,
+        triggerThumbnailLoad: stableTriggerThumbnail,
+      })
+    )
+
+    // bboxMeta が pending の間は loadPage を呼んではならない。
+    // (旧実装は fire-and-forget で loadPage を即実行していたため、ここで loadPage が
+    //  呼ばれていた → bboxMetaRef=null のまま pdfjs fallback 経路に落ちる主因。)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(loadPageMock).not.toHaveBeenCalled()
+
+    // bboxMeta を resolve すると、解決済みの meta を持って loadPage が呼ばれる。
+    const fakeMeta = { '0': [{ bbox: { x: 1, y: 2, width: 3, height: 4 }, writingMode: 'horizontal', order: 0, text: 'x' }] }
+    resolveMeta(fakeMeta)
+
+    await waitFor(() => {
+      expect(loadPageMock).toHaveBeenCalled()
+    })
+
+    const firstCall = loadPageMock.mock.calls[0]
+    // loadPage(pdf, pageIdx, filePath, bboxMeta, mtime)
+    expect(firstCall[1]).toBe(0)
+    expect(firstCall[3]).toEqual(fakeMeta) // ← meta が解決済みで渡されている
+  })
+
+  it('loadPecoToolBBoxMeta が reject しても bboxMetaRef は null になり loadPage は実行される', async () => {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({ document: doc, currentPageIndex: 0 } as any)
+
+    const fakePdf = { numPages: 1 }
+    getSharedPdfProxyMock.mockResolvedValue(fakePdf)
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+
+    // meta loader が reject するケース (旧フローでは catch でつぶしていた)
+    loadPecoToolBBoxMetaMock.mockRejectedValue(new Error('metadata stream corrupt'))
+    loadPageMock.mockImplementation((_pdf, idx) =>
+      Promise.resolve(makePage(idx))
+    )
+
+    const stableShowToast2 = vi.fn()
+    const stableTriggerThumbnail2 = vi.fn()
+
+    renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast: stableShowToast2,
+        triggerThumbnailLoad: stableTriggerThumbnail2,
+      })
+    )
+
+    await waitFor(() => {
+      expect(loadPageMock).toHaveBeenCalled()
+    })
+
+    const firstCall = loadPageMock.mock.calls[0]
+    expect(firstCall[3]).toBeNull() // bboxMeta=null で pdfjs fallback 経路に確定的に落ちる
+  })
+})
+
 describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage は発火しない', () => {
-  it('bboxMeta resolve 前にアンマウント → 追加 loadPage が呼ばれない', async () => {
+  it('bboxMeta resolve 前にアンマウント → 以降の loadPage は新たに発火しない', async () => {
     const TOTAL = 4
     const pages = new Map<number, PageData>()
     for (let i = 0; i < TOTAL; i++) pages.set(i, makeDummyPage(i))
@@ -227,32 +336,41 @@ describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage 
       Promise.resolve(makePage(idx))
     )
 
+    // showToast / triggerThumbnailLoad を stable 参照にする
+    // (renderHook の再レンダ時に新しい vi.fn() が渡されると loadCurrentPage useCallback の
+    //  identity が変わり、effect が再実行されて複数の loadCurrentPage が並列に走る。
+    //  本テストはアンマウント抑制を見るためにこの並列実行は防ぐ。)
+    const stableShowToast = vi.fn()
+    const stableTriggerThumbnail = vi.fn()
+
     const { unmount } = renderHook(() =>
       usePageNavigation({
         currentPageIndex: 0,
-        showToast: vi.fn(),
-        triggerThumbnailLoad: vi.fn(),
+        showToast: stableShowToast,
+        triggerThumbnailLoad: stableTriggerThumbnail,
       })
     )
 
-    // 初回 currentPage(0) の loadPage が呼ばれるのを待つ
-    await waitFor(() => {
-      expect(loadPageMock).toHaveBeenCalled()
-    })
+    // #99 修正後: loadPage は bboxMeta await の完了後にのみ呼ばれる。
+    // resolve 前にアンマウントすれば、その後の resolve でも abort 済みなので loadPage は走らない。
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
 
+    // 現時点での呼び出し回数を計測 (meta 未 resolve なので 0 のはず)
     const callsBeforeAbort = loadPageMock.mock.calls.length
+    expect(callsBeforeAbort).toBe(0)
 
     // アンマウント → controller.abort() がクリーンアップで呼ばれる
     unmount()
 
-    // bboxMeta を後から resolve しても、バルク廃止により追加 loadPage は起こらない
+    // bboxMeta を後から resolve しても、abort 済みなので新規 loadPage は走らない
     resolveMeta({ '0': [], '1': [], '2': [], '3': [] })
-    // promise 連鎖を解消するため複数 microtask を進める
     await Promise.resolve()
     await Promise.resolve()
     await Promise.resolve()
 
-    // 追加 loadPage は 1 度も呼ばれていないこと
+    // 追加 loadPage は 1 度も呼ばれていないこと (meta await 後 signal.aborted で return)
     expect(loadPageMock.mock.calls.length).toBe(callsBeforeAbort)
   })
 })

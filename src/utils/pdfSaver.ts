@@ -881,6 +881,8 @@ export async function buildPdfDocument(
           }
           let offsetInPage = 0;
           let renderedAny = false;
+          let lastRunFont: PDFFont | null = null;
+          let lastBaselineX: number = 0;
           for (const run of runs) {
             const runHeight = run.font.heightAtSize(fontSize);
             if (runHeight === 0) continue;
@@ -903,8 +905,26 @@ export async function buildPdfDocument(
             // Σ advance = textWidth * sy_outer = bbox.height で完全に bbox を埋める。
             offsetInPage += runTextWidth * sy_outer;
             renderedAny = true;
+            lastRunFont = run.font;
+            lastBaselineX = baselineX_run;
           }
           if (!renderedAny) continue;
+          // issue #100: 横書きと同じく invisible スペース (U+0020) を 1 文字、最後の run の続きに
+          // 描画して Acrobat の word-break heuristic を成立させる (Ctrl+A コピペで隣接 BB が
+          // 連結されるのを回避)。縦書きは run ごとに独立した GS フレームを持つため、空白用の
+          // フレームをもう 1 つ push する。U+0020 は writingMode に依らず word break として機能する。
+          if (lastRunFont) {
+            const trailingBaselineY = vh - block.bbox.y - offsetInPage;
+            setPageFontWithStableKey(page, lastRunFont, pageFontKeys);
+            page.pushOperators(
+              pushGraphicsState(),
+              ...rotationCm,
+              translate(lastBaselineX, trailingBaselineY),
+              scale(sx_outer, sy_outer),
+            );
+            page.drawText(' ', { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
+            page.pushOperators(popGraphicsState());
+          }
         } else {
           const sx = block.bbox.width / textWidth;
           const sy = block.bbox.height / textHeight;
@@ -914,7 +934,24 @@ export async function buildPdfDocument(
             continue;
           }
 
-          const baselineY = vh - block.bbox.y - textHeight * sy * 0.8;
+          // 横書き baselineY: 縦書き (#28) と同じく primary font の ascent 比から動的計算する (#99 副因対策)。
+          // 旧実装は textHeight * sy * 0.8 のマジックナンバーで baseline 位置を決めていたため、
+          // primary font の actual ascent ratio (NotoSansJP では heightAtSize / heightAtSize(no descender) で
+          // descentRatio ≈ 0.2) との誤差が bbox 上端で目視可能な縦ずれを生んでいた。
+          //
+          // 動的式 (縦書きと同形):
+          //   descentRatio = (runHeight - runAscent) / runHeight  ... primary font 代表値
+          //   baselineY    = vh - bbox.y - textHeight * sy * (1 - descentRatio)
+          //
+          // 0.8 リテラルとの差分は数 % 程度だが、保存→再読込のラウンドトリップで蓄積すると
+          // ユーザー体験上 BB がずれて見える。primary font の代表値で十分 (混在 run でも
+          // primary font のメトリクスで cm を発行している)。
+          const primaryRunHeight = customFont.heightAtSize(fontSize);
+          const primaryRunAscent = customFont.heightAtSize(fontSize, { descender: false });
+          const descentRatio = primaryRunHeight > 0
+            ? (primaryRunHeight - primaryRunAscent) / primaryRunHeight
+            : 0.2;
+          const baselineY = vh - block.bbox.y - textHeight * sy * (1 - descentRatio);
 
           page.pushOperators(
             pushGraphicsState(),
@@ -923,10 +960,20 @@ export async function buildPdfDocument(
             scale(sx, sy),
           );
           let offset = 0;
+          let lastRunFont: PDFFont | null = null;
           for (const run of runs) {
             setPageFontWithStableKey(page, run.font, pageFontKeys);
             page.drawText(run.text, { x: offset, y: 0, size: fontSize, renderMode: 3 });
             offset += run.font.widthOfTextAtSize(run.text, fontSize);
+            lastRunFont = run.font;
+          }
+          // issue #100: Acrobat の text extraction は座標と文字幅の heuristic で隣接 BB を連結する
+          // (BT...ET 境界を無視)。各 BB の末尾に invisible スペース (U+0020) を 1 文字描画して
+          // Acrobat の word-break heuristic を成立させ、Ctrl+A → コピペで「あいう」「えお」が
+          // 「あいうえお」に連結されるのを回避する。renderMode 3 (invisible) なので画面表示や
+          // 印刷は完全に同等。最後の run のフォントで描画 (U+0020 は全 Latin/CJK フォントで対応)。
+          if (lastRunFont) {
+            page.drawText(' ', { x: offset, y: 0, size: fontSize, renderMode: 3 });
           }
           page.pushOperators(popGraphicsState());
         }
