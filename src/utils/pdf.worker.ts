@@ -352,6 +352,27 @@ function asPageIndex(value: unknown): number | null {
   return typeof pageIndex === 'number' && Number.isInteger(pageIndex) ? pageIndex : null;
 }
 
+/**
+ * issue #96 Option B: existingBBoxMeta から読み出した 1 ページ分のエントリが
+ * 「再描画に必要な最小情報」を備えているか検証する type guard。
+ * 詳細は pdfSaver.ts 側コメント参照。
+ */
+function isRepairTextBlock(value: unknown): value is RepairTextBlock {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.text !== 'string') return false;
+  if (typeof v.order !== 'number') return false;
+  if (v.writingMode !== 'horizontal' && v.writingMode !== 'vertical') return false;
+  const bbox = v.bbox as Record<string, unknown> | null | undefined;
+  if (!bbox || typeof bbox !== 'object') return false;
+  return (
+    typeof bbox.x === 'number' &&
+    typeof bbox.y === 'number' &&
+    typeof bbox.width === 'number' &&
+    typeof bbox.height === 'number'
+  );
+}
+
 function makeFontSupportSet(font: PDFFont): Set<number> | null {
   if (typeof font.getCharacterSet !== 'function') return null;
   return new Set(font.getCharacterSet());
@@ -525,6 +546,49 @@ async function handleSavePdf(
     if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) continue;
     pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
   }
+
+  // issue #96 要件2 (Option B): 「未編集だが明らかに bloated」なページを自動検知して
+  // フルクリーンアップ対象に追加する。詳細は pdfSaver.ts 側コメント参照（同一ロジック）。
+  //
+  // 検知条件: (a) 未 dirty / (b) existingBBoxMeta にエントリ有 / (c) Pecotool 由来フォント
+  // 辞書が BLOAT_THRESHOLD 個超 / (d) fontBytes (Japanese-capable) 有
+  //
+  // 副作用: pruneStalePecoToolResources + replacePageTextContentStreams + drawText 再描画
+  //         により Meiryo subset 群が 1 個の PecoF subset に集約される。
+  const BLOAT_DETECTION_FONT_THRESHOLD = 3;
+  if (fontBytes) {
+    for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+      if (pagesToWrite.has(pi)) continue;
+      const entries = existingBBoxMeta[String(pi)];
+      if (!Array.isArray(entries) || entries.length === 0) continue;
+
+      const page = pdfDoc.getPage(pi);
+      const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
+      const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+      if (!fontDict) continue;
+
+      let pecoCount = 0;
+      for (const [key] of fontDict.entries()) {
+        if (isPecoToolFontKey(key)) {
+          pecoCount++;
+          if (pecoCount > BLOAT_DETECTION_FONT_THRESHOLD) break;
+        }
+      }
+      if (pecoCount <= BLOAT_DETECTION_FONT_THRESHOLD) continue;
+
+      const repairBlocks = entries
+        .filter(isRepairTextBlock)
+        .map((block) => ({
+          text: block.text,
+          bbox: block.bbox,
+          writingMode: block.writingMode,
+          order: block.order,
+        }));
+      if (repairBlocks.length === 0) continue;
+      pagesToWrite.set(pi, { textBlocks: repairBlocks });
+    }
+  }
+
   const pageEntriesToWrite = [...pagesToWrite.entries()].sort(([a], [b]) => a - b);
 
   // Only embed font if we actually have something to draw

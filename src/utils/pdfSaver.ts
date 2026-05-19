@@ -418,6 +418,36 @@ function asPageIndex(value: unknown): number | null {
   return typeof pageIndex === 'number' && Number.isInteger(pageIndex) ? pageIndex : null;
 }
 
+/**
+ * issue #96 Option B: existingBBoxMeta から読み出した 1 ページ分のエントリが
+ * 「再描画に必要な最小情報」を備えているか検証する type guard。
+ *
+ * 検証フィールド:
+ *   - text (string)
+ *   - bbox.{x,y,width,height} (number)
+ *   - writingMode ('horizontal' | 'vertical')
+ *   - order (number)
+ *
+ * 不完全エントリは静かに drop される。検知ロジックは「再描画できる block が
+ * 1 件以上ある」ことを bloated 判定の前提に置くため、ここで落とした結果
+ * repairBlocks が 0 件になった場合は cleanup を諦める。
+ */
+function isRepairTextBlock(value: unknown): value is RepairTextBlock {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.text !== 'string') return false;
+  if (typeof v.order !== 'number') return false;
+  if (v.writingMode !== 'horizontal' && v.writingMode !== 'vertical') return false;
+  const bbox = v.bbox as Record<string, unknown> | null | undefined;
+  if (!bbox || typeof bbox !== 'object') return false;
+  return (
+    typeof bbox.x === 'number' &&
+    typeof bbox.y === 'number' &&
+    typeof bbox.width === 'number' &&
+    typeof bbox.height === 'number'
+  );
+}
+
 function makeFontSupportSet(font: PDFFont): Set<number> | null {
   if (typeof font.getCharacterSet !== 'function') return null;
   return new Set(font.getCharacterSet());
@@ -665,6 +695,80 @@ export async function buildPdfDocument(
     if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) continue;
     pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
   }
+
+  // issue #96 要件2 (Option B): 「未編集だが明らかに bloated」なページを自動検知して
+  // フルクリーンアップ対象に追加する。
+  //
+  // 背景:
+  //   PR #25 で「未編集ページの content stream を保存しただけで書き換わって原本メタが
+  //   破壊される」のを防ぐため、dirty page のみが pruneStalePecoToolResources /
+  //   replacePageTextContentStreams のフルパスを通るよう制限した。
+  //   しかし過去保存で累積した Meiryo subset 群 (1 ページに 50+ 個) のような bloat は
+  //   live xref 内に残り続け、再読み込み → 保存だけでは縮まない。Option Beta (空 q-Q
+  //   除去) だけでは 115MB → 30MB 止まりで acceptance #1 (<20MB) を満たさない。
+  //
+  // 検知条件 (全て満たすこと):
+  //   (a) まだ dirty 扱いになっていない (pagesToWrite に未登録)
+  //   (b) existingBBoxMeta にこのページのエントリ (TextBlock 配列) がある
+  //       — 無いと再描画すべきテキストが分からないので cleanup 不能
+  //   (c) Font 辞書に PecoTool 由来のフォントエントリが BLOAT_THRESHOLD 個以上ある
+  //       — 通常 1-3 個。58 個も入っているのは過去保存で累積した bloat の証跡
+  //   (d) fontBytes が呼び出し側から渡されている (Japanese 対応フォント有)
+  //       — 無いと Helvetica にフォールバックして Japanese テキストが skip され OCR レイヤー
+  //         を破壊する。fontBytes 無しのケースは bloat も発生しえない (描画してない) ので
+  //         検知 fire しなくて問題ない。
+  //
+  // 副作用 (既存 dirty page と同等):
+  //   pruneStalePecoToolResources で Meiryo subset 群が除去され、
+  //   replacePageTextContentStreams で旧 BT...ET が削除され、
+  //   既存ループで existingBBoxMeta から取り出した TextBlock を新 PecoF subset で再描画する。
+  //   結果: 58 個の Meiryo subset → 1 個の PecoF subset に集約され、大幅縮小。
+  //
+  // PR #25 の不変条件への影響:
+  //   - 通常の pristine PDF (PecoTool 由来フォント無し or existingBBoxMeta 無し) では検知が
+  //     fire しないため、bit-equiv 保存が維持される
+  //   - bloated PDF では既に「原本メタ」が壊れた状態なので、再描画して clean meta を出すことが
+  //     issue #96 の意図そのもの (原本メタ保護より優先される)
+  //   - E2-3c 大容量メタ保存テスト: dirty 0 件 + bloat 検知 fire 無し (existingBBoxMeta から
+  //     populate されないので bloated 判定の (c) が満たされない pristine 状態) の場合は
+  //     既存挙動を維持する。bloated PDF を 2 回保存しても 2 回目は subset 数が <= threshold に
+  //     縮んでいるため (c) を満たさず safe。
+  const BLOAT_DETECTION_FONT_THRESHOLD = 3;
+  if (fontBytes) {
+    for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+      if (pagesToWrite.has(pi)) continue; // (a)
+      const entries = existingBBoxMeta[String(pi)];
+      if (!Array.isArray(entries) || entries.length === 0) continue; // (b)
+
+      const page = pdfDoc.getPage(pi);
+      const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
+      const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+      if (!fontDict) continue;
+
+      let pecoCount = 0;
+      for (const [key] of fontDict.entries()) {
+        if (isPecoToolFontKey(key)) {
+          pecoCount++;
+          if (pecoCount > BLOAT_DETECTION_FONT_THRESHOLD) break;
+        }
+      }
+      if (pecoCount <= BLOAT_DETECTION_FONT_THRESHOLD) continue; // (c)
+
+      // Bloated と判定。dirty 相当として pagesToWrite に追加
+      // (テキストは existingBBoxMeta から復元)。
+      const repairBlocks = entries
+        .filter(isRepairTextBlock)
+        .map((block) => ({
+          text: block.text,
+          bbox: block.bbox,
+          writingMode: block.writingMode,
+          order: block.order,
+        }));
+      if (repairBlocks.length === 0) continue;
+      pagesToWrite.set(pi, { textBlocks: repairBlocks });
+    }
+  }
+
   const pageEntriesToWrite = [...pagesToWrite.entries()].sort(([a], [b]) => a - b);
   
   // Only embed font if we actually have something to draw
