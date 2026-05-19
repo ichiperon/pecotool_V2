@@ -355,8 +355,14 @@ describe('pdfSaver / savePDF', () => {
         expect.stringContaining('block error'),
         expect.any(Error),
       )
-      // 2件ともdrawText が呼ばれる（1件目は例外で落ちた後もループ継続）
-      expect(m.drawText).toHaveBeenCalledTimes(2)
+      // 2件ともdrawText が呼ばれる（1件目は例外で落ちた後もループ継続）。
+      // issue #100: 各ブロック描画後に invisible スペース 1 文字を追加するため、
+      //             1 件目 (throw) で 1 回 + 2 件目 (成功) で text+space で 2 回 = 計 3 回。
+      const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
+      expect(drawnTexts).toContain('壊れたテキスト')
+      expect(drawnTexts).toContain('正常なテキスト')
+      expect(drawnTexts).toContain(' ')
+      expect(m.drawText).toHaveBeenCalledTimes(3)
 
       warnSpy.mockRestore()
     })
