@@ -200,7 +200,20 @@ describe.skipIf(!hasRealPdf)('Copy/Paste × save roundtrip (実 PDF)', () => {
     expect(page1[0].text).toBe('COPIED');
     expect(page1[0].bbox.x).toBe(b0.bbox.x + 10);
 
-    // save → reload で両ページの状態が保存されている
+    // page 0 に戻って同じ clipboard を貼り付け、現ページ (page 0) に追加されることを確認。
+    // clipboard はナビゲーション後も保持されているため再度 paste できる。
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+    usePecoStore.getState().pasteClipboard();
+    const page0After = usePecoStore.getState().document!.pages.get(0)!.textBlocks;
+    expect(page0After).toHaveLength(2); // 元の 1 件 + paste 1 件
+    expect(page0After[1].text).toBe('COPIED');
+
+    // save → reload。
+    // テスト用実 PDF は 1 ページ構成のため、buildPdfDocument は page index 1
+    // (pdfDoc.getPageCount() の範囲外) を書き込めず meta に載せない。これは
+    // 「存在しない物理ページには書き戻せない」という正しい不変条件
+    // (pdfSaver.ts: pageIndex >= pdfDoc.getPageCount() で skip)。
+    // 一方 page 0 は dirty かつ範囲内なので確実に保存される。
     const fontBuf = readFileSync(FONT_PATH);
     const fontAB = new ArrayBuffer(fontBuf.byteLength);
     new Uint8Array(fontAB).set(fontBuf);
@@ -214,11 +227,11 @@ describe.skipIf(!hasRealPdf)('Copy/Paste × save roundtrip (実 PDF)', () => {
     });
     const meta = readBBoxMeta(savedDoc);
     expect(meta).not.toBeNull();
-    // page 0 は dirty=false なので meta に載らない (dirty only フィルタ)
-    // → テストの doc では page 0 の isDirty は false のまま。
-    //   page 1 だけが dirty=true で保存対象。
-    expect(meta!['1']).toHaveLength(1);
-    expect(meta!['1'][0].text).toBe('COPIED');
+    // page 0 (範囲内・dirty) は保存され、paste した COPIED ブロックを含む
+    expect(meta!['0']).toBeDefined();
+    expect(meta!['0'].some(e => e.text === 'COPIED')).toBe(true);
+    // page 1 は実 PDF の範囲外なので meta には現れない (ページ跨ぎでの新規物理ページ生成は不可)
+    expect(meta!['1']).toBeUndefined();
   }, 120_000);
 
   it('setDocument で clipboard がリセットされる', async () => {

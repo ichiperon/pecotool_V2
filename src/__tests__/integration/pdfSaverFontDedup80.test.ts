@@ -148,11 +148,14 @@ describe('Issue #80: minimize newFontDictionary internal API dependency', () => 
 
       // 描画は 4 ブロック走るが、同一 font なので newFontDictionary は 1 ページあたり 1 font に
       // つき 1 回しか呼ばれてはならない (cache + scan が機能している)。
-      // fontName は "IPAexGothic" (subset 前 postscriptName)。
-      const ipaCalls = callsByTag.get('IPAexGothic') ?? 0;
+      // issue #96 Fix 1 以降、saver は postscriptName ではなく統一タグ PECO_FONT_KEY_TAG
+      // ('PecoF') を newFontDictionary に渡す (`/PecoF-<random>` 形式 key を生成し、
+      // 次回保存時に isPecoToolFontKey() で確実に検出するため)。よって spy が観測する
+      // tag は 'PecoF' になる。
+      const ipaCalls = callsByTag.get('PecoF') ?? 0;
       expect(
         ipaCalls,
-        `IPAexGothic への newFontDictionary 呼び出しは 1 回のみのはず (実際: ${ipaCalls})`,
+        `PecoF タグへの newFontDictionary 呼び出しは 1 回のみのはず (実際: ${ipaCalls})`,
       ).toBe(1);
 
       // 保存 PDF も alias 重複が無いことを再確認

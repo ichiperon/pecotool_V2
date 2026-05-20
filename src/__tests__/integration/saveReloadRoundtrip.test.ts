@@ -501,9 +501,16 @@ describe('REGRESSION: drawText スキップがあっても text/bbox ペアが�
     const doc = makeDoc(new Map([[0, makePage([b0, b1, b2, b3], 0, true)]]))
     await savePDF(new Uint8Array(10), doc)
 
-    // ---- 前提確認: drawText は空文字を除いた 3 件だけ呼ばれている ----
+    // ---- 前提確認: drawText は空文字ブロックをスキップして 3 ブロックぶん呼ばれる ----
+    // issue #100: Acrobat の word-break heuristic 用に、各非空ブロックの末尾へ
+    // invisible スペース (U+0020, renderMode 3) を 1 文字追加描画する。
+    // したがって drawText の呼び出し列は本文 1 件ごとに ' ' が 1 件挟まる:
+    //   'あ', ' ', 'い', ' ', 'う', ' '
+    // 空文字ブロック (b1) は本文も U+0020 も描画されない (block.text が falsy のため skip)。
     const drawTextCalls = m.drawText.mock.calls.map((c: any[]) => c[0])
-    expect(drawTextCalls).toEqual(['あ', 'い', 'う'])
+    expect(drawTextCalls).toEqual(['あ', ' ', 'い', ' ', 'う', ' '])
+    // 本文 (U+0020 を除いた実テキスト) は空文字を除く 3 件
+    expect(drawTextCalls.filter((t: string) => t !== ' ')).toEqual(['あ', 'い', 'う'])
 
     // ---- 前提確認: bboxMeta には 4 件（空文字含む）すべて保存されている ----
     const bboxMeta = JSON.parse(m.capturedBBoxJson.value!)
