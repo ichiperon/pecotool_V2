@@ -25,6 +25,8 @@ vi.mock('lucide-react', () => {
     X: s('X'),
     Loader2: s('Loader2'),
     FileX: s('FileX'),
+    SearchCheck: s('SearchCheck'),
+    SquareCheckBig: s('SquareCheckBig'),
   }
 })
 
@@ -55,6 +57,9 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> =
     ocrOpacity: 0.5,
     reorderThreshold: 50,
     isPreviewOpen: false,
+    isInspecting: false,
+    canRunCurrentInspection: true,
+    canRunAllPagesInspection: true,
     showSettingsDropdown: false,
     isOcrRunning: false,
     ocrProgress: null,
@@ -67,12 +72,14 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> =
     onToggleSplit: vi.fn(),
     onGroup: vi.fn(),
     onDeduplicate: vi.fn(),
+    onSelectAllText: vi.fn(),
     onRemoveSpaces: vi.fn(),
     onDelete: vi.fn(),
     onToggleOcr: vi.fn(),
     onSetOcrOpacity: vi.fn(),
     onSetReorderThreshold: vi.fn(),
     onTogglePreview: vi.fn(),
+    onRunInspection: vi.fn(),
     onToggleSettingsDropdown: vi.fn(),
     onRunOcrCurrentPage: vi.fn(),
     onRunOcrAllPages: vi.fn(),
@@ -185,5 +192,78 @@ describe('Toolbar', () => {
   it('C-TB-16: settings dropdown shows opacity slider when showSettingsDropdown=true', () => {
     const { container } = renderToolbar({ showSettingsDropdown: true })
     expect(container.querySelector('.ocr-opacity-slider')).toBeTruthy()
+  })
+
+  it('C-TB-17: text select all button calls handler when page has text', () => {
+    const onSelectAllText = vi.fn()
+    renderToolbar({
+      currentPage: {
+        ...dummyPage,
+        textBlocks: [{
+          id: 'b1',
+          text: 'text',
+          originalText: 'text',
+          bbox: { x: 0, y: 0, width: 10, height: 10 },
+          writingMode: 'horizontal',
+          order: 0,
+          isNew: false,
+          isDirty: false,
+        }],
+      },
+      onSelectAllText,
+    })
+
+    fireEvent.click(getButton('テキスト全選択'))
+    expect(onSelectAllText).toHaveBeenCalledTimes(1)
+  })
+
+  it('C-TB-18: inspection dropdown opens from toolbar button', () => {
+    renderToolbar()
+
+    expect(screen.queryByTitle('検査範囲')).toBeNull()
+    fireEvent.click(getButton('構造検査'))
+
+    expect(screen.getByText('現在ページ')).toBeTruthy()
+    expect(screen.getByText('全ページ')).toBeTruthy()
+  })
+
+  it('C-TB-19: inspection dropdown passes selected scope', () => {
+    const onRunInspection = vi.fn()
+    renderToolbar({
+      onRunInspection,
+    })
+
+    fireEvent.click(getButton('構造検査'))
+    fireEvent.click(screen.getByText('現在ページ'))
+
+    expect(onRunInspection).toHaveBeenCalledWith('current')
+  })
+
+  it('C-TB-20: inspection dropdown passes all-page scope', () => {
+    const onRunInspection = vi.fn()
+    renderToolbar({
+      onRunInspection,
+    })
+
+    fireEvent.click(getButton('構造検査'))
+    fireEvent.click(screen.getByText('全ページ'))
+
+    expect(onRunInspection).toHaveBeenCalledWith('all')
+  })
+
+  it('C-TB-21: current page inspection item can be disabled independently', () => {
+    const onRunInspection = vi.fn()
+    renderToolbar({
+      canRunCurrentInspection: false,
+      canRunAllPagesInspection: true,
+      onRunInspection,
+    })
+
+    fireEvent.click(getButton('構造検査'))
+    fireEvent.click(screen.getByText('現在ページ'))
+    fireEvent.click(screen.getByText('全ページ'))
+
+    expect(onRunInspection).toHaveBeenCalledTimes(1)
+    expect(onRunInspection).toHaveBeenCalledWith('all')
   })
 })

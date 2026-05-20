@@ -9,6 +9,13 @@ import {
 import { perf } from '../utils/perfLogger';
 import type { BoundingBox } from '../types';
 
+type BBoxMeta = Record<string, Array<{
+  bbox: BoundingBox;
+  writingMode: string;
+  order: number;
+  text: string;
+}>>;
+
 interface UsePageNavigationOptions {
   currentPageIndex: number;
   showToast: (message: string, isError?: boolean) => void;
@@ -33,6 +40,8 @@ export function usePageNavigation({
   // document 全体ではなく primitives のみ購読
   // (updatePageData 毎の document 参照差し替えで再レンダが起きないようにするため)
   const filePath = usePecoStore((s) => s.document?.filePath);
+  const documentLoadId = usePecoStore((s) => s.documentLoadId);
+  const documentMtime = usePecoStore((s) => s.document?.mtime);
   const totalPages = usePecoStore((s) => s.document?.totalPages);
   // 現在ページの width のみ購読 (未ロード判定用。textBlocks 等には反応しない)
   const currentPageWidth = usePecoStore((s) => s.document?.pages.get(currentPageIndex)?.width);
@@ -44,12 +53,20 @@ export function usePageNavigation({
   const [pageInputValue, setPageInputValue] = useState<string | null>(null);
 
   const currentLoadAbortRef = useRef<AbortController | null>(null);
-  const bboxMetaRef = useRef<Record<string, Array<{
-    bbox: BoundingBox;
-    writingMode: string;
-    order: number;
-    text: string;
-  }>> | null | undefined>(undefined);
+  const loadGenerationRef = useRef(0);
+  const isMountedRef = useRef(true);
+  const bboxMetaRef = useRef<BBoxMeta | null | undefined>(undefined);
+  const bboxMetaPromiseRef = useRef<Promise<BBoxMeta | null> | null>(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      loadGenerationRef.current += 1;
+      currentLoadAbortRef.current?.abort();
+      currentLoadAbortRef.current = null;
+    };
+  }, []);
 
   const loadCurrentPage = useCallback(async (pageIdx: number) => {
     perf.mark('nav.loadEntry', { page: pageIdx });
@@ -57,7 +74,9 @@ export function usePageNavigation({
     currentLoadAbortRef.current?.abort();
     const controller = new AbortController();
     currentLoadAbortRef.current = controller;
+    const loadGeneration = ++loadGenerationRef.current;
     const signal = controller.signal;
+    const isStaleLoad = () => !isMountedRef.current || signal.aborted || loadGenerationRef.current !== loadGeneration;
 
     const doc = usePecoStore.getState().document;
     if (!doc) return;
@@ -72,7 +91,7 @@ export function usePageNavigation({
       const pdf = await getSharedPdfProxy(doc.filePath);
       perf.mark('nav.sharedDone', { page: pageIdx });
 
-      if (signal.aborted) return;
+      if (isStaleLoad()) return;
 
       // bboxMetaが未取得の場合、1ページ目表示をブロックせずバックグラウンドで取得する。
       // 取得した meta は bboxMetaRef.current に保持し、以降の loadPage 呼び出し
@@ -82,11 +101,14 @@ export function usePageNavigation({
       //       現在ページ含む全 getTextContent が順番待ちで詰まる。
       //       そのため先行一括ロードは行わず、実際にそのページを表示・プリフェッチ
       //       する時 (ナビゲーション時の ±1/±2 プリフェッチ経由) に限定する。
-      if (bboxMetaRef.current === undefined) {
-        bboxMetaRef.current = null;
-        loadPecoToolBBoxMeta(pdf).then((meta) => {
+      if (bboxMetaRef.current === undefined && bboxMetaPromiseRef.current === null) {
+        bboxMetaPromiseRef.current = loadPecoToolBBoxMeta(pdf).then((meta) => {
           bboxMetaRef.current = meta;
-        }).catch(() => {});
+          return meta;
+        }).catch(() => {
+          bboxMetaRef.current = null;
+          return null;
+        });
       }
 
       // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）
@@ -95,7 +117,7 @@ export function usePageNavigation({
       perf.mark('nav.pageProxyStart', { page: pageIdx });
       const qp = await getCachedPageProxy(doc.filePath, pageIdx);
       perf.mark('nav.pageProxyDone', { page: pageIdx });
-      if (signal.aborted) return;
+      if (isStaleLoad()) return;
       const qv = qp.getViewport({ scale: 1.0 });
       perf.mark('nav.viewport', { page: pageIdx, w: Math.round(qv.width), h: Math.round(qv.height) });
 
@@ -106,7 +128,7 @@ export function usePageNavigation({
       }
 
       const pre = usePecoStore.getState().document?.pages.get(pageIdx);
-      if (signal.aborted) return;
+      if (isStaleLoad()) return;
       if (!pre || pre.width === 0) {
         // isTextExtracted: false で明示的にプレースホルダとしてマーク。
         // textBlocks=[] だが本当に空かどうかはこのフラグで判別する。
@@ -124,7 +146,7 @@ export function usePageNavigation({
       // ページ寸法が確定した時点で meta ローディング解除
       // → PdfCanvas が即座にレンダリング開始。
       // render 完了までは isLoadingPageRender が true のまま。
-      if (!signal.aborted) {
+      if (!isStaleLoad()) {
         perf.mark('nav.metaDone', { page: pageIdx });
         setIsLoadingPageMeta(false);
       }
@@ -136,9 +158,13 @@ export function usePageNavigation({
       // prefetch (±1/±2 ページの proxy 取得・loadPage) は pdfjs worker のタスクキューを
       // 占有して現在ページの描画/テキスト抽出を遅延させるため廃止。現在ページのみロードする。
       perf.mark('text.loadStart', { page: pageIdx });
-      loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime)
+      const bboxMeta = bboxMetaRef.current === undefined
+        ? await bboxMetaPromiseRef.current
+        : bboxMetaRef.current;
+      if (isStaleLoad()) return;
+      loadPage(pdf, pageIdx, doc.filePath, bboxMeta, doc.mtime)
         .then((pageData) => {
-          if (signal.aborted) return;
+          if (isStaleLoad()) return;
           // ファイル切替チェック（ページ切替は許容: テキストデータは常に保存する）
           const currentDoc = usePecoStore.getState().document;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
@@ -155,11 +181,11 @@ export function usePageNavigation({
           perf.mark('text.updateStoreDone', { page: pageIdx });
         })
         .catch((err) => {
-          if (signal.aborted) return;
+          if (isStaleLoad()) return;
           console.error(`[loadCurrentPage] text extraction failed for page ${pageIdx}:`, err);
         });
     } catch (err: any) {
-      if (signal.aborted) return;
+      if (isStaleLoad()) return;
       console.error(`[loadCurrentPage] failed for page ${pageIdx}:`, err);
       showToast(`ページ ${pageIdx + 1} の読み込みに失敗しました: ${err}`, true);
       setPageLoadError(pageIdx);
@@ -170,13 +196,15 @@ export function usePageNavigation({
   }, [updatePageData, showToast, triggerThumbnailLoad, setCurrentPageProxy]);
 
   // ファイルが変わったときにbboxMetaキャッシュをリセット
-  const prevFilePathRef = useRef<string | undefined>(undefined);
+  const prevDocIdentityRef = useRef<{ filePath?: string; mtime?: number; loadId?: number }>({});
   useEffect(() => {
-    if (filePath !== prevFilePathRef.current) {
+    const prev = prevDocIdentityRef.current;
+    if (filePath !== prev.filePath || documentMtime !== prev.mtime || documentLoadId !== prev.loadId) {
       bboxMetaRef.current = undefined;
-      prevFilePathRef.current = filePath;
+      bboxMetaPromiseRef.current = null;
+      prevDocIdentityRef.current = { filePath, mtime: documentMtime, loadId: documentLoadId };
     }
-  }, [filePath]);
+  }, [filePath, documentMtime, documentLoadId]);
 
   useEffect(() => {
     if (!filePath) return;
@@ -208,14 +236,19 @@ export function usePageNavigation({
     }
     return () => {
       // ページ切替・アンマウント時は進行中ロードを中止
-      currentLoadAbortRef.current?.abort();
+      const controller = currentLoadAbortRef.current;
+      controller?.abort();
+      if (currentLoadAbortRef.current === controller) {
+        currentLoadAbortRef.current = null;
+      }
+      loadGenerationRef.current += 1;
     };
     // currentPageWidth/currentPageExists は loadCurrentPage 後の
     // updatePageData で変化するが、依存に含めると「ロード直後に effect 再実行 →
-    // cleanup で自分の abort」のループになる。filePath + currentPageIndex の
-    // 変化トリガーで十分 (ロード判定は最初の run だけで良い)。
+    // cleanup で自分の abort」のループになる。filePath + documentLoadId +
+    // currentPageIndex の変化トリガーで十分 (ロード判定は最初の run だけで良い)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
+  }, [filePath, documentLoadId, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
 
   const handlePageInputCommit = useCallback(() => {
     if (pageInputValue !== null && filePath && totalPages) {

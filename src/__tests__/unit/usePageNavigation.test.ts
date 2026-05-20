@@ -13,8 +13,8 @@
  *  - bboxMetaRef は後続 loadPage 呼び出しで使えるよう保持されること
  *  - unmount 後の bboxMeta resolve で追加 loadPage が発火しないこと (既存挙動維持)
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { cleanup, renderHook, waitFor } from '@testing-library/react'
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 
@@ -68,6 +68,10 @@ beforeEach(() => {
     isDirty: false,
     currentPageIndex: 0,
   } as any)
+})
+
+afterEach(() => {
+  cleanup()
 })
 
 // disable requestIdleCallback so Step-2 prefetch doesn't run extra loadPage calls.
@@ -124,6 +128,7 @@ describe('S-01-04: bboxMeta 取得後に全ページ loadPage が発火しない
       const calledIdxs = loadPageMock.mock.calls.map((c) => c[1] as number)
       expect(calledIdxs).toContain(0)
     })
+    expect(loadPageMock.mock.calls.find((c) => c[1] === 0)?.[3]).toBe(fakeMeta)
 
     // bboxMeta resolve 完了を待つために microtask を複数進める
     await Promise.resolve()
@@ -235,12 +240,13 @@ describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage 
       })
     )
 
-    // 初回 currentPage(0) の loadPage が呼ばれるのを待つ
+    // meta 待ちの直前まで進んだことを確認する
     await waitFor(() => {
-      expect(loadPageMock).toHaveBeenCalled()
+      expect(getCachedPageProxyMock).toHaveBeenCalled()
     })
 
     const callsBeforeAbort = loadPageMock.mock.calls.length
+    expect(callsBeforeAbort).toBe(0)
 
     // アンマウント → controller.abort() がクリーンアップで呼ばれる
     unmount()
@@ -254,5 +260,90 @@ describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage 
 
     // 追加 loadPage は 1 度も呼ばれていないこと
     expect(loadPageMock.mock.calls.length).toBe(callsBeforeAbort)
+  })
+})
+
+describe('documentLoadId: 同一 filePath / currentPageIndex の再読込', () => {
+  it('document identity が変わったら同じ filePath/currentPageIndex でも loadPage を再発火する', async () => {
+    const filePath = 'same-path.pdf'
+    const fakePdf = { numPages: 1 }
+    getSharedPdfProxyMock.mockResolvedValue(fakePdf)
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+    const metaA = { '0': [{ bbox: { x: 1, y: 1, width: 10, height: 10 }, writingMode: 'horizontal', order: 0, text: 'old' }] }
+    const metaB = { '0': [{ bbox: { x: 2, y: 2, width: 20, height: 20 }, writingMode: 'horizontal', order: 0, text: 'restored' }] }
+    loadPecoToolBBoxMetaMock
+      .mockResolvedValueOnce(metaA)
+      .mockResolvedValueOnce(metaB)
+    loadPageMock.mockImplementation((_pdf, idx) =>
+      Promise.resolve(makePage(idx))
+    )
+
+    const docA: PecoDocument = {
+      filePath,
+      fileName: filePath,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({
+      document: docA,
+      documentLoadId: 1,
+      currentPageIndex: 0,
+    } as any)
+
+    const showToast = vi.fn()
+    const triggerThumbnailLoad = vi.fn()
+
+    renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast,
+        triggerThumbnailLoad,
+      })
+    )
+
+    await waitFor(() => {
+      expect(loadPageMock).toHaveBeenCalledWith(
+        fakePdf,
+        0,
+        filePath,
+        metaA,
+        1234
+      )
+    })
+
+    await Promise.resolve()
+    await Promise.resolve()
+    loadPageMock.mockClear()
+    await Promise.resolve()
+    expect(loadPageMock).not.toHaveBeenCalled()
+
+    const docB: PecoDocument = {
+      filePath,
+      fileName: filePath,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({
+      document: docB,
+      documentLoadId: 2,
+      currentPageIndex: 0,
+    } as any)
+
+    await waitFor(() => {
+      expect(loadPageMock).toHaveBeenCalledWith(
+        fakePdf,
+        0,
+        filePath,
+        metaB,
+        1234
+      )
+    })
+    expect(loadPecoToolBBoxMetaMock).toHaveBeenCalledTimes(2)
   })
 })

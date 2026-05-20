@@ -44,6 +44,8 @@ import {
   loadPDF,
   getAllTemporaryPageData,
   clearTemporaryChanges,
+  clearCachedPages,
+  destroySharedPdfProxy,
   getSharedPdfProxy,
   loadPage,
   loadPecoToolBBoxMeta,
@@ -60,6 +62,7 @@ import {
 } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
+import { flushActiveOcrCardText } from '../utils/ocrEditFlush';
 
 /**
  * 1 ページ目 render 後 (アイドル時) に background で PDF 全体 bytes を取得して
@@ -120,6 +123,7 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
 interface SaveResult {
   size: number;
   skippedChars: SkippedPdfTextChar[];
+  savedPageSnapshots: Map<number, PageData>;
 }
 
 function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
@@ -204,6 +208,7 @@ export function useFileOperations(
           perf.mark('open.loadPdfStart');
           const doc = await loadPDF(selected);
           perf.mark('open.loadPdfDone', { totalPages: doc.totalPages });
+          await clearCachedPages(selected);
           setDocument(doc);
           perf.mark('open.setDoc');
           addToRecent(selected);
@@ -325,6 +330,11 @@ export function useFileOperations(
         }
       });
     }
+    const savedPageSnapshots = new Map<number, PageData>();
+    for (const [idx] of dirtyOnlyPages.entries()) {
+      const snapshotPage = document.pages.get(idx);
+      if (snapshotPage) savedPageSnapshots.set(idx, snapshotPage);
+    }
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
     let skippedChars: SkippedPdfTextChar[] = [];
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
@@ -351,16 +361,25 @@ export function useFileOperations(
     const writePath = targetPath ?? document.filePath;
 
     await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
+    await withStep('clearPageCache', 10_000, () => clearCachedPages(writePath))
+      .catch((e) => { console.warn('[save] clearPageCache failed (ignored):', e); });
+    destroySharedPdfProxy();
     const liveDoc = usePecoStore.getState().document;
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
+    }
+    if (writePath === sourceFilePath) {
+      usePecoStore.setState((state) => {
+        if (!state.document || state.document.filePath !== sourceFilePath) return state;
+        return { document: { ...state.document, mtime: Date.now() } };
+      });
     }
     // originalBytes を更新し、次回保存時もこの累積変更をベースにするようにする
     usePecoStore.getState().setOriginalBytes(savedBytes);
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
     await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
-    return { size: savedBytes.length, skippedChars };
+    return { size: savedBytes.length, skippedChars, savedPageSnapshots };
   };
 
   const handleSave = async () => {
@@ -368,6 +387,7 @@ export function useFileOperations(
     // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
     console.log('[save] handleSave invoked');
     perf.mark('ui.save');
+    flushActiveOcrCardText();
     const { document } = usePecoStore.getState();
     if (!document) {
       showToast("PDFが開かれていません。", true);
@@ -385,7 +405,7 @@ export function useFileOperations(
     try {
       const result = await _executeSave();
       if (result !== null) {
-        resetDirty();
+        resetDirty(result.savedPageSnapshots);
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
         invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
@@ -401,6 +421,7 @@ export function useFileOperations(
   };
 
   const executeSaveAs = async () => {
+    flushActiveOcrCardText();
     const { document } = usePecoStore.getState();
     if (!document) return;
     if (isSavingRef.current) {
@@ -425,7 +446,7 @@ export function useFileOperations(
             }
             const prevPath = currentDoc.filePath;
             setDocumentFilePath(path);
-            resetDirty();
+            resetDirty(result.savedPageSnapshots);
             showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
             addToRecent(path);
             // 元のパスのバックアップも新しいパスのバックアップも削除する

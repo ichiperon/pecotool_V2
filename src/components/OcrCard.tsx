@@ -1,14 +1,17 @@
-import { useRef, useEffect, useImperativeHandle, forwardRef, memo } from "react";
+import { useRef, useEffect, useImperativeHandle, forwardRef, memo, useCallback } from "react";
 import type React from "react";
 import { GripVertical } from "lucide-react";
 import type { DraggableSyntheticListeners } from "@dnd-kit/core";
 import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 import { perf } from "../utils/perfLogger";
+import { flushActiveOcrCardText } from "../utils/ocrEditFlush";
 
 export interface OcrCardHandle {
   focusContent: () => void;
 }
+
+export const commitActiveOcrCardEdit = flushActiveOcrCardText;
 
 interface OcrCardProps {
   block: TextBlock;
@@ -35,6 +38,20 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   const isComposingRef = useRef(false);
   // blur 直前のキャレット位置（restore 用）
   const savedOffsetRef = useRef<number | null>(null);
+
+  const commitDomText = useCallback(() => {
+    const newText = contentRef.current?.textContent ?? "";
+    const page = usePecoStore.getState().document?.pages.get(pageIndex);
+    if (!page) return false;
+    const currentBlock = page.textBlocks.find(b => b.id === block.id);
+    if (currentBlock?.text === newText) return false;
+
+    const newBlocks = page.textBlocks.map(b =>
+      b.id === block.id ? { ...b, text: newText, isDirty: true } : b
+    );
+    updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true });
+    return true;
+  }, [block.id, pageIndex, updatePageData]);
 
   // キャレット位置を復元（保存位置 → なければ末尾）
   const restoreCaret = (el: HTMLDivElement) => {
@@ -97,18 +114,7 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
     if (sel && sel.rangeCount > 0 && contentRef.current?.contains(sel.anchorNode)) {
       savedOffsetRef.current = sel.anchorOffset;
     }
-    // 読み書きを textContent に統一（innerText は改行扱いが環境依存）
-    const newText = contentRef.current?.textContent ?? "";
-    if (newText !== block.text) {
-      // subscribe せず getState() で最新ページを取る: 編集時に他カードが再評価されない
-      const page = usePecoStore.getState().document?.pages.get(pageIndex);
-      if (page) {
-        const newBlocks = page.textBlocks.map(b =>
-          b.id === block.id ? { ...b, text: newText, isDirty: true } : b
-        );
-        updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true });
-      }
-    }
+    commitDomText();
   };
 
   const handleCompositionStart = () => {
@@ -150,6 +156,10 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      flushActiveOcrCardText();
+    }
+
     const direction = e.key === 'ArrowDown' ? 'down' : e.key === 'ArrowUp' ? 'up' : null;
     if (e.shiftKey && direction) {
       if (!isComposingRef.current && onExtendSelection) {
@@ -194,6 +204,8 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
       <div
         ref={contentRef}
         className="ocr-card-content"
+        data-page-index={pageIndex}
+        data-block-id={block.id}
         contentEditable
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}

@@ -145,6 +145,7 @@ function setupPdfLibMock() {
     drawImage:     m.drawImage,
     pushOperators: m.pushOperators,
     node: {
+      get:      vi.fn().mockReturnValue(null),
       Contents: vi.fn().mockReturnValue(null),
       set:      vi.fn(),
     },
@@ -165,6 +166,8 @@ function setupPdfLibMock() {
     removePage:      m.removePage,
     insertPage:      m.insertPage,
     getPage:         vi.fn().mockReturnValue(mockPage),
+    getPages:        vi.fn().mockReturnValue([mockPage]),
+    getPageCount:    vi.fn().mockReturnValue(10),
     embedJpg:        m.embedJpg,
     save:            m.save,
     commit:            m.save,

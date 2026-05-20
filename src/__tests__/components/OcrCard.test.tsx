@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { createRef } from 'react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { OcrCard, type OcrCardHandle } from '../../components/OcrCard'
+import { OcrCard, commitActiveOcrCardEdit, type OcrCardHandle } from '../../components/OcrCard'
 import { usePecoStore } from '../../store/pecoStore'
 import type { TextBlock, PageData, PecoDocument } from '../../types'
 
@@ -107,6 +107,50 @@ describe('OcrCard', () => {
       fireEvent.blur(content)
 
       expect(updateSpy).not.toHaveBeenCalled()
+    })
+
+    it('保存前コミットでフォーカス中の DOM テキストを store に反映する', () => {
+      const block = makeBlock({ text: '保存前' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const { container } = render(<OcrCard block={block} pageIndex={0} />)
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      content.focus()
+      content.textContent = '保存直前の編集'
+
+      expect(commitActiveOcrCardEdit()).toBe(true)
+
+      const updated = usePecoStore.getState().document?.pages.get(0)?.textBlocks.find(b => b.id === 'block-1')
+      expect(updated?.text).toBe('保存直前の編集')
+      expect(updated?.isDirty).toBe(true)
+    })
+
+    it('Ctrl+S は window の保存ハンドラより先に DOM テキストを commit する', () => {
+      const block = makeBlock({ text: '保存前' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const { container } = render(<OcrCard block={block} pageIndex={0} />)
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      let textAtSave = ''
+      const saveListener = vi.fn(() => {
+        textAtSave = usePecoStore.getState().document?.pages.get(0)?.textBlocks[0].text ?? ''
+      })
+      window.addEventListener('keydown', saveListener)
+
+      try {
+        content.focus()
+        content.textContent = 'ショートカット保存直前'
+        fireEvent.keyDown(content, { key: 's', ctrlKey: true })
+
+        expect(saveListener).toHaveBeenCalled()
+        expect(textAtSave).toBe('ショートカット保存直前')
+      } finally {
+        window.removeEventListener('keydown', saveListener)
+      }
     })
   })
 

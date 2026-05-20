@@ -33,6 +33,11 @@ vi.mock('../../utils/pdfLoader', () => ({
   }),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  clearCachedPages: vi.fn().mockResolvedValue(undefined),
+  destroySharedPdfProxy: vi.fn(),
+  getSharedPdfProxy: vi.fn(),
+  loadPage: vi.fn(),
+  loadPecoToolBBoxMeta: vi.fn(),
 }));
 vi.mock('../../utils/pdfSaver', () => ({
   savePDF: vi.fn().mockResolvedValue(new Uint8Array([4, 5, 6])),
@@ -45,7 +50,7 @@ vi.mock('../../hooks/useFontLoader', () => ({
 // pecoStore は本物を使うが、必要最小限の状態だけ。
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
 import { useFileOperations } from '../../hooks/useFileOperations';
-import { loadPDF } from '../../utils/pdfLoader';
+import { clearCachedPages, loadPDF } from '../../utils/pdfLoader';
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -81,6 +86,7 @@ describe('useFileOperations addToRecent (sessionStorage narrow)', () => {
     const recent = readRecent();
     expect(Array.isArray(recent)).toBe(true);
     expect(recent).toEqual(['/new/file.pdf']);
+    expect(clearCachedPages).toHaveBeenCalledWith('/new/file.pdf');
   });
 
   it('S-10-09b: 既存値がオブジェクト ({foo: 1}) でも narrow で reject される', async () => {

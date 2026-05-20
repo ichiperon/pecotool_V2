@@ -57,6 +57,7 @@ vi.mock('lucide-react', async (importOriginal) => {
 // Mock Tauri APIs that might be imported globally
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: vi.fn((path) => `asset://${path}`),
+  invoke: vi.fn().mockResolvedValue([]),
 }))
 
 vi.mock('@tauri-apps/plugin-fs', () => ({

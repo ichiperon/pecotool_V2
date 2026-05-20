@@ -16,6 +16,7 @@ export function waitForPendingIdbSaves(): Promise<void> {
 
 interface PecoState {
   document: PecoDocument | null;
+  documentLoadId: number;
   originalBytes: Uint8Array | null;
   pageAccessOrder: number[]; // For page data LRU (1000ページ対応)
   currentPageIndex: number;
@@ -60,7 +61,7 @@ interface PecoState {
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
-  resetDirty: () => void;
+  resetDirty: (savedPageSnapshots?: Map<number, PageData>) => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
   setSelectedIds: (ids: string[]) => void;
@@ -79,6 +80,7 @@ const MAX_CACHED_PAGES = 50;
 
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
+  documentLoadId: 0,
   originalBytes: null,
   pageAccessOrder: [],
   currentPageIndex: 0,
@@ -115,9 +117,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   setDocument: (doc) => {
     // pendingRestoration を取り出してから state をリセットする
     const restoration = get().pendingRestoration;
+    const documentLoadId = get().documentLoadId + 1;
 
     set({
       document: doc,
+      documentLoadId,
       // originalBytes は保存時に lazy fetch するため、ファイル切替時は null にリセット
       originalBytes: null,
       pageAccessOrder: [],
@@ -284,17 +288,26 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
   },
 
-  resetDirty: () => set((state) => {
+  resetDirty: (savedPageSnapshots) => set((state) => {
     if (!state.document) return state;
     const newPages = new Map(state.document.pages);
-    for (const [idx, page] of newPages.entries()) {
-      if (page.isDirty) {
-        newPages.set(idx, { ...page, isDirty: false });
+    if (savedPageSnapshots) {
+      for (const [idx, savedPage] of savedPageSnapshots.entries()) {
+        const livePage = newPages.get(idx);
+        if (livePage === savedPage && livePage.isDirty) {
+          newPages.set(idx, { ...livePage, isDirty: false });
+        }
+      }
+    } else {
+      for (const [idx, page] of newPages.entries()) {
+        if (page.isDirty) {
+          newPages.set(idx, { ...page, isDirty: false });
+        }
       }
     }
     return {
       document: { ...state.document, pages: newPages },
-      isDirty: false
+      isDirty: Array.from(newPages.values()).some((page) => page.isDirty)
     };
   }),
 

@@ -5,19 +5,33 @@ import { getCachedPageProxy } from './pdfLoader';
 import { getCachedPage, setCachedPage, getTemporaryPageData } from './pdfTemporaryStorage';
 import { perf } from './perfLogger';
 
+type PecoToolBBoxMetaEntry = {
+  bbox: BoundingBox;
+  writingMode: string;
+  order: number;
+  text: string;
+};
+
+function shouldUseSavedMeta(
+  savedMeta: PecoToolBBoxMetaEntry[] | undefined,
+  textItems: TextItem[],
+): savedMeta is PecoToolBBoxMetaEntry[] {
+  if (!savedMeta || savedMeta.length === 0) return false;
+  const nonEmptyTextItemCount = textItems.filter((item) => item.str.trim() !== '').length;
+  if (nonEmptyTextItemCount === 0) return true;
+  const overFragmentedThreshold = Math.max(nonEmptyTextItemCount * 2, nonEmptyTextItemCount + 25);
+  return savedMeta.length <= overFragmentedThreshold;
+}
+
 export async function loadPage(
   _pdf: pdfjsLib.PDFDocumentProxy,
   pageIndex: number,
   filePath: string,
-  bboxMeta?: Record<string, Array<{
-    bbox: BoundingBox;
-    writingMode: string;
-    order: number;
-    text: string;
-  }>> | null,
+  bboxMeta?: Record<string, PecoToolBBoxMetaEntry[]> | null,
   mtime?: number
 ): Promise<PageData> {
   const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
+  const savedMeta = bboxMeta?.[String(pageIndex)];
   const [cached, tempEdited] = await Promise.all([
     getCachedPage(cacheKey),
     getTemporaryPageData(filePath, pageIndex),
@@ -25,7 +39,7 @@ export async function loadPage(
 
   let pageData: PageData;
 
-  if (cached) {
+  if (cached && !(savedMeta && savedMeta.length > 0)) {
     pageData = { ...cached, pageIndex };
   } else {
     // キャッシュ済みプロキシを再利用して二重getPageを回避
@@ -49,8 +63,7 @@ export async function loadPage(
     // 直接読むことでペアの整合を保証する。pdfjs textItems 経由の idx マッチングは
     // drawText スキップ(空文字/0幅/非有限スケール)で件数が食い違い、text が後続
     // ブロックに 1 つズレる既知バグの原因となるため採用しない。
-    const savedMeta = bboxMeta?.[String(pageIndex)];
-    if (savedMeta && savedMeta.length > 0) {
+    if (shouldUseSavedMeta(savedMeta, textItems)) {
       textBlocks = savedMeta.map((meta) => ({
         id: crypto.randomUUID(),
         text: meta.text,

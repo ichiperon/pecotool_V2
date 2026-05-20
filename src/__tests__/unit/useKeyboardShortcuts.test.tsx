@@ -15,6 +15,7 @@ function makeActions() {
     handleDelete: vi.fn(),
     toggleDrawingMode: vi.fn(),
     toggleSplitMode: vi.fn(),
+    toggleShowOcr: vi.fn(),
     handleGroup: vi.fn(),
     handleRemoveSpaces: vi.fn(),
     setZoom: vi.fn(),
@@ -24,12 +25,13 @@ function makeActions() {
   };
 }
 
-function press(target: EventTarget, key: string) {
+function press(target: EventTarget, key: string, init: Partial<KeyboardEventInit> = {}) {
   const event = new KeyboardEvent('keydown', {
     key,
     ctrlKey: true,
     bubbles: true,
     cancelable: true,
+    ...init,
   });
   target.dispatchEvent(event);
   return event;
@@ -88,6 +90,21 @@ describe('useKeyboardShortcuts: BB操作ショートカット', () => {
     expect(actions.toggleSplitMode).not.toHaveBeenCalled();
   });
 
+  it('OCRカード本文編集中の Ctrl+S は保存を実行する', () => {
+    const actions = makeActions();
+    const content = document.createElement('div');
+    content.className = 'ocr-card-content';
+    content.setAttribute('contenteditable', 'true');
+    document.body.appendChild(content);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    content.focus();
+
+    expect(press(content, 's').defaultPrevented).toBe(true);
+    expect(actions.handleSave).toHaveBeenCalledTimes(1);
+    expect(actions.handleSaveAs).not.toHaveBeenCalled();
+  });
+
   it('Ctrl+F10/Ctrl+F11/Ctrl+F12 では BB 操作を実行しない', () => {
     const actions = makeActions();
     renderHook(() => useKeyboardShortcuts(actions));
@@ -99,5 +116,13 @@ describe('useKeyboardShortcuts: BB操作ショートカット', () => {
     expect(actions.toggleDrawingMode).not.toHaveBeenCalled();
     expect(actions.toggleSplitMode).not.toHaveBeenCalled();
     expect(actions.handleGroup).not.toHaveBeenCalled();
+  });
+
+  it('Ctrl+Q で OCR 表示を切り替える', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    expect(press(window, 'q').defaultPrevented).toBe(true);
+    expect(actions.toggleShowOcr).toHaveBeenCalledTimes(1);
   });
 });
