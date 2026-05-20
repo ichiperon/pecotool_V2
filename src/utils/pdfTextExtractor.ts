@@ -91,7 +91,18 @@ export async function loadPage(
             ? item.height
             : (Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]) || mag || 12);
           const runLength = item.width || mag * item.str.length * 0.6;
-          const ascent = thickness * 1.16;
+          // #112: bbox の ascent を実フォントのメトリクスから導く。
+          // pdfjs `getTextContent()` は `textContent.styles[fontName].ascent` に
+          // 正規化済みフォント ascent 比 (font ascent / 1000 units-per-em ≒ 0.7〜0.95)
+          // を持つ。旧実装の固定係数 1.16 はどの実フォントの ascent 比よりも大きく、
+          // meta なし PDF (外部 OCR PDF の初回オープン等) で OCR BB が上方向へ
+          // ずれていた (兄弟 issue #110 の保存側修正に対応する再読込側の修正)。
+          // styles が取れない / 値が非有限 or 非正のフォントだけ 1.16 にフォールバック。
+          const style = item.fontName ? textContent.styles?.[item.fontName] : undefined;
+          const ascentRatio = style && Number.isFinite(style.ascent) && style.ascent > 0
+            ? style.ascent
+            : 1.16;
+          const ascent = thickness * ascentRatio;
 
           // Compute 4 corners of the text bbox in PDF user space, then transform
           // all of them to viewport (screen) space via convertToViewportPoint.
