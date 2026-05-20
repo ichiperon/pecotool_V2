@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Action, BoundingBox, PageData } from "../types";
 import { classifyDirection, reorderBlocks } from "../utils/bulkReorder";
 import { readReorderThreshold } from "../utils/reorderThreshold";
@@ -18,6 +18,12 @@ interface UseBlockDragResizeParams {
   ) => void;
   toggleSelection: (id: string, additive: boolean) => void;
   pushAction: (action: Action) => void;
+  /**
+   * issue #91: ドラッグ中の bbox プレビューを store に書き込む action。
+   * applyDragResize でこれを呼ぶことで textBlocks.map による O(N) コピーを回避し、
+   * 描画側 (overlay) はこの Map を見て選択 BB の bbox のみ上書き表示する。
+   */
+  setDragPreviewBboxes: (bboxes: Map<string, BoundingBox> | null) => void;
 }
 
 interface UseBlockDragResizeResult {
@@ -51,6 +57,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     updatePageData,
     toggleSelection,
     pushAction,
+    setDragPreviewBboxes,
   } = params;
 
   const [isAltDragging, setIsAltDragging] = useState(false);
@@ -65,6 +72,16 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
   >(new Map());
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
   const preDragPageRef = useRef<PageData | null>(null);
+  // updateDragResize を RAF で coalesce するための保留状態。
+  // mousemove は 1 フレームに複数発火しうるため、毎回 updatePageData を呼ぶと
+  // pages Map / textBlocks 配列の全コピーが mousemove ごとに発生してカクつく。
+  // 同一フレーム内では最新の pos のみを採用し、updatePageData を 1 回に集約する。
+  const pendingDragPosRef = useRef<{ x: number; y: number } | null>(null);
+  const dragRafRef = useRef<number | null>(null);
+  // issue #91: ドラッグ中に preview に書き込んだ最後の pos。RAF flush 後も保持し
+  // finishDragResize が pending pos を使えないケース (= 全て RAF で消費された後)
+  // でも最終 bbox を正しく確定できるようにする。
+  const lastAppliedDragPosRef = useRef<{ x: number; y: number } | null>(null);
 
   const beginAltDrag = (pos: { x: number; y: number }) => {
     setIsAltDragging(true);
@@ -139,7 +156,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       const h = block.bbox.height * scale;
 
       if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
-        if ((mods.ctrlKey || mods.metaKey) && selectedIds.has(block.id)) {
+        if ((mods.ctrlKey || mods.metaKey || mods.shiftKey) && selectedIds.has(block.id)) {
           toggleSelection(block.id, true);
           return true;
         }
@@ -174,35 +191,30 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     return false;
   };
 
-  const updateDragResize = (pos: { x: number; y: number }): boolean => {
-    if (!draggedId || dragMode === "none") return false;
+  // issue #91: ドラッグ中の bbox を計算して Map に書き出すだけのヘルパ。
+  // textBlocks 配列を毎フレーム複製していた従来実装をやめ、O(選択 BB 数) の
+  // Map 構築のみ行う。確定書き込みは finishDragResize で 1 度だけ行う。
+  const computeDragPreviewBboxes = (pos: { x: number; y: number }): Map<string, BoundingBox> | null => {
+    if (!draggedId || dragMode === "none") return null;
     const scale = zoom / 100;
     const dx = (pos.x - dragStartMouse.x) / scale;
     const dy = (pos.y - dragStartMouse.y) / scale;
-    const pageData = getPageData();
-    if (!pageData) return true;
 
+    const preview = new Map<string, BoundingBox>();
     if (dragMode === "move") {
-      const newBlocks = pageData.textBlocks.map((b) => {
-        if (dragStartBboxes.has(b.id)) {
-          const startBbox = dragStartBboxes.get(b.id)!;
-          return {
-            ...b,
-            bbox: {
-              ...startBbox,
-              x: startBbox.x + dx,
-              y: startBbox.y + dy,
-            },
-            isDirty: true,
-          };
-        }
-        return b;
+      // 選択された (= dragStartBboxes に登録された) ブロックだけ動かす。
+      // dragStartBboxes は move 開始時にスナップショット済みなので
+      // textBlocks 配列の参照は不要。
+      dragStartBboxes.forEach((startBbox, id) => {
+        preview.set(id, {
+          x: startBbox.x + dx,
+          y: startBbox.y + dy,
+          width: startBbox.width,
+          height: startBbox.height,
+        });
       });
-      // 保存フィルタは page.isDirty のみを見るため、block.isDirty だけでなく
-      // page.isDirty も明示的に立てる必要がある (さもないと BB 移動のみの変更は保存されない)
-      updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
     } else {
-      if (!dragStartBbox) return true;
+      if (!dragStartBbox) return null;
       const startBbox: BoundingBox = dragStartBbox;
       const newBbox: BoundingBox = { ...startBbox };
       if (dragMode === "resize-se") {
@@ -222,35 +234,109 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
         newBbox.width = Math.max(1, startBbox.width - dx);
         newBbox.height = Math.max(1, startBbox.height - dy);
       }
-
-      const newBlocks = pageData.textBlocks.map((b) =>
-        b.id === draggedId ? { ...b, bbox: newBbox, isDirty: true } : b
-      );
-      // 保存フィルタは page.isDirty のみを見るため、block.isDirty だけでなく
-      // page.isDirty も明示的に立てる必要がある (さもないと BB リサイズのみの変更は保存されない)
-      updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
+      preview.set(draggedId, newBbox);
     }
+    return preview;
+  };
+
+  // updateDragResize の実体。pendingDragPosRef.current を最新 pos として消費し
+  // dragPreviewBboxes Map を 1 回更新する (textBlocks は触らない)。
+  // RAF コールバックおよび finishDragResize の flush から使う。
+  const applyDragResize = (pos: { x: number; y: number }): void => {
+    const preview = computeDragPreviewBboxes(pos);
+    if (preview) {
+      setDragPreviewBboxes(preview);
+      lastAppliedDragPosRef.current = pos;
+    }
+  };
+
+  const updateDragResize = (pos: { x: number; y: number }): boolean => {
+    if (!draggedId || dragMode === "none") return false;
+    // 同一フレーム内の複数 mousemove を coalesce: 最新 pos のみを採用し、
+    // RAF コールバックで 1 度だけ実体処理を走らせる。
+    pendingDragPosRef.current = pos;
+    if (dragRafRef.current !== null) return true;
+    dragRafRef.current = requestAnimationFrame(() => {
+      dragRafRef.current = null;
+      const next = pendingDragPosRef.current;
+      pendingDragPosRef.current = null;
+      if (next) applyDragResize(next);
+    });
     return true;
   };
 
   const finishDragResize = () => {
     if (draggedId && dragMode !== "none") {
-      const pageData = getPageData();
-      if (pageData && preDragPageRef.current) {
-        const action: Action = {
-          type: "update_page",
-          pageIndex,
-          before: preDragPageRef.current,
-          after: { ...pageData },
-        };
-        pushAction(action);
-        perf.mark('ui.bboxEdit', { page: pageIndex, mode: dragMode });
+      // ドロップ位置を確実に反映するため、保留中の RAF をキャンセル。
+      if (dragRafRef.current !== null) {
+        cancelAnimationFrame(dragRafRef.current);
+        dragRafRef.current = null;
       }
+      const pending = pendingDragPosRef.current;
+      pendingDragPosRef.current = null;
+
+      // issue #91: ドラッグ中は dragPreviewBboxes のみ更新していた。
+      // 確定タイミング (mouseup) で 1 回だけ textBlocks.map による
+      // 全コピーを行い、ここでまとめて updatePageData を呼ぶ。
+      // これによりドラッグ中の O(N) コピーがフレーム毎ではなく
+      // 「1 ドラッグにつき 1 回」になる。
+      //
+      // 最終 bbox の計算: 優先順位は (1) pending pos (RAF 未 flush 状態) →
+      // (2) 直前に RAF で適用済みの pos → (3) dragStartMouse (フォールバック)。
+      // RAF が flush 済みの場合 (1) は null だが、(2) があれば最新位置で確定可能。
+      const finalPos = pending ?? lastAppliedDragPosRef.current ?? dragStartMouse;
+      const finalPreview = computeDragPreviewBboxes(finalPos);
+      lastAppliedDragPosRef.current = null;
+
+      const pageData = getPageData();
+      if (pageData && finalPreview) {
+        // ドラッグ中に動いた BB だけ新オブジェクトに差し替える。
+        // 動いていない BB は元参照のまま (React の === 比較で skip 可能)。
+        const newBlocks = pageData.textBlocks.map((b) => {
+          const bbox = finalPreview!.get(b.id);
+          return bbox ? { ...b, bbox, isDirty: true } : b;
+        });
+        // 保存フィルタは page.isDirty のみを見るため、block.isDirty だけでなく
+        // page.isDirty も明示的に立てる必要がある。
+        // undoable=false: undo Action は次の pushAction で 1 度だけ積む。
+        updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
+
+        if (preDragPageRef.current) {
+          const after = getPageData();
+          const action: Action = {
+            type: "update_page",
+            pageIndex,
+            before: preDragPageRef.current,
+            after: after ? { ...after } : { ...pageData, textBlocks: newBlocks, isDirty: true },
+          };
+          pushAction(action);
+          perf.mark('ui.bboxEdit', { page: pageIndex, mode: dragMode });
+        }
+      }
+
+      // ドラッグ状態のクリア
+      setDragPreviewBboxes(null);
       preDragPageRef.current = null;
       setDraggedId(null);
       setDragMode("none");
     }
   };
+
+  // unmount 時に保留中の RAF をクリーンアップ (ドラッグ中に component が消えた場合の安全装置)
+  useEffect(() => {
+    return () => {
+      if (dragRafRef.current !== null) {
+        cancelAnimationFrame(dragRafRef.current);
+        dragRafRef.current = null;
+      }
+      pendingDragPosRef.current = null;
+      lastAppliedDragPosRef.current = null;
+      // issue #91: ドラッグ中に unmount された場合 preview を残さない
+      setDragPreviewBboxes(null);
+    };
+    // setDragPreviewBboxes は zustand action で安定参照のため依存不要
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const getHoverCursor = (
     pos: { x: number; y: number },

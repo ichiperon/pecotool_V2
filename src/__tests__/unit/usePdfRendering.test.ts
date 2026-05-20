@@ -294,3 +294,215 @@ describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getC
     expect(getCachedPageProxyMock).not.toHaveBeenCalled()
   })
 })
+
+// ── S-01-94: issue #94 zoom 連続変更時の canvas size 乖離回避 ──────
+//
+// 問題: usePdfRendering の render effect は 30ms debounce で render を遅延させる。
+// この間に zoom が再度変化して effect が再走すると、cleanup で
+// clearTimeout(renderDebounceRef) が走り、debounce が一度も発火せず render task が
+// 起動しない window が生じる。一方 overlay 層は RAF で即座に新 zoom を反映するため、
+// 「画像 Canvas は古い zoom サイズのまま、BB overlay だけ新 zoom」という乖離が起きる。
+//
+// 修正 (本テスト):
+//   (1) effect 同期部で pdfCanvas + overlay + staticOverlay + wrapper のサイズを
+//       新 zoom の viewport サイズに先取りで合わせる (debounce 外で sync)。
+//       これにより layer 間のサイズ乖離 window を 0 にする。
+//   (2) effect 再走の cleanup で setTimeout を破棄しない。timer は発火時に
+//       latestParamsRef から最新 zoom/page を読んで coalesce render する。
+//   (3) bitmapCache ヒット時は同期で描画完了させる (debounce を待たない)。
+describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (issue #94)', () => {
+  // viewport は zoom (scale) によってサイズが変わる FakePage 用ヘルパ。
+  // 既存の makeFakePage は viewport を固定 100x100 で返すので、本テスト専用に
+  // scale 連動の挙動を持たせる。
+  function makeScalingPage(id: string, baseW = 200, baseH = 100): FakePage {
+    return {
+      __id: id,
+      getViewport: vi.fn().mockImplementation(({ scale }: { scale: number }) => ({
+        width: baseW * scale,
+        height: baseH * scale,
+      })),
+      render: vi.fn().mockReturnValue({
+        promise: Promise.resolve(),
+        cancel: vi.fn(),
+      }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [] }),
+      destroy: vi.fn(),
+    }
+  }
+
+  // hook を render するヘルパ。staticOverlayCanvasRef も渡して #90 の互換性を担保。
+  function renderUsePdfRendering(
+    initialProps: { filePath: string; pageIndex: number; zoom: number }
+  ) {
+    const refs = makeRefs()
+    const staticOverlay = window.document.createElement('canvas')
+    const extendedRefs = {
+      ...refs,
+      staticOverlayCanvasRef: { current: staticOverlay } as React.RefObject<HTMLCanvasElement | null>,
+    }
+    const hookResult = renderHook(
+      (props: { filePath: string; pageIndex: number; zoom: number }) =>
+        usePdfRendering({
+          ...extendedRefs,
+          filePath: props.filePath,
+          totalPages: 3,
+          pageIndex: props.pageIndex,
+          zoom: props.zoom,
+          renderOverlaysRef: extendedRefs.renderOverlaysRef,
+        }),
+      { initialProps }
+    )
+    return { ...hookResult, refs: extendedRefs }
+  }
+
+  it('zoom を 100→150→200 と短時間で 3 回変えても、最終的に pdfCanvas / overlay / static overlay / wrapper が zoom=200 サイズに収束する', async () => {
+    const page = makeScalingPage('A:0')
+    getCachedPageProxyMock.mockResolvedValue(page)
+
+    const { result, rerender, refs } = renderUsePdfRendering({
+      filePath: 'file-A.pdf', pageIndex: 0, zoom: 100,
+    })
+
+    // 初回 zoom=100 で pdfPage 解決を待つ
+    await waitFor(() => {
+      expect(result.current.pdfPage).toBe(page)
+    })
+
+    // 同期サイズ同期 (issue #94 (2)) の効果: 初回 effect run の同期部で
+    // pdfCanvas.width/height が 100% scale の viewport に合うこと
+    await waitFor(() => {
+      expect(refs.pdfCanvasRef.current?.width).toBe(200)
+      expect(refs.pdfCanvasRef.current?.height).toBe(100)
+    })
+
+    // zoom を連続変更: 100 → 150 → 200。各 rerender は 30ms 以内に行われる想定
+    // (テストでは setTimeout を進めずに連続 rerender するので debounce 中)。
+    rerender({ filePath: 'file-A.pdf', pageIndex: 0, zoom: 150 })
+    // 同期サイズ同期で overlay / pdfCanvas / staticOverlay / wrapper が即時 zoom=150 へ
+    expect(refs.pdfCanvasRef.current?.width).toBe(300) // 200 * 1.5
+    expect(refs.pdfCanvasRef.current?.height).toBe(150)
+    expect(refs.overlayCanvasRef.current?.width).toBe(300)
+    expect(refs.overlayCanvasRef.current?.height).toBe(150)
+    expect(refs.staticOverlayCanvasRef.current?.width).toBe(300)
+    expect(refs.staticOverlayCanvasRef.current?.height).toBe(150)
+    expect(refs.wrapperRef.current?.style.width).toBe('300px')
+
+    rerender({ filePath: 'file-A.pdf', pageIndex: 0, zoom: 200 })
+    // 同期サイズ同期: zoom=200 でも即座に反映
+    expect(refs.pdfCanvasRef.current?.width).toBe(400)
+    expect(refs.pdfCanvasRef.current?.height).toBe(200)
+    expect(refs.overlayCanvasRef.current?.width).toBe(400)
+    expect(refs.overlayCanvasRef.current?.height).toBe(200)
+    expect(refs.staticOverlayCanvasRef.current?.width).toBe(400)
+    expect(refs.staticOverlayCanvasRef.current?.height).toBe(200)
+    expect(refs.wrapperRef.current?.style.width).toBe('400px')
+
+    // debounce 発火後も最終 zoom のまま (timer 内で latestParams 読み、最新で coalesce)
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 80))
+    })
+    for (let i = 0; i < 4; i++) {
+      await act(async () => { await Promise.resolve() })
+    }
+
+    expect(refs.pdfCanvasRef.current?.width).toBe(400)
+    expect(refs.pdfCanvasRef.current?.height).toBe(200)
+    expect(refs.overlayCanvasRef.current?.width).toBe(400)
+    expect(refs.overlayCanvasRef.current?.height).toBe(200)
+    expect(refs.staticOverlayCanvasRef.current?.width).toBe(400)
+    expect(refs.staticOverlayCanvasRef.current?.height).toBe(200)
+  })
+
+  it('debounce 中の effect 再実行で前 timeout が破棄されず、render task が最終 zoom で 1 回だけ起動する', async () => {
+    const page = makeScalingPage('A:0')
+    getCachedPageProxyMock.mockResolvedValue(page)
+    // render() 呼び出し回数 + 呼び出し時の viewport を観測する
+    const renderCalls: Array<{ width: number; height: number }> = []
+    page.render = vi.fn().mockImplementation((ctx: any) => {
+      renderCalls.push({ width: ctx.viewport.width, height: ctx.viewport.height })
+      return {
+        promise: Promise.resolve(),
+        cancel: vi.fn(),
+      }
+    })
+
+    const { result, rerender } = renderUsePdfRendering({
+      filePath: 'file-A.pdf', pageIndex: 0, zoom: 100,
+    })
+
+    // 初回 zoom=100 で pdfPage 解決 + render 1 回
+    await waitFor(() => expect(result.current.pdfPage).toBe(page))
+    await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+    for (let i = 0; i < 4; i++) {
+      await act(async () => { await Promise.resolve() })
+    }
+    const initialRenderCount = renderCalls.length
+    expect(initialRenderCount).toBeGreaterThanOrEqual(1)
+    // 直近の render は zoom=100 (viewport 200x100)
+    expect(renderCalls[renderCalls.length - 1]).toEqual({ width: 200, height: 100 })
+
+    // 連続 zoom 変更 (debounce 中に 3 連発):
+    // 旧仕様だと cleanup で clearTimeout(renderDebounceRef) のせいで debounce timer が
+    // 何度も置き換わり、間に挟まる effect 再走で「timer がリセットされ続け、
+    // 一度も発火しないまま新 timer に置換」される window が発生していた。
+    // 新仕様: 既存 timer は保持され、発火時に latestParamsRef から最新 zoom (=300%) を読む。
+    rerender({ filePath: 'file-A.pdf', pageIndex: 0, zoom: 200 })
+    rerender({ filePath: 'file-A.pdf', pageIndex: 0, zoom: 250 })
+    rerender({ filePath: 'file-A.pdf', pageIndex: 0, zoom: 300 })
+
+    await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+    for (let i = 0; i < 4; i++) {
+      await act(async () => { await Promise.resolve() })
+    }
+
+    // 連続 3 回の rerender に対し render() 呼び出しは coalesce されて
+    // 高々 1 回だけ追加される (合計 = 初回 + 1)。
+    const newRenders = renderCalls.length - initialRenderCount
+    expect(newRenders).toBe(1)
+    // その 1 回は最終 zoom=300 の viewport (200*3 x 100*3) で行われた
+    expect(renderCalls[renderCalls.length - 1]).toEqual({ width: 600, height: 300 })
+  })
+
+  it('cache hit 時は debounce を待たず同期で render 完了コールバックが呼ばれる', async () => {
+    // bitmap cache が hit する状況を作る: getBitmapCache を真に返すよう mock 上書き
+    const cacheModule = await import('../../utils/bitmapCache')
+    const bitmap = { close: vi.fn() } as unknown as ImageBitmap
+    // viewport(scale=1) は 200x100 になる
+    vi.mocked(cacheModule.getBitmapCache).mockImplementation((key) => {
+      if (key === 'file-A.pdf:0:100') {
+        return { bitmap, zoom: 100, width: 200, height: 100 } as any
+      }
+      return undefined
+    })
+
+    const page = makeScalingPage('A:0')
+    getCachedPageProxyMock.mockResolvedValue(page)
+
+    const onRenderComplete = vi.fn()
+    const refs = makeRefs()
+    const staticOverlay = window.document.createElement('canvas')
+
+    renderHook(() =>
+      usePdfRendering({
+        ...refs,
+        staticOverlayCanvasRef: { current: staticOverlay } as React.RefObject<HTMLCanvasElement | null>,
+        filePath: 'file-A.pdf',
+        totalPages: 3,
+        pageIndex: 0,
+        zoom: 100,
+        onRenderComplete,
+        renderOverlaysRef: refs.renderOverlaysRef,
+      })
+    )
+
+    // pdfPage 解決後の同期 cache hit パスで onRenderComplete が呼ばれる
+    await waitFor(() => {
+      expect(onRenderComplete).toHaveBeenCalled()
+    })
+    // pdfjs render() は呼ばれない (キャッシュ hit のため)
+    expect(page.render).not.toHaveBeenCalled()
+
+    // 後続テストのために mock を戻す (next describe テストが期待する null 返却に)
+    vi.mocked(cacheModule.getBitmapCache).mockReturnValue(undefined as any)
+  })
+})

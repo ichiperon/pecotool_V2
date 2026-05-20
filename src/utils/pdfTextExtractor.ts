@@ -5,33 +5,26 @@ import { getCachedPageProxy } from './pdfLoader';
 import { getCachedPage, setCachedPage, getTemporaryPageData } from './pdfTemporaryStorage';
 import { perf } from './perfLogger';
 
-type PecoToolBBoxMetaEntry = {
-  bbox: BoundingBox;
-  writingMode: string;
-  order: number;
-  text: string;
-};
-
-function shouldUseSavedMeta(
-  savedMeta: PecoToolBBoxMetaEntry[] | undefined,
-  textItems: TextItem[],
-): savedMeta is PecoToolBBoxMetaEntry[] {
-  if (!savedMeta || savedMeta.length === 0) return false;
-  const nonEmptyTextItemCount = textItems.filter((item) => item.str.trim() !== '').length;
-  if (nonEmptyTextItemCount === 0) return true;
-  const overFragmentedThreshold = Math.max(nonEmptyTextItemCount * 2, nonEmptyTextItemCount + 25);
-  return savedMeta.length <= overFragmentedThreshold;
-}
-
 export async function loadPage(
   _pdf: pdfjsLib.PDFDocumentProxy,
   pageIndex: number,
   filePath: string,
-  bboxMeta?: Record<string, PecoToolBBoxMetaEntry[]> | null,
+  bboxMeta?: Record<string, Array<{
+    bbox: BoundingBox;
+    writingMode: string;
+    order: number;
+    text: string;
+  }>> | null,
   mtime?: number
 ): Promise<PageData> {
-  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}`;
-  const savedMeta = bboxMeta?.[String(pageIndex)];
+  // #99: meta 有無でキャッシュキーを分離する。
+  // meta なしで pdfjs textItems の transform から bbox を fallback 計算した結果は、
+  // meta あり経路 (保存メタの viewport-space bbox) と数学的に別物 (ascent ratio や
+  // thickness の扱いが異なる)。同一キーで保存すると、初回 meta-未解決ロード後に
+  // meta が利用可能になっても古い fallback bbox が IDB から再生され続けて固着する。
+  // savedMeta の有無 (`m1` / `m0`) を mix-in して分離する。
+  const hasMeta = !!(bboxMeta && bboxMeta[String(pageIndex)] && bboxMeta[String(pageIndex)].length > 0);
+  const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}:${hasMeta ? 'm1' : 'm0'}`;
   const [cached, tempEdited] = await Promise.all([
     getCachedPage(cacheKey),
     getTemporaryPageData(filePath, pageIndex),
@@ -39,7 +32,7 @@ export async function loadPage(
 
   let pageData: PageData;
 
-  if (cached && !(savedMeta && savedMeta.length > 0)) {
+  if (cached) {
     pageData = { ...cached, pageIndex };
   } else {
     // キャッシュ済みプロキシを再利用して二重getPageを回避
@@ -63,7 +56,8 @@ export async function loadPage(
     // 直接読むことでペアの整合を保証する。pdfjs textItems 経由の idx マッチングは
     // drawText スキップ(空文字/0幅/非有限スケール)で件数が食い違い、text が後続
     // ブロックに 1 つズレる既知バグの原因となるため採用しない。
-    if (shouldUseSavedMeta(savedMeta, textItems)) {
+    const savedMeta = bboxMeta?.[String(pageIndex)];
+    if (savedMeta && savedMeta.length > 0) {
       textBlocks = savedMeta.map((meta) => ({
         id: crypto.randomUUID(),
         text: meta.text,
@@ -120,11 +114,14 @@ export async function loadPage(
             height: Math.max(...vys) - Math.min(...vys),
           };
 
-          // Determine writing mode from screen-space text run direction.
-          // Using bbox shape would misclassify short vertical runs (e.g. single char)
-          // where ascent > run length. The direction vector is always reliable.
-          const [vDirX, vDirY] = viewport.convertToViewportPoint(tx[4] + ux, tx[5] + uy);
-          const isVertical = Math.abs(vDirY - vc[0][1]) > Math.abs(vDirX - vc[0][0]);
+          // 修正 (#39): writing mode は PDF 座標系 (ux, uy) だけで判定する。
+          // 旧実装は viewport.convertToViewportPoint() を通したスクリーン座標で比較
+          // していたが、ページが /Rotate 270 (または 90) の場合 viewport 変換は
+          // 軸を入れ替えるため、PDF 上で横書き (ux≈1, uy≈0) の run がスクリーン上では
+          // 縦方向に見え、誤って vertical 判定される逆転が起きていた。
+          // run 方向は PDF user space のフォント行列に保存されているので、
+          // PDF 座標で |uy| > |ux| を見ればページ回転に依らず正しく分類できる。
+          const isVertical = Math.abs(uy) > Math.abs(ux);
 
           return {
             id: crypto.randomUUID(),

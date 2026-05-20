@@ -76,7 +76,15 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
       return fontBytesCache;
     } catch (err) {
       console.error('[loadFontLazy] Error loading font:', err);
-      fontLoadPromise = null; // リトライ可能にする
+      // issue #52: 失敗時にリトライ可能にするだけでなく、副作用で書かれた可能性のある
+      // 中間状態 (primaryFontKind, fallback cache) も完全に巻き戻す。
+      // そうしないと次回 loadFallbackFontsLazy が古い primaryFontKind を見て
+      // フォールバック配列を誤った組み合わせで固定化してしまう。
+      fontLoadPromise = null;
+      fontBytesCache = null;
+      primaryFontKind = null;
+      fallbackFontBytesCache = null;
+      fallbackFontLoadPromise = null;
       return null;
     }
   })();
@@ -90,6 +98,10 @@ export async function loadFallbackFontsLazy(): Promise<ArrayBuffer[] | null> {
 
   fallbackFontLoadPromise = (async () => {
     try {
+      // primary フォント (Meiryo / IPAmjMincho) を先に確定させてから fallback パスを決める。
+      // これを await しないと並列呼び出し時に primaryFontKind が null のままで
+      // Meiryo 環境でも IPAmjMincho.ttf が fallback に含まれない状態でキャッシュされる。
+      await loadFontLazy();
       const buffers: ArrayBuffer[] = [];
       for (const path of getFallbackFontPaths()) {
         const res = await fetch(path);

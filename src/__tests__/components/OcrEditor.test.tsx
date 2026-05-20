@@ -28,6 +28,7 @@ vi.mock('@dnd-kit/core', () => ({
   PointerSensor: class {},
   useSensor: vi.fn().mockReturnValue(null),
   useSensors: vi.fn().mockReturnValue([]),
+  MeasuringStrategy: { Always: 'always', BeforeDragging: 'before-dragging', WhileDragging: 'while-dragging' },
 }))
 
 vi.mock('@dnd-kit/sortable', () => ({
@@ -54,6 +55,28 @@ vi.mock('@dnd-kit/sortable', () => ({
 vi.mock('@dnd-kit/utilities', () => ({
   CSS: { Transform: { toString: vi.fn().mockReturnValue('') } },
 }))
+
+// jsdom には layout が無いため Virtuoso は実行時 0 items しか描画しない。
+// テストでは itemContent を全件展開する単純な div に差し替える。
+// issue #92: renderItem の identity を検証するため、最後に渡された itemContent を
+// globalThis に保持してテストから参照できるようにする。
+vi.mock('react-virtuoso', () => {
+  const React = require('react') as typeof import('react')
+  const Virtuoso = React.forwardRef(function Virtuoso(
+    { totalCount, itemContent, className, style }: any,
+    _ref: any
+  ) {
+    ;(globalThis as any).__lastVirtuosoItemContent = itemContent
+    const items = []
+    for (let i = 0; i < totalCount; i++) {
+      items.push(
+        React.createElement('div', { key: i, 'data-virtuoso-index': i }, itemContent(i))
+      )
+    }
+    return React.createElement('div', { className, style }, items)
+  })
+  return { Virtuoso }
+})
 
 vi.mock('lucide-react', () => ({
   GripVertical: () => null,
@@ -609,6 +632,293 @@ describe('OcrEditor', () => {
       expect(pageIdx).toBe(0)
       expect(patch.isDirty).toBe(true)
       expect(Array.isArray(patch.textBlocks)).toBe(true)
+    })
+  })
+
+  // ── V-01: 仮想化 + キーボードナビ整合 (issue #20) ────────────────
+  describe('V-01: 仮想化リストでもキーボードナビゲーションが機能する', () => {
+    it('大量ブロックでも Virtuoso 経由で全カードが描画され Shift+ArrowDown が動作する', () => {
+      // モックされた Virtuoso は totalCount 全件を render するため、仮想化境界の代わりに
+      // SortableContext へ全 id が渡され、キーボードナビが index ベースで通ることを検証する
+      const manyBlocks: TextBlock[] = []
+      for (let i = 0; i < 50; i++) {
+        manyBlocks.push(makeBlock(`v${i}`, `block ${i}`, i))
+      }
+      const { container } = setup(manyBlocks, ['v10'])
+
+      const contents = getCardContents(container)
+      expect(contents.length).toBe(50)
+
+      fireEvent.keyDown(contents[10], { key: 'ArrowDown', shiftKey: true })
+      expectSelectedIds(['v10', 'v11'])
+    })
+
+    it('Virtuoso ラッパー (.ocr-card-list) 配下にカードが描画される', () => {
+      const { container } = setup()
+      // OcrEditor 内では Virtuoso が ocr-card-list クラスのコンテナを描画する
+      const list = container.querySelector('.ocr-card-list')
+      expect(list).not.toBeNull()
+      // フィルタなしの 3 カード全てが list 配下にある
+      expect(list!.querySelectorAll('.ocr-card-content').length).toBe(3)
+    })
+  })
+
+  // ── M-84: issue #84 モーダル open 中はグローバル keydown を抑止する ──
+  describe('M-84 (issue #84): モーダル open 中は window keydown ハンドラが動かない', () => {
+    afterEach(() => {
+      // 各テストで body に挿した dialog を確実に掃除
+      document.querySelectorAll('[data-test-modal]').forEach((el) => el.remove())
+    })
+
+    function openFakeModal() {
+      // Modal 実装が描画する DOM と同じ属性で「モーダル open」状態を再現
+      const dialog = document.createElement('div')
+      dialog.setAttribute('role', 'dialog')
+      dialog.setAttribute('aria-modal', 'true')
+      dialog.setAttribute('data-test-modal', 'true')
+      document.body.appendChild(dialog)
+      return dialog
+    }
+
+    it('window Ctrl+ArrowDown: モーダルが開いていると選択を変えない', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      // モーダルを開く
+      openFakeModal()
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+
+      // 選択は b1 のまま (本来なら b2 に動く)
+      expectSelectedIds(['b1'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b1')
+    })
+
+    it('window Shift+ArrowDown: モーダルが開いていると選択を拡張しない', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      openFakeModal()
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', shiftKey: true })
+
+      // 選択は b1 のまま (本来なら b1,b2 に拡張)
+      expectSelectedIds(['b1'])
+      expect(usePecoStore.getState().lastSelectedId).toBe('b1')
+    })
+
+    it('モーダルを閉じる (DOM から消す) と再びキー操作が効く', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      const dialog = openFakeModal()
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+      expectSelectedIds(['b1']) // ガードで抑止
+
+      // モーダル close → ガード解除
+      dialog.remove()
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+      expectSelectedIds(['b2'])
+    })
+
+    it('role=dialog でも aria-modal=false の要素はガードしない (非モーダル dialog 互換)', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      const nonModal = document.createElement('div')
+      nonModal.setAttribute('role', 'dialog')
+      nonModal.setAttribute('aria-modal', 'false')
+      nonModal.setAttribute('data-test-modal', 'true')
+      document.body.appendChild(nonModal)
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+
+      // 非モーダル dialog なので OcrEditor のキー処理は通常通り動く
+      expectSelectedIds(['b2'])
+    })
+  })
+
+  // ── P-22: issue #27 グローバル keydown listener が毎レンダー再登録されない ──
+  describe('P-22 (issue #27): window keydown listener は再レンダーで再登録されない', () => {
+    it('テキスト編集等で再レンダーが起きても addEventListener("keydown", ...) は 1 回のみ', () => {
+      const addSpy = vi.spyOn(window, 'addEventListener')
+      const removeSpy = vi.spyOn(window, 'removeEventListener')
+      addSpy.mockClear()
+      removeSpy.mockClear()
+
+      setup()
+
+      // 初回 mount で 'keydown' の addEventListener が 1 回呼ばれる前提
+      const initialKeydownAdds = addSpy.mock.calls.filter(c => c[0] === 'keydown').length
+      expect(initialKeydownAdds).toBe(1)
+
+      // テキストブロックを編集して store 更新 → OcrEditor 再レンダー
+      act(() => {
+        const doc = usePecoStore.getState().document!
+        const page = doc.pages.get(0)!
+        const newBlocks = page.textBlocks.map((b, i) =>
+          i === 0 ? { ...b, text: 'edited' } : b
+        )
+        const newPages = new Map(doc.pages)
+        newPages.set(0, { ...page, textBlocks: newBlocks })
+        usePecoStore.setState({ document: { ...doc, pages: newPages } } as any)
+      })
+
+      // 選択も変える (これも以前は依存に入っていて再登録の引き金)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2']), lastSelectedId: 'b2' } as any)
+      })
+
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b3']), lastSelectedId: 'b3' } as any)
+      })
+
+      // 再レンダー後も 'keydown' の addEventListener 累計は変わらない
+      const finalKeydownAdds = addSpy.mock.calls.filter(c => c[0] === 'keydown').length
+      const finalKeydownRemoves = removeSpy.mock.calls.filter(c => c[0] === 'keydown').length
+      expect(finalKeydownAdds).toBe(initialKeydownAdds)
+      expect(finalKeydownRemoves).toBe(0)
+
+      addSpy.mockRestore()
+      removeSpy.mockRestore()
+    })
+
+    it('listener が ref 経由で最新の selectedIds / lastSelectedId を読む', () => {
+      const keyboardBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(keyboardBlocks)
+
+      // 初期: 何も選択されていない
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(), lastSelectedId: null } as any)
+      })
+
+      // listener 登録後に selectedIds / lastSelectedId が変化しても、ref 経由で
+      // 最新値を読むので動作が壊れない
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b1']), lastSelectedId: 'b1' } as any)
+      })
+
+      fireEvent.keyDown(window, { key: 'ArrowDown', ctrlKey: true })
+      expectSelectedIds(['b2'])
+    })
+  })
+
+  // ── P-92: issue #92 renderItem identity 安定 (Virtuoso memoization 維持) ───────────
+  describe('P-92 (issue #92): renderItem / itemContent は再レンダーで identity が変わらない', () => {
+    it('テキスト編集で textBlocks 参照が変わっても itemContent callback の identity は不変', () => {
+      const editBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(editBlocks)
+
+      const initialItemContent = (globalThis as any).__lastVirtuosoItemContent
+      expect(typeof initialItemContent).toBe('function')
+
+      // 1 文字編集相当: textBlocks 配列の参照を新規生成
+      act(() => {
+        const doc = usePecoStore.getState().document!
+        const page = doc.pages.get(0)!
+        const newBlocks = page.textBlocks.map((b, i) =>
+          i === 0 ? { ...b, text: 'edited' } : b
+        )
+        const newPages = new Map(doc.pages)
+        newPages.set(0, { ...page, textBlocks: newBlocks })
+        usePecoStore.setState({ document: { ...doc, pages: newPages } } as any)
+      })
+
+      const afterEditItemContent = (globalThis as any).__lastVirtuosoItemContent
+      // 再レンダー後も itemContent の identity が同一であること
+      expect(afterEditItemContent).toBe(initialItemContent)
+
+      // さらに選択状態を変えても同じ
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2']), lastSelectedId: 'b2' } as any)
+      })
+      expect((globalThis as any).__lastVirtuosoItemContent).toBe(initialItemContent)
+    })
+
+    it('itemContent は ref 経由で最新の filteredBlocks を読む (検索フィルター後も正しく描画)', async () => {
+      const user = userEvent.setup()
+      const editBlocks = [
+        makeBlock('b1', 'apple fruit', 0),
+        makeBlock('b2', 'banana fruit', 1),
+        makeBlock('b3', 'cherry', 2),
+      ]
+      const { container } = setup(editBlocks)
+
+      const initialItemContent = (globalThis as any).__lastVirtuosoItemContent
+
+      // 検索 → filteredBlocks の中身が変化
+      await user.type(screen.getByPlaceholderText('検索...'), 'cherry')
+
+      // itemContent identity は同じ (mount 中固定)
+      expect((globalThis as any).__lastVirtuosoItemContent).toBe(initialItemContent)
+
+      // それでも表示内容は最新 filteredBlocks (cherry のみ)
+      const cards = container.querySelectorAll('.ocr-card-content')
+      expect(cards.length).toBe(1)
+      expect(cards[0].textContent).toBe('cherry')
+    })
+
+    it('renderItem が ref 経由で最新の handleSelect を呼び、テキスト編集後もクリック選択が壊れない', () => {
+      const editBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      const { container } = setup(editBlocks)
+
+      // テキスト編集 → textBlocks 参照変化 → 旧実装なら handleSelect 再生成 → renderItem も再生成
+      // 新実装では renderItem は安定だが ref 経由で最新 handleSelect を呼ぶ
+      act(() => {
+        const doc = usePecoStore.getState().document!
+        const page = doc.pages.get(0)!
+        const newBlocks = page.textBlocks.map((b, i) =>
+          i === 1 ? { ...b, text: 'edited' } : b
+        )
+        const newPages = new Map(doc.pages)
+        newPages.set(0, { ...page, textBlocks: newBlocks })
+        usePecoStore.setState({ document: { ...doc, pages: newPages } } as any)
+      })
+
+      // 編集後にクリック選択が動作することを確認 (handleSelect が ref 経由で最新版を呼ぶ)
+      const cards = container.querySelectorAll('.ocr-card')
+      fireEvent.click(cards[2])
+      expect(usePecoStore.getState().selectedIds.has('b3')).toBe(true)
     })
   })
 

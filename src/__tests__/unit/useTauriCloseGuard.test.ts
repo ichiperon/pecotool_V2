@@ -135,7 +135,7 @@ describe('useTauriCloseGuard', () => {
   })
 
   describe('堅牢化: × 閉じ不能防止フロー', () => {
-    it('ask が 8 秒以上返らなくても main destroy が呼ばれる (タイムアウト → close 続行)', async () => {
+    it('issue #31: ask が 8 秒以上返らなくても main destroy は呼ばれない (タイムアウト → cancel 扱い)', async () => {
       vi.useFakeTimers()
       try {
         pecoStoreModule.usePecoStore.setState({ isDirty: true, document: null })
@@ -156,14 +156,14 @@ describe('useTauriCloseGuard', () => {
         const fakeEvent = { preventDefault: vi.fn() }
         const handlerPromise = (closeHandler as any)(fakeEvent)
 
-        // ask の 8 秒タイムアウト + main destroy の 1 秒タイムアウト枠を進める
+        // ask の 8 秒タイムアウトを進める
         await vi.advanceTimersByTimeAsync(8000)
         await vi.advanceTimersByTimeAsync(1000)
         await handlerPromise
 
         expect(fakeEvent.preventDefault).toHaveBeenCalled()
-        // ask タイムアウトは「閉じてよい」扱いで main destroy に到達する
-        expect(m.destroyWindow).toHaveBeenCalled()
+        // issue #31: ask タイムアウト時は安全側 (cancel 扱い) で main destroy をスキップ
+        expect(m.destroyWindow).not.toHaveBeenCalled()
       } finally {
         vi.useRealTimers()
       }

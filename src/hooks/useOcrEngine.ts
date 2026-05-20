@@ -4,8 +4,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { ask, open } from '@tauri-apps/plugin-dialog';
 import { writeFile, remove } from '@tauri-apps/plugin-fs';
 import { tempDir, join } from '@tauri-apps/api/path';
-import { usePecoStore } from '../store/pecoStore';
-import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc } from '../utils/pdfLoader';
+import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
+import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
@@ -17,8 +17,20 @@ const RENDER_SCALE = 2.0;
 /**
  * Render a page from an isolated PDF document (not the shared LRU cache)
  * so it never conflicts with PdfCanvas's concurrent render on the same proxy.
+ *
+ * 戻り値: テンポラリ画像パス。
+ *
+ * #71 修正: 以前は scale=1.0 viewport を返し、OCR の bbox を
+ *   convertViewportBBoxToPdfUserSpace で PDF user space に変換していた。
+ *   しかし pdfSaver 側は bbox を viewport-y (top-down) と仮定して描画していたため、
+ *   R=0 では偶然キャンセルされ、R=90/180/270 では位置がページ外へ飛んでいた。
+ *   修正後: OCR の bbox は viewport 空間のまま store に入れ、pdfSaver が
+ *   page.getRotation() を読んで cm で位置補正する設計に統一した。
  */
-async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex: number): Promise<string> {
+async function renderPageToTempFile(
+  ocrPdf: pdfjsLib.PDFDocumentProxy,
+  pageIndex: number,
+): Promise<{ tempPath: string }> {
   const page = await ocrPdf.getPage(pageIndex + 1);
   const canvas = document.createElement('canvas');
   try {
@@ -39,7 +51,7 @@ async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex
     const fileName = `peco_ocr_${pageIndex}_${Date.now()}.png`;
     const tempPath = await join(tmp, fileName);
     await writeFile(tempPath, bytes);
-    return tempPath;
+    return { tempPath };
   } finally {
     canvas.width = 0;
     canvas.height = 0;
@@ -47,10 +59,16 @@ async function renderPageToTempFile(ocrPdf: pdfjsLib.PDFDocumentProxy, pageIndex
   }
 }
 
-function toTextBlocks(blocks: OcrResultBlock[], settings: OcrSortSettings): TextBlock[] {
+function toTextBlocks(
+  blocks: OcrResultBlock[],
+  settings: OcrSortSettings,
+): TextBlock[] {
   const filtered = blocks.filter((b) => b.text.trim() !== '');
   const sorted = sortOcrBlocks(filtered, settings);
-  return sorted.map((b, i) => ({
+  return sorted.map((b, i) => {
+    // #71: bbox は viewport 空間 (rotated screen coords, y-down) のまま保持する。
+    // pdfSaver 側で page.getRotation() を読み、rotation に応じた cm で位置補正する。
+    return {
       id: crypto.randomUUID(),
       text: b.text,
       originalText: b.text,
@@ -59,7 +77,8 @@ function toTextBlocks(blocks: OcrResultBlock[], settings: OcrSortSettings): Text
       order: i,
       isNew: true,
       isDirty: true,
-    }));
+    };
+  });
 }
 
 async function runOcrForPage(
@@ -68,10 +87,11 @@ async function runOcrForPage(
   pageIndex: number,
   pageWidth: number,
   pageHeight: number,
-): Promise<OcrResult> {
+): Promise<{ result: OcrResult }> {
   let tempPath: string | null = null;
   try {
-    tempPath = await renderPageToTempFile(ocrPdf, pageIndex);
+    const rendered = await renderPageToTempFile(ocrPdf, pageIndex);
+    tempPath = rendered.tempPath;
     const raw = await invoke<string>('run_ocr', {
       imagePath: tempPath,
       pageWidth,
@@ -82,9 +102,11 @@ async function runOcrForPage(
     try {
       parsed = JSON.parse(raw) as OcrResult;
     } catch (e) {
-      return { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` };
+      return {
+        result: { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` },
+      };
     }
-    return parsed;
+    return { result: parsed };
   } finally {
     if (tempPath) {
       remove(tempPath).catch((e) => {
@@ -104,7 +126,12 @@ type OcrProgress = {
 
 interface FolderOcrCallbacks {
   openPdf?: (filePath: string) => Promise<boolean>;
-  savePdf?: () => Promise<void>;
+  /**
+   * #48: 戻り値で保存成功/失敗を明示的に返す。フォルダ OCR ループは false を
+   * 受け取ったら即座に中止する。store の isDirty を後追いで判定するのは
+   * IDB の async save が non-atomic で残るため false positive が出る。
+   */
+  savePdf?: () => Promise<boolean>;
 }
 
 export function useOcrEngine(
@@ -116,11 +143,20 @@ export function useOcrEngine(
   const cancelTokenRef = useRef(false);
   const isOcrRunningRef = useRef(false);
 
-  // 描画タイミングに依存しないよう、非同期処理では getState() で最新状態を取得する
-  const { document: reactDoc, currentPageIndex } = usePecoStore();
+  // 描画タイミングに依存しないよう、非同期処理では getState() で最新状態を取得する。
+  // Toolbar の disabled 制御に必要な「document の有無」と「現在ページ」だけ細粒度購読し、
+  // テキスト編集等の document 全体差し替えで本フックが再 render されないようにする。
+  const hasDocument = usePecoStore(selectHasDocument);
+  const currentPageIndex = usePecoStore(selectCurrentPageIndex);
 
-  const isCurrentDocument = (filePath: string) =>
-    usePecoStore.getState().document?.filePath === filePath;
+  // #102: filePath 一致だけでは F5 (再読み込み) で「同じパスの別 doc 参照」に
+  // 古い OCR 結果が書き込まれる事故が発生する。
+  // updatePageData は document を新オブジェクトに置き換えるため reference identity も
+  // 使えない (1 ページ書き込んだ瞬間に doc が変わる)。
+  // 解決策: setDocument 時のみ +1 される documentEpoch を比較する。
+  // OCR ループ開始時点の epoch を保持し、毎ステップで getState().documentEpoch と一致するか判定。
+  const isCurrentDocument = (capturedEpoch: number) =>
+    usePecoStore.getState().documentEpoch === capturedEpoch;
 
   const setOcrRunning = (running: boolean) => {
     isOcrRunningRef.current = running;
@@ -153,11 +189,16 @@ export function useOcrEngine(
     doc: PecoDocument,
     progressForPage?: (pageIndex: number) => OcrProgress,
   ) => {
+    // #102: 開始時点の epoch を captured epoch として保持。
+    // ループ内で getState().documentEpoch と比較し、F5 / Ctrl+O 経由で document が
+    // 差し替えられた瞬間に検知して停止する (filePath 一致でも doc 自体は別物のため)。
+    // updatePageData による document 差し替えは epoch を増やさないので、書き込みは正常に続く。
+    const capturedEpoch = usePecoStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       for (let i = 0; i < doc.totalPages; i++) {
         if (cancelTokenRef.current) break;
-        if (!isCurrentDocument(doc.filePath)) {
+        if (!isCurrentDocument(capturedEpoch)) {
           cancelTokenRef.current = true;
           showToast('OCRを中止しました（別のPDFが開かれました）。', true);
           break;
@@ -176,8 +217,14 @@ export function useOcrEngine(
         }
 
         try {
-          const result = await runOcrForPage(ocrPdf, doc.filePath, i, size.pageWidth, size.pageHeight);
-          if (!isCurrentDocument(doc.filePath)) {
+          const { result } = await runOcrForPage(
+            ocrPdf,
+            doc.filePath,
+            i,
+            size.pageWidth,
+            size.pageHeight,
+          );
+          if (!isCurrentDocument(capturedEpoch)) {
             cancelTokenRef.current = true;
             showToast('OCRを中止しました（別のPDFが開かれました）。', true);
             break;
@@ -187,6 +234,8 @@ export function useOcrEngine(
             continue;
           }
           const settings = useOcrSettingsStore.getState();
+          // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
+          // pdfSaver が page.getRotation() を読んで cm で位置補正する。
           const newBlocks = toTextBlocks(result.blocks ?? [], settings);
           usePecoStore.getState().updatePageData(i, {
             textBlocks: newBlocks,
@@ -226,7 +275,21 @@ export function useOcrEngine(
       }
     }
 
-    if ((pageData.textBlocks?.length ?? 0) > 0) {
+    // メモリ上の textBlocks に加えて、LRU 退避済みページが IDB に残しているかも確認する。
+    // (issue #9: LRU 退避ページに対する OCR が既存編集を黙って上書きする)
+    let hasExistingBlocks = (pageData.textBlocks?.length ?? 0) > 0;
+    if (!hasExistingBlocks) {
+      try {
+        const idbData = await getTemporaryPageData(doc.filePath, pageIdx);
+        if ((idbData?.textBlocks?.length ?? 0) > 0) {
+          hasExistingBlocks = true;
+        }
+      } catch (e) {
+        console.warn(`[OCR] IDB 退避データの確認に失敗 (page ${pageIdx + 1}):`, e);
+      }
+    }
+
+    if (hasExistingBlocks) {
       const confirmed = await ask(
         'このページには既存のOCRデータがあります。上書きしますか？',
         { title: 'OCR上書き確認', kind: 'warning' }
@@ -236,12 +299,21 @@ export function useOcrEngine(
 
     setOcrRunning(true);
     perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
+    // #102: 開始時点の documentEpoch を保持。F5 等で同パスの別 doc に置き換わった際は
+    // epoch がインクリメントされるため、古い結果を書き込む前に検知できる。
+    const capturedEpoch = usePecoStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
-      if (!isCurrentDocument(doc.filePath)) return;
+      if (!isCurrentDocument(capturedEpoch)) return;
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
-      const result = await runOcrForPage(ocrPdf, doc.filePath, pageIdx, pageData.width, pageData.height);
-      if (!isCurrentDocument(doc.filePath)) {
+      const { result } = await runOcrForPage(
+        ocrPdf,
+        doc.filePath,
+        pageIdx,
+        pageData.width,
+        pageData.height,
+      );
+      if (!isCurrentDocument(capturedEpoch)) {
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
         return;
       }
@@ -252,6 +324,8 @@ export function useOcrEngine(
       }
 
       const settings = useOcrSettingsStore.getState();
+      // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
+      // pdfSaver が page.getRotation() を読んで cm で位置補正する。
       const newBlocks = toTextBlocks(result.blocks ?? [], settings);
       usePecoStore.getState().updatePageData(pageIdx, {
         textBlocks: newBlocks,
@@ -370,11 +444,12 @@ export function useOcrEngine(
         if (cancelTokenRef.current) break;
 
         setOcrProgress({ current: doc.totalPages, total: doc.totalPages, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName });
-        await callbacks.savePdf();
-        const state = usePecoStore.getState();
-        const hasDirtyPages = Array.from(state.document?.pages.values() || []).some((p) => p.isDirty);
-        if (state.isDirty || hasDirtyPages) {
-          showToast(`${fileName} の保存に失敗した可能性があります。フォルダOCRを中止します。`, true);
+        // #48: savePdf の戻り値で成功/失敗を明示判定する。
+        // 旧実装は store の isDirty を見ていたが、saveTemporaryPageData の async は
+        // non-atomic で残るため false positive 中止が起きていた。
+        const saved = await callbacks.savePdf();
+        if (!saved) {
+          showToast(`${fileName} の保存に失敗しました。フォルダOCRを中止します。`, true);
           cancelTokenRef.current = true;
           break;
         }
@@ -393,6 +468,10 @@ export function useOcrEngine(
 
   const checkAndPromptOcrZero = async (doc: PecoDocument) => {
     if (isOcrRunningRef.current) return;
+    // #102: doc を渡された瞬間の epoch を保持。ask() の待機中に別 PDF へ切り替わったら
+    // runOcrAllPages を起動しない (旧実装は filePath 一致のみ確認していたため、
+    // 同 filePath で再ロードされた別 doc に対しても OCR を実行していた)。
+    const capturedEpoch = usePecoStore.getState().documentEpoch;
     try {
       const pdf = await getSharedPdfProxy(doc.filePath);
       const page0 = await pdf.getPage(1);
@@ -413,14 +492,14 @@ export function useOcrEngine(
           'このPDFにはOCRデータが含まれていません。全ページOCRを実行しますか？',
           { title: 'OCR実行の提案', kind: 'info' }
         );
-        if (confirmed && isCurrentDocument(doc.filePath)) await runOcrAllPages();
+        if (confirmed && isCurrentDocument(capturedEpoch)) await runOcrAllPages();
       }
     } catch (e) {
       console.error('[OCR] OCRゼロ検出に失敗:', e);
     }
   };
 
-  // reactDoc / currentPageIndex は Toolbar の disabled 制御用に返す
+  // hasDocument / currentPageIndex は Toolbar の disabled 制御用に返す
   return {
     isOcrRunning,
     ocrProgress,
@@ -429,7 +508,7 @@ export function useOcrEngine(
     runOcrFolder,
     cancelOcr,
     checkAndPromptOcrZero,
-    hasDocument: !!reactDoc,
+    hasDocument,
     currentPageIndex,
   };
 }

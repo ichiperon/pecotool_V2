@@ -122,9 +122,10 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
           isDirty: true,
         });
         setSelectedIds([newBlock.id]);
+        // Issue #7: BB が正常に作れた場合だけ描画モードを解除する (失敗時はモード維持)
+        toggleDrawingMode();
       }
     }
-    toggleDrawingMode();
   };
 
   const trySplit = (pos: { x: number; y: number }): boolean => {
@@ -145,7 +146,7 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
             : Math.max(1, Math.min(w - 1, pos.x - x)) / w;
           const split = splitBlockAtRatio(block, ratio);
           if (!split) {
-            toggleSplitMode();
+            // Issue #5: 分割不可ブロックは split モードを維持して、別ブロックを再試行できるようにする
             return false;
           }
           const { b1, b2 } = split;

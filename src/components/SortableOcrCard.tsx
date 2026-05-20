@@ -1,4 +1,4 @@
-import { forwardRef } from 'react';
+import { forwardRef, memo } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { OcrCard, OcrCardHandle } from './OcrCard';
@@ -12,7 +12,9 @@ interface SortableOcrCardProps {
   onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
 }
 
-export const SortableOcrCard = forwardRef<OcrCardHandle, SortableOcrCardProps>(
+// 仮想化リスト内で大量カードがマウントされてもムダな再レンダリングを避けるため memo 化。
+// 親からのコールバックは useCallback で安定化されている前提。
+export const SortableOcrCard = memo(forwardRef<OcrCardHandle, SortableOcrCardProps>(
   function SortableOcrCard({ block, pageIndex, onNavigate, onExtendSelection, onSelect }, ref) {
   const {
     attributes,
@@ -44,4 +46,4 @@ export const SortableOcrCard = forwardRef<OcrCardHandle, SortableOcrCardProps>(
       />
     </div>
   );
-});
+}));

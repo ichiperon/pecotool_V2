@@ -7,7 +7,8 @@ import {
   selectSelectedIds,
   selectIsDrawingMode,
   selectIsSplitMode,
-  selectCurrentPage,
+  selectCurrentPageTextBlocks,
+  selectDragPreviewBboxes,
 } from "../store/pecoStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
@@ -32,12 +33,18 @@ export function PdfCanvas({
   onRenderComplete,
 }: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
+  // 静的層: 全 BB の塗・枠・テキスト (非選択分のみ)
+  const staticOverlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  // 動的層: 選択ハイライト・ハンドル・drawing プレビュー・altDrag 矢印 (および hit-test 受け口)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const renderOverlaysRef = useRef<(() => void) | null>(null);
 
   const document = usePecoStore((s) => s.document);
-  const currentPage = usePecoStore(selectCurrentPage);
+  // overlay 再描画 effect は textBlocks のみを依存とし、PageData の他フィールド
+  // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
+  // 再描画 effect が走らないようにする (issue #22)。
+  const currentTextBlocks = usePecoStore(selectCurrentPageTextBlocks);
   const zoom = usePecoStore(selectZoom);
   const showOcr = usePecoStore(selectShowOcr);
   const ocrOpacity = usePecoStore(selectOcrOpacity);
@@ -57,12 +64,22 @@ export function PdfCanvas({
     () => (rawInspectionIssues ?? []).filter((issue) => !issue.ignored),
     [rawInspectionIssues],
   );
+  const setDragPreviewBboxes = usePecoStore((s) => s.setDragPreviewBboxes);
+  // issue #91: ドラッグ中のみ非 null。動的層 overlay で選択 BB の bbox を上書きする。
+  const dragPreviewBboxes = usePecoStore(selectDragPreviewBboxes);
 
-  const getPageData = () => document?.pages.get(pageIndex);
+  // issue #106: render 時点の `document` state を closure 保持すると、
+  // 同一 React tick 内で updatePageData() 直後に再度呼んだ getPageData が
+  // 「更新前」の値を返してしまい、useBlockDragResize.finishDragResize の
+  // Action.after が before と同じ snapshot になる → Redo が無効化される。
+  // 常に最新 state を store から直接読み出すことで、書き込み直後の after を
+  // 正しく取得できるようにする。
+  const getPageData = () => usePecoStore.getState().document?.pages.get(pageIndex);
 
   const { pdfPage, loadError, setLoadError, retry } = usePdfRendering({
     pdfCanvasRef,
     overlayCanvasRef,
+    staticOverlayCanvasRef,
     wrapperRef,
     filePath: document?.filePath,
     totalPages: document?.totalPages,
@@ -92,6 +109,7 @@ export function PdfCanvas({
     updatePageData,
     toggleSelection,
     pushAction,
+    setDragPreviewBboxes,
   });
 
   const getMousePos = (e: React.MouseEvent) => {
@@ -103,12 +121,15 @@ export function PdfCanvas({
     };
   };
 
-  // 選択されたブロックへの自動スクロール
+  // 選択されたブロックへの自動スクロール。
+  // 依存に `currentPage` (PageData 全体) を入れると updatePageData による
+  // テキスト編集 / dirty flag / thumbnail 更新でも effect が走り、user scroll を
+  // 中断してしまう。textBlocks のみを購読すれば bbox が変わったときだけ再実行
+  // される (issue #73)。
   useEffect(() => {
     if (selectedIds.size !== 1 || drag.draggedId) return;
     const selectedId = Array.from(selectedIds)[0];
-    const pageData = currentPage;
-    const block = pageData?.textBlocks.find((b) => b.id === selectedId);
+    const block = currentTextBlocks?.find((b) => b.id === selectedId);
     if (!block) return;
 
     const container = window.document.querySelector(".pdf-viewer-panel");
@@ -129,7 +150,7 @@ export function PdfCanvas({
       top: Math.max(0, targetY),
       behavior: "smooth",
     });
-  }, [selectedIds, zoom, currentPage, pageIndex, drag.draggedId]);
+  }, [selectedIds, zoom, currentTextBlocks, pageIndex, drag.draggedId]);
 
   useEffect(() => {
     if (!activeIssueId) return;
@@ -156,7 +177,127 @@ export function PdfCanvas({
     });
   }, [activeIssueId, inspectionIssues, zoom]);
 
-  // Overlay Layer Rendering
+  // ── Overlay Layer Rendering (2 層分割) ───────────────────────────────
+  //
+  // issue #90: BB 500+ の状況で 1 文字編集や矢印キー移動ごとに O(N) の
+  // forEach 描画が走るのを軽減するため、overlay を静的層と動的層に分割。
+  //
+  //   静的層 (staticOverlayCanvasRef):
+  //     - 全 BB の塗・枠・テキストを描画する
+  //     - ただし selectedIds に含まれる BB はスキップ (動的層で青く重ね描く)
+  //     - 依存: currentTextBlocks / zoom / showOcr / ocrOpacity / pdfPage
+  //       (selectedIds の変化では再走しない: ref 経由で参照)
+  //
+  //   動的層 (overlayCanvasRef):
+  //     - 選択 BB の塗・枠・ハンドル・テキスト
+  //     - drawing プレビュー
+  //     - altDrag プレビュー (矢印 / 方向ラベル)
+  //     - hit-test 用のマウスイベント受け口でもある (上層)
+  //     - 依存: 上記の動的入力のみ。textBlocks 変化でも、選択 BB の bbox が
+  //       変わったときには再走する必要があるため currentTextBlocks も含める。
+
+  // 静的層 effect から selectedIds を ref 越しに読むことで、selectedIds の
+  // 変化で静的層 effect が再走しないようにする (矢印キー移動の最適化に必要)。
+  const selectedIdsRef = useRef(selectedIds);
+  useEffect(() => {
+    selectedIdsRef.current = selectedIds;
+  }, [selectedIds]);
+
+  // 静的層: 非選択 BB の塗・枠・テキストを描画
+  const staticOverlayRafRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!staticOverlayCanvasRef.current || !pdfPage) return;
+
+    const renderStatic = () => {
+      const canvas = staticOverlayCanvasRef.current;
+      if (!canvas) return;
+      const context = canvas.getContext("2d");
+      if (!context) return;
+
+      context.clearRect(0, 0, canvas.width, canvas.height);
+
+      const textBlocks = currentTextBlocks;
+      if (!showOcr || !textBlocks) return;
+
+      const curSelected = selectedIdsRef.current;
+      const scale = zoom / 100;
+
+      textBlocks.forEach((block) => {
+        if (curSelected.has(block.id)) return; // 選択 BB は動的層に任せる
+
+        const x = block.bbox.x * scale;
+        const y = block.bbox.y * scale;
+        const w = block.bbox.width * scale;
+        const h = block.bbox.height * scale;
+
+        const inset = 1;
+        const baseAlpha = ocrOpacity;
+        const fillAlpha = ocrOpacity * 0.25;
+
+        context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
+        context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+
+        context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+        context.lineWidth = 1;
+        context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+
+        if (block.text) {
+          if (block.writingMode === "vertical") {
+            const fontSize = Math.max(10, w * 0.8);
+            context.save();
+            context.font = `bold ${fontSize}px sans-serif`;
+            context.textBaseline = "top";
+
+            const textLen = block.text.length;
+            const naturalHeight = textLen * fontSize;
+            const sy = h / naturalHeight;
+
+            context.translate(x + w, y + 2);
+            context.scale(1, sy);
+            context.rotate(Math.PI / 2);
+            context.lineWidth = 3 / sy;
+            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+            context.strokeText(block.text, 0, 0);
+            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+            context.fillText(block.text, 0, 0);
+            context.restore();
+          } else {
+            const fontSize = Math.max(10, h * 0.8);
+            context.save();
+            context.font = `bold ${fontSize}px sans-serif`;
+            context.textBaseline = "top";
+
+            const textWidth = context.measureText(block.text).width || 1;
+            const sx = w / textWidth;
+
+            context.translate(x, y + 2);
+            context.scale(sx, 1);
+            context.lineWidth = 3 / sx;
+            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+            context.strokeText(block.text, 0, 0);
+            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+            context.fillText(block.text, 0, 0);
+            context.restore();
+          }
+        }
+      });
+    };
+
+    if (staticOverlayRafRef.current) cancelAnimationFrame(staticOverlayRafRef.current);
+    staticOverlayRafRef.current = requestAnimationFrame(() => {
+      renderStatic();
+      staticOverlayRafRef.current = null;
+    });
+
+    return () => {
+      if (staticOverlayRafRef.current) {
+        cancelAnimationFrame(staticOverlayRafRef.current);
+        staticOverlayRafRef.current = null;
+      }
+    };
+  }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage]);
+
+  // 動的層: 選択 BB ハイライト + drawing/altDrag プレビュー
   const overlayRafRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -210,50 +351,53 @@ export function PdfCanvas({
     const renderOverlays = () => {
       if (!overlayCanvasRef.current) return;
       const canvas = overlayCanvasRef.current;
-      const context = canvas.getContext("2d")!;
+      const context = canvas.getContext("2d");
+      if (!context) return;
 
       context.clearRect(0, 0, canvas.width, canvas.height);
 
-      const pageData = currentPage;
-      if (showOcr && pageData && pageData.textBlocks) {
-        pageData.textBlocks.forEach((block) => {
-          const isSelected = selectedIds.has(block.id);
-          context.strokeStyle = isSelected ? "rgba(0, 120, 255, 0.8)" : "rgba(255, 0, 0, 0.3)";
-          context.lineWidth = isSelected ? 2 : 1;
+      const textBlocks = currentTextBlocks;
+      if (showOcr && textBlocks && selectedIds.size > 0) {
+        const scale = zoom / 100;
+        const baseAlpha = Math.min(1.0, ocrOpacity * 2);
+        const fillAlpha = Math.min(0.4, ocrOpacity * 0.625);
 
-          const x = block.bbox.x * (zoom / 100);
-          const y = block.bbox.y * (zoom / 100);
-          const w = block.bbox.width * (zoom / 100);
-          const h = block.bbox.height * (zoom / 100);
+        // 選択された BB のみ描画 (O(|selectedIds|))。textBlocks 全体を走査するが
+        // bbox/text 取得は選択分だけで済む。selectedIds が小さければ高速。
+        // issue #91: ドラッグ中は dragPreviewBboxes に動いた bbox が入っているので
+        // それを優先的に参照する (textBlocks 側は finishDragResize まで変わらない)。
+        textBlocks.forEach((block) => {
+          if (!selectedIds.has(block.id)) return;
 
-          const inset = isSelected ? 0 : 1;
+          const previewBbox = dragPreviewBboxes?.get(block.id);
+          const bbox = previewBbox ?? block.bbox;
+          const x = bbox.x * scale;
+          const y = bbox.y * scale;
+          const w = bbox.width * scale;
+          const h = bbox.height * scale;
 
-          const baseAlpha = isSelected ? Math.min(1.0, ocrOpacity * 2) : ocrOpacity;
-          const fillAlpha = isSelected ? Math.min(0.4, ocrOpacity * 0.625) : ocrOpacity * 0.25;
+          const inset = 0;
 
-          context.fillStyle = `rgba(${isSelected ? "0, 100, 255" : "0, 150, 255"}, ${fillAlpha})`;
+          context.fillStyle = `rgba(0, 100, 255, ${fillAlpha})`;
           context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
-          context.strokeStyle = `rgba(${isSelected ? "0, 100, 255" : "255, 0, 0"}, ${
-            isSelected ? Math.min(1.0, baseAlpha * 1.125) : baseAlpha
-          })`;
-          context.lineWidth = isSelected ? 2 : 1;
+          context.strokeStyle = `rgba(0, 100, 255, ${Math.min(1.0, baseAlpha * 1.125)})`;
+          context.lineWidth = 2;
           context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
-          if (isSelected) {
-            context.fillStyle = "white";
-            context.strokeStyle = "rgba(0, 100, 255, 1)";
-            const handleSize = 6;
-            [
-              [x, y],
-              [x + w, y],
-              [x, y + h],
-              [x + w, y + h],
-            ].forEach(([hx, hy]) => {
-              context.fillRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize);
-              context.strokeRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize);
-            });
-          }
+          // 4 隅のリサイズハンドル
+          context.fillStyle = "white";
+          context.strokeStyle = "rgba(0, 100, 255, 1)";
+          const handleSize = 6;
+          [
+            [x, y],
+            [x + w, y],
+            [x, y + h],
+            [x + w, y + h],
+          ].forEach(([hx, hy]) => {
+            context.fillRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize);
+            context.strokeRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize);
+          });
 
           if (block.text) {
             if (block.writingMode === "vertical") {
@@ -272,9 +416,7 @@ export function PdfCanvas({
               context.lineWidth = 3 / sy;
               context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
               context.strokeText(block.text, 0, 0);
-              context.fillStyle = isSelected
-                ? `rgba(0, 50, 255, ${baseAlpha})`
-                : `rgba(255, 0, 0, ${baseAlpha})`;
+              context.fillStyle = `rgba(0, 50, 255, ${baseAlpha})`;
               context.fillText(block.text, 0, 0);
               context.restore();
             } else {
@@ -291,9 +433,7 @@ export function PdfCanvas({
               context.lineWidth = 3 / sx;
               context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
               context.strokeText(block.text, 0, 0);
-              context.fillStyle = isSelected
-                ? `rgba(0, 50, 255, ${baseAlpha})`
-                : `rgba(255, 0, 0, ${baseAlpha})`;
+              context.fillStyle = `rgba(0, 50, 255, ${baseAlpha})`;
               context.fillText(block.text, 0, 0);
               context.restore();
             }
@@ -377,7 +517,7 @@ export function PdfCanvas({
     };
   }, [
     zoom,
-    currentPage,
+    currentTextBlocks,
     pageIndex,
     showOcr,
     ocrOpacity,
@@ -393,7 +533,101 @@ export function PdfCanvas({
     inspectionIssues,
     activeIssueId,
     showInspectionHighlights,
+    // issue #91: ドラッグ中の preview bbox 更新で動的層を再描画
+    dragPreviewBboxes,
   ]);
+
+  // selectedIds が変化したとき、静的層は selectedIdsRef を介して読むだけで
+  // 再走しない。しかし「新たに非選択になった BB」を静的層に書き戻す必要があるため、
+  // selectedIds 変化時に静的層を 1 度再描画する。これは selectedIds 配列のみが
+  // 変化した場合に効くもので、textBlocks 変化と同時に起きるケースは静的層の
+  // メイン effect が走るので二重描画にはならない (RAF coalesce で吸収)。
+  useEffect(() => {
+    if (!staticOverlayCanvasRef.current || !pdfPage) return;
+    const canvas = staticOverlayCanvasRef.current;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    if (staticOverlayRafRef.current) cancelAnimationFrame(staticOverlayRafRef.current);
+    staticOverlayRafRef.current = requestAnimationFrame(() => {
+      staticOverlayRafRef.current = null;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+
+      const textBlocks = currentTextBlocks;
+      if (!showOcr || !textBlocks) return;
+
+      const scale = zoom / 100;
+      textBlocks.forEach((block) => {
+        if (selectedIds.has(block.id)) return;
+
+        const x = block.bbox.x * scale;
+        const y = block.bbox.y * scale;
+        const w = block.bbox.width * scale;
+        const h = block.bbox.height * scale;
+
+        const inset = 1;
+        const baseAlpha = ocrOpacity;
+        const fillAlpha = ocrOpacity * 0.25;
+
+        context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
+        context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+
+        context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+        context.lineWidth = 1;
+        context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+
+        if (block.text) {
+          if (block.writingMode === "vertical") {
+            const fontSize = Math.max(10, w * 0.8);
+            context.save();
+            context.font = `bold ${fontSize}px sans-serif`;
+            context.textBaseline = "top";
+
+            const textLen = block.text.length;
+            const naturalHeight = textLen * fontSize;
+            const sy = h / naturalHeight;
+
+            context.translate(x + w, y + 2);
+            context.scale(1, sy);
+            context.rotate(Math.PI / 2);
+            context.lineWidth = 3 / sy;
+            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+            context.strokeText(block.text, 0, 0);
+            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+            context.fillText(block.text, 0, 0);
+            context.restore();
+          } else {
+            const fontSize = Math.max(10, h * 0.8);
+            context.save();
+            context.font = `bold ${fontSize}px sans-serif`;
+            context.textBaseline = "top";
+
+            const textWidth = context.measureText(block.text).width || 1;
+            const sx = w / textWidth;
+
+            context.translate(x, y + 2);
+            context.scale(sx, 1);
+            context.lineWidth = 3 / sx;
+            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+            context.strokeText(block.text, 0, 0);
+            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+            context.fillText(block.text, 0, 0);
+            context.restore();
+          }
+        }
+      });
+    });
+
+    return () => {
+      if (staticOverlayRafRef.current) {
+        cancelAnimationFrame(staticOverlayRafRef.current);
+        staticOverlayRafRef.current = null;
+      }
+    };
+    // 注: 依存は selectedIds のみ。他フィールドのときは上の "メイン" 静的層
+    // effect が責任を持つ。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (disableDrawing) return;
@@ -480,6 +714,16 @@ export function PdfCanvas({
       }}
     >
       <canvas ref={pdfCanvasRef} />
+      <canvas
+        ref={staticOverlayCanvasRef}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          zIndex: 1,
+          pointerEvents: "none",
+        }}
+      />
       <canvas
         ref={overlayCanvasRef}
         onMouseDown={handleMouseDown}

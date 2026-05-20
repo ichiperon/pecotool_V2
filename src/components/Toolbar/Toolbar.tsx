@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, SearchCheck, SquareCheckBig
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace, SearchCheck, SquareCheckBig
 } from "lucide-react";
 import { PageData } from '../../types';
 import type { TextInspectionScope } from '../../hooks/useTextInspection';
@@ -59,6 +59,8 @@ interface ToolbarProps {
   onCancelOcr: () => void;
   onClearOcrCurrentPage: () => void;
   onClearOcrAllPages: () => void;
+  /** issue #93: Find & Replace ダイアログを開く。ファイル未ロードなら disabled */
+  onOpenReplace: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = (props) => {
@@ -111,6 +113,13 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>
         <button onClick={props.onSelectAllText} title="テキスト全選択" disabled={!props.currentPage || props.currentPage.textBlocks.length === 0}><SquareCheckBig size={18} /><span>全選択</span></button>
         <button onClick={props.onRemoveSpaces} title="スペース削除 (Ctrl+Shift+Space)" disabled={props.selectedIdsCount === 0}><RemoveFormatting size={18} /><span>スペース削除</span></button>
+        <button
+          onClick={props.onOpenReplace}
+          title={props.isOcrRunning ? '検索と置換 (OCR実行中は無効)' : '検索と置換 (Ctrl+H)'}
+          /* #103: OCR 実行中は Replace を開けないようにする。
+             置換結果が後追い OCR で上書きされる事故を防ぐ。 */
+          disabled={!props.isFileLoaded || props.isOcrRunning}
+        ><Replace size={18} /><span>検索と置換</span></button>
         <button onClick={props.onDelete} title="削除" className="danger" disabled={props.selectedIdsCount === 0}><Trash2 size={18} /></button>
       </div>
       

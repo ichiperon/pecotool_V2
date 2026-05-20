@@ -2,12 +2,23 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
-import { usePecoStore } from '../store/pecoStore';
+import { usePecoStore, selectDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
 
 export function useThumbnailWindow() {
   const [isThumbnailOpen, setIsThumbnailOpen] = useState(false);
-  const { document, currentPageIndex } = usePecoStore();
+  const document = usePecoStore(selectDocument);
+  const currentPageIndex = usePecoStore(selectCurrentPageIndex);
+  // dirty ページ一覧をシリアライズしたプリミティブのみ購読する。
+  // document 全体を購読すると textBlocks 等 dirty に無関係なフィールド更新でも
+  // effect が再実行されて Tauri IPC が走るため (issue #35)。
+  const dirtyPagesSerialized = usePecoStore((s) => {
+    const doc = s.document;
+    if (!doc) return '';
+    const parts: number[] = [];
+    doc.pages.forEach((page, idx) => { if (page.isDirty) parts.push(idx); });
+    return parts.join(',');
+  });
   // Dirty なページインデックス一覧を追跡
   const prevDirtyRef = useRef<string>('');
 
@@ -125,14 +136,14 @@ export function useThumbnailWindow() {
   }, [currentPageIndex]);
 
   // --- Dirty状態の変化をサムネイル窓に通知 ---
+  // dirty ページ一覧のシリアライズ済みプリミティブのみ購読することで、
+  // textBlocks 等 dirty に無関係な store 更新では effect が再実行されない (issue #35)。
   useEffect(() => {
-    if (!document) return;
-    const dirty = getDirtyPages();
-    const serialized = dirty.join(',');
-    if (serialized === prevDirtyRef.current) return;
-    prevDirtyRef.current = serialized;
+    if (dirtyPagesSerialized === prevDirtyRef.current) return;
+    prevDirtyRef.current = dirtyPagesSerialized;
+    const dirty = dirtyPagesSerialized === '' ? [] : dirtyPagesSerialized.split(',').map(Number);
     emit('thumbnail:dirty-update', { dirtyPages: dirty }).catch(logUnlessTauriWindowNotFound);
-  }, [document, getDirtyPages]);
+  }, [dirtyPagesSerialized]);
 
   return { initThumbnailWindow, isThumbnailOpen, toggleThumbnailWindow };
 }

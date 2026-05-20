@@ -8,6 +8,9 @@ import { perf } from "../utils/perfLogger";
 interface UsePdfRenderingParams {
   pdfCanvasRef: RefObject<HTMLCanvasElement | null>;
   overlayCanvasRef: RefObject<HTMLCanvasElement | null>;
+  // 静的層 (issue #90 で導入)。サイズ同期のために受け取り、optional とする
+  // (既存呼び出しの後方互換と、テストでの省略を許容)。
+  staticOverlayCanvasRef?: RefObject<HTMLCanvasElement | null>;
   wrapperRef: RefObject<HTMLDivElement | null>;
   filePath: string | undefined;
   totalPages: number | undefined;
@@ -41,6 +44,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const {
     pdfCanvasRef,
     overlayCanvasRef,
+    staticOverlayCanvasRef,
     wrapperRef,
     filePath,
     pageIndex,
@@ -57,6 +61,29 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+
+  // issue #94: 連続 zoom 変化 (ボタン連打 / Ctrl+wheel / fit-to-screen 切替) で
+  // 30ms 以内に effect が再走したとき、cleanup で clearTimeout すると debounce が
+  // 一度も発火せず render task が走らない window が発生する。一方 overlay 層は
+  // RAF で即座に新 zoom 反映するため "画像 Canvas は古い zoom、BB overlay は新 zoom"
+  // という乖離が起きる。対策:
+  //   (1) 最新パラメータを ref に書き続け、debounce 中の effect 再実行では
+  //       既存 timeout を破棄せずに温存。timeout 発火時に ref から最新値を読む。
+  //   (2) effect 同期部で全 Canvas (pdfCanvas + 両 overlay + wrapper) のサイズを
+  //       新 zoom の viewport 値に先取りで合わせる。これにより layer 間の
+  //       size 乖離 window を 0 にする。
+  //   (3) bitmapCache ヒット時は debounce を待たず同期 (同一フレーム) で
+  //       描画まで完了させる。
+  // 言葉: "mounted" は本コンポーネントがマウント中かどうかのフラグで、unmount 時
+  // のみ false になる。effect 再走の cleanup では false にしない。
+  const mountedRef = useRef(true);
+  const latestParamsRef = useRef<{
+    pdfPage: pdfjsLib.PDFPageProxy | null;
+    zoom: number;
+    filePath: string | undefined;
+    pageIndex: number;
+  }>({ pdfPage: null, zoom, filePath, pageIndex });
+  latestParamsRef.current = { pdfPage, zoom, filePath, pageIndex };
 
   // PDFページの取得
   // ファイル or ページ切替時: 旧 pdfPage は即座にクリアせず、新ページ proxy の
@@ -113,55 +140,118 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     return () => { unsubscribe(); };
   }, [filePath, pageIndex]);
 
+  // unmount 専用 cleanup: 残っている debounce / render task をここで破棄する。
+  // effect 再走時の cleanup ではこれをしない (上記 issue #94 の (1))。
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (renderDebounceRef.current) {
+        clearTimeout(renderDebounceRef.current);
+        renderDebounceRef.current = null;
+      }
+      renderTaskRef.current?.cancel();
+      renderTaskRef.current = null;
+    };
+  }, []);
+
   // PDFレンダリング
   useEffect(() => {
     if (!pdfPage || !pdfCanvasRef.current) return;
 
-    // この render 試行がアクティブかどうかのフラグ。cleanup で false になる。
-    let active = true;
+    // 同期サイズ同期 (issue #94 (2)): pdfCanvas + 両 overlay + wrapper を
+    // 新 zoom の viewport サイズに先取りで合わせる。canvas.width/height への
+    // 代入は canvas を白でクリアするので画像は一瞬空白になりうるが、後続の
+    // render or bitmapCache 描画が同期 or 数フレーム以内に上書きするため、
+    // 「BB overlay が新 zoom、画像が古い zoom サイズ」という乖離は起きない。
+    const viewport = pdfPage.getViewport({ scale: zoom / 100 });
+    const w = Math.floor(viewport.width);
+    const h = Math.floor(viewport.height);
+    const pdfCanvas = pdfCanvasRef.current;
+    syncCanvasSizes({
+      w,
+      h,
+      pdfCanvasRef,
+      overlayCanvasRef,
+      staticOverlayCanvasRef,
+      wrapperRef,
+    });
 
-    const renderPdf = async () => {
-      const canvas = pdfCanvasRef.current!;
+    // bitmapCache ヒット時は debounce を待たず同期で完了させる (issue #94 (3))。
+    // 進行中の古い render があればキャンセルしてからキャッシュ画像を貼る。
+    const cacheKey = `${filePath}:${pageIndex}:${zoom}`;
+    const cached = getBitmapCache(cacheKey);
+    if (cached && cached.width === w && cached.height === h) {
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel();
+        renderTaskRef.current = null;
+      }
+      const context = pdfCanvas.getContext("2d", {
+        alpha: false,
+        willReadFrequently: false,
+      });
+      if (context) {
+        context.drawImage(cached.bitmap, 0, 0);
+        if (perf.enabled) perf.mark('render.drawn', { page: pageIndex, cacheHit: true });
+      }
+      if (hasCalledFirstRenderRef.current !== filePath) {
+        hasCalledFirstRenderRef.current = filePath ?? null;
+        onFirstRender?.();
+      }
+      renderOverlaysRef.current?.();
+      if (perf.enabled) perf.mark('render.complete', { page: pageIndex, cacheHit: true });
+      onRenderComplete?.();
+      // ページ切替時の prev 更新: cache hit でも次回判定に使うので忘れず更新。
+      prevPdfPageRef.current = pdfPage;
+      return;
+    }
+
+    // 注: cleanup では debounce timeout は破棄しない。timeout 発火時に
+    // latestParamsRef を読んで最新 zoom/page を反映する (issue #94)。
+    // 進行中の render task は new render 起動時 or unmount でのみ cancel する。
+
+    const renderPdfTask = async () => {
+      // ref から最新値を読む。debounce 中に zoom が連続変化したケースでも
+      // 最後の値で 1 回だけ render する (coalesce)。
+      const latest = latestParamsRef.current;
+      const curPage = latest.pdfPage;
+      if (!curPage || !pdfCanvasRef.current) return;
+      const curZoom = latest.zoom;
+      const curFilePath = latest.filePath;
+      const curPageIndex = latest.pageIndex;
+
+      const canvas = pdfCanvasRef.current;
       const context = canvas.getContext("2d", { alpha: false, willReadFrequently: false })!;
 
-      const viewport = pdfPage.getViewport({ scale: zoom / 100 });
-      const w = Math.floor(viewport.width);
-      const h = Math.floor(viewport.height);
+      const liveViewport = curPage.getViewport({ scale: curZoom / 100 });
+      const lw = Math.floor(liveViewport.width);
+      const lh = Math.floor(liveViewport.height);
 
-      const cacheKey = `${filePath}:${pageIndex}:${zoom}`;
-      const cached = getBitmapCache(cacheKey);
-      if (cached && cached.width === w && cached.height === h) {
-        // キャッシュヒット: 進行中の古い render があればキャンセルしてから
-        // サイズ適用 + 即時描画することでチラつきゼロで差し替える。
+      const liveCacheKey = `${curFilePath}:${curPageIndex}:${curZoom}`;
+      const liveCached = getBitmapCache(liveCacheKey);
+      if (liveCached && liveCached.width === lw && liveCached.height === lh) {
+        // debounce 中にキャッシュが用意された (他経路) or 既に上の同期パスで
+        // 描画済みの可能性。サイズだけ同期して即時描画。
         if (renderTaskRef.current) {
           renderTaskRef.current.cancel();
           renderTaskRef.current = null;
         }
-        canvas.width = w;
-        canvas.height = h;
-        if (overlayCanvasRef.current) {
-          overlayCanvasRef.current.width = w;
-          overlayCanvasRef.current.height = h;
-        }
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-        canvas.style.display = "block";
-        if (overlayCanvasRef.current) {
-          overlayCanvasRef.current.style.width = `${w}px`;
-          overlayCanvasRef.current.style.height = `${h}px`;
-        }
-        if (wrapperRef.current) {
-          wrapperRef.current.style.width = `${w}px`;
-          wrapperRef.current.style.height = `${h}px`;
-        }
-        context.drawImage(cached.bitmap, 0, 0);
-        perf.mark('render.drawn', { page: pageIndex, cacheHit: true });
-        if (hasCalledFirstRenderRef.current !== filePath) {
-          hasCalledFirstRenderRef.current = filePath ?? null;
+        syncCanvasSizes({
+          w: lw,
+          h: lh,
+          pdfCanvasRef,
+          overlayCanvasRef,
+          staticOverlayCanvasRef,
+          wrapperRef,
+        });
+        context.drawImage(liveCached.bitmap, 0, 0);
+        if (perf.enabled) perf.mark('render.drawn', { page: curPageIndex, cacheHit: true });
+        if (hasCalledFirstRenderRef.current !== curFilePath) {
+          hasCalledFirstRenderRef.current = curFilePath ?? null;
           onFirstRender?.();
         }
         renderOverlaysRef.current?.();
-        perf.mark('render.complete', { page: pageIndex, cacheHit: true });
+        if (perf.enabled) perf.mark('render.complete', { page: curPageIndex, cacheHit: true });
         onRenderComplete?.();
         return;
       }
@@ -169,28 +259,28 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       // キャッシュミス: オフスクリーンに描画してから on-screen に swap することで
       // 描画途中の「真っ白→じわっ」状態をユーザーに見せない。
       const offscreen = window.document.createElement("canvas");
-      offscreen.width = w;
-      offscreen.height = h;
+      offscreen.width = lw;
+      offscreen.height = lh;
       const offctx = offscreen.getContext("2d", { alpha: false, willReadFrequently: false })!;
       offctx.fillStyle = "#ffffff";
-      offctx.fillRect(0, 0, w, h);
+      offctx.fillRect(0, 0, lw, lh);
 
       const renderContext = {
         canvasContext: offctx,
-        viewport: viewport,
+        viewport: liveViewport,
         canvas: offscreen,
       };
 
       if (renderTaskRef.current) {
         renderTaskRef.current.cancel();
       }
-      if ((pdfPage as any)._transport?.destroyed) return;
-      perf.mark('render.start', { page: pageIndex, zoom, w, h });
-      renderTaskRef.current = pdfPage.render(renderContext);
+      if ((curPage as any)._transport?.destroyed) return;
+      if (perf.enabled) perf.mark('render.start', { page: curPageIndex, zoom: curZoom, w: lw, h: lh });
+      renderTaskRef.current = curPage.render(renderContext);
 
       try {
         await renderTaskRef.current.promise;
-        perf.mark('render.taskDone', { page: pageIndex });
+        if (perf.enabled) perf.mark('render.taskDone', { page: curPageIndex });
       } catch (err: any) {
         if (err.name === "RenderingCancelledException") return;
         if (err instanceof TypeError && err.message.includes("sendWithPromise")) return;
@@ -200,43 +290,42 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       }
 
       // cleanup 済み (例: さらに新ページに切り替わった) なら on-screen に反映しない
-      if (!active) return;
+      if (!mountedRef.current) return;
+      // 直近 latestParams が更に変わっているならその差分を再描画させる
+      // (effect の次回 run か、または既にスケジュールされた debounce が拾う)。
+      const after = latestParamsRef.current;
+      if (after.pdfPage !== curPage || after.zoom !== curZoom) {
+        // 古い render 結果は捨てる。新しい parameter での render は次の effect run
+        // / 既存 timeout の発火で改めて開始される。
+        return;
+      }
 
       // on-screen canvas にサイズ適用してオフスクリーンから一括コピー
-      canvas.width = w;
-      canvas.height = h;
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.width = w;
-        overlayCanvasRef.current.height = h;
-      }
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
-      canvas.style.display = "block";
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.style.width = `${w}px`;
-        overlayCanvasRef.current.style.height = `${h}px`;
-      }
-      if (wrapperRef.current) {
-        wrapperRef.current.style.width = `${w}px`;
-        wrapperRef.current.style.height = `${h}px`;
-      }
+      syncCanvasSizes({
+        w: lw,
+        h: lh,
+        pdfCanvasRef,
+        overlayCanvasRef,
+        staticOverlayCanvasRef,
+        wrapperRef,
+      });
       context.drawImage(offscreen, 0, 0);
-      perf.mark('render.drawn', { page: pageIndex });
+      if (perf.enabled) perf.mark('render.drawn', { page: curPageIndex });
 
-      if (hasCalledFirstRenderRef.current !== filePath) {
-        hasCalledFirstRenderRef.current = filePath ?? null;
+      if (hasCalledFirstRenderRef.current !== curFilePath) {
+        hasCalledFirstRenderRef.current = curFilePath ?? null;
         onFirstRender?.();
       }
 
       try {
         const bitmap = await createImageBitmap(offscreen);
-        setBitmapCache(cacheKey, { bitmap, zoom, width: w, height: h });
+        setBitmapCache(liveCacheKey, { bitmap, zoom: curZoom, width: lw, height: lh });
       } catch {
         /* ビットマップ作成失敗は無視 */
       }
 
       renderOverlaysRef.current?.();
-      perf.mark('render.complete', { page: pageIndex, cacheHit: false });
+      if (perf.enabled) perf.mark('render.complete', { page: curPageIndex, cacheHit: false });
       onRenderComplete?.();
       // prefetch は pdfjs worker のタスクキューを占有して現在ページ描画を遅延させるため廃止
     };
@@ -248,27 +337,28 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     // 後続して zoom を確定させる (最大 ~50ms 程度)。この間に古い zoom で
     // render を開始すると pdfjs worker が無駄に占有され、確定 zoom の
     // render 開始が遅延する。そのため page 切替時は 50ms 待って zoom が
-    // 確定してから 1 回だけ render する (50ms 以内に zoom が再変更されたら
-    // 新しい zoom で再スタートする: effect の再実行がそれを担う)。
+    // 確定してから 1 回だけ render する。
     //
     // 通常の zoom 操作 (wheel / button) も 30ms の短 debounce で連続入力を
     // 束ねて 1 回の render にする。
-    if (renderDebounceRef.current) clearTimeout(renderDebounceRef.current);
-    const delay = isPageChange ? 50 : 30;
-    renderDebounceRef.current = setTimeout(() => {
-      renderDebounceRef.current = null;
-      if (!active) return;
-      renderPdf();
-    }, delay);
-
-    return () => {
-      active = false;
-      if (renderDebounceRef.current) {
-        clearTimeout(renderDebounceRef.current);
+    //
+    // issue #94: 既に timer が走っている場合は新規スケジュールしない。
+    // timer は発火時に latestParamsRef から最新 zoom を読む。
+    if (!renderDebounceRef.current) {
+      const delay = isPageChange ? 50 : 30;
+      renderDebounceRef.current = setTimeout(() => {
         renderDebounceRef.current = null;
-      }
-      renderTaskRef.current?.cancel();
-    };
+        if (!mountedRef.current) return;
+        renderPdfTask();
+      }, delay);
+    }
+
+    // issue #94: effect 再走の cleanup では debounce を破棄しない。
+    // 進行中の render task は新規 renderPdfTask 内で cancel する (latest と
+    // 異なる zoom/page なら if (after.pdfPage !== curPage || ...) で
+    // discard する) ため、ここでは何もしない。unmount 時の最終 cleanup は
+    // mount-only effect が担う。
+    return undefined;
   }, [pdfPage, zoom]);
 
   return {
@@ -277,4 +367,46 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     setLoadError,
     retry: () => setRetryCount((c) => c + 1),
   };
+}
+
+// 全 Canvas (pdfCanvas + overlay + 静的 overlay + wrapper) のサイズを
+// 指定の viewport (w,h) に同期させる。
+// issue #94: BB overlay と画像 Canvas のサイズ乖離 window を 0 にするため、
+// effect 同期部 / cache hit / render 完了の各タイミングで呼び出す。
+function syncCanvasSizes(opts: {
+  w: number;
+  h: number;
+  pdfCanvasRef: RefObject<HTMLCanvasElement | null>;
+  overlayCanvasRef: RefObject<HTMLCanvasElement | null>;
+  staticOverlayCanvasRef?: RefObject<HTMLCanvasElement | null>;
+  wrapperRef: RefObject<HTMLDivElement | null>;
+}) {
+  const { w, h, pdfCanvasRef, overlayCanvasRef, staticOverlayCanvasRef, wrapperRef } = opts;
+  const pdfCanvas = pdfCanvasRef.current;
+  if (pdfCanvas) {
+    if (pdfCanvas.width !== w) pdfCanvas.width = w;
+    if (pdfCanvas.height !== h) pdfCanvas.height = h;
+    pdfCanvas.style.width = `${w}px`;
+    pdfCanvas.style.height = `${h}px`;
+    pdfCanvas.style.display = "block";
+  }
+  const overlay = overlayCanvasRef.current;
+  if (overlay) {
+    if (overlay.width !== w) overlay.width = w;
+    if (overlay.height !== h) overlay.height = h;
+    overlay.style.width = `${w}px`;
+    overlay.style.height = `${h}px`;
+  }
+  const staticOverlay = staticOverlayCanvasRef?.current;
+  if (staticOverlay) {
+    if (staticOverlay.width !== w) staticOverlay.width = w;
+    if (staticOverlay.height !== h) staticOverlay.height = h;
+    staticOverlay.style.width = `${w}px`;
+    staticOverlay.style.height = `${h}px`;
+  }
+  const wrapper = wrapperRef.current;
+  if (wrapper) {
+    wrapper.style.width = `${w}px`;
+    wrapper.style.height = `${h}px`;
+  }
 }

@@ -66,9 +66,10 @@ function detectEnabled(): { enabled: boolean; verbose: boolean } {
   } catch {
     // localStorage アクセス不可 (SSR 等) は無効
   }
-  // プロダクションビルドではデフォルトで有効化 (操作ログ常時収集。
-  // mark 単位のオーバーヘッドはサブμ秒、5000 件のリングバッファで頭打ち)
-  if (import.meta.env.PROD) return { enabled: true, verbose: false };
+  // production / development どちらも default は無効。
+  // hot path (bbox ドラッグ / テキスト編集 / 高速スクロール) で extra object
+  // allocation が GC pressure を起こすため、必要時のみ #perf または
+  // localStorage.pecoPerf=1 / 'verbose' で明示的に opt-in する (issue #76)。
   return { enabled: false, verbose: false };
 }
 
@@ -128,13 +129,17 @@ export const perf: PerfLogger = {
 
   mark(label, extra) {
     if (!state.enabled) return;
-    try {
-      if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
-        // performance.mark は同一 label を複数回受け付けるので sessionId をサフィックス化して衝突回避
-        performance.mark(label);
+    // production では performance.mark を呼ばない。User Timing バッファに無制限蓄積する
+    // メモリリーク (高頻度操作: bbox ドラッグ等) を防ぐため、開発時のみ DevTools 連携用に発火させる。
+    if (import.meta.env.DEV) {
+      try {
+        if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+          // performance.mark は同一 label を複数回受け付けるので sessionId をサフィックス化して衝突回避
+          performance.mark(label);
+        }
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* ignore */
     }
     pushEntry(label, extra);
     if (state.verbose) {

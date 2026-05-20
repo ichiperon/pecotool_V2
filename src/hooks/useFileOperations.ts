@@ -16,6 +16,20 @@ import { invoke } from '@tauri-apps/api/core';
 async function writeFileChunked(path: string, bytes: Uint8Array): Promise<void> {
   const CHUNK = 4 * 1024 * 1024; // 4MB
   const headerPath = encodeURIComponent(path);
+  // bytes.byteLength === 0 の場合でも offset==0 で 1 回だけ呼び、
+  // Rust 側 (offset==0 で create+truncate) に空ファイル生成を任せる。
+  // for ループは bytes.byteLength === 0 だと一度も入らず、結果として
+  // tempPath が作られないまま replace_pdf_file が呼ばれて無音失敗するため、
+  // 空配列専用の単発 invoke で open/create を保証する。
+  if (bytes.byteLength === 0) {
+    await invoke('write_pdf_chunk', new ArrayBuffer(0), {
+      headers: {
+        'x-path': headerPath,
+        'x-offset': '0',
+      },
+    });
+    return;
+  }
   for (let offset = 0; offset < bytes.byteLength; offset += CHUNK) {
     const end = Math.min(offset + CHUNK, bytes.byteLength);
     // subarray はビューを返すだけ (copy しない)
@@ -38,6 +52,30 @@ async function writeFileAtomically(path: string, bytes: Uint8Array): Promise<voi
   const tempPath = `${path}.pecotool-${Date.now()}-${crypto.randomUUID()}.tmp`;
   await writeFileChunked(tempPath, bytes);
   await invoke('replace_pdf_file', { tempPath, targetPath: path });
+}
+
+/**
+ * Rust 側エラーメッセージから「上書き不可」系の障害を検出する。
+ * Windows では他プロセス (Acrobat 等) がファイルを掴んでいると EACCES/EBUSY/
+ * ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33) が返るため、
+ * これらを「別名で保存」フォールバックの引き金にする。
+ *
+ * Rust 側は std::io::Error の英文メッセージや `os error 32` 番号を含む文字列を
+ * 返してくる。コード番号 (os error 32) や英語フレーズの両方で検出できるように
+ * 緩めの正規表現でマッチする。
+ */
+export function isWriteAccessError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('eacces') ||
+    lower.includes('ebusy') ||
+    lower.includes('access is denied') ||
+    lower.includes('permission denied') ||
+    lower.includes('being used by another process') ||
+    lower.includes('sharing violation') ||
+    lower.includes('lock violation') ||
+    /os error (32|33)\b/.test(lower)
+  );
 }
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import {
@@ -66,8 +104,8 @@ import { flushActiveOcrCardText } from '../utils/ocrEditFlush';
 
 /**
  * 1 ページ目 render 後 (アイドル時) に background で PDF 全体 bytes を取得して
- * pecoStore.originalBytes にキャッシュする。Ctrl+S 時は既にメモリ上にあるため
- * pdf-lib 処理のみで保存完了できる (~1-3 秒)。
+ * モジュールレベルキャッシュ (originalBytesCache) に格納する。Ctrl+S 時は
+ * 既にメモリ上にあるため pdf-lib 処理のみで保存完了できる (~1-3 秒)。
  *
  * 以前は pdfjs.getData() や asset.localhost URL への fetch 経由で bytes を取得して
  * いたが、いずれも WebView2 の Range キューを pdfjs / サムネ / OCR と奪い合い、
@@ -78,19 +116,65 @@ import { flushActiveOcrCardText } from '../utils/ocrEditFlush';
  * 読み込む。asset.localhost 帯域とは完全に独立した IPC チャネルで転送されるため、
  * pdfjs 側の処理中でも干渉しない。
  *
+ * issue #29: 100MB 級 PDF の bytes を zustand store に格納すると、
+ * subscriber が増えるたびに structural compare の対象となり GC 圧と
+ * メモリフラグメンテーションが問題化する。bytes は単なる I/O キャッシュで
+ * UI から購読する必要がないため、モジュールレベル Map<filePath, Uint8Array> に
+ * 切り出して store からは外す。
+ *
  * 同時に複数の prefetch が走らないよう、ファイルパスをキーに in-flight Promise を
  * モジュールレベルで共有する。保存時 (_executeSave) も同じ Promise を await する
  * ことで、二重読み込みを防ぐ。
  */
 const inflightPrefetches = new Map<string, Promise<Uint8Array | null>>();
 
+// 100MB 級の bytes を保持する。直近 1 ファイル分だけ持つことでメモリを抑える
+// (複数ファイル同時編集の UI は無く、ファイル切替時は前ファイルの bytes を
+//  即座に破棄してよい)。
+const originalBytesCache = new Map<string, Uint8Array>();
+const MAX_CACHED_ORIGINAL_FILES = 1;
+
+/**
+ * 指定 filePath の originalBytes キャッシュをセットする。
+ * 同時に MAX_CACHED_ORIGINAL_FILES を超えた古いエントリを破棄する。
+ */
+function setOriginalBytesCache(filePath: string, bytes: Uint8Array): void {
+  // 既にあれば一旦消して LRU 順を更新 (Map の挿入順を活用)
+  originalBytesCache.delete(filePath);
+  originalBytesCache.set(filePath, bytes);
+  while (originalBytesCache.size > MAX_CACHED_ORIGINAL_FILES) {
+    const oldestKey = originalBytesCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    originalBytesCache.delete(oldestKey);
+  }
+}
+
+/**
+ * テスト/デバッグ用にキャッシュへアクセスするヘルパ。
+ * 本番コードからは呼ばないこと。
+ */
+export const __originalBytesCacheForTest = {
+  get(filePath: string): Uint8Array | undefined {
+    return originalBytesCache.get(filePath);
+  },
+  set(filePath: string, bytes: Uint8Array): void {
+    setOriginalBytesCache(filePath, bytes);
+  },
+  clear(): void {
+    originalBytesCache.clear();
+  },
+  size(): number {
+    return originalBytesCache.size;
+  },
+};
+
 function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | null> {
   const existing = inflightPrefetches.get(filePath);
   if (existing) return existing;
 
-  const state = usePecoStore.getState();
-  if (state.originalBytes && state.document?.filePath === filePath) {
-    return Promise.resolve(state.originalBytes);
+  const cached = originalBytesCache.get(filePath);
+  if (cached) {
+    return Promise.resolve(cached);
   }
 
   const run = async (): Promise<Uint8Array | null> => {
@@ -98,10 +182,8 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
       // Tauri plugin-fs は v2 で raw binary IPC を使用する。100MB 級でも
       // base64 エンコードのオーバーヘッドは掛からず、HTTP/asset 経路とも無干渉。
       const bytes = await readFile(filePath);
-      const now = usePecoStore.getState();
-      if (now.document?.filePath === filePath && !now.originalBytes) {
-        now.setOriginalBytes(bytes);
-      }
+      // 古いエントリは setOriginalBytesCache 内で自動的に追い出される。
+      setOriginalBytesCache(filePath, bytes);
       return bytes;
     } catch (e) {
       console.warn('[prefetchOriginalBytes] readFile failed:', e);
@@ -142,39 +224,86 @@ function formatSaveToast(prefix: string, size: number, skippedChars: SkippedPdfT
 }
 
 export function useFileOperations(
-  showToast: (msg: string, isError?: boolean) => void,
+  showToast: (msg: string, isError?: boolean, action?: { label: string; onClick: () => void }) => void,
   setIsSaving?: (v: boolean) => void,
   setIsLoadingFile?: (v: boolean) => void,
   onOpenComplete?: (doc: import('../types').PecoDocument) => void,
+  /**
+   * issue #102: OCR 実行中の handleOpen ガード用。
+   * App 側で useOcrEngine の isOcrRunning を ref 化して渡す。
+   * folder OCR ループは内部で handleOpen を呼ぶため、bypassOcrGuard option で除外する。
+   */
+  isOcrRunningRef?: React.RefObject<boolean>,
 ) {
-  const { setDocument, setDocumentFilePath, resetDirty } = usePecoStore();
+  const setDocument = usePecoStore((s) => s.setDocument);
+  const setDocumentFilePath = usePecoStore((s) => s.setDocumentFilePath);
+  const resetDirty = usePecoStore((s) => s.resetDirty);
   const isSavingRef = useRef(false);
+  // executeSaveAs は下で定義されるため、_executeSave / handleSave から参照できるよう
+  // ref で間接化する。issue #53: writeFileAtomically が EACCES/EBUSY で失敗したときに
+  // showToast の action ボタンから「別名で保存」へフォールバックさせるのに使う。
+  const executeSaveAsRef = useRef<(() => Promise<void>) | null>(null);
 
-  const addToRecent = (path: string) => {
-    // ファイルフルパスは機密情報のため sessionStorage に保存（ブラウザ/アプリを閉じると消去）
-    const saved = sessionStorage.getItem('peco-recent-files');
-    let recent: string[] = [];
-    if (saved) {
-      try {
-        const parsed: unknown = JSON.parse(saved);
-        // 改ざん・型不整合に備え string[] を narrow。失敗時は空配列で続行。
-        if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
-          recent = parsed;
-        }
-      } catch {
-        // 不正 JSON は無視して空配列にフォールバック
+  // localStorage 上の peco-recent-files を string[] として読み出す。
+  // 改ざん・型不整合・壊れた JSON は全て空配列にフォールバックする。
+  // issue #37: 以前は sessionStorage に保存していたが、アプリ再起動で
+  // 必ず空になり「最近開いたファイル」機能が事実上機能していなかった。
+  // localStorage に切り替えて永続化する。
+  const readRecent = (): string[] => {
+    const saved = localStorage.getItem('peco-recent-files');
+    if (!saved) return [];
+    try {
+      const parsed: unknown = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+        return parsed;
       }
+    } catch {
+      // 不正 JSON は無視
     }
-    recent = [path, ...recent.filter((p) => p !== path)].slice(0, 10);
-    sessionStorage.setItem('peco-recent-files', JSON.stringify(recent));
-    window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
+    return [];
   };
 
-  const handleOpen = async (explicitPath?: string): Promise<boolean> => {
+  // issue #21: localStorage.setItem は quota / プライベートモードで QuotaExceededError を投げる。
+  // 開いている PDF とは無関係のエラーなのでユーザー向けにはサイレント、ログだけ残す。
+  const safeWriteRecent = (next: string[]) => {
+    try {
+      localStorage.setItem('peco-recent-files', JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent('peco-recent-files-updated'));
+    } catch (e) {
+      console.warn('[useFileOperations] recent-files storage write failed:', e);
+    }
+  };
+
+  const addToRecent = (path: string) => {
+    // issue #37: アプリ再起動後も履歴を残すため localStorage に保存する。
+    // ファイルフルパスは機密性があるため、最大件数を 10 件に抑える。
+    const recent = [path, ...readRecent().filter((p) => p !== path)].slice(0, 10);
+    safeWriteRecent(recent);
+  };
+
+  // Recent Files から指定パスを除去する。読み込み失敗時の自動クリーンアップで使用。
+  // useRecentFiles 側は peco-recent-files-updated を listen しているため即座に UI 反映される。
+  const removeFromRecent = (path: string) => {
+    const current = readRecent();
+    const next = current.filter((p) => p !== path);
+    if (next.length === current.length) return; // 変化なしなら storage 書き込みもイベントも発火しない
+    safeWriteRecent(next);
+  };
+
+  const handleOpen = async (
+    explicitPath?: string,
+    opts?: { bypassOcrGuard?: boolean },
+  ): Promise<boolean> => {
     perf.mark('open.start', { explicit: !!explicitPath });
     try {
       if (isSavingRef.current) {
         showToast("保存中はPDFを開けません。");
+        return false;
+      }
+      // issue #102: OCR 実行中の Open は古い doc 参照で新ドキュメントへの汚染を起こす。
+      // folder OCR ループは bypassOcrGuard で素通しさせる (内部から再入するため)。
+      if (isOcrRunningRef?.current && !opts?.bypassOcrGuard) {
+        showToast('OCR実行中はPDFを開けません。');
         return false;
       }
 
@@ -236,6 +365,16 @@ export function useFileOperations(
       return false;
     } catch (err) {
       console.error("Failed to open file:", err);
+      // Recent Files (explicitPath あり) 経由で開いた時に読み込みが失敗したら、
+      // 削除/移動済みファイルが履歴に残り続けて選択するたびにエラーになる現象を防ぐため
+      // sessionStorage から該当パスを除去 + peco-recent-files-updated イベントを発火する。
+      if (explicitPath) {
+        try {
+          removeFromRecent(explicitPath);
+        } catch (cleanupErr) {
+          console.warn('[handleOpen] removeFromRecent failed (ignored):', cleanupErr);
+        }
+      }
       showToast("ファイルの読み込みに失敗しました。", true);
       setIsLoadingFile?.(false);
       return false;
@@ -274,7 +413,7 @@ export function useFileOperations(
     if (!document) return null;
     const sourceFilePath = document.filePath;
 
-    let cachedBytes = usePecoStore.getState().originalBytes;
+    let cachedBytes = originalBytesCache.get(sourceFilePath);
     if (!cachedBytes) {
       showToast("保存用にファイルを読み込み中...");
       const fetched = await withStep('readFile', 90_000, () => ensurePrefetchOriginalBytes(sourceFilePath));
@@ -368,21 +507,23 @@ export function useFileOperations(
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
     }
-    if (writePath === sourceFilePath) {
-      usePecoStore.setState((state) => {
-        if (!state.document || state.document.filePath !== sourceFilePath) return state;
-        return { document: { ...state.document, mtime: Date.now() } };
-      });
-    }
-    // originalBytes を更新し、次回保存時もこの累積変更をベースにするようにする
-    usePecoStore.getState().setOriginalBytes(savedBytes);
+    // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
+    // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
+    setOriginalBytesCache(writePath, savedBytes);
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
     await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
     return { size: savedBytes.length, skippedChars, savedPageSnapshots };
   };
 
-  const handleSave = async () => {
+  /**
+   * Ctrl+S 経路と「フォルダ OCR の自動上書き保存」(#48) の共通エントリ。
+   * - 成功時: true
+   * - 失敗 / アボート (PDF 未オープン、保存中ロック、_executeSave が null、例外) は false
+   *
+   * フォルダ OCR ループは false を見て即時中止できる。
+   */
+  const handleSave = async (): Promise<boolean> => {
     // Ctrl+S が届いていることを可視化するため、開始時に必ずトースト表示。
     // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
     console.log('[save] handleSave invoked');
@@ -391,12 +532,12 @@ export function useFileOperations(
     const { document } = usePecoStore.getState();
     if (!document) {
       showToast("PDFが開かれていません。", true);
-      return;
+      return false;
     }
 
     if (isSavingRef.current) {
       showToast("保存処理が進行中です。");
-      return;
+      return false;
     }
 
     isSavingRef.current = true;
@@ -409,11 +550,30 @@ export function useFileOperations(
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
         invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
+        return true;
       }
+      return false;
     } catch (err) {
       console.error("Failed to save:", err);
       const msg = err instanceof Error ? err.message : String(err);
-      showToast(`保存に失敗しました: ${msg}`, true);
+      // issue #53: 他プロセスが PDF を掴んでいる (Acrobat 等) と EACCES/EBUSY/
+      // sharing violation で書き込み失敗する。この場合は別名で保存する以外に
+      // ユーザーの取れる手段が無いため、フォールバックの導線をトーストに直接出す。
+      if (isWriteAccessError(msg)) {
+        showToast(
+          `保存先のファイルを開けません (別プロセスがロック中の可能性): ${msg}`,
+          true,
+          {
+            label: '別名で保存',
+            onClick: () => {
+              void executeSaveAsRef.current?.();
+            },
+          },
+        );
+      } else {
+        showToast(`保存に失敗しました: ${msg}`, true);
+      }
+      return false;
     } finally {
       isSavingRef.current = false;
       setIsSaving?.(false);
@@ -463,6 +623,10 @@ export function useFileOperations(
       showToast("名前を付けて保存に失敗しました。", true);
     }
   };
+
+  // handleSave 内のエラーフォールバックから executeSaveAs を呼び出せるように
+  // ref へ最新参照を入れる (関数定義順の循環参照を回避する目的)。
+  executeSaveAsRef.current = executeSaveAs;
 
   return { handleOpen, handleSave, executeSaveAs };
 }

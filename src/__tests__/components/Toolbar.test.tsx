@@ -27,6 +27,7 @@ vi.mock('lucide-react', () => {
     FileX: s('FileX'),
     SearchCheck: s('SearchCheck'),
     SquareCheckBig: s('SquareCheckBig'),
+    Replace: s('Replace'),
   }
 })
 
@@ -87,6 +88,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> =
     onCancelOcr: vi.fn(),
     onClearOcrCurrentPage: vi.fn(),
     onClearOcrAllPages: vi.fn(),
+    onOpenReplace: vi.fn(),
     ...overrides,
   }
 }
@@ -194,7 +196,32 @@ describe('Toolbar', () => {
     expect(container.querySelector('.ocr-opacity-slider')).toBeTruthy()
   })
 
-  it('C-TB-17: text select all button calls handler when page has text', () => {
+  // ── #103: OCR 実行中は検索と置換ボタンを disabled にする ─────────
+  it('C-TB-17 (#103): Replace ボタンは isFileLoaded=true でも isOcrRunning=true なら disabled', () => {
+    renderToolbar({ isFileLoaded: true, isOcrRunning: true, ocrProgress: { current: 1, total: 5 } })
+    expect(getButton('検索と置換 (OCR実行中は無効)').disabled).toBe(true)
+  })
+
+  it('C-TB-18 (#103): Replace ボタンは通常時 (OCR 非実行 + ファイル読込済み) は enabled', () => {
+    renderToolbar({ isFileLoaded: true, isOcrRunning: false })
+    expect(getButton('検索と置換 (Ctrl+H)').disabled).toBe(false)
+  })
+
+  it('C-TB-19 (#103): isOcrRunning=true で disabled、クリックしても onOpenReplace が呼ばれない', () => {
+    const onOpenReplace = vi.fn()
+    renderToolbar({ isFileLoaded: true, isOcrRunning: true, ocrProgress: { current: 1, total: 5 }, onOpenReplace })
+    const btn = getButton('検索と置換 (OCR実行中は無効)')
+    fireEvent.click(btn)
+    // disabled なボタンへの click は handler に届かない
+    expect(onOpenReplace).not.toHaveBeenCalled()
+  })
+
+  it('C-TB-20 (#103): isFileLoaded=false でも (OCR 実行中) Replace は disabled (既存仕様維持)', () => {
+    renderToolbar({ isFileLoaded: false, isOcrRunning: true, ocrProgress: { current: 1, total: 5 } })
+    expect(getButton('検索と置換 (OCR実行中は無効)').disabled).toBe(true)
+  })
+
+  it('C-TB-21: text select all button calls handler when page has text', () => {
     const onSelectAllText = vi.fn()
     renderToolbar({
       currentPage: {
@@ -217,7 +244,7 @@ describe('Toolbar', () => {
     expect(onSelectAllText).toHaveBeenCalledTimes(1)
   })
 
-  it('C-TB-18: inspection dropdown opens from toolbar button', () => {
+  it('C-TB-22: inspection dropdown opens from toolbar button', () => {
     renderToolbar()
 
     expect(screen.queryByTitle('検査範囲')).toBeNull()
@@ -227,7 +254,7 @@ describe('Toolbar', () => {
     expect(screen.getByText('全ページ')).toBeTruthy()
   })
 
-  it('C-TB-19: inspection dropdown passes selected scope', () => {
+  it('C-TB-23: inspection dropdown passes selected scope', () => {
     const onRunInspection = vi.fn()
     renderToolbar({
       onRunInspection,
@@ -239,7 +266,7 @@ describe('Toolbar', () => {
     expect(onRunInspection).toHaveBeenCalledWith('current')
   })
 
-  it('C-TB-20: inspection dropdown passes all-page scope', () => {
+  it('C-TB-24: inspection dropdown passes all-page scope', () => {
     const onRunInspection = vi.fn()
     renderToolbar({
       onRunInspection,
@@ -251,7 +278,7 @@ describe('Toolbar', () => {
     expect(onRunInspection).toHaveBeenCalledWith('all')
   })
 
-  it('C-TB-21: current page inspection item can be disabled independently', () => {
+  it('C-TB-25: current page inspection item can be disabled independently', () => {
     const onRunInspection = vi.fn()
     renderToolbar({
       canRunCurrentInspection: false,

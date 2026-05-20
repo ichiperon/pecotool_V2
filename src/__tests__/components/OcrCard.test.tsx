@@ -390,6 +390,79 @@ describe('OcrCard', () => {
     })
   })
 
+  // ── C-OC-18: anchor card のみ scrollIntoView (issue #70) ──────
+  describe('C-OC-18: scrollIntoView は anchor (lastSelectedId) のみ', () => {
+    // 前提: 複数選択時に全カードが scrollIntoView({behavior:'smooth'}) を同時発火
+    // するとブラウザが N 個の smooth-scroll を並走させジャンクが起きる。
+    // 修正後は lastSelectedId と一致するカードだけが scroll を呼び、behavior:'auto'
+    // で Virtuoso 等の他 scroll と競合しないようにする。
+
+    it('C-OC-18-01: 単一選択 + 自身が anchor → scrollIntoView({behavior:"auto"}) が 1 回呼ばれる', () => {
+      const block = makeBlock({ id: 'b1' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({
+        document: doc,
+        selectedIds: new Set(['b1']),
+        lastSelectedId: 'b1',
+      } as any)
+
+      const spy = vi.fn()
+      const orig = HTMLElement.prototype.scrollIntoView
+      HTMLElement.prototype.scrollIntoView = spy as unknown as typeof HTMLElement.prototype.scrollIntoView
+
+      render(<OcrCard block={block} pageIndex={0} />)
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0][0]).toEqual({ behavior: 'auto', block: 'nearest' })
+
+      HTMLElement.prototype.scrollIntoView = orig
+    })
+
+    it('C-OC-18-02: 複数選択 + 自身は anchor ではない → scrollIntoView は呼ばれない', () => {
+      const block = makeBlock({ id: 'b1' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      // b1 は選択状態だが anchor は b5 (別カード)。本カードは scroll しない
+      usePecoStore.setState({
+        document: doc,
+        selectedIds: new Set(['b1', 'b2', 'b3', 'b4', 'b5']),
+        lastSelectedId: 'b5',
+      } as any)
+
+      const spy = vi.fn()
+      const orig = HTMLElement.prototype.scrollIntoView
+      HTMLElement.prototype.scrollIntoView = spy as unknown as typeof HTMLElement.prototype.scrollIntoView
+
+      render(<OcrCard block={block} pageIndex={0} />)
+
+      expect(spy).not.toHaveBeenCalled()
+
+      HTMLElement.prototype.scrollIntoView = orig
+    })
+
+    it('C-OC-18-03: 未選択カード → scrollIntoView は呼ばれない', () => {
+      const block = makeBlock({ id: 'b1' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({
+        document: doc,
+        selectedIds: new Set<string>(),
+        lastSelectedId: null,
+      } as any)
+
+      const spy = vi.fn()
+      const orig = HTMLElement.prototype.scrollIntoView
+      HTMLElement.prototype.scrollIntoView = spy as unknown as typeof HTMLElement.prototype.scrollIntoView
+
+      render(<OcrCard block={block} pageIndex={0} />)
+
+      expect(spy).not.toHaveBeenCalled()
+
+      HTMLElement.prototype.scrollIntoView = orig
+    })
+  })
+
   // ── S-05: IME 入力中の DOM 書換 skip ───────────────────────────
   describe('S-05: IME composition 中は DOM 書換を skip', () => {
     // 前提: OcrCard の useEffect は isComposingRef.current が true の間

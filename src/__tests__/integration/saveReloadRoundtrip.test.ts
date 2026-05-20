@@ -30,6 +30,8 @@ const m = vi.hoisted(() => ({
   pdfjsGetDocument: vi.fn(),
   // 保存時に書き込まれた PecoToolBBoxes JSON を捕捉する
   capturedBBoxJson: { value: null as string | null },
+  // テストから pdfDoc.getPageCount() / getPages() の戻り値を変更できる box
+  mockPageCount: { value: 1 },
   infoDictSet: vi.fn(),
   translateFn: vi.fn((...args: any[]) => ({ type: 'translate', args })),
   scaleFn:     vi.fn((...args: any[]) => ({ type: 'scale', args })),
@@ -132,6 +134,7 @@ function setupPdfLibMock() {
   __setSaveWorkerFactoryForTest(() => null)
   __resetSaveStateForTest()
   m.capturedBBoxJson.value = null
+  m.mockPageCount.value = 1
 
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(100)),
@@ -148,10 +151,15 @@ function setupPdfLibMock() {
       get:      vi.fn().mockReturnValue(null),
       Contents: vi.fn().mockReturnValue(null),
       set:      vi.fn(),
+      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+      get: vi.fn().mockReturnValue(null),
+      Resources: vi.fn().mockReturnValue(undefined),
     },
     getWidth: () => 595,
     getHeight: () => 842,
     getSize: () => ({ width: 595, height: 842 }),
+    // PR #71 で導入: rotation 別 cm を per-block push する経路で page.getRotation を見る。
+    getRotation: () => ({ angle: 0 }),
   }
 
   const mockInfoDict = {
@@ -160,23 +168,37 @@ function setupPdfLibMock() {
     lookup: vi.fn(),
   }
 
+  // テスト内で複数ページの doc を扱うため、getPages はテストが pageCount を後から設定できるよう
+  // mock 変数 m.mockPageCount を介して動的に返す。
+  const dynamicPages = (count: number) => Array.from({ length: count }, () => mockPage)
   const mockPdfDoc = {
     registerFontkit: m.registerFontkit,
     embedFont:       m.embedFont,
     removePage:      m.removePage,
     insertPage:      m.insertPage,
     getPage:         vi.fn().mockReturnValue(mockPage),
-    getPages:        vi.fn().mockReturnValue([mockPage]),
-    getPageCount:    vi.fn().mockReturnValue(10),
+    // PR #96: pdfSaver は pdfDoc.getPages() / getPageCount() を使う。
+    // m.mockPageCount をテストから設定可能にする。
+    getPages:        vi.fn().mockImplementation(() => dynamicPages(m.mockPageCount.value)),
+    getPageCount:    vi.fn().mockImplementation(() => m.mockPageCount.value),
     embedJpg:        m.embedJpg,
     save:            m.save,
     commit:            m.save,
-    context: { lookup: vi.fn() },
+    // PR #96: sweepUnreachableObjects が context.trailerInfo を必要とする。
+    context: {
+      lookup: vi.fn(),
+      delete: vi.fn(),
+      enumerateIndirectObjects: vi.fn().mockReturnValue([]),
+      trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
+    },
     getInfoDict: vi.fn().mockReturnValue(mockInfoDict),
   }
   m.embedFont.mockResolvedValue({
     widthOfTextAtSize: vi.fn().mockReturnValue(10),
-    heightAtSize: vi.fn().mockReturnValue(1.448),
+    // #99: heightAtSize(size, { descender: false }) は ascent のみを返す (CJK 想定で 0.8 倍)。
+    heightAtSize: vi.fn().mockImplementation((_size: number, opts?: { descender?: boolean }) => {
+      return opts?.descender === false ? 1.448 * 0.8 : 1.448
+    }),
   })
   m.insertPage.mockReturnValue(mockPage)
   m.embedJpg.mockResolvedValue({ width: 1, height: 1 })
@@ -267,6 +289,7 @@ describe('S-03-01: 複数ページ編集 → savePDF → 再読込で id/text/bb
       [0, makePage([blockP0], 0, true)],
       [1, makePage([blockP1], 1, true)],
     ]))
+    m.mockPageCount.value = 2 // pdfDoc.getPageCount() を 2 にして 2 ページ書き込みを許可
 
     // savePDF 実行（PDFHexString.fromText で JSON が m.capturedBBoxJson に格納される）
     await savePDF(new Uint8Array(10), doc)
@@ -326,6 +349,71 @@ describe('S-03-02: 縦書きブロック編集 → 保存 → 再読込で writi
     expect(block.bbox.height).toBeGreaterThan(block.bbox.width)
     expect(block.bbox).toEqual({ x: 500, y: 200, width: 24, height: 200 })
     expect(block.text).toBe('縦書きテキスト')
+  })
+})
+
+// ── S-03-04 (#99 main regression) ──────────────────────────────
+describe('S-03-04 (#99): 横書き bbox の保存→再読込でラウンドトリップ位置ずれが起きない', () => {
+  it('横書きブロックの bbox.y は保存→再読込で完全に一致する (fallback ascent*1.16 経路に落ちない)', async () => {
+    setupPdfLibMock()
+
+    // viewport-space で `bbox.y=120, height=20` を保存する。
+    // 旧バグ (主因): 再読込時に bboxMeta が未解決のまま loadPage が走り、pdfjs fallback
+    // 経路で `ascent = thickness * 1.16` で bbox.y が `* 0.36 * height` 程度上にずれていた。
+    // 修正後: 1) usePageNavigation が bboxMeta を await してから loadPage、2) loadPage は
+    // bboxMeta があれば fallback 経路に落ちない、3) cache key を meta 有無で分離。
+    const block = makeBlock({
+      id: 'roundtrip-1',
+      text: 'ラウンドトリップ',
+      bbox: { x: 100, y: 120, width: 200, height: 20 },
+      writingMode: 'horizontal',
+      order: 0,
+      isDirty: true,
+    })
+    const doc = makeDoc(new Map([[0, makePage([block], 0, true)]]))
+
+    await savePDF(new Uint8Array(10), doc)
+    expect(m.capturedBBoxJson.value).not.toBeNull()
+    const bboxMeta = JSON.parse(m.capturedBBoxJson.value!)
+
+    // 再読込: bboxMeta を渡して loadPage する (修正後の usePageNavigation がやる経路と同等)。
+    await setupReloadPdfMockWithItems(['ラウンドトリップ'])
+    const reloaded = await loadPage({} as any, 0, 'test.pdf', bboxMeta)
+
+    expect(reloaded.textBlocks).toHaveLength(1)
+    const r = reloaded.textBlocks[0]
+    // bbox 完全一致: ラウンドトリップずれ 0
+    expect(r.bbox.x).toBeCloseTo(100, 6)
+    expect(r.bbox.y).toBeCloseTo(120, 6) // ← 旧バグでは 120 - 0.36*20 = 112.8 などにずれていた
+    expect(r.bbox.width).toBeCloseTo(200, 6)
+    expect(r.bbox.height).toBeCloseTo(20, 6)
+    expect(r.writingMode).toBe('horizontal')
+    expect(r.text).toBe('ラウンドトリップ')
+  })
+
+  it('横書き baselineY の動的 ascent 計算: translate(y) は (1 - descentRatio) で寄る', async () => {
+    setupPdfLibMock()
+    const block = makeBlock({
+      id: 'baseline-1',
+      text: 'BaselineCheck',
+      bbox: { x: 50, y: 200, width: 150, height: 30 },
+      writingMode: 'horizontal',
+      order: 0,
+      isDirty: true,
+    })
+    const doc = makeDoc(new Map([[0, makePage([block], 0, true)]]))
+    await savePDF(new Uint8Array(10), doc)
+
+    // translate の最後の呼び出し引数 (cm push 順序: rotation cm → translate → scale)
+    // モック heightAtSize: full=1.448, ascent=1.158 (=0.8倍) → descentRatio=0.2
+    // baselineY = vh - bbox.y - textHeight * sy * (1 - 0.2)
+    //          = 842 - 200 - 1.448 * (30 / 1.448) * 0.8
+    //          = 842 - 200 - 24 = 618
+    expect(m.translateFn).toHaveBeenCalled()
+    // 最後の translate (cm 内 translate) を取る
+    const lastTranslate = m.translateFn.mock.calls[m.translateFn.mock.calls.length - 1]
+    const [, y] = lastTranslate
+    expect(y).toBeCloseTo(842 - 200 - 1.448 * (30 / 1.448) * 0.8, 5)
   })
 })
 

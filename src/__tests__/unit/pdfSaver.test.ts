@@ -115,28 +115,53 @@ beforeEach(() => {
     drawImage:    m.drawImage,
     drawText:     m.drawText,
     pushOperators: m.pushOperators,
-    node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+    node: {
+      Contents: vi.fn().mockReturnValue(null),
+      set: vi.fn(),
+      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+      get: vi.fn().mockReturnValue(null),
+      Resources: vi.fn().mockReturnValue(undefined),
+    },
     getWidth: () => 595,
     getHeight: () => 842,
     getSize: () => ({ width: 595, height: 842 }),
+    // PR #71 で導入: rotation 別 cm を per-block push する経路で page.getRotation を見る。
+    getRotation: () => ({ angle: 0 }),
   }
   m.insertPage.mockReturnValue(mockPage)
   m.embedJpg.mockResolvedValue({ width: 1, height: 1 })
   m.save.mockResolvedValue(new Uint8Array([1, 2, 3]))
+  // heightAtSize(size) は line-height (ascent+descent) を返し、
+  // heightAtSize(size, { descender: false }) は ascent のみ (descent を除外) を返す。
+  // NotoSansJP では descentRatio ≈ 0.2 なので: 1.448 (full) → 1.448*0.8 = 1.1584 (ascent only).
   m.embedFont.mockResolvedValue({
     widthOfTextAtSize: vi.fn().mockReturnValue(10),
-    heightAtSize: vi.fn().mockReturnValue(1.448),
+    heightAtSize: vi.fn().mockImplementation((_size: number, opts?: { descender?: boolean }) => {
+      // descender:false ⇒ ascent only ⇒ 0.8 倍
+      return opts?.descender === false ? 1.448 * 0.8 : 1.448
+    }),
   })
+  // 修正: PR #96 で導入された collectPageContentRefCounts (pdfDoc.getPages()) と
+  //       getPageCount が pdfSaver.ts で呼ばれるため、mock に追加する。
+  //       これらがないと "pdfDoc.getPages is not a function" で大量のテストが落ちる。
   m.pdfLoad.mockResolvedValue({
     registerFontkit: m.registerFontkit,
     embedFont:       m.embedFont,
     removePage:      m.removePage,
     insertPage:      m.insertPage,
     getPage:         vi.fn().mockReturnValue(mockPage),
+    getPages:        vi.fn().mockReturnValue([mockPage]),
+    getPageCount:    vi.fn().mockReturnValue(1),
     embedJpg:        m.embedJpg,
     save:            m.save,
     commit:            m.save,
-    context: { lookup: vi.fn() },
+    // PR #96 で導入: sweepUnreachableObjects は context.trailerInfo を起点に到達可能性走査する。
+    context: {
+      lookup: vi.fn(),
+      delete: vi.fn(),
+      enumerateIndirectObjects: vi.fn().mockReturnValue([]),
+      trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
+    },
     getInfoDict:     vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
   })
 
@@ -169,21 +194,60 @@ beforeEach(() => {
 
 describe('pdfSaver / savePDF', () => {
 
-  describe('U-S-01: 横書きブロックの Y 座標', () => {
-    it('translate の y 引数 ≈ viewport.height - bbox.y - ベースライン補正', async () => {
+  describe('U-S-01: 横書きブロックの Y 座標 (#99 動的 ascent 計算)', () => {
+    it('translate の y 引数 = vh - bbox.y - textHeight * sy * (1 - descentRatio)', async () => {
       const doc = makeDoc([{
         writingMode: 'horizontal',
         bbox: { x: 10, y: 100, width: 200, height: 20 },
       }])
       await savePDF(new Uint8Array(), doc)
 
-      // 新コード: translate(bboxX, baselineY) が pushOperators 経由で呼ばれる
-      // baselineY = 842 - 100 - 1.16 * (20/1.448) ≈ 725.98 ≈ 726
+      // #99 副因対策: 旧コードは `* 0.8` 固定だったが、primary font の ascent 比から動的計算する。
+      //   descentRatio = (heightAtSize - heightAtSize(no descender)) / heightAtSize
+      //                = (1.448 - 1.158) / 1.448  ≈ 0.2
+      //   baselineY    = 842 - 100 - textHeight * sy * (1 - 0.2)
+      //                = 842 - 100 - 1.448 * (20/1.448) * 0.8
+      //                = 842 - 100 - 16
+      //                = 726
+      // モック実装: 旧固定値 0.8 と同じ結果になるよう descentRatio=0.2 を返す。
+      // 0.8 ハードコードに対する実害は実フォント (CJK で descent ratio が 0.18-0.22 に分布) で出る。
       expect(m.translateFn).toHaveBeenCalled()
       const [, y] = m.translateFn.mock.calls[0]
-      const sy = 20 / 1.448
-      const expectedY = PAGE_HEIGHT - 100 - 1.16 * sy
-      expect(y).toBeCloseTo(expectedY, 0) // ≈ 726（旧設計の ≈ 725 に対応）
+      const heightAtSize = 1.448
+      const ascent = heightAtSize * 0.8
+      const descentRatio = (heightAtSize - ascent) / heightAtSize
+      const sy = 20 / heightAtSize
+      const expectedY = PAGE_HEIGHT - 100 - heightAtSize * sy * (1 - descentRatio)
+      expect(y).toBeCloseTo(expectedY, 5)
+    })
+
+    it('descentRatio が大きい (=0.3) フォントで baseline が下方向に正しく寄る', async () => {
+      // descent ratio が 30% に増えるフォントでは、bbox 上端基準で baseline が
+      // より下に来る（drawText の glyph origin は baseline なので、ascent ratio が
+      // 小さい=descent ratio が大きい場合、bbox 上端から baseline までの距離も短くなる）。
+      m.embedFont.mockResolvedValue({
+        widthOfTextAtSize: vi.fn().mockReturnValue(10),
+        heightAtSize: vi.fn().mockImplementation((_size: number, opts?: { descender?: boolean }) => {
+          return opts?.descender === false ? 1.448 * 0.7 : 1.448
+        }),
+      })
+      const doc = makeDoc([{
+        writingMode: 'horizontal',
+        bbox: { x: 10, y: 100, width: 200, height: 20 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      const [, y] = m.translateFn.mock.calls[0]
+      const heightAtSize = 1.448
+      const ascent = heightAtSize * 0.7
+      const descentRatio = (heightAtSize - ascent) / heightAtSize // 0.3
+      const sy = 20 / heightAtSize
+      const expectedY = PAGE_HEIGHT - 100 - heightAtSize * sy * (1 - descentRatio)
+      // 0.8 ハードコードのままなら expectedY = 842-100-16 = 726 となるはず。
+      // 動的計算では 842 - 100 - heightAtSize*sy*0.7 = 842 - 100 - 14 = 728。
+      // 旧式と異なる値であることを確認 → 動的計算が効いていることの保証。
+      expect(y).toBeCloseTo(expectedY, 5)
+      expect(y).not.toBeCloseTo(PAGE_HEIGHT - 100 - heightAtSize * sy * 0.8, 1)
     })
   })
 
@@ -291,8 +355,14 @@ describe('pdfSaver / savePDF', () => {
         expect.stringContaining('block error'),
         expect.any(Error),
       )
-      // 2件ともdrawText が呼ばれる（1件目は例外で落ちた後もループ継続）
-      expect(m.drawText).toHaveBeenCalledTimes(2)
+      // 2件ともdrawText が呼ばれる（1件目は例外で落ちた後もループ継続）。
+      // issue #100: 各ブロック描画後に invisible スペース 1 文字を追加するため、
+      //             1 件目 (throw) で 1 回 + 2 件目 (成功) で text+space で 2 回 = 計 3 回。
+      const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
+      expect(drawnTexts).toContain('壊れたテキスト')
+      expect(drawnTexts).toContain('正常なテキスト')
+      expect(drawnTexts).toContain(' ')
+      expect(m.drawText).toHaveBeenCalledTimes(3)
 
       warnSpy.mockRestore()
     })
@@ -464,7 +534,13 @@ describe('pdfSaver / savePDF', () => {
           drawImage:    m.drawImage,
           drawText:     m.drawText,
           pushOperators: m.pushOperators,
-          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          node: {
+      Contents: vi.fn().mockReturnValue(null),
+      set: vi.fn(),
+      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+      get: vi.fn().mockReturnValue(null),
+      Resources: vi.fn().mockReturnValue(undefined),
+    },
           getWidth: () => 595,
           getHeight: () => 842,
           getSize: () => ({ width: 595, height: 842 }),
@@ -511,7 +587,13 @@ describe('pdfSaver / savePDF', () => {
           drawImage:    m.drawImage,
           drawText:     m.drawText,
           pushOperators: m.pushOperators,
-          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          node: {
+      Contents: vi.fn().mockReturnValue(null),
+      set: vi.fn(),
+      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+      get: vi.fn().mockReturnValue(null),
+      Resources: vi.fn().mockReturnValue(undefined),
+    },
           getWidth: () => 595,
           getHeight: () => 842,
           getSize: () => ({ width: 595, height: 842 }),
@@ -726,7 +808,13 @@ describe('pdfSaver / savePDF', () => {
           drawImage:    m.drawImage,
           drawText:     m.drawText,
           pushOperators: m.pushOperators,
-          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          node: {
+      Contents: vi.fn().mockReturnValue(null),
+      set: vi.fn(),
+      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+      get: vi.fn().mockReturnValue(null),
+      Resources: vi.fn().mockReturnValue(undefined),
+    },
           getWidth: () => 595,
           getHeight: () => 842,
           getSize: () => ({ width: 595, height: 842 }),
@@ -771,7 +859,13 @@ describe('pdfSaver / savePDF', () => {
           drawImage:    m.drawImage,
           drawText:     m.drawText,
           pushOperators: m.pushOperators,
-          node: { Contents: vi.fn().mockReturnValue(null), set: vi.fn() },
+          node: {
+      Contents: vi.fn().mockReturnValue(null),
+      set: vi.fn(),
+      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+      get: vi.fn().mockReturnValue(null),
+      Resources: vi.fn().mockReturnValue(undefined),
+    },
           getWidth: () => 595,
           getHeight: () => 842,
           getSize: () => ({ width: 595, height: 842 }),
