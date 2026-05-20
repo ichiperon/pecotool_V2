@@ -100,6 +100,39 @@ function makeDoc(
 // viewport1x: scale=1.0 → height=842
 const PAGE_HEIGHT = 842
 
+// beforeEach で構築した default pdf-lib load mock を保持する。
+// withPageCount() がページ数依存のテストで getPages/getPageCount を上書きするために使う。
+let defaultPdfDocMock: any
+let defaultMockPage: any
+
+/**
+ * PR #96 で pdfSaver は pageIndex >= pdfDoc.getPageCount() のページを skip するようになった。
+ * 複数ページ doc を扱うテストでは default mock (1 ページぶん) ではページ 1+ が drop されるため、
+ * getPageCount / getPages を doc のページ数に合わせて上書きする。
+ */
+function withPageCount(count: number): void {
+  defaultPdfDocMock.getPageCount.mockReturnValue(count)
+  defaultPdfDocMock.getPages.mockReturnValue(
+    Array.from({ length: count }, () => defaultMockPage),
+  )
+}
+
+/**
+ * PR #96 で導入された sweepUnreachableObjects は context.trailerInfo を起点に
+ * 到達可能性 BFS し、context.enumerateIndirectObjects() を走査する。
+ * pdfLoad mock を個別に差し替えるテストでも context にこれらが必要なため、
+ * 共通の最小 context を生成するヘルパーで補う（extra で lookup 等を追加できる）。
+ */
+function makeSweepableContext(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    lookup: vi.fn(),
+    delete: vi.fn(),
+    enumerateIndirectObjects: vi.fn().mockReturnValue([]),
+    trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
+    ...extra,
+  }
+}
+
 // ── setup ──────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -128,6 +161,7 @@ beforeEach(() => {
     // PR #71 で導入: rotation 別 cm を per-block push する経路で page.getRotation を見る。
     getRotation: () => ({ angle: 0 }),
   }
+  defaultMockPage = mockPage
   m.insertPage.mockReturnValue(mockPage)
   m.embedJpg.mockResolvedValue({ width: 1, height: 1 })
   m.save.mockResolvedValue(new Uint8Array([1, 2, 3]))
@@ -144,7 +178,8 @@ beforeEach(() => {
   // 修正: PR #96 で導入された collectPageContentRefCounts (pdfDoc.getPages()) と
   //       getPageCount が pdfSaver.ts で呼ばれるため、mock に追加する。
   //       これらがないと "pdfDoc.getPages is not a function" で大量のテストが落ちる。
-  m.pdfLoad.mockResolvedValue({
+  //       複数ページ doc のテストは withPageCount() で getPages/getPageCount を上書きする。
+  defaultPdfDocMock = {
     registerFontkit: m.registerFontkit,
     embedFont:       m.embedFont,
     removePage:      m.removePage,
@@ -163,7 +198,8 @@ beforeEach(() => {
       trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
     },
     getInfoDict:     vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
-  })
+  }
+  m.pdfLoad.mockResolvedValue(defaultPdfDocMock)
 
   // pdfjs mock: getPage returns viewport + render stub
   m.pdfjsGetDocument.mockReturnValue({
@@ -291,33 +327,35 @@ describe('pdfSaver / savePDF', () => {
   })
 
   describe('U-S-04: 縦書きブロックのフォントサイズ', () => {
-    it('drawText は size=1 で呼ばれ、scale で bbox.width に応じたスケールが設定される', async () => {
+    it('drawText は size=fontSize で呼ばれ、scale で bbox.width に応じたスケールが設定される', async () => {
       const doc = makeDoc([{
         writingMode: 'vertical',
         bbox: { x: 10, y: 100, width: 15, height: 200 },
       }])
       await savePDF(new Uint8Array(), doc)
 
-      // size は常に 1（スケールは translate+scale マトリクスで設定）
-      expect(m.drawText.mock.calls[0][1].size).toBe(1)
-      // scale が呼ばれる（bbox.width に応じた sx）
+      // size は fontSize = clamp(1..96, bbox.width * 0.8) = 15 * 0.8 = 12。
+      // 実スケールは translate+scale マトリクス (sx_outer/sy_outer) で別途設定される。
+      expect(m.drawText.mock.calls[0][1].size).toBe(12)
+      // scale が呼ばれる（bbox.width に応じた sx_outer = bbox.width / textHeight）
       expect(m.scaleFn).toHaveBeenCalled()
       const [sx] = m.scaleFn.mock.calls[0]
-      // sx = bbox.width / 1.448 ≈ 10.36
+      // sx_outer = bbox.width / textHeight = 15 / 1.448 ≈ 10.36
       expect(sx).toBeCloseTo(15 / 1.448, 1)
     })
   })
 
   describe('U-S-05: 横書きブロックのフォントサイズ', () => {
-    it('drawText は size=1 で呼ばれ、scale で bbox に応じたスケールが設定される', async () => {
+    it('drawText は size=fontSize で呼ばれ、scale で bbox に応じたスケールが設定される', async () => {
       const doc = makeDoc([{
         writingMode: 'horizontal',
         bbox: { x: 10, y: 100, width: 200, height: 20 },
       }])
       await savePDF(new Uint8Array(), doc)
 
-      // size は常に 1
-      expect(m.drawText.mock.calls[0][1].size).toBe(1)
+      // size は fontSize = clamp(1..96, bbox.height * 0.8) = 20 * 0.8 = 16。
+      // 実スケールは translate+scale マトリクス (sx/sy) で別途設定される。
+      expect(m.drawText.mock.calls[0][1].size).toBe(16)
       // scale が呼ばれる（bbox.height に応じた sy）
       expect(m.scaleFn).toHaveBeenCalled()
       const [sx, sy] = m.scaleFn.mock.calls[0]
@@ -398,10 +436,17 @@ describe('pdfSaver / savePDF', () => {
         filePath: '', fileName: 'test.pdf', totalPages: 3, metadata: {},
         pages: new Map([[0, page0], [1, page1], [2, page2]]),
       }
+      // pdfSaver は pageIndex >= pdfDoc.getPageCount() のページを skip するため、
+      // 3 ページ doc に合わせて getPageCount / getPages を 3 ページぶんに上書きする
+      // （default の beforeEach mock は 1 ページぶんしか返さない）。
+      withPageCount(3)
       await savePDF(new Uint8Array(), doc)
 
-      expect(m.drawText).toHaveBeenCalledTimes(1)
+      // dirty な page 1 のみ描画される。issue #100 で各ブロック末尾に invisible
+      // スペース (U+0020) を 1 文字追加するため、1 ブロックにつき text + space で 2 回。
+      expect(m.drawText).toHaveBeenCalledTimes(2)
       expect(m.drawText.mock.calls[0][0]).toBe('Page1')
+      expect(m.drawText.mock.calls[1][0]).toBe(' ')
     })
   })
 
@@ -525,30 +570,36 @@ describe('pdfSaver / savePDF', () => {
   describe('U-SV-24: BBox metadata written to info dict', () => {
     it('mockInfoDict.set is called with PecoToolBBoxes key', async () => {
       const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      const u24Page = {
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }
       m.pdfLoad.mockResolvedValue({
         registerFontkit: m.registerFontkit,
         embedFont:       m.embedFont,
         removePage:      m.removePage,
         insertPage:      m.insertPage,
-        getPage:         vi.fn().mockReturnValue({
-          drawImage:    m.drawImage,
-          drawText:     m.drawText,
-          pushOperators: m.pushOperators,
-          node: {
-      Contents: vi.fn().mockReturnValue(null),
-      set: vi.fn(),
-      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
-      get: vi.fn().mockReturnValue(null),
-      Resources: vi.fn().mockReturnValue(undefined),
-    },
-          getWidth: () => 595,
-          getHeight: () => 842,
-          getSize: () => ({ width: 595, height: 842 }),
-        }),
+        getPage:         vi.fn().mockReturnValue(u24Page),
+        // PR #96: collectPageContentRefCounts(getPages) と getPageCount が必須。
+        getPages:        vi.fn().mockReturnValue([u24Page]),
+        getPageCount:    vi.fn().mockReturnValue(1),
         embedJpg:        m.embedJpg,
         save:            m.save,
     commit:            m.save,
-        context: { lookup: vi.fn() },
+        // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
+        context: makeSweepableContext(),
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -578,30 +629,38 @@ describe('pdfSaver / savePDF', () => {
         set: vi.fn(),
         lookup: vi.fn(),
       }
+      const u25Page = {
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }
       m.pdfLoad.mockResolvedValue({
         registerFontkit: m.registerFontkit,
         embedFont:       m.embedFont,
         removePage:      m.removePage,
         insertPage:      m.insertPage,
-        getPage:         vi.fn().mockReturnValue({
-          drawImage:    m.drawImage,
-          drawText:     m.drawText,
-          pushOperators: m.pushOperators,
-          node: {
-      Contents: vi.fn().mockReturnValue(null),
-      set: vi.fn(),
-      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
-      get: vi.fn().mockReturnValue(null),
-      Resources: vi.fn().mockReturnValue(undefined),
-    },
-          getWidth: () => 595,
-          getHeight: () => 842,
-          getSize: () => ({ width: 595, height: 842 }),
-        }),
+        getPage:         vi.fn().mockReturnValue(u25Page),
+        // PR #96: collectPageContentRefCounts(getPages) と getPageCount が必須。
+        // dirty page index は 1 なので getPageCount は 2 を返す必要がある
+        // (pageIndex >= getPageCount() のページは skip されるため)。
+        getPages:        vi.fn().mockReturnValue([u25Page, u25Page]),
+        getPageCount:    vi.fn().mockReturnValue(2),
         embedJpg:        m.embedJpg,
         save:            m.save,
     commit:            m.save,
-        context: { lookup: vi.fn() },
+        // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
+        context: makeSweepableContext(),
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -643,6 +702,9 @@ describe('pdfSaver / savePDF', () => {
       const mockPageNode = {
         Contents: vi.fn().mockReturnValue('stream-ref'),
         set: vi.fn(),
+        // PR #96: collectPageContentRefCounts / replacePageTextContentStreams は
+        // page.node.get(/Contents) を直接見る。get が無いと TypeError になる。
+        get: vi.fn().mockReturnValue('stream-ref'),
       }
       const mockPage = {
         drawImage:     m.drawImage,
@@ -652,6 +714,7 @@ describe('pdfSaver / savePDF', () => {
         getWidth: () => 595,
         getHeight: () => 842,
         getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
       }
 
       // Create a real _PDFRawStream instance so instanceof works
@@ -669,15 +732,19 @@ describe('pdfSaver / savePDF', () => {
         removePage:      m.removePage,
         insertPage:      m.insertPage,
         getPage:         vi.fn().mockReturnValue(mockPage),
+        // PR #96: collectPageContentRefCounts(getPages) と getPageCount が必須。
+        getPages:        vi.fn().mockReturnValue([mockPage]),
+        getPageCount:    vi.fn().mockReturnValue(1),
         embedJpg:        m.embedJpg,
         save:            m.save,
     commit:            m.save,
-        context: {
+        // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
+        context: makeSweepableContext({
           lookup: vi.fn().mockReturnValue(fakeStream),
           flateStream: vi.fn().mockReturnValue(mockFlateStream),
           register: vi.fn().mockReturnValue(mockStreamRef),
           obj: vi.fn().mockImplementation((arr: any[]) => arr),
-        },
+        }),
         getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), lookup: vi.fn() }),
       })
 
@@ -700,6 +767,9 @@ describe('pdfSaver / savePDF', () => {
       const mockPageNode = {
         Contents: vi.fn().mockReturnValue('stream-ref'),
         set: vi.fn(),
+        // PR #96: collectPageContentRefCounts / replacePageTextContentStreams は
+        // page.node.get(/Contents) を直接見る。get が無いと TypeError になる。
+        get: vi.fn().mockReturnValue('stream-ref'),
       }
       const mockPage = {
         drawImage:     m.drawImage,
@@ -709,6 +779,7 @@ describe('pdfSaver / savePDF', () => {
         getWidth: () => 595,
         getHeight: () => 842,
         getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
       }
 
       // Content with multiple BT..ET blocks
@@ -729,15 +800,19 @@ describe('pdfSaver / savePDF', () => {
         removePage:      m.removePage,
         insertPage:      m.insertPage,
         getPage:         vi.fn().mockReturnValue(mockPage),
+        // PR #96: collectPageContentRefCounts(getPages) と getPageCount が必須。
+        getPages:        vi.fn().mockReturnValue([mockPage]),
+        getPageCount:    vi.fn().mockReturnValue(1),
         embedJpg:        m.embedJpg,
         save:            m.save,
     commit:            m.save,
-        context: {
+        // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
+        context: makeSweepableContext({
           lookup: vi.fn().mockReturnValue(fakeStream),
           flateStream: mockFlateStreamFn,
           register: vi.fn().mockReturnValue(mockStreamRef),
           obj: vi.fn().mockImplementation((arr: any[]) => arr),
-        },
+        }),
         getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), lookup: vi.fn() }),
       })
 
@@ -787,42 +862,51 @@ describe('pdfSaver / savePDF', () => {
         filePath: '', fileName: 'test.pdf', totalPages: 2, metadata: {},
         pages: new Map([[0, page0], [1, page1]]),
       }
+      // pageIndex >= getPageCount() のページは skip されるため 2 ページぶんに上書きする。
+      withPageCount(2)
       await savePDF(new Uint8Array(), doc)
 
       const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
       expect(drawnTexts).toContain('PageZero')
       expect(drawnTexts).toContain('PageOne')
-      expect(m.drawText).toHaveBeenCalledTimes(2)
+      // 2 dirty page × (text 1 回 + issue #100 の invisible スペース 1 回) = 4 回。
+      expect(m.drawText).toHaveBeenCalledTimes(4)
     })
   })
 
   describe('U-SV-28: BBox metadata contains correct structure', () => {
     it('metadata entry has bbox, writingMode, order, text fields', async () => {
       const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      const u28Page = {
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }
       m.pdfLoad.mockResolvedValue({
         registerFontkit: m.registerFontkit,
         embedFont:       m.embedFont,
         removePage:      m.removePage,
         insertPage:      m.insertPage,
-        getPage:         vi.fn().mockReturnValue({
-          drawImage:    m.drawImage,
-          drawText:     m.drawText,
-          pushOperators: m.pushOperators,
-          node: {
-      Contents: vi.fn().mockReturnValue(null),
-      set: vi.fn(),
-      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
-      get: vi.fn().mockReturnValue(null),
-      Resources: vi.fn().mockReturnValue(undefined),
-    },
-          getWidth: () => 595,
-          getHeight: () => 842,
-          getSize: () => ({ width: 595, height: 842 }),
-        }),
+        getPage:         vi.fn().mockReturnValue(u28Page),
+        // PR #96: collectPageContentRefCounts(getPages) と getPageCount が必須。
+        getPages:        vi.fn().mockReturnValue([u28Page]),
+        getPageCount:    vi.fn().mockReturnValue(1),
         embedJpg:        m.embedJpg,
         save:            m.save,
     commit:            m.save,
-        context: { lookup: vi.fn() },
+        // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
+        context: makeSweepableContext(),
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -850,30 +934,36 @@ describe('pdfSaver / savePDF', () => {
   describe('U-SV-29: Blocks sorted by order in metadata', () => {
     it('metadata entries are ordered by block.order', async () => {
       const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      const u29Page = {
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }
       m.pdfLoad.mockResolvedValue({
         registerFontkit: m.registerFontkit,
         embedFont:       m.embedFont,
         removePage:      m.removePage,
         insertPage:      m.insertPage,
-        getPage:         vi.fn().mockReturnValue({
-          drawImage:    m.drawImage,
-          drawText:     m.drawText,
-          pushOperators: m.pushOperators,
-          node: {
-      Contents: vi.fn().mockReturnValue(null),
-      set: vi.fn(),
-      // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
-      get: vi.fn().mockReturnValue(null),
-      Resources: vi.fn().mockReturnValue(undefined),
-    },
-          getWidth: () => 595,
-          getHeight: () => 842,
-          getSize: () => ({ width: 595, height: 842 }),
-        }),
+        getPage:         vi.fn().mockReturnValue(u29Page),
+        // PR #96: collectPageContentRefCounts(getPages) と getPageCount が必須。
+        getPages:        vi.fn().mockReturnValue([u29Page]),
+        getPageCount:    vi.fn().mockReturnValue(1),
         embedJpg:        m.embedJpg,
         save:            m.save,
     commit:            m.save,
-        context: { lookup: vi.fn() },
+        // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
+        context: makeSweepableContext(),
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -1035,7 +1125,10 @@ describe('pdfSaver / Worker 経路', () => {
       const doc = makeSimpleDoc()
       const p = savePDF(new Uint8Array(), doc)
       const w = ControllableMockWorker.instances[0]
-      w.emitOnError(new Error('worker crashed'))
+      // 実ブラウザの Worker.onerror は ErrorEvent を受け取る。pdfSaver の onerror は
+      // err.preventDefault() を呼び err instanceof ErrorEvent で詳細を組み立てるため、
+      // 素の Error ではなく ErrorEvent を発火させる（jsdom 環境では global ErrorEvent が利用可能）。
+      w.emitOnError(new ErrorEvent('error', { message: 'worker crashed' }))
 
       await expect(p).rejects.toBeDefined()
       // onerror の cleanup で 1 回 terminate される
