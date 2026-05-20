@@ -494,6 +494,33 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
 }
 
 /**
+ * フォントの descent 比 |descent| / (ascent + |descent|) を返す。
+ *
+ * #99 で baseline を pdf-lib の heightAtSize(size, {descender:false}) から動的計算
+ * するようにしたが、その pdf-lib API は unitsPerEm≠1000 のフォントで未スケールの
+ * descent を減算するバグを持つ。Meiryo / IPAmjMincho (ともに unitsPerEm=2048) では
+ * descentRatio が約2倍に膨張し、OCR テキスト層の baseline が bbox 上端方向へ
+ * ずれて見える (校正→保存→再読込で顕在化, #99 の回帰)。embedder 経由で fontkit の
+ * 生メトリクス (ascent/descent) から直接算出して回避する。比なので unitsPerEm
+ * には依存しない。
+ */
+export function getFontDescentRatio(font: PDFFont, fontSize: number): number {
+  const fk = (font as unknown as {
+    embedder?: { font?: { ascent?: number; descent?: number } };
+  }).embedder?.font;
+  if (fk && typeof fk.ascent === 'number' && typeof fk.descent === 'number') {
+    const span = fk.ascent - fk.descent; // ascent + |descent| (descent は負値)
+    if (span > 0) return Math.abs(fk.descent) / span;
+  }
+  // フォールバック: embedder 非公開時 (テストのモックフォント等)。
+  const full = font.heightAtSize(fontSize);
+  if (full > 0) {
+    return (full - font.heightAtSize(fontSize, { descender: false })) / full;
+  }
+  return 0.2;
+}
+
+/**
  * #80: Resources.Font dict を scan して、すでに同じ font.ref が登録されていれば
  * その key を再利用する。タグ prefix が `font.name` (postscriptName) と一致するもの
  * のみを再利用対象とし、誤マッチを避ける。
@@ -888,8 +915,7 @@ export async function buildPdfDocument(
             if (runHeight === 0) continue;
             const runTextWidth = run.font.widthOfTextAtSize(run.text, fontSize);
             if (runTextWidth === 0) continue;
-            const runAscent = run.font.heightAtSize(fontSize, { descender: false });
-            const descentRatio = (runHeight - runAscent) / runHeight;
+            const descentRatio = getFontDescentRatio(run.font, fontSize);
             const baselineX_run = block.bbox.x + descentRatio * block.bbox.width;
             const baselineY_run = vh - block.bbox.y - offsetInPage;
             setPageFontWithStableKey(page, run.font, pageFontKeys);
@@ -934,23 +960,14 @@ export async function buildPdfDocument(
             continue;
           }
 
-          // 横書き baselineY: 縦書き (#28) と同じく primary font の ascent 比から動的計算する (#99 副因対策)。
-          // 旧実装は textHeight * sy * 0.8 のマジックナンバーで baseline 位置を決めていたため、
-          // primary font の actual ascent ratio (NotoSansJP では heightAtSize / heightAtSize(no descender) で
-          // descentRatio ≈ 0.2) との誤差が bbox 上端で目視可能な縦ずれを生んでいた。
-          //
-          // 動的式 (縦書きと同形):
-          //   descentRatio = (runHeight - runAscent) / runHeight  ... primary font 代表値
-          //   baselineY    = vh - bbox.y - textHeight * sy * (1 - descentRatio)
-          //
-          // 0.8 リテラルとの差分は数 % 程度だが、保存→再読込のラウンドトリップで蓄積すると
-          // ユーザー体験上 BB がずれて見える。primary font の代表値で十分 (混在 run でも
-          // primary font のメトリクスで cm を発行している)。
-          const primaryRunHeight = customFont.heightAtSize(fontSize);
-          const primaryRunAscent = customFont.heightAtSize(fontSize, { descender: false });
-          const descentRatio = primaryRunHeight > 0
-            ? (primaryRunHeight - primaryRunAscent) / primaryRunHeight
-            : 0.2;
+          // 横書き baselineY: primary font の descent 比から baseline 位置を動的に決める。
+          //   baselineY = vh - bbox.y - textHeight * sy * (1 - descentRatio)
+          // descentRatio はフォント実メトリクス由来 (getFontDescentRatio)。#99 では
+          // heightAtSize(size, {descender:false}) から算出していたが、その pdf-lib API は
+          // unitsPerEm≠1000 のフォント (Meiryo/IPAmjMincho=2048) で誤差を持ち、baseline が
+          // bbox 上端方向へずれていた。primary font 代表値で十分 (混在 run でも cm は
+          // primary font メトリクスで発行している)。
+          const descentRatio = getFontDescentRatio(customFont, fontSize);
           const baselineY = vh - block.bbox.y - textHeight * sy * (1 - descentRatio);
 
           page.pushOperators(

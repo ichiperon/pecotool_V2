@@ -251,11 +251,13 @@ describe('pdfSaver issue #28: vertical baselineX uses font ascent (not magic 0.2
     const probeDoc = await PDFDocument.create();
     probeDoc.registerFontkit(fontkit);
     const probeFont = await probeDoc.embedFont(primaryBytes, { subset: false });
-    // bbox.width=30, height=400, text "あいう" → fontSize = max(1, min(96, 30*0.8)) = 24
-    const fontSize = Math.max(1, Math.min(96, 30 * 0.8));
-    const runHeight = probeFont.heightAtSize(fontSize);
-    const runAscent = probeFont.heightAtSize(fontSize, { descender: false });
-    const descentRatio = (runHeight - runAscent) / runHeight;
+    // descentRatio はフォント実メトリクス由来 (getFontDescentRatio と同じ算出)。
+    // #99 では heightAtSize({descender:false}) から算出していたが、その pdf-lib API は
+    // unitsPerEm≠1000 (IPAexGothic=2048) で誤差を持つため fontkit の生メトリクスを使う。
+    const fk = (probeFont as unknown as {
+      embedder: { font: { ascent: number; descent: number } };
+    }).embedder.font;
+    const descentRatio = Math.abs(fk.descent) / (fk.ascent - fk.descent); // 246/2048 ≈ 0.12012
     const expectedBaselineX = 100 + descentRatio * 30; // bbox.x + descentRatio * bbox.width
     // 旧コードの 0.2 マジック値とは別の値であることを保証
     const oldMagicBaselineX = 100 + 0.2 * 30; // = 106

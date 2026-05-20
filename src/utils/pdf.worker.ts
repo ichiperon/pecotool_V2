@@ -419,6 +419,26 @@ function measureRuns(runs: FontRun[], size: number): { width: number; height: nu
 }
 
 /**
+ * フォントの descent 比 |descent| / (ascent + |descent|) を返す。
+ * pdf-lib heightAtSize({descender:false}) は unitsPerEm≠1000 で誤差を持つため
+ * embedder 経由で fontkit の生メトリクスから直接算出する (詳細は pdfSaver.ts 側参照)。
+ */
+function getFontDescentRatio(font: PDFFont, fontSize: number): number {
+  const fk = (font as unknown as {
+    embedder?: { font?: { ascent?: number; descent?: number } };
+  }).embedder?.font;
+  if (fk && typeof fk.ascent === 'number' && typeof fk.descent === 'number') {
+    const span = fk.ascent - fk.descent; // ascent + |descent| (descent は負値)
+    if (span > 0) return Math.abs(fk.descent) / span;
+  }
+  const full = font.heightAtSize(fontSize);
+  if (full > 0) {
+    return (full - font.heightAtSize(fontSize, { descender: false })) / full;
+  }
+  return 0.2;
+}
+
+/**
  * #80: Resources.Font dict scan で既存 key を再利用する (pdfSaver.ts 側詳細参照)。
  * `font.ref` 完全一致 + key tag prefix が `/<font.name>-` 一致のみ採用。
  */
@@ -688,8 +708,7 @@ async function handleSavePdf(
             if (runHeight === 0) continue;
             const runTextWidth = run.font.widthOfTextAtSize(run.text, fontSize);
             if (runTextWidth === 0) continue;
-            const runAscent = run.font.heightAtSize(fontSize, { descender: false });
-            const descentRatio = (runHeight - runAscent) / runHeight;
+            const descentRatio = getFontDescentRatio(run.font, fontSize);
             const baselineX_run = block.bbox.x + descentRatio * block.bbox.width;
             const baselineY_run = vh - block.bbox.y - offsetInPage;
             setPageFontWithStableKey(page, run.font, pageFontKeys);
@@ -727,13 +746,9 @@ async function handleSavePdf(
 
           if (!isFinite(sx) || !isFinite(sy)) continue;
 
-          // 横書き baselineY: 縦書き (#28) と同じく primary font の ascent 比から動的計算する (#99 副因対策)。
+          // 横書き baselineY: primary font の descent 比 (getFontDescentRatio) から動的計算。
           // 詳細コメントは pdfSaver.ts 側参照。
-          const primaryRunHeight = customFont.heightAtSize(fontSize);
-          const primaryRunAscent = customFont.heightAtSize(fontSize, { descender: false });
-          const descentRatio = primaryRunHeight > 0
-            ? (primaryRunHeight - primaryRunAscent) / primaryRunHeight
-            : 0.2;
+          const descentRatio = getFontDescentRatio(customFont, fontSize);
           const baselineY = vh - block.bbox.y - textHeight * sy * (1 - descentRatio);
           page.pushOperators(
             pushGraphicsState(),
