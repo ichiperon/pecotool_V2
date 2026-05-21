@@ -1,0 +1,72 @@
+name: quality-gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      run_pdf_soak:
+        description: Run heavy real PDF soak tests when fixtures are available
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  quality:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: npm ci
+
+      - run: npx playwright install chromium
+
+      - run: npm run test:quality
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-artifacts
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+
+  pdf-soak:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_pdf_soak
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Require real PDF fixture
+        shell: pwsh
+        run: |
+          $pdfs = Get-ChildItem -Path test -Filter *.pdf -File -ErrorAction SilentlyContinue
+          if (-not $pdfs) {
+            throw "No real PDF fixture found under test/. The pdf-soak job is intentionally failing instead of silently skipping."
+          }
+
+      - run: npm run test:pdf:soak

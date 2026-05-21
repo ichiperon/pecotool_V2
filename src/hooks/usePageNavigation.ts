@@ -34,6 +34,7 @@ export function usePageNavigation({
   // (updatePageData 毎の document 参照差し替えで再レンダが起きないようにするため)
   const filePath = usePecoStore((s) => s.document?.filePath);
   const totalPages = usePecoStore((s) => s.document?.totalPages);
+  const documentEpoch = usePecoStore((s) => s.documentEpoch);
   // 現在ページの width のみ購読 (未ロード判定用。textBlocks 等には反応しない)
   const currentPageWidth = usePecoStore((s) => s.document?.pages.get(currentPageIndex)?.width);
   const currentPageExists = usePecoStore((s) => s.document?.pages.has(currentPageIndex) ?? false);
@@ -59,7 +60,9 @@ export function usePageNavigation({
     currentLoadAbortRef.current = controller;
     const signal = controller.signal;
 
-    const doc = usePecoStore.getState().document;
+    const stateAtStart = usePecoStore.getState();
+    const doc = stateAtStart.document;
+    const capturedDocumentEpoch = stateAtStart.documentEpoch;
     if (!doc) return;
     setIsLoadingPageMeta(true);
     // 新ページの render がまだ開始していない状態。後段で usePdfRendering が
@@ -109,7 +112,7 @@ export function usePageNavigation({
 
       // currentPageIndex がまだ pageIdx のうちに proxy を共有
       const liveState = usePecoStore.getState();
-      if (liveState.document?.filePath === doc.filePath && liveState.currentPageIndex === pageIdx) {
+      if (liveState.document?.filePath === doc.filePath && liveState.documentEpoch === capturedDocumentEpoch && liveState.currentPageIndex === pageIdx) {
         setCurrentPageProxy(doc.filePath, pageIdx, qp);
       }
 
@@ -148,7 +151,9 @@ export function usePageNavigation({
         .then((pageData) => {
           if (signal.aborted) return;
           // ファイル切替チェック（ページ切替は許容: テキストデータは常に保存する）
-          const currentDoc = usePecoStore.getState().document;
+          const currentState = usePecoStore.getState();
+          const currentDoc = currentState.document;
+          if (currentState.documentEpoch !== capturedDocumentEpoch) return;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
           const existing = currentDoc.pages.get(pageIdx);
           // isDirty だけで保持すると、clearOcrAllPages の stub や width===0 の未ロード
@@ -179,12 +184,14 @@ export function usePageNavigation({
 
   // ファイルが変わったときにbboxMetaキャッシュをリセット
   const prevFilePathRef = useRef<string | undefined>(undefined);
+  const prevDocumentEpochRef = useRef<number | undefined>(undefined);
   useEffect(() => {
-    if (filePath !== prevFilePathRef.current) {
+    if (filePath !== prevFilePathRef.current || documentEpoch !== prevDocumentEpochRef.current) {
       bboxMetaRef.current = undefined;
       prevFilePathRef.current = filePath;
+      prevDocumentEpochRef.current = documentEpoch;
     }
-  }, [filePath]);
+  }, [filePath, documentEpoch]);
 
   useEffect(() => {
     if (!filePath) return;
@@ -206,7 +213,7 @@ export function usePageNavigation({
           const qp = await getCachedPageProxy(filePath, currentPageIndex);
           // レースチェック: 現在もこのページが選択されているか
           const live = usePecoStore.getState();
-          if (live.document?.filePath === filePath && live.currentPageIndex === currentPageIndex) {
+          if (live.document?.filePath === filePath && live.documentEpoch === documentEpoch && live.currentPageIndex === currentPageIndex) {
             setCurrentPageProxy(filePath, currentPageIndex, qp);
           }
         } catch {
@@ -223,12 +230,13 @@ export function usePageNavigation({
     // cleanup で自分の abort」のループになる。filePath + currentPageIndex の
     // 変化トリガーで十分 (ロード判定は最初の run だけで良い)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
+  }, [filePath, documentEpoch, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
 
   const handlePageInputCommit = useCallback(() => {
     if (pageInputValue !== null && filePath && totalPages) {
-      const pageNum = parseInt(pageInputValue, 10);
-      if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= totalPages) {
+      const normalizedPageInput = pageInputValue.trim();
+      const pageNum = Number(normalizedPageInput);
+      if (/^\d+$/.test(normalizedPageInput) && pageNum >= 1 && pageNum <= totalPages) {
         setCurrentPage(pageNum - 1);
       }
     }

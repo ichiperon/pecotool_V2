@@ -201,6 +201,46 @@ describe('C1: save-during-edit race (resetDirty が新編集を巻き込まな�
     expect(mocks.clearCachedPages).toHaveBeenCalledWith('/a.pdf');
   });
 
+  it('handleSave 中に同じページを再編集 → save スナップショットは旧値、live page は新編集 dirty のまま残る', async () => {
+    const doc: PecoDocument = {
+      filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 1, metadata: {},
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0-a', text: 'P0_SAVE_START' })], isDirty: true, thumbnail: null }],
+      ]),
+    };
+    usePecoStore.setState({
+      document: doc,
+      originalBytes: new Uint8Array([1, 2, 3]),
+      currentPageIndex: 0,
+      isDirty: true,
+    } as any);
+
+    const pendingSave = deferred<Uint8Array>();
+    mocks.savePDF.mockImplementationOnce(() => pendingSave.promise);
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const savePromise = result.current.handleSave();
+    await waitFor(() => expect(mocks.savePDF).toHaveBeenCalledTimes(1));
+
+    const savedDoc = mocks.savePDF.mock.calls[0][1] as PecoDocument;
+    expect(savedDoc.pages.get(0)!.textBlocks[0].text).toBe('P0_SAVE_START');
+    expect(savedDoc.pages.get(0)!.isDirty).toBe(true);
+
+    usePecoStore.getState().updatePageData(0, {
+      textBlocks: [makeBlock({ id: 'p0-a', text: 'P0_EDITED_DURING_SAVE' })],
+      isDirty: true,
+    });
+    pendingSave.resolve(new Uint8Array([4, 5, 6]));
+
+    await savePromise;
+
+    const livePage = usePecoStore.getState().document!.pages.get(0)!;
+    expect(livePage.textBlocks[0].text).toBe('P0_EDITED_DURING_SAVE');
+    expect(livePage.isDirty).toBe(true);
+    expect(usePecoStore.getState().isDirty).toBe(true);
+  });
+
   it('save 中に別ページ編集 → スナップショット外の dirty フラグは残る', () => {
     // 初期: page 0 は dirty、page 1 は clean
     const doc: PecoDocument = {

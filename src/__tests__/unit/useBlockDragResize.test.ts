@@ -185,6 +185,97 @@ describe('useBlockDragResize: page.isDirty 伝播 (finishDragResize で 1 回)',
   });
 });
 
+describe('useBlockDragResize: issue #122 移動量 0 のクリックは dirty/Undo にしない', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('既存 BB をクリックして mouseup しただけでは updatePageData と pushAction を呼ばない', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const pushAction = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+        setDragPreviewBboxes,
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    expect(result.current.dragMode).toBe('move');
+
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    expect(updatePageData).not.toHaveBeenCalled();
+    expect(pushAction).not.toHaveBeenCalled();
+    expect(setDragPreviewBboxes).toHaveBeenLastCalledWith(null);
+    expect(result.current.dragMode).toBe('none');
+  });
+
+  it('同一座標の mousemove 後に mouseup しても updatePageData と pushAction を呼ばない', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const pushAction = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+        setDragPreviewBboxes,
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    act(() => {
+      result.current.updateDragResize({ x: 110, y: 110 });
+    });
+    act(() => {
+      flushRaf();
+    });
+
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    expect(updatePageData).not.toHaveBeenCalled();
+    expect(pushAction).not.toHaveBeenCalled();
+    expect(setDragPreviewBboxes).toHaveBeenLastCalledWith(null);
+  });
+});
+
 describe('useBlockDragResize: 修飾キー付きクリック (#6)', () => {
   beforeEach(() => {
     installRafMock();
@@ -770,5 +861,136 @@ describe('useBlockDragResize: issue #106 Redo round-trip (Action.after が最新
     // usePecoStore.getState() 化し最新 state を返すこと (issue #106)。
     expect(afterBbox.x).toBe(beforeBbox.x);
     expect(afterBbox.y).toBe(beforeBbox.y);
+  });
+});
+
+describe('useBlockDragResize: 厳格化 - 複数選択と全リサイズハンドル', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('複数選択BBのmove確定は選択BBだけを同じdx/dyで更新し、1 ActionでUndo/Redo可能なafterを積む', () => {
+    const b1 = makeBlock({ id: 'b1', bbox: { x: 100, y: 100, width: 50, height: 20 } });
+    const b2 = makeBlock({ id: 'b2', bbox: { x: 200, y: 200, width: 60, height: 25 } });
+    const b3 = makeBlock({ id: 'b3', bbox: { x: 300, y: 300, width: 70, height: 30 } });
+    let currentPage = makePage([b1, b2, b3]);
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      currentPage = { ...currentPage, ...partial };
+    });
+    const pushAction = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set(['b1', 'b2']),
+        getPageData: () => currentPage,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 125, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    act(() => {
+      result.current.updateDragResize({ x: 155, y: 130 });
+    });
+    act(() => {
+      flushRaf();
+    });
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    expect(updatePageData).toHaveBeenCalledTimes(1);
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const updatedBlocks = updatePageData.mock.calls[0][1].textBlocks as TextBlock[];
+    expect(updatedBlocks.find((b) => b.id === 'b1')!.bbox).toEqual({ x: 130, y: 120, width: 50, height: 20 });
+    expect(updatedBlocks.find((b) => b.id === 'b2')!.bbox).toEqual({ x: 230, y: 220, width: 60, height: 25 });
+    expect(updatedBlocks.find((b) => b.id === 'b3')!.bbox).toEqual(b3.bbox);
+
+    const action = pushAction.mock.calls[0][0];
+    expect(action.before.textBlocks.find((b: TextBlock) => b.id === 'b1')!.bbox).toEqual(b1.bbox);
+    expect(action.after.textBlocks.find((b: TextBlock) => b.id === 'b1')!.bbox).toEqual({ x: 130, y: 120, width: 50, height: 20 });
+    expect(action.after.textBlocks.find((b: TextBlock) => b.id === 'b2')!.bbox).toEqual({ x: 230, y: 220, width: 60, height: 25 });
+    expect(action.after.textBlocks.find((b: TextBlock) => b.id === 'b3')!.bbox).toEqual(b3.bbox);
+  });
+
+  it.each([
+    {
+      label: 'resize-nw',
+      start: { x: 100, y: 100 },
+      end: { x: 250, y: 140 },
+      expected: { x: 179, y: 119, width: 1, height: 1 },
+    },
+    {
+      label: 'resize-ne',
+      start: { x: 180, y: 100 },
+      end: { x: 200, y: 140 },
+      expected: { x: 100, y: 119, width: 100, height: 1 },
+    },
+    {
+      label: 'resize-sw',
+      start: { x: 100, y: 120 },
+      end: { x: 190, y: 140 },
+      expected: { x: 179, y: 100, width: 1, height: 40 },
+    },
+  ])('$label は反対角を越えてもwidth/heightを1以上に保って1 Actionだけ積む', ({ label, start, end, expected }) => {
+    const block = makeBlock();
+    let currentPage = makePage([block]);
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      currentPage = { ...currentPage, ...partial };
+    });
+    const pushAction = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => currentPage,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        start,
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    expect(result.current.dragMode).toBe(label);
+
+    act(() => {
+      result.current.updateDragResize(end);
+    });
+    act(() => {
+      flushRaf();
+    });
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    expect(updatePageData).toHaveBeenCalledTimes(1);
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const updatedBlock = (updatePageData.mock.calls[0][1].textBlocks as TextBlock[])[0];
+    expect(updatedBlock.bbox).toEqual(expected);
+    expect(updatedBlock.bbox.width).toBeGreaterThanOrEqual(1);
+    expect(updatedBlock.bbox.height).toBeGreaterThanOrEqual(1);
+    expect(updatePageData.mock.calls[0][1].isDirty).toBe(true);
   });
 });

@@ -113,13 +113,15 @@ function addRefCount(counts: Map<string, number>, value: unknown): void {
 function collectPageContentRefCounts(pdfDoc: PDFDocument): Map<string, number> {
   const counts = new Map<string, number>();
   const contentsKey = PDFName.of('Contents');
+  const getPages = (pdfDoc as unknown as { getPages?: () => Array<{ node: { get?: (key: PDFName) => unknown; Contents?: () => unknown } }> }).getPages;
+  if (typeof getPages !== 'function') return counts;
 
-  for (const page of pdfDoc.getPages()) {
-    const rawContents = page.node.get(contentsKey) ?? page.node.Contents?.();
+  for (const page of getPages.call(pdfDoc)) {
+    const rawContents = page.node.get?.(contentsKey) ?? page.node.Contents?.();
     if (!rawContents) continue;
 
     addRefCount(counts, rawContents);
-    const resolved = pdfDoc.context.lookup(rawContents);
+    const resolved = pdfDoc.context.lookup(rawContents as any);
     if (!(resolved instanceof PDFArray)) continue;
 
     for (const streamRef of resolved.asArray()) {
@@ -661,6 +663,9 @@ export async function buildPdfDocument(
     updateMetadata: false,
   });
   pdfDoc.registerFontkit(fontkit);
+  const pdfPageCount = typeof (pdfDoc as unknown as { getPageCount?: () => number }).getPageCount === 'function'
+    ? pdfDoc.getPageCount()
+    : documentState.totalPages;
 
   const dirtyPages = Array.from(documentState.pages.entries()).filter(([, pageData]) => pageData.isDirty);
   const contentRefCounts = collectPageContentRefCounts(pdfDoc);
@@ -692,7 +697,7 @@ export async function buildPdfDocument(
   const pagesToWrite = new Map<number, RepairPageData>();
   for (const [pageIndexValue, pageData] of dirtyPages) {
     const pageIndex = asPageIndex(pageIndexValue);
-    if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) continue;
+    if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfPageCount) continue;
     pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
   }
 
@@ -818,7 +823,7 @@ export async function buildPdfDocument(
     // pdfSaver は元々 R=0 を仮定して translate(bbox.x, pageH - bbox.y) していたため、
     // R=90/180/270 では位置がページ外へ飛んでいた (#50 regression)。
     // 修正方針: viewport 寸法 (vw/vh) を使い、rotation に応じた cm を per-block push する。
-    const rotation = normalizeRotation(page.getRotation().angle);
+    const rotation = normalizeRotation(page.getRotation?.().angle ?? 0);
     const { vh } = getViewportSize(rotation, pageW, pageH);
     const rotationCm = getRotationCm(rotation, pageW, pageH);
 
@@ -988,7 +993,7 @@ export async function buildPdfDocument(
   // と異なり、BT...ET には触れずフォント辞書も触らないため、原本 OCR レイヤーは保持される。
   // 過去の保存で累積した空 q-Q ブロックを安全に除去でき、再読み込み→保存だけで容量が縮む。
   const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
-  for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+  for (let pi = 0; pi < pdfPageCount; pi++) {
     if (dirtyPageIndexSet.has(pi)) continue;
     const page = pdfDoc.getPage(pi);
     stripEmptyQBlocksOnPage(
@@ -1034,7 +1039,7 @@ export async function buildPdfDocument(
   // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。
   // フォントや到達可能オブジェクト再検証は重いので、平均サイズチェックのみで十分。
   if (process.env.NODE_ENV !== 'production') {
-    const pageCount = pdfDoc.getPageCount();
+    const pageCount = pdfPageCount;
     if (pageCount > 0) {
       const avgPerPage = savedBytes.byteLength / pageCount;
       if (avgPerPage > 2 * 1024 * 1024) {
@@ -1176,7 +1181,7 @@ export async function savePDF(
 
       activeWorker.onerror = (err) => {
         if (settled) return;
-        err.preventDefault();
+        if (typeof err?.preventDefault === 'function') err.preventDefault();
         cleanup();
         const details = err instanceof ErrorEvent
           ? [

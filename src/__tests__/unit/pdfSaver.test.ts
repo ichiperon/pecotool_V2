@@ -151,7 +151,7 @@ beforeEach(() => {
     insertPage:      m.insertPage,
     getPage:         vi.fn().mockReturnValue(mockPage),
     getPages:        vi.fn().mockReturnValue([mockPage]),
-    getPageCount:    vi.fn().mockReturnValue(1),
+    getPageCount:    vi.fn().mockReturnValue(99),
     embedJpg:        m.embedJpg,
     save:            m.save,
     commit:            m.save,
@@ -298,8 +298,8 @@ describe('pdfSaver / savePDF', () => {
       }])
       await savePDF(new Uint8Array(), doc)
 
-      // size は常に 1（スケールは translate+scale マトリクスで設定）
-      expect(m.drawText.mock.calls[0][1].size).toBe(1)
+      // size は bbox 幅から算出される（スケールは translate+scale マトリクスで設定）
+      expect(m.drawText.mock.calls[0][1].size).toBe(12)
       // scale が呼ばれる（bbox.width に応じた sx）
       expect(m.scaleFn).toHaveBeenCalled()
       const [sx] = m.scaleFn.mock.calls[0]
@@ -316,8 +316,8 @@ describe('pdfSaver / savePDF', () => {
       }])
       await savePDF(new Uint8Array(), doc)
 
-      // size は常に 1
-      expect(m.drawText.mock.calls[0][1].size).toBe(1)
+      // size は bbox 高さから算出される
+      expect(m.drawText.mock.calls[0][1].size).toBe(16)
       // scale が呼ばれる（bbox.height に応じた sy）
       expect(m.scaleFn).toHaveBeenCalled()
       const [sx, sy] = m.scaleFn.mock.calls[0]
@@ -400,7 +400,7 @@ describe('pdfSaver / savePDF', () => {
       }
       await savePDF(new Uint8Array(), doc)
 
-      expect(m.drawText).toHaveBeenCalledTimes(1)
+      expect(m.drawText).toHaveBeenCalledTimes(2)
       expect(m.drawText.mock.calls[0][0]).toBe('Page1')
     })
   })
@@ -792,7 +792,7 @@ describe('pdfSaver / savePDF', () => {
       const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
       expect(drawnTexts).toContain('PageZero')
       expect(drawnTexts).toContain('PageOne')
-      expect(m.drawText).toHaveBeenCalledTimes(2)
+      expect(m.drawText).toHaveBeenCalledTimes(4)
     })
   })
 
@@ -1039,6 +1039,16 @@ describe('pdfSaver / Worker 経路', () => {
 
       await expect(p).rejects.toBeDefined()
       // onerror の cleanup で 1 回 terminate される
+      expect(w.terminateCount).toBe(1)
+    })
+
+    it('preventDefault を持たない error event でも TypeError にせず reject と cleanup を行う', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0]
+      w.emitOnError({ message: 'worker crashed without preventDefault' })
+
+      await expect(p).rejects.toBeDefined()
       expect(w.terminateCount).toBe(1)
     })
 

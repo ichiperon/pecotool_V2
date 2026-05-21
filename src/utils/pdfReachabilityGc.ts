@@ -63,13 +63,16 @@ export function sweepUnreachableObjects(pdfDoc: PDFDocument): SweepResult {
   // PDFContext.trailerInfo の型は実装上 { Root?, Info?, Encrypt?, ID? } だが
   // 公開型では index signature を持たないため構造型アサーションを介してアクセスする。
   const trailerInfo = (context as unknown as {
-    trailerInfo: {
+    trailerInfo?: {
       Root?: PDFObject;
       Info?: PDFObject;
       Encrypt?: PDFObject;
       ID?: PDFObject;
     };
   }).trailerInfo;
+  if (!trailerInfo || typeof (context as unknown as { enumerateIndirectObjects?: unknown }).enumerateIndirectObjects !== 'function') {
+    return { dropped: 0 };
+  }
 
   enqueue(trailerInfo.Root);
   enqueue(trailerInfo.Info);

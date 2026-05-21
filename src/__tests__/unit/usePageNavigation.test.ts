@@ -14,7 +14,7 @@
  *  - unmount 後の bboxMeta resolve で追加 loadPage が発火しないこと (既存挙動維持)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { renderHook, waitFor, cleanup } from '@testing-library/react'
+import { act, renderHook, waitFor, cleanup } from '@testing-library/react'
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 
@@ -62,6 +62,7 @@ beforeEach(() => {
   // store をクリーンに
   usePecoStore.setState({
     document: null,
+    documentEpoch: 0,
     selectedIds: new Set<string>(),
     undoStack: [],
     redoStack: [],
@@ -380,8 +381,8 @@ describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage 
   })
 })
 
-describe('documentLoadId: 同一 filePath / currentPageIndex の再読込', () => {
-  it('document identity が変わったら同じ filePath/currentPageIndex でも loadPage を再発火する', async () => {
+describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () => {
+  it('documentEpoch が変わったら同じ filePath/currentPageIndex でも loadPage を再発火する', async () => {
     const filePath = 'same-path.pdf'
     const fakePdf = { numPages: 1 }
     getSharedPdfProxyMock.mockResolvedValue(fakePdf)
@@ -407,7 +408,7 @@ describe('documentLoadId: 同一 filePath / currentPageIndex の再読込', () =
     }
     usePecoStore.setState({
       document: docA,
-      documentLoadId: 1,
+      documentEpoch: 1,
       currentPageIndex: 0,
     } as any)
 
@@ -448,7 +449,7 @@ describe('documentLoadId: 同一 filePath / currentPageIndex の再読込', () =
     }
     usePecoStore.setState({
       document: docB,
-      documentLoadId: 2,
+      documentEpoch: 2,
       currentPageIndex: 0,
     } as any)
 
@@ -462,5 +463,113 @@ describe('documentLoadId: 同一 filePath / currentPageIndex の再読込', () =
       )
     })
     expect(loadPecoToolBBoxMetaMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('page input validation', () => {
+  it.each([
+    ['0'],
+    ['6'],
+    [''],
+    ['1.5'],
+    ['+1'],
+    ['-1'],
+  ])('境界外または非整数のページ番号入力 "%s" では移動しない', (input) => {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 5,
+      metadata: {},
+      pages: new Map<number, PageData>([[1, makePage(1)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({ document: doc, currentPageIndex: 1 } as any)
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+
+    const { result } = renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 1,
+        showToast: vi.fn(),
+        triggerThumbnailLoad: vi.fn(),
+      })
+    )
+
+    act(() => {
+      result.current.setPageInputValue(input)
+    })
+    act(() => {
+      result.current.handlePageInputCommit()
+    })
+
+    expect(usePecoStore.getState().currentPageIndex).toBe(1)
+    expect(result.current.pageInputValue).toBeNull()
+  })
+
+  it('数字以外を含むページ番号入力では移動しない', () => {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 5,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makePage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({ document: doc, currentPageIndex: 0 } as any)
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+
+    const { result } = renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast: vi.fn(),
+        triggerThumbnailLoad: vi.fn(),
+      })
+    )
+
+    act(() => {
+      result.current.setPageInputValue('3abc')
+    })
+    act(() => {
+      result.current.handlePageInputCommit()
+    })
+
+    expect(usePecoStore.getState().currentPageIndex).toBe(0)
+    expect(result.current.pageInputValue).toBeNull()
+  })
+
+  it('数字のみのページ番号入力では対象ページに移動する', () => {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 5,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makePage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({ document: doc, currentPageIndex: 0 } as any)
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+
+    const { result } = renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast: vi.fn(),
+        triggerThumbnailLoad: vi.fn(),
+      })
+    )
+
+    act(() => {
+      result.current.setPageInputValue('3')
+    })
+    act(() => {
+      result.current.handlePageInputCommit()
+    })
+
+    expect(usePecoStore.getState().currentPageIndex).toBe(2)
+    expect(result.current.pageInputValue).toBeNull()
   })
 })

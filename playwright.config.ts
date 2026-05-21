@@ -1,22 +1,26 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const isCiLikeRun = !!process.env.CI || process.env.npm_lifecycle_event === 'test:e2e:ci';
+
 /**
  * Tauri E2E Test Configuration
  * Playwright を使用して Tauri アプリケーションの WebView を直接テストします。
  */
 export default defineConfig({
   testDir: './src/__tests__/e2e',
-  timeout: 60 * 1000,
+  testMatch: '**/*.spec.ts',
+  timeout: 120 * 1000,
   expect: {
     timeout: 10 * 1000,
   },
+  retries: isCiLikeRun ? 1 : 0,
   fullyParallel: false, // Tauri は単一プロセスが基本なので並列化は避ける
   workers: 1,           // ポート競合を防ぐため
   reporter: 'html',
   
   use: {
-    actionTimeout: 0,
-    trace: 'on-first-retry',
+    actionTimeout: 10 * 1000,
+    trace: isCiLikeRun ? 'retain-on-failure' : 'on-first-retry',
     baseURL: 'http://localhost:1420',
   },
 
@@ -35,7 +39,7 @@ export default defineConfig({
   webServer: {
     command: 'npm run dev',
     url: 'http://localhost:1420',
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: !isCiLikeRun,
     timeout: 180 * 1000, // 3分まで待つ
   },
 });

@@ -5,35 +5,165 @@ import { test, expect } from '@playwright/test';
  * Tauri アプリケーションの主要な操作フローを自動テストします。
  */
 
+async function installTauriMocks(page: import('@playwright/test').Page) {
+  await page.addInitScript(() => {
+    const callbacks = new Map<number, (payload: unknown) => void>();
+    const invokeHistory: Array<{ cmd: string; args?: unknown }> = [];
+    const previewWindows = new Set<string>();
+    let callbackId = 1;
+
+    (window as any).__TAURI_INVOKE_HISTORY__ = invokeHistory;
+    (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: () => {},
+    };
+    const knownInvokes: Record<string, (args?: any) => unknown> = {
+      'plugin:event|listen': (args) => args?.handler ?? 0,
+      'plugin:event|unlisten': () => null,
+      'plugin:event|emit': () => null,
+      'plugin:window|get_all_windows': () => ['main', ...previewWindows],
+      'plugin:webview|create_webview_window': (args) => {
+        previewWindows.add(args?.label ?? 'preview-window');
+        return null;
+      },
+      'plugin:window|show': () => null,
+      'plugin:window|hide': () => null,
+      'plugin:window|set_focus': () => null,
+      check_pending_backups: () => [],
+      clear_backup: () => null,
+      save_backup: () => null,
+      load_meiryo_font: () => {
+        throw new Error('not available in e2e browser');
+      },
+    };
+
+    (window as any).__TAURI_INTERNALS__ = {
+      metadata: {
+        currentWindow: { label: 'main' },
+        currentWebview: { windowLabel: 'main', label: 'main' },
+      },
+      callbacks,
+      transformCallback: (callback: (payload: unknown) => void, once = false) => {
+        const id = callbackId++;
+        callbacks.set(id, (payload: unknown) => {
+          if (once) callbacks.delete(id);
+          callback(payload);
+        });
+        return id;
+      },
+      unregisterCallback: (id: number) => {
+        callbacks.delete(id);
+      },
+      runCallback: (id: number, payload: unknown) => {
+        callbacks.get(id)?.(payload);
+      },
+      convertFileSrc: (filePath: string) => `http://asset.localhost/${encodeURIComponent(filePath)}`,
+      invoke: async (cmd: string, args?: any) => {
+        const handler = knownInvokes[cmd];
+        if (!handler) throw new Error(`[e2e tauri mock] Unknown invoke: ${cmd}`);
+        invokeHistory.push({ cmd, args });
+        return handler(args);
+      },
+    };
+  });
+}
+
+async function getTauriInvokeHistory(page: import('@playwright/test').Page) {
+  return page.evaluate(() => (window as any).__TAURI_INVOKE_HISTORY__ ?? []) as Promise<Array<{ cmd: string; args?: unknown }>>;
+}
+
+async function loadFixtureDocument(page: import('@playwright/test').Page) {
+  await page.evaluate(async () => {
+    const { usePecoStore } = await import('/src/store/pecoStore.ts');
+    usePecoStore.getState().setDocument({
+      filePath: 'e2e-fixture.pdf',
+      fileName: 'e2e-fixture.pdf',
+      totalPages: 2,
+      metadata: {},
+      pages: new Map([
+        [0, {
+          width: 600,
+          height: 800,
+          rotation: 0,
+          textBlocks: [
+            {
+              id: 'block-1',
+              text: '最初のOCRテキスト',
+              bbox: { x: 80, y: 90, width: 160, height: 32 },
+              writingMode: 'horizontal',
+              order: 0,
+              isDirty: false,
+            },
+            {
+              id: 'block-2',
+              text: '二つ目のOCRテキスト',
+              bbox: { x: 80, y: 150, width: 180, height: 32 },
+              writingMode: 'horizontal',
+              order: 1,
+              isDirty: false,
+            },
+          ],
+          isTextExtracted: true,
+          isDirty: false,
+        }],
+        [1, {
+          width: 600,
+          height: 800,
+          rotation: 0,
+          textBlocks: [
+            {
+              id: 'block-3',
+              text: '2ページ目',
+              bbox: { x: 60, y: 80, width: 120, height: 30 },
+              writingMode: 'horizontal',
+              order: 0,
+              isDirty: false,
+            },
+          ],
+          isTextExtracted: true,
+          isDirty: false,
+        }],
+      ]),
+    });
+  });
+  await expect(page.locator('.ocr-card').first()).toBeVisible();
+}
+
 test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
 
   test.beforeEach(async ({ page }) => {
+    await installTauriMocks(page);
     // 開発サーバー上のアプリにアクセス
-    await page.goto('/');
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     // アプリのコンテナが表示されるまで待機
-    await expect(page.locator('.app-container')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.app-container')).toBeVisible({ timeout: 30000 });
   });
 
   test.describe('E-F: ファイル操作', () => {
     test('[E-F-01] 初期状態のツールバー確認', async ({ page }) => {
-      // 開くボタンが存在することを確認
-      const openButton = page.locator('button', { hasText: '開く' });
-      await expect(openButton).toBeVisible();
+      // ファイルメニューから開く導線が存在することを確認
+      const fileMenu = page.locator('button', { hasText: 'ファイル' });
+      await expect(fileMenu).toBeVisible();
+      await fileMenu.click();
+      await expect(page.locator('.menu-dropdown-item', { hasText: '開く' })).toBeVisible();
       
       // 未読み込み時のプレースホルダー確認
       await expect(page.locator('.empty-state')).toContainText('PDFファイルを [開く] から読み込んでください');
+
+      await expect.poll(async () => (await getTauriInvokeHistory(page)).map(({ cmd }) => cmd)).toContain('check_pending_backups');
+      await expect(page.evaluate(() => (window as any).__TAURI_INTERNALS__.invoke('__unknown_e2e_command__'))).rejects.toThrow(/Unknown invoke/);
     });
 
     test('[E-F-04] ダーティマークの表示確認', async ({ page }) => {
       // 実際には PDF を読み込む必要があるが、
       // 読み込み済みの状態で「未保存の変更あり」が表示されるかのロジックテストも兼ねる
       // ※E2Eでは初期状態の「なし」も確認
-      await expect(page.locator('.status-bar')).toContainText('0 / 0');
+      await expect(page.locator('.status-bar')).toContainText(/0\s*\/\s*0/);
     });
   });
 
   test.describe('E-C: キャンバス操作・編集', () => {
     test('[E-C-01] 描画モードの切り替え', async ({ page }) => {
+      await loadFixtureDocument(page);
       const addBtn = page.locator('button', { hasText: '追加' });
       await addBtn.click();
       
@@ -61,71 +191,53 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
     });
 
     test('[E-K-05] 矢印キーでのページ移動（サムネイルパネル）', async ({ page }) => {
+      await loadFixtureDocument(page);
       const thumbs = page.locator('.thumbnails-panel .scroll-content');
       await thumbs.focus();
       await page.keyboard.press('ArrowDown');
-      // 実際には 0 ページ目なので変化なしだが、イベントが走ることを確認
+      await expect(page.locator('.page-input')).toHaveValue('2');
+      await expect.poll(async () => page.evaluate(async () => {
+        const { usePecoStore } = await import('/src/store/pecoStore.ts');
+        return usePecoStore.getState().currentPageIndex;
+      })).toBe(1);
     });
   });
 
   test.describe('E-P: プレビューウィンドウ連携', () => {
     test('[E-P-01] プレビューボタンの動作確認', async ({ page }) => {
+      await loadFixtureDocument(page);
       const previewBtn = page.locator('button', { hasText: 'テキスト確認' });
       await expect(previewBtn).toBeVisible();
-      // クリックしてエラーが出ないことを確認
       await previewBtn.click();
+      await expect(previewBtn).toHaveClass(/active/);
+      await expect.poll(async () => (await getTauriInvokeHistory(page)).map(({ cmd }) => cmd)).toEqual(
+        expect.arrayContaining([
+          'plugin:window|get_all_windows',
+          'plugin:webview|create_webview_window',
+          'plugin:window|show',
+          'plugin:window|set_focus',
+        ]),
+      );
     });
   });
 
   test.describe('E-M: マリン監修・機能追加', () => {
     test('Ctrl+矢印キーでのカードナビゲーション（実装済み機能）', async ({ page }) => {
-      // OCRカードリストが空でない場合に Ctrl+ArrowDown で移動できるか
-      // ※初期状態は空なので、要素が存在しないことを確認
-      await expect(page.locator('.ocr-card')).toHaveCount(0);
+      await loadFixtureDocument(page);
+      await expect(page.locator('.ocr-card')).toHaveCount(2);
     });
   });
 
-  /**
-   * ------------------------------------------------------------------
-   * 宿題: 実 PDF を用いた E2E シナリオ (E2E-02 / E2E-05 / E2E-12)
-   * ------------------------------------------------------------------
-   * 現状、本プロジェクトの「PDFを開く」導線は `@tauri-apps/plugin-dialog`
-   * 経由の OS ネイティブダイアログに依存している。Playwright を
-   * Vite dev server (http://localhost:1420) に対して起動する現在の
-   * 構成では Tauri API 名前空間が存在せず、ファイル読込をシミュレート
-   * できない。
-   *
-   * これらを実行可能にするには以下いずれかの対応が必要:
-   *   1. `tauri-driver` + `webdriverio` を導入し Tauri アプリ本体に
-   *      対して E2E を実行する (公式推奨)。
-   *   2. テスト時限定で `window.__TAURI__` をモックし、
-   *      dialog.open() / fs.readFile() をスタブ化する
-   *      (vite の define/env で切替)。
-   *   3. dev ビルド限定でドロップインの `<input type="file">`
-   *      フォールバック導線を実装する。
-   *
-   * 上記いずれかが整備されるまで describe.skip() で宿題化し、
-   * 要件 (docs/TEST_REQUIREMENTS.md §Phase 4) とのトレーサビリティ
-   * を確保する。
-   *
-   * TODO(next-release): PDF fixture を test-scratch/ に配置し、
-   *   上記 1〜3 のいずれかで PDF 読み込み導線を E2E から叩けるように
-   *   なった段階で `describe.skip` → `describe` へ戻す。
-   */
-  test.describe.skip('E-PDF: 実 PDF を伴うシナリオ (Tauri driver 未整備のため skip)', () => {
+  test.describe('E-PDF: PDF 読み込み済み状態の主要シナリオ', () => {
     /**
      * E2E-02: PDF 読み込み
      * 期待結果: Canvas 描画 / ページ数表示 / サムネイル / OCR カード
      */
     test('[E2E-02] PDF 読み込み → Canvas/サムネイル/OCR カードが出現', async ({ page }) => {
-      // TODO: dialog.open() をスタブ化し、テスト用 PDF のパスを返す
-      // await mockTauriDialog(page, 'test-scratch/sample.pdf');
-
-      const openButton = page.locator('button', { hasText: '開く' });
-      await openButton.click();
+      await loadFixtureDocument(page);
 
       // (1) Canvas (PDF 本体レイヤー + オーバーレイ) が描画されること
-      await expect(page.locator('.canvas-wrapper canvas')).toHaveCount(2);
+      await expect(page.locator('.canvas-wrapper canvas')).toHaveCount(3);
 
       // (2) ステータスバーに "1 / N" 形式でページ数が表示されること
       await expect(page.locator('.status-bar')).toContainText(/\d+\s*\/\s*\d+/);
@@ -142,8 +254,7 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
      * 期待結果: 直前の編集が元に戻る
      */
     test('[E2E-05] Ctrl+Z で Undo 動作', async ({ page }) => {
-      // TODO: 上記同様 PDF をロード済みとする
-      // await loadFixturePdf(page, 'test-scratch/sample.pdf');
+      await loadFixtureDocument(page);
 
       const firstCard = page.locator('.ocr-card').first();
       await expect(firstCard).toBeVisible();
@@ -173,8 +284,7 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
      * 期待結果: マージ結果の 1 カード + テキスト結合
      */
     test('[E2E-12] OCR カード複数選択 → グループ化でマージ', async ({ page }) => {
-      // TODO: 上記同様 PDF をロード済みとする
-      // await loadFixturePdf(page, 'test-scratch/sample.pdf');
+      await loadFixtureDocument(page);
 
       const cards = page.locator('.ocr-card');
       await expect(cards.nth(1)).toBeVisible();
@@ -193,6 +303,10 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
 
       // カード総数が 1 減ること（2 枚 → 1 枚にマージ）
       await expect(cards).toHaveCount(countBefore - 1);
+
+      const mergedText = await cards.first().locator('[contenteditable="true"]').textContent();
+      expect(mergedText).toContain('最初のOCRテキスト');
+      expect(mergedText).toContain('二つ目のOCRテキスト');
 
       // dirty 状態になっていること
       await expect(page.locator('.status-bar')).toContainText(/未保存/);

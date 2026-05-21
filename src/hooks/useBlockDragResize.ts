@@ -265,6 +265,18 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     return true;
   };
 
+  const hasBboxChanges = (pageData: PageData, preview: Map<string, BoundingBox>): boolean => {
+    return pageData.textBlocks.some((b) => {
+      const bbox = preview.get(b.id);
+      return !!bbox && (
+        bbox.x !== b.bbox.x ||
+        bbox.y !== b.bbox.y ||
+        bbox.width !== b.bbox.width ||
+        bbox.height !== b.bbox.height
+      );
+    });
+  };
+
   const finishDragResize = () => {
     if (draggedId && dragMode !== "none") {
       // ドロップ位置を確実に反映するため、保留中の RAF をキャンセル。
@@ -289,7 +301,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       lastAppliedDragPosRef.current = null;
 
       const pageData = getPageData();
-      if (pageData && finalPreview) {
+      if (pageData && finalPreview && hasBboxChanges(pageData, finalPreview)) {
         // ドラッグ中に動いた BB だけ新オブジェクトに差し替える。
         // 動いていない BB は元参照のまま (React の === 比較で skip 可能)。
         const newBlocks = pageData.textBlocks.map((b) => {

@@ -148,7 +148,6 @@ function setupPdfLibMock() {
     drawImage:     m.drawImage,
     pushOperators: m.pushOperators,
     node: {
-      get:      vi.fn().mockReturnValue(null),
       Contents: vi.fn().mockReturnValue(null),
       set:      vi.fn(),
       // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。
@@ -502,9 +501,9 @@ describe('REGRESSION: drawText スキップがあっても text/bbox ペアが�
     const doc = makeDoc(new Map([[0, makePage([b0, b1, b2, b3], 0, true)]]))
     await savePDF(new Uint8Array(10), doc)
 
-    // ---- 前提確認: drawText は空文字を除いた 3 件だけ呼ばれている ----
+    // ---- 前提確認: drawText は空文字を除いた 3 件と、各ブロック末尾の invisible space が呼ばれている ----
     const drawTextCalls = m.drawText.mock.calls.map((c: any[]) => c[0])
-    expect(drawTextCalls).toEqual(['あ', 'い', 'う'])
+    expect(drawTextCalls).toEqual(['あ', ' ', 'い', ' ', 'う', ' '])
 
     // ---- 前提確認: bboxMeta には 4 件（空文字含む）すべて保存されている ----
     const bboxMeta = JSON.parse(m.capturedBBoxJson.value!)

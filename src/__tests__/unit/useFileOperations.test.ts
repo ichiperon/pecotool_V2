@@ -39,6 +39,8 @@ vi.mock('../../utils/pdfLoader', () => ({
   }),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  clearCachedPages: vi.fn().mockResolvedValue(undefined),
+  destroySharedPdfProxy: vi.fn(),
   getSharedPdfProxy: vi.fn().mockResolvedValue({}),
   loadPage: vi.fn().mockResolvedValue({ textBlocks: [], imageBlocks: [], isDirty: false }),
   loadPecoToolBBoxMeta: vi.fn().mockResolvedValue(null),
@@ -57,7 +59,7 @@ vi.mock('../../hooks/useFontLoader', () => ({
 // pecoStore は本物を使うが、必要最小限の状態だけ。
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
 import { useFileOperations, __originalBytesCacheForTest, isWriteAccessError } from '../../hooks/useFileOperations';
-import { loadPDF } from '../../utils/pdfLoader';
+import { getAllTemporaryPageData, loadPDF, loadPage } from '../../utils/pdfLoader';
 import { savePDF } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
 import { invoke } from '@tauri-apps/api/core';
@@ -324,6 +326,47 @@ describe('useFileOperations originalBytes module-level cache (issue #29)', () =>
     expect(__originalBytesCacheForTest.size()).toBe(1);
     expect(__originalBytesCacheForTest.get('/old.pdf')).toBeUndefined();
     expect(__originalBytesCacheForTest.get('/new.pdf')).toBeDefined();
+  });
+});
+
+describe('useFileOperations dirty-only save (issue #123)', () => {
+  it('#123: dirty ページが 0 件なら全ページを loadPage して dirty 化しない', async () => {
+    const cleanPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [],
+      imageBlocks: [],
+      isDirty: false,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/clean.pdf',
+      fileName: 'clean.pdf',
+      totalPages: 2,
+      metadata: {},
+      pages: new Map([[0, cleanPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: false });
+    __originalBytesCacheForTest.set('/clean.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    (getAllTemporaryPageData as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Map());
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockResolvedValue(undefined);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    expect(loadPage).not.toHaveBeenCalled();
+    expect(savePDF).toHaveBeenCalled();
+    const [, savedDoc] = (savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      unknown,
+      PecoDocument,
+    ];
+    expect(savedDoc.pages.size).toBe(0);
   });
 });
 

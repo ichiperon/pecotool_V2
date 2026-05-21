@@ -84,9 +84,6 @@ import {
   clearTemporaryChanges,
   clearCachedPages,
   destroySharedPdfProxy,
-  getSharedPdfProxy,
-  loadPage,
-  loadPecoToolBBoxMeta,
 } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import type { SavePdfSource, SkippedPdfTextChar } from '../utils/pdfWorkerTypes';
@@ -459,16 +456,6 @@ export function useFileOperations(
     const dirtyOnlyPages = new Map<number, PageData>(
       [...mergedPages.entries()].filter(([, p]) => p.isDirty)
     );
-    if (dirtyOnlyPages.size === 0) {
-      await withStep('loadRepairPages', 300_000, async () => {
-        const pdf = await getSharedPdfProxy(sourceFilePath);
-        const bboxMeta = await loadPecoToolBBoxMeta(pdf).catch(() => null);
-        for (let pageIndex = 0; pageIndex < document.totalPages; pageIndex++) {
-          const pageData = await loadPage(pdf, pageIndex, sourceFilePath, bboxMeta, document.mtime);
-          dirtyOnlyPages.set(pageIndex, { ...pageData, isDirty: true });
-        }
-      });
-    }
     const savedPageSnapshots = new Map<number, PageData>();
     for (const [idx] of dirtyOnlyPages.entries()) {
       const snapshotPage = document.pages.get(idx);
