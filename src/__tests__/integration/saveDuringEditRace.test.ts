@@ -1,5 +1,5 @@
 /**
- * C1: 保存中に別ページ編集 → resetDirty race の再現テスト。
+ * C1: 保存中に別ページ編集 → resetDirty race の回帰テスト (issue #115 / #119)。
  *
  * 背景:
  *   useFileOperations.handleSave は以下の順序で動く:
@@ -8,10 +8,14 @@
  *     3. writeFileChunked (長い、数秒〜)
  *     4. resetDirty(savedPageSnapshots) — save に載ったページだけ clean にする
  *
- *   ステップ 2〜3 の間 (数秒〜数十秒) にユーザーが別ページを編集すると、
- *   そのページは save スナップショットに含まれないが store 側で isDirty=true になる。
- *   ステップ 4 で「スナップショット外の新編集」の isDirty が残らないと、
- *   次の save で dirty フィルタに載らず、永久に保存されない可能性がある。
+ *   ステップ 2〜3 の間 (数秒〜数十秒) にユーザーがページを編集すると、
+ *   その編集は save スナップショットに含まれないが store 側で isDirty=true になる。
+ *
+ *   resetDirty は保存スナップショットに含まれたページの「PageData オブジェクト参照」
+ *   の Map を受け取り、保存後も live ページが同一参照のままのページだけ isDirty を
+ *   下ろす。保存中に編集されたページ (別ページでも同一ページでも) は updatePageData
+ *   が新しいオブジェクトに差し替えるため参照が一致せず、その新編集の dirty フラグは
+ *   維持される → 次回 save に正しく載る。
  *
  * 本テストは useFileOperations と pecoStore の両方でこの race を再現し、
  * save スナップショット後の新編集が dirty のまま残ることを確認する。
@@ -91,7 +95,7 @@ vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
 
 import { usePecoStore } from '../../store/pecoStore';
 import { useFileOperations } from '../../hooks/useFileOperations';
-import type { PecoDocument, TextBlock } from '../../types';
+import type { PageData, PecoDocument, TextBlock } from '../../types';
 
 function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
   return {
@@ -105,6 +109,18 @@ function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
     isDirty: false,
     ...overrides,
   };
+}
+
+/**
+ * save スナップショット相当の Map<pageIndex, PageData> を作る。
+ * useFileOperations._executeSave が savedPageSnapshots を組み立てるのと同じく、
+ * **その時点の live ページオブジェクト参照** をそのまま値に入れる。
+ */
+function snapshotDirtyPages(): Map<number, PageData> {
+  return new Map(
+    [...usePecoStore.getState().document!.pages.entries()]
+      .filter(([, p]) => p.isDirty)
+  );
 }
 
 function deferred<T>() {
@@ -159,7 +175,7 @@ beforeEach(() => {
   } as any);
 });
 
-describe('C1: save-during-edit race (resetDirty が新編集を巻き込まない)', () => {
+describe('C1: save-during-edit race (resetDirty が新編集を巻き込まない / issue #115 / #119)', () => {
   it('handleSave 中に別ページ編集 → 1回目スナップショット外の dirty は残る', async () => {
     const doc: PecoDocument = {
       filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
@@ -252,11 +268,8 @@ describe('C1: save-during-edit race (resetDirty が新編集を巻き込まな�
     };
     usePecoStore.getState().setDocument(doc);
 
-    // --- save スナップショット相当 (useFileOperations の dirtyOnlyPages と同等) ---
-    const snapshotDirty = new Map(
-      [...usePecoStore.getState().document!.pages.entries()]
-      .filter(([, p]) => p.isDirty)
-    );
+    // --- save スナップショット相当 (useFileOperations の savedPageSnapshots と同等) ---
+    const snapshotDirty = snapshotDirtyPages();
     expect([...snapshotDirty.keys()]).toEqual([0]); // save に載るのは page 0 のみ
 
     // --- ここから save 実行中 (savePDF + writeFile で数秒掛かる想定) ---
@@ -271,48 +284,131 @@ describe('C1: save-during-edit race (resetDirty が新編集を巻き込まな�
     usePecoStore.getState().resetDirty(snapshotDirty);
 
     // --- 検証 ---
+    const p0 = usePecoStore.getState().document!.pages.get(0)!;
     const p1 = usePecoStore.getState().document!.pages.get(1)!;
-    // データ自体は保持されている (text は新編集の値)
+    // 保存に載った page 0 は dirty が下りる (live 参照がスナップショットと同一)
+    expect(p0.isDirty).toBe(false);
+    // page 1 のデータは保持され、isDirty も **維持される** (race 修正の核心)
     expect(p1.textBlocks[0].text).toBe('P1_EDITED_DURING_SAVE');
-    // スナップショット外の新編集なので dirty のまま残る
     expect(p1.isDirty).toBe(true);
+    // 未保存ページが残っているのでドキュメントレベル isDirty も true のまま
     expect(usePecoStore.getState().isDirty).toBe(true);
 
-    // 次回の save スナップショットに載る
+    // 次回の save スナップショットに page 1 が載る = 新編集が確実に保存される
     const nextSnapshot = [...usePecoStore.getState().document!.pages.entries()]
       .filter(([, p]) => p.isDirty)
       .map(([idx]) => idx);
     expect(nextSnapshot).toEqual([1]);
   });
 
+  /**
+   * issue #119: 保存中に「保存対象と同じページ」を再編集したケース。
+   *
+   * savedPageSnapshots はクリア対象を「ページ index」ではなく「PageData の
+   * オブジェクト参照」で判定する。保存中に同じ page 0 を再編集すると、
+   * updatePageData が page 0 を新しいオブジェクトに差し替えるため、保存後の
+   * live 参照はスナップショット時の参照と一致しない。
+   * → resetDirty は page 0 の isDirty を下ろさず、2 回目の編集が dirty のまま残る。
+   * → 次回 save の dirty フィルタに page 0 が正しく載る。
+   */
   it('save 中に同じページを再編集 → スナップショット後の dirty フラグは残る', () => {
     const doc: PecoDocument = {
       filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 1, metadata: {},
       pages: new Map([
-        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0-a', text: 'P0' })], isDirty: true, thumbnail: null }],
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0-a', text: 'EDIT_1' })], isDirty: true, thumbnail: null }],
       ]),
     };
     usePecoStore.getState().setDocument(doc);
 
-    const snapshotDirty = new Map(
-      [...usePecoStore.getState().document!.pages.entries()]
-        .filter(([, p]) => p.isDirty)
-    );
+    // --- save スナップショット相当: dirty な page 0 を保存対象として確定 ---
+    const snapshotDirty = snapshotDirtyPages();
+    expect([...snapshotDirty.keys()]).toEqual([0]);
 
+    // --- save 実行中 (savePDF + writeFile に数秒) に、同じ page 0 をユーザーが再編集 ---
     usePecoStore.getState().updatePageData(0, {
-      textBlocks: [makeBlock({ id: 'p0-a', text: 'P0_EDITED_DURING_SAVE' })],
+      textBlocks: [makeBlock({ id: 'p0-a', text: 'EDIT_2_DURING_SAVE' })],
       isDirty: true,
     });
+    expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text)
+      .toBe('EDIT_2_DURING_SAVE');
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true);
 
+    // --- save 完了直後の resetDirty(snapshotDirty) ---
+    //   page 0 は再編集で参照が変わっているため、isDirty は下りない。
     usePecoStore.getState().resetDirty(snapshotDirty);
 
     const p0 = usePecoStore.getState().document!.pages.get(0)!;
-    expect(p0.textBlocks[0].text).toBe('P0_EDITED_DURING_SAVE');
+    // テキストは 2 回目の編集値、dirty も **維持される** (issue #119 の核心)。
+    expect(p0.textBlocks[0].text).toBe('EDIT_2_DURING_SAVE');
     expect(p0.isDirty).toBe(true);
+    expect(usePecoStore.getState().isDirty).toBe(true);
+
+    // 次回 save の dirty スナップショットに page 0 が載る = 2 回目の編集が保存される。
+    const nextSnapshot = [...usePecoStore.getState().document!.pages.entries()]
+      .filter(([, p]) => p.isDirty)
+      .map(([idx]) => idx);
+    expect(nextSnapshot).toEqual([0]);
+  });
+
+  it('保存に載った全ページが clean になり、残 dirty が無ければ document.isDirty=false', () => {
+    const doc: PecoDocument = {
+      filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'x', text: 'A' })], isDirty: true, thumbnail: null }],
+        [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock({ id: 'y', text: 'B' })], isDirty: true, thumbnail: null }],
+      ]),
+    };
+    usePecoStore.getState().setDocument(doc);
+
+    // 両ページが保存に載り、保存中の編集なし → 両方 clean になる
+    usePecoStore.getState().resetDirty(snapshotDirtyPages());
+
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+    expect(usePecoStore.getState().document!.pages.get(1)!.isDirty).toBe(false);
+    // 残 dirty なし → document.isDirty も false
+    expect(usePecoStore.getState().isDirty).toBe(false);
+  });
+
+  it('スナップショットに含まれないページの dirty は触らない', () => {
+    // page 0 dirty, page 1 dirty。スナップショットには page 0 だけ入れる。
+    const doc: PecoDocument = {
+      filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock()], isDirty: true, thumbnail: null }],
+        [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock()], isDirty: true, thumbnail: null }],
+      ]),
+    };
+    usePecoStore.getState().setDocument(doc);
+
+    const pages = usePecoStore.getState().document!.pages;
+    const partialSnapshot = new Map<number, PageData>([[0, pages.get(0)!]]);
+    usePecoStore.getState().resetDirty(partialSnapshot);
+
+    // page 0 はクリア、page 1 はスナップショット外なので維持
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+    expect(usePecoStore.getState().document!.pages.get(1)!.isDirty).toBe(true);
     expect(usePecoStore.getState().isDirty).toBe(true);
   });
 
-  it('【参考】通常の save (save 中に編集なし) では dirty フラグを wipe して正解', () => {
+  it('【後方互換】resetDirty() を引数なしで呼ぶと従来通り全ページを wipe する', () => {
+    const doc: PecoDocument = {
+      filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock()], isDirty: true, thumbnail: null }],
+        [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock()], isDirty: true, thumbnail: null }],
+      ]),
+    };
+    usePecoStore.getState().setDocument(doc);
+
+    // 引数なし → 全クリア (既存呼び出し元は無改修で動く)
+    usePecoStore.getState().resetDirty();
+
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+    expect(usePecoStore.getState().document!.pages.get(1)!.isDirty).toBe(false);
+    expect(usePecoStore.getState().isDirty).toBe(false);
+  });
+
+  it('【参考】通常の save (save 中に編集なし) では保存ページの dirty が落ちる', () => {
     const doc: PecoDocument = {
       filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 1, metadata: {},
       pages: new Map([
@@ -321,12 +417,8 @@ describe('C1: save-during-edit race (resetDirty が新編集を巻き込まな�
     };
     usePecoStore.getState().setDocument(doc);
 
-    // save 中に編集なし
-    const snapshotDirty = new Map(
-      [...usePecoStore.getState().document!.pages.entries()]
-        .filter(([, p]) => p.isDirty)
-    );
-    usePecoStore.getState().resetDirty(snapshotDirty);
+    // save 中に編集なし → 保存に載った page 0 の dirty が落ちる
+    usePecoStore.getState().resetDirty(snapshotDirtyPages());
     const p0 = usePecoStore.getState().document!.pages.get(0)!;
     expect(p0.isDirty).toBe(false);
     // store 全体の isDirty も false

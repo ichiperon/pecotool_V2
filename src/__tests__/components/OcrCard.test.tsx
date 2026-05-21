@@ -390,14 +390,14 @@ describe('OcrCard', () => {
     })
   })
 
-  // ── C-OC-18: anchor card のみ scrollIntoView (issue #70) ──────
-  describe('C-OC-18: scrollIntoView は anchor (lastSelectedId) のみ', () => {
-    // 前提: 複数選択時に全カードが scrollIntoView({behavior:'smooth'}) を同時発火
-    // するとブラウザが N 個の smooth-scroll を並走させジャンクが起きる。
-    // 修正後は lastSelectedId と一致するカードだけが scroll を呼び、behavior:'auto'
-    // で Virtuoso 等の他 scroll と競合しないようにする。
+  // ── C-OC-18: OcrCard はもう自前で scrollIntoView しない (issue #116) ──
+  describe('C-OC-18: scroll はエディタ側 Virtuoso が担当 / OcrCard は自前 scroll しない', () => {
+    // 旧実装: anchor カードが per-card useEffect で cardRef.scrollIntoView を呼んでいた。
+    // しかし react-virtuoso は画面外カードをアンマウントするため、未マウントのカードへは
+    // 選択スクロールが効かなかった。issue #116 で scroll 責務を OcrEditor の
+    // virtuosoRef.scrollIntoView({index}) に移し、OcrCard の dead effect を削除した。
 
-    it('C-OC-18-01: 単一選択 + 自身が anchor → scrollIntoView({behavior:"auto"}) が 1 回呼ばれる', () => {
+    it('C-OC-18-01: 単一選択 + 自身が anchor でも OcrCard は scrollIntoView を呼ばない', () => {
       const block = makeBlock({ id: 'b1' })
       const page = makePage([block])
       const doc = makeDoc(new Map([[0, page]]))
@@ -413,8 +413,8 @@ describe('OcrCard', () => {
 
       render(<OcrCard block={block} pageIndex={0} />)
 
-      expect(spy).toHaveBeenCalledTimes(1)
-      expect(spy.mock.calls[0][0]).toEqual({ behavior: 'auto', block: 'nearest' })
+      // scroll 責務はエディタ側へ移管済み。OcrCard 単体では一切 scroll しない。
+      expect(spy).not.toHaveBeenCalled()
 
       HTMLElement.prototype.scrollIntoView = orig
     })
@@ -423,7 +423,6 @@ describe('OcrCard', () => {
       const block = makeBlock({ id: 'b1' })
       const page = makePage([block])
       const doc = makeDoc(new Map([[0, page]]))
-      // b1 は選択状態だが anchor は b5 (別カード)。本カードは scroll しない
       usePecoStore.setState({
         document: doc,
         selectedIds: new Set(['b1', 'b2', 'b3', 'b4', 'b5']),
@@ -460,6 +459,202 @@ describe('OcrCard', () => {
       expect(spy).not.toHaveBeenCalled()
 
       HTMLElement.prototype.scrollIntoView = orig
+    })
+  })
+
+  // ── C-OC-19: アンマウント時コミット (issue #115) ────────────────
+  describe('C-OC-19: アンマウント時にも編集が store にコミットされる', () => {
+    // 前提: react-virtuoso が画面外カードをアンマウントする際 React 19 は onBlur を
+    // 発火しない。blur を経ずにカードが消えても onInput でミラーした編集内容を
+    // アンマウント時 cleanup が store にコミットして編集消失を防ぐ。
+
+    it('C-OC-19-01: 入力 → blur せずアンマウント → 編集が store に保存される', () => {
+      const block = makeBlock({ id: 'block-1', text: '元のテキスト' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const { container, unmount } = render(<OcrCard block={block} pageIndex={0} />)
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+
+      // ユーザー入力を再現: textContent を変更し onInput を発火（ミラー ref に同期）
+      content.textContent = '編集後テキスト'
+      fireEvent.input(content)
+
+      // blur を発火させずにそのままアンマウント（画面外スクロール相当）
+      act(() => {
+        unmount()
+      })
+
+      const updated = usePecoStore.getState().document?.pages.get(0)?.textBlocks.find(b => b.id === 'block-1')
+      expect(updated?.text).toBe('編集後テキスト')
+      expect(updated?.isDirty).toBe(true)
+    })
+
+    it('C-OC-19-02: 入力なしでアンマウント → store は更新されない', () => {
+      const block = makeBlock({ id: 'block-1', text: '元のテキスト' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const updateSpy = vi.spyOn(usePecoStore.getState(), 'updatePageData')
+      // store action は identity 安定で spy が他テストに残留しうるため、
+      // この時点までの呼び出し履歴をクリアしてアンマウント以降のみを観測する。
+      updateSpy.mockClear()
+      const { unmount } = render(<OcrCard block={block} pageIndex={0} />)
+
+      act(() => {
+        unmount()
+      })
+
+      expect(updateSpy).not.toHaveBeenCalled()
+      updateSpy.mockRestore()
+    })
+
+    it('C-OC-19-03: blur で既にコミット済みなら アンマウント時に二重コミットしない', () => {
+      const block = makeBlock({ id: 'block-1', text: '元のテキスト' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const { container, unmount } = render(<OcrCard block={block} pageIndex={0} />)
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+
+      content.textContent = 'コミット済み'
+      fireEvent.input(content)
+      fireEvent.blur(content)
+
+      // blur 後に store が新値へ更新されている
+      expect(
+        usePecoStore.getState().document?.pages.get(0)?.textBlocks[0].text
+      ).toBe('コミット済み')
+
+      // blur 後の updatePageData 呼び出しを監視: アンマウントで追加コミットされないこと。
+      // store action は identity 安定で spy が他テストに残留しうるため mockClear で
+      // blur 時点までの履歴を消し、アンマウント以降のみを観測する。
+      const updateSpy = vi.spyOn(usePecoStore.getState(), 'updatePageData')
+      updateSpy.mockClear()
+      act(() => {
+        unmount()
+      })
+      expect(updateSpy).not.toHaveBeenCalled()
+      updateSpy.mockRestore()
+    })
+
+    it('C-OC-19-04: IME 変換確定後 (compositionEnd) の入力もアンマウント時に保存される', () => {
+      const block = makeBlock({ id: 'block-1', text: 'あいう' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const { container, unmount } = render(<OcrCard block={block} pageIndex={0} />)
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+
+      // IME 変換 → 確定: compositionEnd 後の textContent がミラーされる
+      fireEvent.compositionStart(content)
+      content.textContent = 'あいうえお'
+      fireEvent.compositionEnd(content)
+
+      act(() => {
+        unmount()
+      })
+
+      const updated = usePecoStore.getState().document?.pages.get(0)?.textBlocks.find(b => b.id === 'block-1')
+      expect(updated?.text).toBe('あいうえお')
+      expect(updated?.isDirty).toBe(true)
+    })
+
+    it('C-OC-19-05: フォーカスを保持したまま (blur せず) アンマウント → 編集が store に保存される', () => {
+      // issue #115 の本来のデータ消失シナリオ。C-OC-19-01〜04 は blur 後または
+      // フォーカスなしでアンマウントしていたが、react-virtuoso が画面外カードを
+      // アンマウントする実際の状況では「contentEditable に focus が当たったまま」
+      // カードが消える。React 19 はこのとき onBlur を発火しないため、blur 待ちの
+      // commit は走らず、アンマウント cleanup だけが編集を救える。
+      const block = makeBlock({ id: 'block-1', text: '元のテキスト' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const { container, unmount } = render(<OcrCard block={block} pageIndex={0} />)
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+
+      // ユーザーがカードを編集中: 実際に focus を当ててから入力する。
+      content.focus()
+      expect(document.activeElement).toBe(content)
+
+      // キー入力を再現: textContent を変更し onInput を発火 (ミラー ref に同期)。
+      content.textContent = '編集中テキスト'
+      fireEvent.input(content)
+
+      // blur は一切発火させない。focus が当たったままアンマウント (= 画面外スクロール)。
+      expect(document.activeElement).toBe(content)
+      act(() => {
+        unmount()
+      })
+
+      // アンマウント cleanup が pendingTextRef を store にコミットしている。
+      const updated = usePecoStore.getState().document?.pages.get(0)?.textBlocks.find(b => b.id === 'block-1')
+      expect(updated?.text).toBe('編集中テキスト')
+      expect(updated?.isDirty).toBe(true)
+    })
+
+    it('C-OC-19-06: フォーカス保持 + 複数回入力 → アンマウント時に最後の入力値が保存される', () => {
+      // 連続打鍵を再現: onInput が複数回走った後、最後の textContent が
+      // pendingTextRef にミラーされ、フォーカス保持アンマウントでもそれが保存される。
+      const block = makeBlock({ id: 'block-1', text: 'start' })
+      const page = makePage([block])
+      const doc = makeDoc(new Map([[0, page]]))
+      usePecoStore.setState({ document: doc })
+
+      const { container, unmount } = render(<OcrCard block={block} pageIndex={0} />)
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+
+      content.focus()
+      // 1 文字ずつ打鍵する想定 (各 keystroke で onInput)。
+      content.textContent = 'start1'
+      fireEvent.input(content)
+      content.textContent = 'start12'
+      fireEvent.input(content)
+      content.textContent = 'start123'
+      fireEvent.input(content)
+
+      // focus 保持のままアンマウント。
+      expect(document.activeElement).toBe(content)
+      act(() => {
+        unmount()
+      })
+
+      const updated = usePecoStore.getState().document?.pages.get(0)?.textBlocks.find(b => b.id === 'block-1')
+      // 最後の入力値が保存されていること。
+      expect(updated?.text).toBe('start123')
+      expect(updated?.isDirty).toBe(true)
+    })
+  })
+
+  // ── C-OC-20: data-block-id 属性 (issue #117) ───────────────────
+  describe('C-OC-20: data-block-id 属性がカード root に付与される', () => {
+    // 前提: App.tsx の Find & Replace 前処理は編集中の contentEditable から
+    // closest('[data-block-id]') で対象ブロック id を引く。属性が無いと
+    // skipBlockIds が常に空になり、編集中ブロックの誤置換が起きる。
+
+    it('C-OC-20-01: root .ocr-card に data-block-id=block.id が付く', () => {
+      const block = makeBlock({ id: 'block-xyz' })
+      const { container } = render(<OcrCard block={block} pageIndex={0} />)
+
+      const card = container.querySelector('.ocr-card') as HTMLElement
+      expect(card.getAttribute('data-block-id')).toBe('block-xyz')
+    })
+
+    it('C-OC-20-02: contentEditable から closest("[data-block-id]") で id が解決できる', () => {
+      const block = makeBlock({ id: 'block-xyz' })
+      const { container } = render(<OcrCard block={block} pageIndex={0} />)
+
+      // App.tsx と同じ経路: 編集中要素 = .ocr-card-content から closest で辿る
+      const content = container.querySelector('.ocr-card-content') as HTMLElement
+      const resolved = content
+        .closest('[data-block-id]')
+        ?.getAttribute('data-block-id')
+      expect(resolved).toBe('block-xyz')
     })
   })
 

@@ -77,6 +77,7 @@ export function isWriteAccessError(message: string): boolean {
     /os error (32|33)\b/.test(lower)
   );
 }
+
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import {
   loadPDF,
@@ -202,16 +203,28 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
 interface SaveResult {
   size: number;
   skippedChars: SkippedPdfTextChar[];
+  /**
+   * issue #115 / #119: 今回の保存スナップショットに含まれたページの
+   * pageIndex → PageData オブジェクト参照の Map。保存後の resetDirty に渡すと、
+   * 保存中に編集された (= オブジェクト参照が変わった) ページの isDirty を
+   * 巻き込んでクリアしないようにできる。
+   */
   savedPageSnapshots: Map<number, PageData>;
 }
 
 function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
+  // issue #115: どの文字が何回除外されたかを具体的に示す。
+  // 印字可能文字は実体を、制御文字など不可視のものはコードポイントのみを表示し、
+  // それぞれ除外回数 (count) を括弧で添える。
+  const distinct = skippedChars.length;
+  const totalCount = skippedChars.reduce((sum, item) => sum + item.count, 0);
   const sample = skippedChars.slice(0, 8).map((item) => {
-    const visible = item.char >= ' ' && item.char !== '\u007f' ? `${item.char} ` : '';
-    return `${visible}${item.codePoint}`;
+    const isVisible = item.char >= ' ' && item.char.codePointAt(0) !== 0x7f;
+    const label = isVisible ? `「${item.char}」(${item.codePoint})` : item.codePoint;
+    return `${label}×${item.count}`;
   }).join('、');
-  const suffix = skippedChars.length > 8 ? ' ほか' : '';
-  return `PDFテキスト層に埋め込めない文字を除外しました: ${sample}${suffix}`;
+  const suffix = distinct > 8 ? ` ほか${distinct - 8}種` : '';
+  return `PDFテキスト層に埋め込めない文字を計${totalCount}個除外しました: ${sample}${suffix}`;
 }
 
 function formatSaveToast(prefix: string, size: number, skippedChars: SkippedPdfTextChar[]): string {
@@ -489,17 +502,34 @@ export function useFileOperations(
     await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
     await withStep('clearPageCache', 10_000, () => clearCachedPages(writePath))
       .catch((e) => { console.warn('[save] clearPageCache failed (ignored):', e); });
+    // replace_pdf_file でディスク上の PDF バイト列が差し替わったため、それを開いていた
+    // pdfjs の共有 proxy / bitmap キャッシュ / ページ proxy キャッシュは全て stale。
+    // destroySharedPdfProxy はこれら 3 つを破棄するが、これだけでは React 層が
+    // 再 render しないため、保存前にレンダリング済みのページ画像はそのまま固着し、
+    // 以降の zoom 変更で再ラスタライズされない (issue #118)。
     destroySharedPdfProxy();
     const liveDoc = usePecoStore.getState().document;
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
     }
+    // issue #118: documentEpoch を +1 して usePageNavigation / usePdfRendering に
+    // 「pdfjs proxy を取り直して現在ページ画像を再 render せよ」と通知する。
+    // setDocument と違い textBlocks / BB / dirty / undo・redo / currentPageIndex /
+    // zoom は一切変えないため、編集内容・スクロール位置・ズーム倍率は保持される。
+    // 別名保存 (writePath が新パス) は呼び出し側で setDocumentFilePath が filePath を
+    // 変えることでも reload が走るが、上書き保存は filePath が不変なので epoch bump が
+    // 唯一の再 render トリガーになる。
+    usePecoStore.getState().bumpDocumentEpoch();
     // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
     // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
     setOriginalBytesCache(writePath, savedBytes);
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
     await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
+    // issue #115 / #119: 保存スナップショットに載った各ページの PageData
+    // オブジェクト参照 (savedPageSnapshots) を返す。呼び出し側は保存後の
+    // resetDirty にこれを渡し、保存中に編集された (= 参照が変わった) ページの
+    // dirty を巻き込まないようにする。
     return { size: savedBytes.length, skippedChars, savedPageSnapshots };
   };
 
@@ -515,6 +545,11 @@ export function useFileOperations(
     // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
     console.log('[save] handleSave invoked');
     perf.mark('ui.save');
+    // issue #115: store スナップショット前にフォーカス中の OcrCard の未コミット
+    // 編集を store へ確定させる。OcrCard のテキスト編集は再レンダリング抑制のため
+    // blur-commit 設計になっており、Ctrl+S 時にフォーカス中だと最新編集が store に
+    // 無い。flushActiveOcrCardText は focus 中の .ocr-card-content を直接読んで
+    // 同期 updatePageData するため、直後の _executeSave スナップショットに載る。
     flushActiveOcrCardText();
     const { document } = usePecoStore.getState();
     if (!document) {
@@ -533,6 +568,9 @@ export function useFileOperations(
     try {
       const result = await _executeSave();
       if (result !== null) {
+        // issue #115 / #119: 保存スナップショットと同一参照のページだけ dirty を
+        // 下ろす。保存中に編集されたページは参照が変わり一致しないため isDirty が
+        // 保持され、次回保存の dirty フィルタに正しく載る。
         resetDirty(result.savedPageSnapshots);
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
@@ -593,6 +631,8 @@ export function useFileOperations(
             }
             const prevPath = currentDoc.filePath;
             setDocumentFilePath(path);
+            // issue #115 / #119: 別名保存でも保存スナップショットと同一参照の
+            // ページだけ dirty を下ろす。
             resetDirty(result.savedPageSnapshots);
             showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
             addToRecent(path);

@@ -14,7 +14,8 @@
  *  - unmount 後の bboxMeta resolve で追加 loadPage が発火しないこと (既存挙動維持)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { act, renderHook, waitFor, cleanup } from '@testing-library/react'
+import { renderHook, waitFor, cleanup, act } from '@testing-library/react'
+import type React from 'react'
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 
@@ -59,6 +60,7 @@ beforeEach(() => {
   loadPageMock.mockReset()
   loadPecoToolBBoxMetaMock.mockReset()
 
+  usePecoStore.setState(usePecoStore.getInitialState(), true)
   // store をクリーンに
   usePecoStore.setState({
     document: null,
@@ -312,6 +314,197 @@ describe('S-01-06 (#99): loadPage 呼び出し時点で bboxMetaRef が解決済
   })
 })
 
+// ─────────────────────────────────────────────────────────────
+// ページ番号入力 (handlePageInputCommit / handlePageInputKeyDown)。
+// 1-based 入力 → 0-based index への変換と、範囲外/非数値の拒否は
+// 「存在しないページへ飛んでクラッシュ」を防ぐ境界ロジック。未検証だった。
+// ─────────────────────────────────────────────────────────────
+describe('usePageNavigation: ページ番号入力のコミット (handlePageInputCommit)', () => {
+  /**
+   * setCurrentPage を spy に差し替えてから hook を mount する。
+   * usePageNavigation は usePecoStore(s => s.setCurrentPage) で render 時に
+   * 取得するため、spy は renderHook より前に store へ入れておく必要がある。
+   */
+  function renderNav(totalPages: number) {
+    const setCurrentPageSpy = vi.fn()
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages,
+      metadata: {},
+      // currentPage は width>0 の実ページにして loadCurrentPage を発火させない
+      pages: new Map<number, PageData>([[0, makePage(0, false, 100)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({
+      document: doc,
+      currentPageIndex: 0,
+      setCurrentPage: setCurrentPageSpy,
+    } as any)
+    getSharedPdfProxyMock.mockResolvedValue({ numPages: totalPages })
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+    loadPecoToolBBoxMetaMock.mockResolvedValue({})
+    loadPageMock.mockImplementation((_pdf: unknown, idx: number) => Promise.resolve(makePage(idx)))
+
+    const hook = renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast: vi.fn(),
+        triggerThumbnailLoad: vi.fn(),
+      })
+    )
+    return { ...hook, setCurrentPageSpy }
+  }
+
+  it('範囲内のページ番号 (1-based) を 0-based index に変換して setCurrentPage を呼ぶ', () => {
+    const { result, setCurrentPageSpy } = renderNav(10)
+
+    act(() => { result.current.setPageInputValue('5') })
+    act(() => { result.current.handlePageInputCommit() })
+
+    // 入力 "5" (1-based) → index 4
+    expect(setCurrentPageSpy).toHaveBeenCalledWith(4)
+    // コミット後は pageInputValue がクリアされる
+    expect(result.current.pageInputValue).toBeNull()
+  })
+
+  it('下限境界: "1" は index 0 を要求し受理される', () => {
+    const { result, setCurrentPageSpy } = renderNav(10)
+
+    act(() => { result.current.setPageInputValue('1') })
+    act(() => { result.current.handlePageInputCommit() })
+
+    expect(setCurrentPageSpy).toHaveBeenCalledWith(0)
+  })
+
+  it('上限境界: totalPages ちょうどは受理、totalPages+1 は拒否される', () => {
+    const { result, setCurrentPageSpy } = renderNav(10)
+
+    // 上限 (10) ちょうど → index 9 で受理
+    act(() => { result.current.setPageInputValue('10') })
+    act(() => { result.current.handlePageInputCommit() })
+    expect(setCurrentPageSpy).toHaveBeenCalledWith(9)
+
+    setCurrentPageSpy.mockClear()
+
+    // 上限超過 (11) → 拒否、setCurrentPage は呼ばれない
+    act(() => { result.current.setPageInputValue('11') })
+    act(() => { result.current.handlePageInputCommit() })
+    expect(setCurrentPageSpy).not.toHaveBeenCalled()
+    // 拒否されても入力値はクリアされる
+    expect(result.current.pageInputValue).toBeNull()
+  })
+
+  it('0 や負値は拒否される (1-based の下限未満)', () => {
+    const { result, setCurrentPageSpy } = renderNav(10)
+
+    act(() => { result.current.setPageInputValue('0') })
+    act(() => { result.current.handlePageInputCommit() })
+    expect(setCurrentPageSpy).not.toHaveBeenCalled()
+
+    act(() => { result.current.setPageInputValue('-2') })
+    act(() => { result.current.handlePageInputCommit() })
+    expect(setCurrentPageSpy).not.toHaveBeenCalled()
+  })
+
+  it('非数値の入力は拒否され setCurrentPage を呼ばない', () => {
+    const { result, setCurrentPageSpy } = renderNav(10)
+
+    act(() => { result.current.setPageInputValue('abc') })
+    act(() => { result.current.handlePageInputCommit() })
+
+    expect(setCurrentPageSpy).not.toHaveBeenCalled()
+    expect(result.current.pageInputValue).toBeNull()
+  })
+
+  it('pageInputValue が null のときは何もしない (no-op コミット)', () => {
+    const { result, setCurrentPageSpy } = renderNav(10)
+
+    // setPageInputValue を呼ばずにコミット
+    act(() => { result.current.handlePageInputCommit() })
+
+    expect(setCurrentPageSpy).not.toHaveBeenCalled()
+  })
+
+  it('前置数値を含む不正な入力 ("3xyz") は拒否される', () => {
+    const { result, setCurrentPageSpy } = renderNav(10)
+
+    act(() => { result.current.setPageInputValue('3xyz') })
+    act(() => { result.current.handlePageInputCommit() })
+
+    expect(setCurrentPageSpy).not.toHaveBeenCalled()
+    expect(result.current.pageInputValue).toBeNull()
+  })
+})
+
+describe('usePageNavigation: ページ番号入力のキー操作 (handlePageInputKeyDown)', () => {
+  function renderNav() {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 10,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makePage(0, false, 100)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({ document: doc, currentPageIndex: 0 } as any)
+    getSharedPdfProxyMock.mockResolvedValue({ numPages: 10 })
+    getCachedPageProxyMock.mockResolvedValue({ getViewport: () => ({ width: 100, height: 100 }) })
+    loadPecoToolBBoxMetaMock.mockResolvedValue({})
+    loadPageMock.mockImplementation((_pdf: unknown, idx: number) => Promise.resolve(makePage(idx)))
+    return renderHook(() =>
+      usePageNavigation({ currentPageIndex: 0, showToast: vi.fn(), triggerThumbnailLoad: vi.fn() })
+    )
+  }
+
+  it('Enter キーは input を blur する (コミットは blur ハンドラに委譲)', () => {
+    const { result } = renderNav()
+    const blur = vi.fn()
+    const evt = {
+      key: 'Enter',
+      currentTarget: { blur },
+    } as unknown as React.KeyboardEvent<HTMLInputElement>
+
+    act(() => { result.current.handlePageInputKeyDown(evt) })
+    expect(blur).toHaveBeenCalledTimes(1)
+  })
+
+  it('Escape キーは pageInputValue を破棄して input を blur する', () => {
+    const { result } = renderNav()
+    // まず入力値を入れておく
+    act(() => { result.current.setPageInputValue('7') })
+    expect(result.current.pageInputValue).toBe('7')
+
+    const blur = vi.fn()
+    const evt = {
+      key: 'Escape',
+      currentTarget: { blur },
+    } as unknown as React.KeyboardEvent<HTMLInputElement>
+
+    act(() => { result.current.handlePageInputKeyDown(evt) })
+    // Escape は入力を捨てる
+    expect(result.current.pageInputValue).toBeNull()
+    expect(blur).toHaveBeenCalledTimes(1)
+  })
+
+  it('Enter / Escape 以外のキーは何もしない (入力値も blur も変化しない)', () => {
+    const { result } = renderNav()
+    act(() => { result.current.setPageInputValue('9') })
+
+    const blur = vi.fn()
+    const evt = {
+      key: 'a',
+      currentTarget: { blur },
+    } as unknown as React.KeyboardEvent<HTMLInputElement>
+
+    act(() => { result.current.handlePageInputKeyDown(evt) })
+    expect(result.current.pageInputValue).toBe('9')
+    expect(blur).not.toHaveBeenCalled()
+  })
+})
+
 describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage は発火しない', () => {
   it('bboxMeta resolve 前にアンマウント → 以降の loadPage は新たに発火しない', async () => {
     const TOTAL = 4
@@ -382,7 +575,7 @@ describe('S-01-05: unmount 後に bboxMeta が resolve しても追加 loadPage 
 })
 
 describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () => {
-  it('documentEpoch が変わったら同じ filePath/currentPageIndex でも loadPage を再発火する', async () => {
+  it('document identity が変わったら同じ filePath/currentPageIndex でも loadPage を再発火する', async () => {
     const filePath = 'same-path.pdf'
     const fakePdf = { numPages: 1 }
     getSharedPdfProxyMock.mockResolvedValue(fakePdf)

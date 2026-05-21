@@ -345,6 +345,24 @@ export function OcrEditor({
   currentPageIndexRef.current = currentPageIndex;
   handleSelectRef.current = handleSelect;
 
+  // issue #116: BB クリックで lastSelectedId が変わったら、仮想化リストを
+  // そのブロックまでスクロールさせる。OcrCard 側の per-card scrollIntoView は
+  // アンマウント済みカードでは動かないため、エディタ側で Virtuoso を駆動する。
+  // - 単一選択時のみ発火 (複数選択ドラッグ等で勝手にジャンプしないように)。
+  // - filteredBlocks / selectedIds は ref 経由で読み、依存を lastSelectedId のみにして
+  //   1 文字編集ごとにこの effect が再実行されるのを防ぐ (focusBlockByIndex と同方針)。
+  useEffect(() => {
+    if (!lastSelectedId) return;
+    if (selectedIdsRef.current.size !== 1) return;
+    const index = filteredBlocksRef.current.findIndex(b => b.id === lastSelectedId);
+    if (index === -1) return;
+    virtuosoRef.current?.scrollIntoView({
+      index,
+      behavior: 'auto',
+      align: 'center',
+    });
+  }, [lastSelectedId]);
+
   // Virtuoso の item レンダラ。memo化された SortableOcrCard へ stable な props を渡す。
   // setCardRef は空依存 useCallback で安定しているため、ここの依存配列は空にして
   // renderItem の identity を mount 中固定にする (Virtuoso itemContent の memoization 維持)。

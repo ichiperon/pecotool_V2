@@ -34,7 +34,7 @@ export default defineConfig(async () => ({
           'pdfjs': ['pdfjs-dist'],
           // pdf-lib は保存時のみ使用するため分離
           'pdf-lib': ['@cantoo/pdf-lib'],
-          // react-virtuoso はサムネイルウィンドウでのみ使用
+          // react-virtuoso は OCR エディタとサムネイルウィンドウで使用
           'virtuoso': ['react-virtuoso'],
         },
       },
