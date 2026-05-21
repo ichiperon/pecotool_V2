@@ -17,6 +17,7 @@ dist-ssr
 .vscode/*
 !.vscode/extensions.json
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 .idea
 .DS_Store
 *.suo
