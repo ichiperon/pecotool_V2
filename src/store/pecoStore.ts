@@ -95,6 +95,15 @@ interface PecoState {
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
   setDocument: (doc: PecoDocument | null) => void;
+  /**
+   * issue #118: documentEpoch だけを +1 する。document / pages / currentPageIndex /
+   * zoom / undo・redo / isDirty には一切触れない。
+   * 保存 (replace_pdf_file) でディスク上の PDF バイト列が差し替わったあと、
+   * usePageNavigation / usePdfRendering に「同じ filePath/currentPageIndex でも
+   * pdfjs proxy を取り直してページ画像を再 render せよ」と通知するための入口。
+   * setDocument と違い編集状態 (textBlocks / BB / dirty / 履歴) を保持する。
+   */
+  bumpDocumentEpoch: () => void;
   setDocumentFilePath: (filePath: string) => void;
   setCurrentPage: (index: number) => void;
   setZoom: (zoom: number) => void;
@@ -243,6 +252,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       pendingIdbSaves.add(tracked);
     }
   },
+
+  // issue #118: 保存後にディスク上の PDF が差し替わった際、pdfjs proxy の再取得と
+  // ページ画像の再 render をトリガーするためだけに documentEpoch を進める。
+  // document 本体・pages・currentPageIndex・zoom・undo/redo・isDirty は不変。
+  bumpDocumentEpoch: () => set((state) => ({ documentEpoch: state.documentEpoch + 1 })),
 
   setCurrentPage: (index) => {
     perf.mark('nav.click', { to: index });

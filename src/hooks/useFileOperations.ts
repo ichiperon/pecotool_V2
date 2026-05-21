@@ -515,11 +515,24 @@ export function useFileOperations(
     await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
     await withStep('clearPageCache', 10_000, () => clearCachedPages(writePath))
       .catch((e) => { console.warn('[save] clearPageCache failed (ignored):', e); });
+    // replace_pdf_file でディスク上の PDF バイト列が差し替わったため、それを開いていた
+    // pdfjs の共有 proxy / bitmap キャッシュ / ページ proxy キャッシュは全て stale。
+    // destroySharedPdfProxy はこれら 3 つを破棄するが、これだけでは React 層が
+    // 再 render しないため、保存前にレンダリング済みのページ画像はそのまま固着し、
+    // 以降の zoom 変更で再ラスタライズされない (issue #118)。
     destroySharedPdfProxy();
     const liveDoc = usePecoStore.getState().document;
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
     }
+    // issue #118: documentEpoch を +1 して usePageNavigation / usePdfRendering に
+    // 「pdfjs proxy を取り直して現在ページ画像を再 render せよ」と通知する。
+    // setDocument と違い textBlocks / BB / dirty / undo・redo / currentPageIndex /
+    // zoom は一切変えないため、編集内容・スクロール位置・ズーム倍率は保持される。
+    // 別名保存 (writePath が新パス) は呼び出し側で setDocumentFilePath が filePath を
+    // 変えることでも reload が走るが、上書き保存は filePath が不変なので epoch bump が
+    // 唯一の再 render トリガーになる。
+    usePecoStore.getState().bumpDocumentEpoch();
     // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
     // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
     setOriginalBytesCache(writePath, savedBytes);

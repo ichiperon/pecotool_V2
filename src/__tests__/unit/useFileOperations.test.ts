@@ -912,3 +912,156 @@ describe('formatSkippedCharWarning メッセージ改善 (issue #115 Fix 3)', ()
     expect(lastMsg).not.toContain('除外しました');
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// issue #118: 保存後に pdfjs proxy / キャッシュを破棄し、ページ画像の再 render を
+// トリガーする (保存→ズームで画像が固着する不具合の修正)。
+// ────────────────────────────────────────────────────────────────────────
+describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #118)', () => {
+  /**
+   * dirty ページ 1 件を持つ doc を store に投入する共通セットアップ。
+   * 他テストの残留 undo/redo 履歴が混ざらないよう履歴も明示クリアして
+   * テストを自己完結させる。
+   */
+  function setupSavableDoc(filePath: string): PecoDocument {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'blk', text: 'HELLO', isDirty: true }],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  it('#118: 上書き保存が成功すると destroySharedPdfProxy が呼ばれ documentEpoch が +1 される', async () => {
+    setupSavableDoc('/reload/save.pdf');
+    // documentEpoch を既知値にしておき、保存後に +1 されたことを確認する。
+    usePecoStore.setState({ documentEpoch: 7 });
+    const { destroySharedPdfProxy } = await import('../../utils/pdfLoader');
+    (destroySharedPdfProxy as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(true);
+    // 保存後、ディスク上の PDF を開いていた stale な pdfjs proxy / bitmap /
+    // page-proxy キャッシュが破棄されている。
+    expect(destroySharedPdfProxy).toHaveBeenCalled();
+    // documentEpoch が +1 され、usePageNavigation / usePdfRendering が
+    // proxy を取り直して現在ページ画像を再 render するトリガーになる。
+    expect(usePecoStore.getState().documentEpoch).toBe(8);
+  });
+
+  it('#118: 保存が成功しても textBlocks / currentPageIndex / zoom は変化しない (画像のみ再 render)', async () => {
+    const doc = setupSavableDoc('/reload/preserve.pdf');
+    // ユーザーが page index / zoom を変えている状態を再現。
+    usePecoStore.setState({ documentEpoch: 3, currentPageIndex: 0, zoom: 175 });
+    const originalBlocks = doc.pages.get(0)!.textBlocks;
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const after = usePecoStore.getState();
+    // epoch だけ進む。
+    expect(after.documentEpoch).toBe(4);
+    // 編集の source-of-truth (textBlocks) は同一参照のまま保持される。
+    expect(after.document!.pages.get(0)!.textBlocks).toBe(originalBlocks);
+    expect(after.document!.pages.get(0)!.textBlocks[0].text).toBe('HELLO');
+    // ページ index / zoom は保存で巻き戻らない。
+    expect(after.currentPageIndex).toBe(0);
+    expect(after.zoom).toBe(175);
+    // undo/redo 履歴も保存では消えない。
+    expect(after.undoStack).toEqual([]);
+    expect(after.redoStack).toEqual([]);
+  });
+
+  it('#118: 保存が失敗 (writeFileAtomically が reject) した場合は documentEpoch を進めない', async () => {
+    setupSavableDoc('/reload/fail.pdf');
+    usePecoStore.setState({ documentEpoch: 5 });
+
+    // replace_pdf_file が reject されて保存が失敗する。
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') {
+        return Promise.reject(new Error('disk full: ENOSPC'));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(false);
+    // 書き込みに失敗したので再 render トリガーは出さない。
+    expect(usePecoStore.getState().documentEpoch).toBe(5);
+  });
+
+  it('#118: 別名保存 (Save As) が成功すると documentEpoch が +1 される', async () => {
+    setupSavableDoc('/reload/src.pdf');
+    usePecoStore.setState({ documentEpoch: 2 });
+
+    // save ダイアログが新しいパスを返す。
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce('/reload/dst.pdf');
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    // 別名保存も _executeSave 経由なので epoch bump が走る。
+    // (filePath 変更でも reload は走るが、epoch bump が抜けていないことを担保する)
+    expect(usePecoStore.getState().documentEpoch).toBe(3);
+  });
+
+  it('#118: bumpDocumentEpoch ストアアクションは documentEpoch だけを進め他の状態を変えない', () => {
+    const doc = setupSavableDoc('/reload/action.pdf');
+    usePecoStore.setState({
+      documentEpoch: 10,
+      currentPageIndex: 0,
+      zoom: 220,
+      isDirty: true,
+    });
+    const blocksBefore = doc.pages.get(0)!.textBlocks;
+
+    usePecoStore.getState().bumpDocumentEpoch();
+
+    const s = usePecoStore.getState();
+    expect(s.documentEpoch).toBe(11);
+    // document 本体・pages・textBlocks 参照は不変。
+    expect(s.document).toBe(doc);
+    expect(s.document!.pages.get(0)!.textBlocks).toBe(blocksBefore);
+    // currentPageIndex / zoom / isDirty も不変。
+    expect(s.currentPageIndex).toBe(0);
+    expect(s.zoom).toBe(220);
+    expect(s.isDirty).toBe(true);
+  });
+});
