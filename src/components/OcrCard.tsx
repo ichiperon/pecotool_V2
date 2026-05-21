@@ -5,10 +5,13 @@ import type { DraggableSyntheticListeners } from "@dnd-kit/core";
 import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 import { perf } from "../utils/perfLogger";
+import { flushActiveOcrCardText } from "../utils/ocrEditFlush";
 
 export interface OcrCardHandle {
   focusContent: () => void;
 }
+
+export const commitActiveOcrCardEdit = flushActiveOcrCardText;
 
 interface OcrCardProps {
   block: TextBlock;
@@ -196,6 +199,10 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      flushActiveOcrCardText();
+    }
+
     const direction = e.key === 'ArrowDown' ? 'down' : e.key === 'ArrowUp' ? 'up' : null;
     if (e.shiftKey && direction) {
       if (!isComposingRef.current && onExtendSelection) {
@@ -243,6 +250,8 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
       <div
         ref={contentRef}
         className="ocr-card-content"
+        data-page-index={pageIndex}
+        data-block-id={block.id}
         contentEditable
         onInput={handleInput}
         onBlur={handleBlur}

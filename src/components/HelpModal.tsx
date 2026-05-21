@@ -49,6 +49,7 @@ export function HelpModal({ helpModal, onClose }: Props) {
             <div className="help-divider" />
             <div className="modal-section-title">表示</div>
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>0</kbd><span>画面にフィット</span></div>
+            <div className="help-item"><kbd>Ctrl</kbd>+<kbd>Q</kbd><span>OCRレイヤー表示切替</span></div>
             <div className="help-item"><kbd>Ctrl</kbd>/<kbd>Alt</kbd>+<kbd>ホイール</kbd><span>ズーム</span></div>
             <div className="help-item"><kbd>Space</kbd>+<span>ドラッグ 画面移動（パン）</span></div>
             <div className="help-item"><kbd>Ctrl</kbd>+<kbd>F</kbd><span>テキスト検索</span></div>

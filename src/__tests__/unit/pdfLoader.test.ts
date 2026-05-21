@@ -265,4 +265,27 @@ describe('pdfLoader / loadPage', () => {
     })
   })
 
+  describe('U-PL-13: Over-fragmented PecoToolBBoxes fallback', () => {
+    it('savedMeta が pdfjs textItems より大幅に多い場合は savedMeta ではなく fallback 抽出を使う', async () => {
+      const pdf = makeMockPdf([
+        { str: 'まとまったテキスト1', transform: [1, 0, 0, 12, 100, 700], width: 120, height: 12 },
+        { str: 'まとまったテキスト2', transform: [1, 0, 0, 12, 100, 680], width: 120, height: 12 },
+      ])
+      setupGetDocument(pdf)
+
+      const overFragmentedMeta = Array.from({ length: 31 }, (_, order) => ({
+        text: `分割${order}`,
+        bbox: { x: order, y: order, width: 1, height: 1 },
+        writingMode: 'horizontal',
+        order,
+      }))
+
+      const page = await loadPage(pdf as any, 0, 'test.pdf', { '0': overFragmentedMeta })
+
+      expect(page.textBlocks).toHaveLength(2)
+      expect(page.textBlocks.map(b => b.text)).toEqual(['まとまったテキスト1', 'まとまったテキスト2'])
+      expect(page.textBlocks[0].bbox).not.toEqual(overFragmentedMeta[0].bbox)
+    })
+  })
+
 })

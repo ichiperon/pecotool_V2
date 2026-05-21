@@ -24,13 +24,27 @@ import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
 import { Search } from 'lucide-react';
 import { perf } from '../utils/perfLogger';
+import { InspectionPanel } from './InspectionPanel';
+import { countInspectionIssues, useInspectionStore } from '../store/inspectionStore';
+import type { TextInspectionScope } from '../hooks/useTextInspection';
+
+export type OcrEditorTab = 'ocr' | 'inspection';
 
 interface OcrEditorProps {
   width: number;
   searchInputRef: React.RefObject<HTMLInputElement | null>;
+  activeTab: OcrEditorTab;
+  onActiveTabChange: (tab: OcrEditorTab) => void;
+  onRunInspection: (scope?: TextInspectionScope) => void | Promise<void>;
 }
 
-export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
+export function OcrEditor({
+  width,
+  searchInputRef,
+  activeTab,
+  onActiveTabChange,
+  onRunInspection,
+}: OcrEditorProps) {
   const document = usePecoStore(s => s.document);
   const currentPageIndex = usePecoStore(s => s.currentPageIndex);
   const selectedIds = usePecoStore(s => s.selectedIds);
@@ -41,6 +55,9 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
   const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
+  const inspectionIssues = useInspectionStore(s => s.issuesByPage.get(currentPageIndex));
+  const visibleInspectionIssues = (inspectionIssues ?? []).filter(issue => !issue.ignored);
+  const inspectionCounts = countInspectionIssues(visibleInspectionIssues);
 
   // 仮想化対応: マウント/アンマウントされる各カードへの ref を id でひける Map に保持。
   // Virtuoso は可視範囲外のカードをアンマウントするので index ベースの配列は使えない。
@@ -370,20 +387,52 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
   return (
     <aside className="editor-panel" style={{ width: `${width}px` }}>
       <div className="panel-header">
-        <span>OCRテキスト</span>
-        <div className="search-container">
-          <Search size={14} className="search-icon" />
-          <input
-            ref={searchInputRef}
-            type="text"
-            placeholder="検索..."
-            className="search-box"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
+        <div className="editor-tabs" role="tablist" aria-label="右ペイン表示">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'ocr'}
+            className={`editor-tab ${activeTab === 'ocr' ? 'active' : ''}`}
+            onClick={() => onActiveTabChange('ocr')}
+          >
+            OCRテキスト
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'inspection'}
+            className={`editor-tab ${activeTab === 'inspection' ? 'active' : ''}`}
+            onClick={() => onActiveTabChange('inspection')}
+          >
+            検査結果
+          </button>
         </div>
+        {activeTab === 'ocr' ? (
+          <div className="search-container">
+            <Search size={14} className="search-icon" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="検索..."
+              className="search-box"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+        ) : (
+          <div className="inspection-header-actions">
+            <div className="inspection-count-badges" aria-label="検査件数">
+              <span className="inspection-count-badge error">エラー {inspectionCounts.error}</span>
+              <span className="inspection-count-badge warning">警告 {inspectionCounts.warning}</span>
+              <span className="inspection-count-badge info">確認 {inspectionCounts.info}</span>
+            </div>
+          </div>
+        )}
       </div>
-      <div className="scroll-content">
+      {activeTab === 'inspection' ? (
+        <InspectionPanel embedded onRunInspection={onRunInspection} />
+      ) : (
+        <div className="scroll-content">
         {!document ? (
           <div className="placeholder">データなし</div>
         ) : !currentPage ? (
@@ -437,7 +486,8 @@ export function OcrEditor({ width, searchInputRef }: OcrEditorProps) {
             })()}
           </DndContext>
         )}
-      </div>
+        </div>
+      )}
     </aside>
   );
 }

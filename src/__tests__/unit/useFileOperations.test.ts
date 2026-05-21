@@ -39,6 +39,8 @@ vi.mock('../../utils/pdfLoader', () => ({
   }),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  clearCachedPages: vi.fn().mockResolvedValue(undefined),
+  destroySharedPdfProxy: vi.fn(),
   getSharedPdfProxy: vi.fn().mockResolvedValue({}),
   loadPage: vi.fn().mockResolvedValue({ textBlocks: [], imageBlocks: [], isDirty: false }),
   loadPecoToolBBoxMeta: vi.fn().mockResolvedValue(null),
@@ -595,10 +597,26 @@ function getLastSavedDoc(): PecoDocument {
   return calls[calls.length - 1][1] as PecoDocument;
 }
 
-describe('useFileOperations save が フォーカス中エディタを blur する (issue #115 Fix 1)', () => {
-  it('#115: handleSave は store スナップショット前にフォーカス中の contentEditable を blur しコミットを確定させる', async () => {
-    // OcrCard の blur-commit を模した DOM。contentEditable に blur リスナを付け、
-    // blur 時に updatePageData で store へ最新テキストを書き込む。
+describe('useFileOperations save がフォーカス中の OCR 編集を flush する (issue #115 Fix 1)', () => {
+  /**
+   * OcrCard の .ocr-card-content に相当する contentEditable を DOM 上に作る。
+   * flushActiveOcrCardText は focus 中の
+   * `.ocr-card-content[data-page-index][data-block-id]` を直接読んで store へ
+   * 同期コミットするため、この属性付き要素を本物の OcrCard の代わりに使う。
+   */
+  function makeOcrCardContent(pageIndex: number, blockId: string): HTMLDivElement {
+    const el = document.createElement('div');
+    el.className = 'ocr-card-content';
+    el.setAttribute('contenteditable', 'true');
+    el.dataset.pageIndex = String(pageIndex);
+    el.dataset.blockId = blockId;
+    el.tabIndex = 0;
+    document.body.appendChild(el);
+    return el;
+  }
+
+  it('#115: handleSave は store スナップショット前にフォーカス中の OCR 編集を flush して確定させる', async () => {
+    // store には古いテキスト STALE、DOM 側には未コミット編集が乗っている状態。
     const block = { id: 'blk-1', text: 'STALE', isDirty: true } as unknown as Record<string, unknown>;
     const dirtyPage = {
       pageIndex: 0,
@@ -609,30 +627,20 @@ describe('useFileOperations save が フォーカス中エディタを blur す�
       thumbnail: null,
     } as unknown as PageData;
     const doc: PecoDocument = {
-      filePath: '/blur/test.pdf',
+      filePath: '/flush/test.pdf',
       fileName: 'test.pdf',
       totalPages: 1,
       metadata: {},
       pages: new Map([[0, dirtyPage]]),
     } as unknown as PecoDocument;
     usePecoStore.setState({ document: doc, isDirty: true });
-    __originalBytesCacheForTest.set('/blur/test.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    __originalBytesCacheForTest.set('/flush/test.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
 
-    // contentEditable を生成し、blur で「編集後テキスト」を store にコミットする。
-    const editable = document.createElement('div');
-    editable.setAttribute('contenteditable', 'true');
-    editable.tabIndex = 0;
-    document.body.appendChild(editable);
-    editable.addEventListener('blur', () => {
-      // OcrCard.commitText 相当: blur 時に最新テキストを store へ書き込む
-      const page = usePecoStore.getState().document!.pages.get(0)!;
-      const newBlocks = page.textBlocks.map((b: any) =>
-        b.id === 'blk-1' ? { ...b, text: 'EDITED_BEFORE_SAVE', isDirty: true } : b,
-      );
-      usePecoStore.getState().updatePageData(0, { textBlocks: newBlocks, isDirty: true });
-    });
-    editable.focus();
-    expect(document.activeElement).toBe(editable);
+    // フォーカス中の .ocr-card-content に未コミットの編集後テキストを入れておく。
+    const content = makeOcrCardContent(0, 'blk-1');
+    content.textContent = 'EDITED_BEFORE_SAVE';
+    content.focus();
+    expect(document.activeElement).toBe(content);
 
     const showToast = vi.fn();
     const { result } = renderHook(() => useFileOperations(showToast));
@@ -641,29 +649,28 @@ describe('useFileOperations save が フォーカス中エディタを blur す�
       await result.current.handleSave();
     });
 
-    // blur がフォーカス中エディタを離脱させている
-    expect(document.activeElement).not.toBe(editable);
-    // savePDF に渡った mergedDoc には blur-commit 後の最新テキストが載っている
+    // flushActiveOcrCardText がスナップショット前に DOM の編集を store へ確定させ、
+    // savePDF に渡る mergedDoc に編集後テキストが載っている (stale な STALE ではない)。
     const savedDoc = getLastSavedDoc();
     expect(savedDoc.pages.get(0)!.textBlocks[0].text).toBe('EDITED_BEFORE_SAVE');
 
-    document.body.removeChild(editable);
+    document.body.removeChild(content);
   });
 
-  it('#115: フォーカスが編集要素でなければ blur しない (通常 button 等は影響なし)', async () => {
+  it('#115: フォーカスが OCR カードでなければ flush しない (通常 button 等は影響なし)', async () => {
     const dirtyPage = {
       pageIndex: 0, width: 595, height: 842,
       textBlocks: [{ id: 'b', text: 'T', isDirty: true }],
       isDirty: true, thumbnail: null,
     } as unknown as PageData;
     const doc: PecoDocument = {
-      filePath: '/blur/btn.pdf', fileName: 'btn.pdf', totalPages: 1, metadata: {},
+      filePath: '/flush/btn.pdf', fileName: 'btn.pdf', totalPages: 1, metadata: {},
       pages: new Map([[0, dirtyPage]]),
     } as unknown as PecoDocument;
     usePecoStore.setState({ document: doc, isDirty: true });
-    __originalBytesCacheForTest.set('/blur/btn.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    __originalBytesCacheForTest.set('/flush/btn.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
 
-    // button は編集要素ではないので blur 対象外 → フォーカスは保持される
+    // button は .ocr-card-content ではないので flush 対象外。
     const button = document.createElement('button');
     document.body.appendChild(button);
     button.focus();
@@ -675,29 +682,31 @@ describe('useFileOperations save が フォーカス中エディタを blur す�
       await result.current.handleSave();
     });
 
-    // 編集要素でない button はフォーカスを失わない
+    // flush は OCR カード以外を触らないので button のフォーカスは保持され、保存は完走する。
     expect(document.activeElement).toBe(button);
+    const savedDoc = getLastSavedDoc();
+    expect(savedDoc.pages.get(0)!.textBlocks[0].text).toBe('T');
 
     document.body.removeChild(button);
   });
 
-  it('#115: INPUT にフォーカスがある場合も保存前に blur される', async () => {
+  it('#115: フォーカス中 OCR カードのテキストが store と同一なら無変更で保存される', async () => {
     const dirtyPage = {
       pageIndex: 0, width: 595, height: 842,
-      textBlocks: [{ id: 'b', text: 'T', isDirty: true }],
+      textBlocks: [{ id: 'blk-1', text: 'UNCHANGED', isDirty: true }],
       isDirty: true, thumbnail: null,
     } as unknown as PageData;
     const doc: PecoDocument = {
-      filePath: '/blur/input.pdf', fileName: 'input.pdf', totalPages: 1, metadata: {},
+      filePath: '/flush/same.pdf', fileName: 'same.pdf', totalPages: 1, metadata: {},
       pages: new Map([[0, dirtyPage]]),
     } as unknown as PecoDocument;
     usePecoStore.setState({ document: doc, isDirty: true });
-    __originalBytesCacheForTest.set('/blur/input.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    __originalBytesCacheForTest.set('/flush/same.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
 
-    const input = document.createElement('input');
-    document.body.appendChild(input);
-    input.focus();
-    expect(document.activeElement).toBe(input);
+    // DOM 側のテキストは store と一致 = flush は差分なしで no-op になる。
+    const content = makeOcrCardContent(0, 'blk-1');
+    content.textContent = 'UNCHANGED';
+    content.focus();
 
     const showToast = vi.fn();
     const { result } = renderHook(() => useFileOperations(showToast));
@@ -705,8 +714,10 @@ describe('useFileOperations save が フォーカス中エディタを blur す�
       await result.current.handleSave();
     });
 
-    expect(document.activeElement).not.toBe(input);
-    document.body.removeChild(input);
+    const savedDoc = getLastSavedDoc();
+    expect(savedDoc.pages.get(0)!.textBlocks[0].text).toBe('UNCHANGED');
+
+    document.body.removeChild(content);
   });
 });
 
@@ -786,8 +797,8 @@ describe('useFileOperations save-diff: 編集が保存出力に反映される (
       await result.current.handleSave();
     });
 
-    // resetDirty(savedPageIndices) は保存に載った page 0 のみクリア。
-    // 保存中に編集された page 1 の isDirty は維持される。
+    // resetDirty(savedPageSnapshots) は保存スナップショットと同一参照の page 0 のみ
+    // クリア。保存中に編集された page 1 は参照が変わり一致しないため isDirty 維持。
     expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
     expect(usePecoStore.getState().document!.pages.get(1)!.isDirty).toBe(true);
     // 未保存ページが残るのでドキュメントレベル isDirty も true

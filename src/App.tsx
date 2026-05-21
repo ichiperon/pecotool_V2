@@ -18,9 +18,10 @@ import { ask } from '@tauri-apps/plugin-dialog';
 import { destroySharedPdfProxy } from "./utils/pdfLoader";
 import { readReorderThreshold, writeReorderThreshold } from "./utils/reorderThreshold";
 import { PdfCanvas } from "./components/PdfCanvas";
-import { OcrEditor } from "./components/OcrEditor";
+import { OcrEditor, type OcrEditorTab } from "./components/OcrEditor";
 import { TextBlock } from "./types";
 import { perf } from "./utils/perfLogger";
+import { useInspectionStore } from "./store/inspectionStore";
 
 // Hooks
 import { useFileOperations } from "./hooks/useFileOperations";
@@ -38,6 +39,7 @@ import { useViewerPan } from "./hooks/useViewerPan";
 import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
 import { useRecentFiles } from "./hooks/useRecentFiles";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
+import { useTextInspection, type TextInspectionScope } from "./hooks/useTextInspection";
 
 // Components
 import { Toolbar } from "./components/Toolbar/Toolbar";
@@ -78,6 +80,9 @@ function App() {
   const isDirty = usePecoStore(selectIsDirty);
   const undoStack = usePecoStore(selectUndoStack);
   const redoStack = usePecoStore(selectRedoStack);
+  const inspectionIssues = useInspectionStore(s => s.issuesByPage.get(currentPageIndex));
+  const isCurrentPageInspected = useInspectionStore(s => s.issuesByPage.has(currentPageIndex));
+  const visibleInspectionIssues = (inspectionIssues ?? []).filter(issue => !issue.ignored);
   // Actions
   const updatePageData = usePecoStore(s => s.updatePageData);
   const toggleShowOcr = usePecoStore(s => s.toggleShowOcr);
@@ -108,6 +113,7 @@ function App() {
 
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState<OcrEditorTab>('ocr');
   const { recentFiles } = useRecentFiles();
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
@@ -123,6 +129,12 @@ function App() {
   // --- External Hooks ---
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
+  const {
+    inspectPages,
+    isInspecting,
+    canInspectAllPages,
+    canInspectCurrentPage,
+  } = useTextInspection();
   const { loadEpoch, subscribeThumbnail, getThumbnail, subscribeActivePage, getIsActivePage, requestThumbnail, handleSelectPage: handleThumbnailSelectPage, fakeDocument, triggerThumbnailLoad } = useThumbnailPanel();
   const {
     isOcrRunning,
@@ -195,6 +207,20 @@ function App() {
     perf.mark('ui.saveAs');
     await executeSaveAs();
   };
+
+  const handleRunInspection = useCallback(async (scope: TextInspectionScope = 'current') => {
+    setRightPanelTab('inspection');
+    perf.mark('ui.textInspection', { scope });
+    const issues = await inspectPages(scope);
+    const error = useInspectionStore.getState().lastError;
+    if (error) {
+      showToast(error, true);
+      return;
+    }
+    showToast(scope === 'all'
+      ? `検査完了（全ページ）: ${issues.length}件`
+      : `検査完了（現在ページ）: ${issues.length}件`);
+  }, [inspectPages, showToast]);
 
   const handleOpenLogFolder = useCallback(async () => {
     try {
@@ -283,6 +309,11 @@ function App() {
     updatePageData(currentPageIndex, { textBlocks: updatedBlocks, isDirty: true });
     usePecoStore.getState().setSelectedIds([newBlock.id]);
     showToast(`${selectedBlocks.length}個のブロックをグループ化しました。`);
+  };
+
+  const handleSelectAllText = () => {
+    if (!currentPage || currentPage.textBlocks.length === 0) return;
+    usePecoStore.getState().setSelectedIds(currentPage.textBlocks.map(block => block.id));
   };
 
   const handleClearOcrCurrentPage = async () => {
@@ -405,7 +436,7 @@ function App() {
   useKeyboardShortcuts({
     undo, redo, fitToScreen, handleSave, handleSaveAs, copySelected,
     pasteClipboard: handlePasteClipboard, handleDelete, toggleDrawingMode, toggleSplitMode,
-    handleGroup, setZoom, zoom, setIsAutoFit,
+    toggleShowOcr, handleGroup, setZoom, zoom, setIsAutoFit,
     searchInputRef, handleRemoveSpaces,
     handleOpen,
     // #102/#103: OCR 実行中の Ctrl+O / Ctrl+H をブロックするための最新値参照。
@@ -430,6 +461,11 @@ function App() {
   // --- Effects ---
   // CloseGuard: 保存中の close を suppress するため isSavingRef を渡す (Critical: rename race のデータロス回避)。
   useTauriCloseGuard({ isSavingRef });
+
+  useEffect(() => {
+    useInspectionStore.getState().clearAllIssues();
+    setRightPanelTab('ocr');
+  }, [filePath]);
 
   useEffect(() => {
     const handleF5 = (e: KeyboardEvent) => {
@@ -590,15 +626,19 @@ function App() {
         zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode}
         selectedIdsCount={selectedIds.size} showOcr={showOcr} ocrOpacity={ocrOpacity}
         reorderThreshold={reorderThreshold} isPreviewOpen={isPreviewOpen}
+        isInspecting={isInspecting}
+        canRunCurrentInspection={canInspectCurrentPage}
+        canRunAllPagesInspection={canInspectAllPages}
         showSettingsDropdown={showSettingsDropdown}
         isOcrRunning={isOcrRunning} ocrProgress={ocrProgress}
         onUndo={undo} onRedo={redo} onZoomIn={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }}
         onZoomOut={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom - 10)); }}
         onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode}
-        onGroup={handleGroup} onDeduplicate={handleDeduplicate} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
+        onGroup={handleGroup} onDeduplicate={handleDeduplicate} onSelectAllText={handleSelectAllText} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
         onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity}
         onSetReorderThreshold={(val) => { setReorderThreshold(writeReorderThreshold(val)); }}
         onTogglePreview={togglePreviewWindow}
+        onRunInspection={handleRunInspection}
         onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
         onRunOcrCurrentPage={runOcrCurrentPage}
         onRunOcrAllPages={runOcrAllPages}
@@ -638,7 +678,7 @@ function App() {
           onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={stopPanning} onMouseLeave={stopPanning}
         >
           <div className="pdf-canvas-container">
-            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
+            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} showInspectionHighlights={rightPanelTab === 'inspection'} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
           {(isLoadingFile || isLoadingPageMeta) && (
             <div className="loading-overlay">
@@ -685,7 +725,13 @@ function App() {
           )}
         </section>
         <div className="resizer" onMouseDown={startResizeRight} />
-        <OcrEditor width={rightWidth} searchInputRef={searchInputRef} />
+        <OcrEditor
+          width={rightWidth}
+          searchInputRef={searchInputRef}
+          activeTab={rightPanelTab}
+          onActiveTabChange={setRightPanelTab}
+          onRunInspection={handleRunInspection}
+        />
       </main>
 
       {showConsole && (
@@ -698,6 +744,9 @@ function App() {
         <div className="status-left">
           <div className="status-item">ズーム: {zoom}%</div>
           <div className="status-item">BB数: {currentPage?.textBlocks?.length || 0}</div>
+          {isFileLoaded && isCurrentPageInspected && (
+            <div className="status-item">検査結果: {visibleInspectionIssues.length}件</div>
+          )}
         </div>
         <div className="status-center">
           <div className="status-item">

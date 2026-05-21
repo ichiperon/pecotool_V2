@@ -249,9 +249,9 @@ describe('I-SAVE-DIFF: 編集 → 保存スナップショットは編集後テ�
   }
 
   /**
-   * useFileOperations.blurActiveEditableElement の忠実なコピー。
-   * Ctrl+S 保存の最初に呼ばれ、focus 中の編集要素を blur して
-   * OcrCard の blur-commit (同期 updatePageData) を store に確定させる。
+   * focus 中の編集要素を blur するテスト用ヘルパ。
+   * blur すると OcrCard の onBlur ハンドラ (blur-commit: 同期 updatePageData) が走り、
+   * 編集中テキストが store に確定する。本ファイルはこの blur-commit 経路を検証する。
    */
   function blurActiveEditableElement(): void {
     const active = window.document.activeElement;

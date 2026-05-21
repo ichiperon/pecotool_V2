@@ -322,6 +322,7 @@ export {
   saveTemporaryPageData,
   saveTemporaryPageDataBatch,
   clearTemporaryChanges,
+  clearCachedPages,
   getAllTemporaryPageData,
 } from './pdfTemporaryStorage';
 export { loadPage } from './pdfTextExtractor';

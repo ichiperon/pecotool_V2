@@ -9,6 +9,13 @@ import {
 import { perf } from '../utils/perfLogger';
 import type { BoundingBox } from '../types';
 
+type BBoxMeta = Record<string, Array<{
+  bbox: BoundingBox;
+  writingMode: string;
+  order: number;
+  text: string;
+}>>;
+
 interface UsePageNavigationOptions {
   currentPageIndex: number;
   showToast: (message: string, isError?: boolean) => void;
@@ -33,6 +40,11 @@ export function usePageNavigation({
   // document 全体ではなく primitives のみ購読
   // (updatePageData 毎の document 参照差し替えで再レンダが起きないようにするため)
   const filePath = usePecoStore((s) => s.document?.filePath);
+  // #102: setDocument のたびに +1 される単調増加カウンタ。同一 filePath の再読込
+  // (F5 / Ctrl+O で同じファイルを開き直す等) でも document identity が変わったことを
+  // 検出するために購読する。updatePageData による document 再生成では変化しない。
+  const documentEpoch = usePecoStore((s) => s.documentEpoch);
+  const documentMtime = usePecoStore((s) => s.document?.mtime);
   const totalPages = usePecoStore((s) => s.document?.totalPages);
   // 現在ページの width のみ購読 (未ロード判定用。textBlocks 等には反応しない)
   const currentPageWidth = usePecoStore((s) => s.document?.pages.get(currentPageIndex)?.width);
@@ -44,12 +56,7 @@ export function usePageNavigation({
   const [pageInputValue, setPageInputValue] = useState<string | null>(null);
 
   const currentLoadAbortRef = useRef<AbortController | null>(null);
-  const bboxMetaRef = useRef<Record<string, Array<{
-    bbox: BoundingBox;
-    writingMode: string;
-    order: number;
-    text: string;
-  }>> | null | undefined>(undefined);
+  const bboxMetaRef = useRef<BBoxMeta | null | undefined>(undefined);
 
   const loadCurrentPage = useCallback(async (pageIdx: number) => {
     perf.mark('nav.loadEntry', { page: pageIdx });
@@ -177,14 +184,17 @@ export function usePageNavigation({
     }
   }, [updatePageData, showToast, triggerThumbnailLoad, setCurrentPageProxy]);
 
-  // ファイルが変わったときにbboxMetaキャッシュをリセット
-  const prevFilePathRef = useRef<string | undefined>(undefined);
+  // ドキュメント identity が変わったときに bboxMeta キャッシュをリセット。
+  // filePath だけでなく mtime / documentEpoch も見るのは、同じパスのファイルを
+  // 開き直した (F5 / Ctrl+O) ケースで前ドキュメントの bboxMeta を持ち越さないため。
+  const prevDocIdentityRef = useRef<{ filePath?: string; mtime?: number; epoch?: number }>({});
   useEffect(() => {
-    if (filePath !== prevFilePathRef.current) {
+    const prev = prevDocIdentityRef.current;
+    if (filePath !== prev.filePath || documentMtime !== prev.mtime || documentEpoch !== prev.epoch) {
       bboxMetaRef.current = undefined;
-      prevFilePathRef.current = filePath;
+      prevDocIdentityRef.current = { filePath, mtime: documentMtime, epoch: documentEpoch };
     }
-  }, [filePath]);
+  }, [filePath, documentMtime, documentEpoch]);
 
   useEffect(() => {
     if (!filePath) return;
@@ -220,10 +230,12 @@ export function usePageNavigation({
     };
     // currentPageWidth/currentPageExists は loadCurrentPage 後の
     // updatePageData で変化するが、依存に含めると「ロード直後に effect 再実行 →
-    // cleanup で自分の abort」のループになる。filePath + currentPageIndex の
-    // 変化トリガーで十分 (ロード判定は最初の run だけで良い)。
+    // cleanup で自分の abort」のループになる。filePath + documentEpoch +
+    // currentPageIndex の変化トリガーで十分 (ロード判定は最初の run だけで良い)。
+    // documentEpoch を含めることで、同一 filePath/currentPageIndex でも document が
+    // 差し替わった (再読込) 場合に loadCurrentPage を再発火できる。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
+  }, [filePath, documentEpoch, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
 
   const handlePageInputCommit = useCallback(() => {
     if (pageInputValue !== null && filePath && totalPages) {

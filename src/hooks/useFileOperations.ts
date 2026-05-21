@@ -77,42 +77,14 @@ export function isWriteAccessError(message: string): boolean {
     /os error (32|33)\b/.test(lower)
   );
 }
-/**
- * issue #115: 保存スナップショット前にフォーカス中の編集要素を blur する。
- *
- * OcrCard のテキスト編集は contentEditable の onBlur でのみ store にコミットされる
- * (毎打鍵 store write による再レンダリングを避けるための意図的な blur-commit 設計)。
- * Ctrl+S → handleSave がそのまま store をスナップショットすると、フォーカス中の
- * OcrCard の未コミット編集が store に無く、古いテキストで保存されてしまう。
- *
- * 保存処理の最初 (store 読み出し前) にこの関数を呼び、編集要素にフォーカスがあれば
- * .blur() する。React の onBlur は .blur() の同期実行中に走るため、OcrCard の
- * blur-commit (updatePageData = 同期 set()) はこの関数の return 前に store へ反映される。
- */
-function blurActiveEditableElement(): void {
-  if (typeof document === 'undefined') return;
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement)) return;
-  const tag = active.tagName;
-  // contentEditable は IDL プロパティ isContentEditable と contenteditable 属性の
-  // 両方で判定する。isContentEditable は祖先からの継承も拾えるが一部環境 (jsdom 等)
-  // で未実装のため、属性値 ('' / 'true' / 'plaintext-only') も併せて確認する。
-  const ceAttr = active.getAttribute('contenteditable');
-  const isContentEditable =
-    active.isContentEditable ||
-    ceAttr === '' || ceAttr === 'true' || ceAttr === 'plaintext-only';
-  const isEditable =
-    isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA';
-  if (isEditable) {
-    active.blur();
-  }
-}
 
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import {
   loadPDF,
   getAllTemporaryPageData,
   clearTemporaryChanges,
+  clearCachedPages,
+  destroySharedPdfProxy,
   getSharedPdfProxy,
   loadPage,
   loadPecoToolBBoxMeta,
@@ -129,6 +101,7 @@ import {
 } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
+import { flushActiveOcrCardText } from '../utils/ocrEditFlush';
 
 /**
  * 1 ページ目 render 後 (アイドル時) に background で PDF 全体 bytes を取得して
@@ -234,11 +207,12 @@ interface SaveResult {
   size: number;
   skippedChars: SkippedPdfTextChar[];
   /**
-   * issue #115: 今回の保存スナップショットに含まれたページ index の集合。
-   * 保存後の resetDirty にこれを渡すことで、保存中に編集された別ページの
-   * isDirty フラグを巻き込んでクリアしないようにする。
+   * issue #115 / #119: 今回の保存スナップショットに含まれたページの
+   * pageIndex → PageData オブジェクト参照の Map。保存後の resetDirty に渡すと、
+   * 保存中に編集された (= オブジェクト参照が変わった) ページの isDirty を
+   * 巻き込んでクリアしないようにできる。
    */
-  savedPageIndices: Set<number>;
+  savedPageSnapshots: Map<number, PageData>;
 }
 
 function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
@@ -376,6 +350,7 @@ export function useFileOperations(
           perf.mark('open.loadPdfStart');
           const doc = await loadPDF(selected);
           perf.mark('open.loadPdfDone', { totalPages: doc.totalPages });
+          await clearCachedPages(selected);
           setDocument(doc);
           perf.mark('open.setDoc');
           addToRecent(selected);
@@ -507,6 +482,11 @@ export function useFileOperations(
         }
       });
     }
+    const savedPageSnapshots = new Map<number, PageData>();
+    for (const [idx] of dirtyOnlyPages.entries()) {
+      const snapshotPage = document.pages.get(idx);
+      if (snapshotPage) savedPageSnapshots.set(idx, snapshotPage);
+    }
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
     let skippedChars: SkippedPdfTextChar[] = [];
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
@@ -533,6 +513,9 @@ export function useFileOperations(
     const writePath = targetPath ?? document.filePath;
 
     await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
+    await withStep('clearPageCache', 10_000, () => clearCachedPages(writePath))
+      .catch((e) => { console.warn('[save] clearPageCache failed (ignored):', e); });
+    destroySharedPdfProxy();
     const liveDoc = usePecoStore.getState().document;
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
@@ -543,14 +526,11 @@ export function useFileOperations(
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
     await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
-    // issue #115: 今回保存に載ったページ index (dirtyOnlyPages のキー = 通常の dirty
-    // フィルタ分 + repair 分岐で追加した全ページ分) を返す。呼び出し側は保存後の
-    // resetDirty にこれを渡し、保存中に編集された別ページの dirty を巻き込まない。
-    return {
-      size: savedBytes.length,
-      skippedChars,
-      savedPageIndices: new Set(dirtyOnlyPages.keys()),
-    };
+    // issue #115 / #119: 保存スナップショットに載った各ページの PageData
+    // オブジェクト参照 (savedPageSnapshots) を返す。呼び出し側は保存後の
+    // resetDirty にこれを渡し、保存中に編集された (= 参照が変わった) ページの
+    // dirty を巻き込まないようにする。
+    return { size: savedBytes.length, skippedChars, savedPageSnapshots };
   };
 
   /**
@@ -565,11 +545,12 @@ export function useFileOperations(
     // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
     console.log('[save] handleSave invoked');
     perf.mark('ui.save');
-    // issue #115: store スナップショット前にフォーカス中の編集要素を blur し、
-    // OcrCard の未コミット編集 (blur-commit 設計) を store へ確定させる。
-    // .blur() 中に React の onBlur → updatePageData (同期 set) が走るため、
-    // 直後の getState() / _executeSave のスナップショットに最新編集が載る。
-    blurActiveEditableElement();
+    // issue #115: store スナップショット前にフォーカス中の OcrCard の未コミット
+    // 編集を store へ確定させる。OcrCard のテキスト編集は再レンダリング抑制のため
+    // blur-commit 設計になっており、Ctrl+S 時にフォーカス中だと最新編集が store に
+    // 無い。flushActiveOcrCardText は focus 中の .ocr-card-content を直接読んで
+    // 同期 updatePageData するため、直後の _executeSave スナップショットに載る。
+    flushActiveOcrCardText();
     const { document } = usePecoStore.getState();
     if (!document) {
       showToast("PDFが開かれていません。", true);
@@ -587,9 +568,10 @@ export function useFileOperations(
     try {
       const result = await _executeSave();
       if (result !== null) {
-        // issue #115: 保存に載ったページだけ dirty を下ろす。保存中に編集された
-        // 別ページの isDirty は保持され、次回保存の dirty フィルタに正しく載る。
-        resetDirty(result.savedPageIndices);
+        // issue #115 / #119: 保存スナップショットと同一参照のページだけ dirty を
+        // 下ろす。保存中に編集されたページは参照が変わり一致しないため isDirty が
+        // 保持され、次回保存の dirty フィルタに正しく載る。
+        resetDirty(result.savedPageSnapshots);
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
         invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
@@ -624,6 +606,7 @@ export function useFileOperations(
   };
 
   const executeSaveAs = async () => {
+    flushActiveOcrCardText();
     const { document } = usePecoStore.getState();
     if (!document) return;
     if (isSavingRef.current) {
@@ -640,10 +623,6 @@ export function useFileOperations(
         isSavingRef.current = true;
         setIsSaving?.(true);
         try {
-          // issue #115: _executeSave が store をスナップショットする直前に
-          // フォーカス中の編集要素を blur し、未コミット編集を確定させる。
-          // (save ダイアログ表示中の編集にも対応するためここで呼ぶ)
-          blurActiveEditableElement();
           const result = await _executeSave(path);
           if (result !== null) {
             const currentDoc = usePecoStore.getState().document;
@@ -652,8 +631,9 @@ export function useFileOperations(
             }
             const prevPath = currentDoc.filePath;
             setDocumentFilePath(path);
-            // issue #115: 別名保存でも保存に載ったページだけ dirty を下ろす。
-            resetDirty(result.savedPageIndices);
+            // issue #115 / #119: 別名保存でも保存スナップショットと同一参照の
+            // ページだけ dirty を下ろす。
+            resetDirty(result.savedPageSnapshots);
             showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
             addToRecent(path);
             // 元のパスのバックアップも新しいパスのバックアップも削除する

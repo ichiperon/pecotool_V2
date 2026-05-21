@@ -12,6 +12,7 @@ interface ShortcutActions {
   handleDelete: () => void;
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
+  toggleShowOcr: () => void;
   handleGroup: () => void;
   handleRemoveSpaces: () => void;
   setZoom: (zoom: number) => void;
@@ -100,6 +101,9 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
         e.preventDefault();
         if (e.shiftKey) ac.handleSaveAs();
         else ac.handleSave();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'q') {
+        e.preventDefault();
+        ac.toggleShowOcr();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !isEditing) {
         ac.copySelected();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !isEditing) {

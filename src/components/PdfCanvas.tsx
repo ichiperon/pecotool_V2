@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   usePecoStore,
   selectZoom,
@@ -14,15 +14,24 @@ import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
 import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
 import { useBlockDragResize } from "../hooks/useBlockDragResize";
+import { useInspectionStore } from "../store/inspectionStore";
+import type { InspectionIssue } from "../utils/textInspection";
 
 interface PdfCanvasProps {
   pageIndex: number;
   disableDrawing?: boolean;
+  showInspectionHighlights?: boolean;
   onFirstRender?: () => void;
   onRenderComplete?: () => void;
 }
 
-export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, onRenderComplete }: PdfCanvasProps) {
+export function PdfCanvas({
+  pageIndex,
+  disableDrawing = false,
+  showInspectionHighlights = true,
+  onFirstRender,
+  onRenderComplete,
+}: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   // 静的層: 全 BB の塗・枠・テキスト (非選択分のみ)
   const staticOverlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -49,6 +58,12 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
   const setSelectedIds = usePecoStore((s) => s.setSelectedIds);
   const clearSelection = usePecoStore((s) => s.clearSelection);
   const pushAction = usePecoStore((s) => s.pushAction);
+  const rawInspectionIssues = useInspectionStore((s) => s.issuesByPage.get(pageIndex));
+  const activeIssueId = useInspectionStore((s) => s.activeIssueId);
+  const inspectionIssues = useMemo(
+    () => (rawInspectionIssues ?? []).filter((issue) => !issue.ignored),
+    [rawInspectionIssues],
+  );
   const setDragPreviewBboxes = usePecoStore((s) => s.setDragPreviewBboxes);
   // issue #91: ドラッグ中のみ非 null。動的層 overlay で選択 BB の bbox を上書きする。
   const dragPreviewBboxes = usePecoStore(selectDragPreviewBboxes);
@@ -136,6 +151,31 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
       behavior: "smooth",
     });
   }, [selectedIds, zoom, currentTextBlocks, pageIndex, drag.draggedId]);
+
+  useEffect(() => {
+    if (!activeIssueId) return;
+    const issue = inspectionIssues.find((item) => item.id === activeIssueId);
+    if (!issue) return;
+
+    const container = window.document.querySelector(".pdf-viewer-panel");
+    if (!container) return;
+
+    const scale = zoom / 100;
+    const x = issue.bbox.x * scale;
+    const y = issue.bbox.y * scale;
+    const w = issue.bbox.width * scale;
+    const h = issue.bbox.height * scale;
+
+    const containerRect = container.getBoundingClientRect();
+    const targetX = x - containerRect.width / 2 + w / 2;
+    const targetY = y - containerRect.height / 2 + h / 2;
+
+    container.scrollTo({
+      left: Math.max(0, targetX),
+      top: Math.max(0, targetY),
+      behavior: "smooth",
+    });
+  }, [activeIssueId, inspectionIssues, zoom]);
 
   // ── Overlay Layer Rendering (2 層分割) ───────────────────────────────
   //
@@ -263,6 +303,51 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
   useEffect(() => {
     if (!overlayCanvasRef.current || !pdfPage) return;
 
+    const getInspectionColor = (category: string) => {
+      switch (category) {
+        case "character_fragmentation":
+          return { rgb: "37, 99, 235", strokeAlpha: 0.9, fillAlpha: 0.14 };
+        case "reading_order_anomaly":
+          return { rgb: "124, 58, 237", strokeAlpha: 0.9, fillAlpha: 0.13 };
+        case "sentence_fragmentation":
+          return { rgb: "13, 148, 136", strokeAlpha: 0.85, fillAlpha: 0.12 };
+        case "symbol_structure":
+          return { rgb: "220, 38, 38", strokeAlpha: 0.95, fillAlpha: 0.16 };
+        case "isolated_block":
+          return { rgb: "100, 116, 139", strokeAlpha: 0.8, fillAlpha: 0.1 };
+        case "duplicate_block":
+          return { rgb: "217, 119, 6", strokeAlpha: 0.9, fillAlpha: 0.14 };
+        case "bbox_anomaly":
+          return { rgb: "190, 18, 60", strokeAlpha: 0.95, fillAlpha: 0.14 };
+        default:
+          return { rgb: "71, 85, 105", strokeAlpha: 0.8, fillAlpha: 0.1 };
+      }
+    };
+
+    const drawInspectionIssue = (context: CanvasRenderingContext2D, issue: InspectionIssue) => {
+      const color = getInspectionColor(issue.category);
+      const isActive = issue.id === activeIssueId;
+      const scale = zoom / 100;
+      const x = issue.bbox.x * scale;
+      const y = issue.bbox.y * scale;
+      const w = issue.bbox.width * scale;
+      const h = issue.bbox.height * scale;
+      const pad = isActive ? 4 : 2;
+
+      context.save();
+      context.fillStyle = `rgba(${color.rgb}, ${isActive ? color.fillAlpha * 1.6 : color.fillAlpha})`;
+      context.strokeStyle = `rgba(${color.rgb}, ${isActive ? 1 : color.strokeAlpha})`;
+      context.lineWidth = isActive ? 3 : 2;
+      context.setLineDash(
+        issue.category === "sentence_fragmentation" || issue.category === "reading_order_anomaly"
+          ? [6, 4]
+          : []
+      );
+      context.fillRect(x - pad, y - pad, w + pad * 2, h + pad * 2);
+      context.strokeRect(x - pad, y - pad, w + pad * 2, h + pad * 2);
+      context.restore();
+    };
+
     const renderOverlays = () => {
       if (!overlayCanvasRef.current) return;
       const canvas = overlayCanvasRef.current;
@@ -356,6 +441,10 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
         });
       }
 
+      if (showInspectionHighlights) {
+        inspectionIssues.forEach((issue) => drawInspectionIssue(context, issue));
+      }
+
       if (drawing.isDrawing) {
         context.strokeStyle = "rgba(0, 200, 0, 0.8)";
         context.setLineDash([5, 5]);
@@ -441,6 +530,9 @@ export function PdfCanvas({ pageIndex, disableDrawing = false, onFirstRender, on
     drag.isAltDragging,
     drag.altDragStart,
     drag.altDragEnd,
+    inspectionIssues,
+    activeIssueId,
+    showInspectionHighlights,
     // issue #91: ドラッグ中の preview bbox 更新で動的層を再描画
     dragPreviewBboxes,
   ]);

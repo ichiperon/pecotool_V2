@@ -5,6 +5,24 @@ import { getCachedPageProxy } from './pdfLoader';
 import { getCachedPage, setCachedPage, getTemporaryPageData } from './pdfTemporaryStorage';
 import { perf } from './perfLogger';
 
+type PecoToolBBoxMetaEntry = {
+  bbox: BoundingBox;
+  writingMode: string;
+  order: number;
+  text: string;
+};
+
+function shouldUseSavedMeta(
+  savedMeta: PecoToolBBoxMetaEntry[] | undefined,
+  textItems: TextItem[],
+): savedMeta is PecoToolBBoxMetaEntry[] {
+  if (!savedMeta || savedMeta.length === 0) return false;
+  const nonEmptyTextItemCount = textItems.filter((item) => item.str.trim() !== '').length;
+  if (nonEmptyTextItemCount === 0) return true;
+  const overFragmentedThreshold = Math.max(nonEmptyTextItemCount * 2, nonEmptyTextItemCount + 25);
+  return savedMeta.length <= overFragmentedThreshold;
+}
+
 export async function loadPage(
   _pdf: pdfjsLib.PDFDocumentProxy,
   pageIndex: number,
@@ -57,7 +75,7 @@ export async function loadPage(
     // drawText スキップ(空文字/0幅/非有限スケール)で件数が食い違い、text が後続
     // ブロックに 1 つズレる既知バグの原因となるため採用しない。
     const savedMeta = bboxMeta?.[String(pageIndex)];
-    if (savedMeta && savedMeta.length > 0) {
+    if (shouldUseSavedMeta(savedMeta, textItems)) {
       textBlocks = savedMeta.map((meta) => ({
         id: crypto.randomUUID(),
         text: meta.text,

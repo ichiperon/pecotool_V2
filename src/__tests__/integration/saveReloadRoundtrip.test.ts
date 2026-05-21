@@ -148,6 +148,7 @@ function setupPdfLibMock() {
     drawImage:     m.drawImage,
     pushOperators: m.pushOperators,
     node: {
+      get:      vi.fn().mockReturnValue(null),
       Contents: vi.fn().mockReturnValue(null),
       set:      vi.fn(),
       // PR #96 で導入: pdfSaver は page.node.get(/Contents) を直接見るようになった。

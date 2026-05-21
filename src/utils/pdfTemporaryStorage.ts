@@ -110,6 +110,37 @@ export async function clearTemporaryChanges(filePath: string) {
   } catch { /* ignore */ }
 }
 
+export async function clearCachedPages(filePath: string) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const prefix = `${filePath}:`;
+    const range = IDBKeyRange.bound(prefix, prefix + '\uFFFF', false, false);
+    const request = store.openCursor(range);
+    await new Promise<void>((resolve) => {
+      request.onsuccess = () => {
+        try {
+          const cursor = request.result;
+          if (cursor) {
+            cursor.delete();
+            cursor.continue();
+          } else {
+            resolve();
+          }
+        } catch (e) {
+          console.warn('[clearCachedPages] cursor iteration failed:', e);
+          resolve();
+        }
+      };
+      request.onerror = () => resolve();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch { /* ignore */ }
+}
+
 export async function getAllTemporaryPageData(filePath: string): Promise<Map<number, Partial<PageData>>> {
   const results = new Map<number, Partial<PageData>>();
   try {

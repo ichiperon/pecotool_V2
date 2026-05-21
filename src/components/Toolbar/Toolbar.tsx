@@ -2,9 +2,10 @@ import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace, SearchCheck, SquareCheckBig
 } from "lucide-react";
 import { PageData } from '../../types';
+import type { TextInspectionScope } from '../../hooks/useTextInspection';
 
 interface ToolbarProps {
   isFileLoaded: boolean;
@@ -21,6 +22,9 @@ interface ToolbarProps {
   ocrOpacity: number;
   reorderThreshold: number;
   isPreviewOpen: boolean;
+  isInspecting: boolean;
+  canRunCurrentInspection: boolean;
+  canRunAllPagesInspection: boolean;
   showSettingsDropdown: boolean;
   isOcrRunning: boolean;
   ocrProgress: {
@@ -40,12 +44,14 @@ interface ToolbarProps {
   onToggleSplit: () => void;
   onGroup: () => void;
   onDeduplicate: () => void;
+  onSelectAllText: () => void;
   onRemoveSpaces: () => void;
   onDelete: () => void;
   onToggleOcr: () => void;
   onSetOcrOpacity: (val: number) => void;
   onSetReorderThreshold: (val: number) => void;
   onTogglePreview: () => void;
+  onRunInspection: (scope?: TextInspectionScope) => void;
   onToggleSettingsDropdown: (e: React.MouseEvent) => void;
   onRunOcrCurrentPage: () => void;
   onRunOcrAllPages: () => void;
@@ -60,6 +66,7 @@ interface ToolbarProps {
 export const Toolbar: React.FC<ToolbarProps> = (props) => {
   const [showOcrDropdown, setShowOcrDropdown] = useState(false);
   const [showClearOcrDropdown, setShowClearOcrDropdown] = useState(false);
+  const [showInspectionDropdown, setShowInspectionDropdown] = useState(false);
 
   useEffect(() => {
     if (!showOcrDropdown) return;
@@ -74,6 +81,13 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [showClearOcrDropdown]);
+
+  useEffect(() => {
+    if (!showInspectionDropdown) return;
+    const close = () => setShowInspectionDropdown(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [showInspectionDropdown]);
 
   return (
     <header className="toolbar">
@@ -97,6 +111,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
         <button onClick={props.onToggleSplit} title="BB分割" className={props.isSplitMode ? "active" : ""} disabled={!props.isFileLoaded}><Scissors size={18} /><span>分割</span></button>
         <button onClick={props.onGroup} title="グループ化" disabled={props.selectedIdsCount < 2}><Group size={18} /><span>グループ化</span></button>
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>
+        <button onClick={props.onSelectAllText} title="テキスト全選択" disabled={!props.currentPage || props.currentPage.textBlocks.length === 0}><SquareCheckBig size={18} /><span>全選択</span></button>
         <button onClick={props.onRemoveSpaces} title="スペース削除 (Ctrl+Shift+Space)" disabled={props.selectedIdsCount === 0}><RemoveFormatting size={18} /><span>スペース削除</span></button>
         <button
           onClick={props.onOpenReplace}
@@ -111,7 +126,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
       <div className="divider" />
       
       <div className="toolbar-group">
-        <button onClick={props.onToggleOcr} title="OCR表示" className={props.showOcr ? "active" : ""}><Eye size={18} /><span>OCR表示</span></button>
+        <button onClick={props.onToggleOcr} title="OCR表示 (Ctrl+Q)" className={props.showOcr ? "active" : ""}><Eye size={18} /><span>OCR表示</span></button>
         
         <div className="btn-group">
           <button className={`dropdown-btn ${props.showSettingsDropdown ? 'active' : ''}`} onClick={props.onToggleSettingsDropdown} title="表示設定" style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}>
@@ -139,6 +154,47 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
         </div>
         
         <button onClick={props.onTogglePreview} title="プレビュー" className={`feature-btn ${props.isPreviewOpen ? 'active' : ''}`} disabled={!props.isFileLoaded}><ClipboardList size={18} /><span>テキスト確認</span></button>
+        <div className="btn-group">
+          <button
+            className={`dropdown-btn ${showInspectionDropdown ? 'active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setShowInspectionDropdown(!showInspectionDropdown); }}
+            title="構造検査"
+            disabled={!props.canRunCurrentInspection && !props.canRunAllPagesInspection}
+            style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
+          >
+            {props.isInspecting
+              ? <Loader2 size={14} style={{ marginRight: '4px', animation: 'spin 1s linear infinite' }} />
+              : <SearchCheck size={14} style={{ marginRight: '4px' }} />}
+            <span>{props.isInspecting ? '検査中' : '検査'}</span>
+            {!props.isInspecting && <ChevronDown size={14} style={{ marginLeft: '2px' }} />}
+          </button>
+          {showInspectionDropdown && !props.isInspecting && (
+            <div className="recent-dropdown inspection-dropdown" onClick={(e) => e.stopPropagation()}>
+              <div
+                className="recent-item"
+                onClick={() => {
+                  if (!props.canRunCurrentInspection) return;
+                  setShowInspectionDropdown(false);
+                  props.onRunInspection('current');
+                }}
+                style={!props.canRunCurrentInspection ? { opacity: 0.5, pointerEvents: 'none' } : undefined}
+              >
+                現在ページ
+              </div>
+              <div
+                className="recent-item"
+                onClick={() => {
+                  if (!props.canRunAllPagesInspection) return;
+                  setShowInspectionDropdown(false);
+                  props.onRunInspection('all');
+                }}
+                style={!props.canRunAllPagesInspection ? { opacity: 0.5, pointerEvents: 'none' } : undefined}
+              >
+                全ページ
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="divider" />
