@@ -78,6 +78,16 @@ beforeEach(() => {
     metadata: {},
     pages: new Map(),
   });
+  // issue #115: 一部テスト (#53 等) は invoke を mockImplementation で
+  // 永続的に reject させる。clearAllMocks では実装は消えないため、毎テスト前に
+  // 良性デフォルト (全コマンド成功) へ戻して保存系テストの相互汚染を防ぐ。
+  (invoke as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+    () => Promise.resolve(undefined),
+  );
+  // savePDF も同様に毎テスト前にデフォルトの成功実装へ戻す。
+  (savePDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
+    new Uint8Array([4, 5, 6]),
+  );
 });
 
 function readRecent(): unknown {
@@ -567,5 +577,327 @@ describe('useFileOperations selector subscription (re-render avoidance)', () => 
 
     // actions しか subscribe していないので、これらの変更では再 render が発生しない
     expect(renderCount).toBe(baseline);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// issue #115: 保存オーケストレーション層の修正テスト
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * _executeSave は savePDF(saveSource, mergedDoc, ...) を呼ぶ。
+ * mergedDoc.pages には dirty ページが入るため、savePDF mock の第 2 引数を読めば
+ * 「保存スナップショットに何のテキストが載ったか」を検証できる。
+ */
+function getLastSavedDoc(): PecoDocument {
+  const calls = (savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls;
+  expect(calls.length).toBeGreaterThan(0);
+  return calls[calls.length - 1][1] as PecoDocument;
+}
+
+describe('useFileOperations save が フォーカス中エディタを blur する (issue #115 Fix 1)', () => {
+  it('#115: handleSave は store スナップショット前にフォーカス中の contentEditable を blur しコミットを確定させる', async () => {
+    // OcrCard の blur-commit を模した DOM。contentEditable に blur リスナを付け、
+    // blur 時に updatePageData で store へ最新テキストを書き込む。
+    const block = { id: 'blk-1', text: 'STALE', isDirty: true } as unknown as Record<string, unknown>;
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [block],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/blur/test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/blur/test.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    // contentEditable を生成し、blur で「編集後テキスト」を store にコミットする。
+    const editable = document.createElement('div');
+    editable.setAttribute('contenteditable', 'true');
+    editable.tabIndex = 0;
+    document.body.appendChild(editable);
+    editable.addEventListener('blur', () => {
+      // OcrCard.commitText 相当: blur 時に最新テキストを store へ書き込む
+      const page = usePecoStore.getState().document!.pages.get(0)!;
+      const newBlocks = page.textBlocks.map((b: any) =>
+        b.id === 'blk-1' ? { ...b, text: 'EDITED_BEFORE_SAVE', isDirty: true } : b,
+      );
+      usePecoStore.getState().updatePageData(0, { textBlocks: newBlocks, isDirty: true });
+    });
+    editable.focus();
+    expect(document.activeElement).toBe(editable);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // blur がフォーカス中エディタを離脱させている
+    expect(document.activeElement).not.toBe(editable);
+    // savePDF に渡った mergedDoc には blur-commit 後の最新テキストが載っている
+    const savedDoc = getLastSavedDoc();
+    expect(savedDoc.pages.get(0)!.textBlocks[0].text).toBe('EDITED_BEFORE_SAVE');
+
+    document.body.removeChild(editable);
+  });
+
+  it('#115: フォーカスが編集要素でなければ blur しない (通常 button 等は影響なし)', async () => {
+    const dirtyPage = {
+      pageIndex: 0, width: 595, height: 842,
+      textBlocks: [{ id: 'b', text: 'T', isDirty: true }],
+      isDirty: true, thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/blur/btn.pdf', fileName: 'btn.pdf', totalPages: 1, metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/blur/btn.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    // button は編集要素ではないので blur 対象外 → フォーカスは保持される
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    button.focus();
+    expect(document.activeElement).toBe(button);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // 編集要素でない button はフォーカスを失わない
+    expect(document.activeElement).toBe(button);
+
+    document.body.removeChild(button);
+  });
+
+  it('#115: INPUT にフォーカスがある場合も保存前に blur される', async () => {
+    const dirtyPage = {
+      pageIndex: 0, width: 595, height: 842,
+      textBlocks: [{ id: 'b', text: 'T', isDirty: true }],
+      isDirty: true, thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/blur/input.pdf', fileName: 'input.pdf', totalPages: 1, metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/blur/input.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    expect(document.activeElement).not.toBe(input);
+    document.body.removeChild(input);
+  });
+});
+
+describe('useFileOperations save-diff: 編集が保存出力に反映される (issue #115 回帰)', () => {
+  it('#115: ブロックのテキストを編集して保存すると、保存スナップショットに編集後テキストが載る (古いテキストではない)', async () => {
+    // 初期テキスト ORIGINAL のブロックを持つ dirty ページ
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'edit-blk', text: 'ORIGINAL', isDirty: false }],
+      isDirty: false,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/diff/test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: false });
+    __originalBytesCacheForTest.set('/diff/test.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    // ユーザー編集相当: ブロックのテキストを NEW_TEXT に変更 (store へコミット)
+    const page = usePecoStore.getState().document!.pages.get(0)!;
+    usePecoStore.getState().updatePageData(0, {
+      textBlocks: page.textBlocks.map((b: any) =>
+        b.id === 'edit-blk' ? { ...b, text: 'NEW_TEXT', isDirty: true } : b,
+      ),
+      isDirty: true,
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // savePDF に渡った doc は編集後の NEW_TEXT を保持している (stale な ORIGINAL ではない)
+    const savedDoc = getLastSavedDoc();
+    expect(savedDoc.pages.get(0)!.textBlocks[0].text).toBe('NEW_TEXT');
+  });
+
+  it('#115: 保存中に別ページを編集 → resetDirty 後もその編集が dirty を保ち、次回保存に載る', async () => {
+    // page 0, page 1 を持つ doc。page 0 のみ dirty。
+    const doc: PecoDocument = {
+      filePath: '/diff/race.pdf',
+      fileName: 'race.pdf',
+      totalPages: 2,
+      metadata: {},
+      pages: new Map<number, PageData>([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [{ id: 'p0', text: 'P0', isDirty: true }], isDirty: true, thumbnail: null } as unknown as PageData],
+        [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [{ id: 'p1', text: 'P1', isDirty: false }], isDirty: false, thumbnail: null } as unknown as PageData],
+      ]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/diff/race.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    // savePDF が解決する前に「別ページ編集」を割り込ませる。
+    // savePDF mock を 1 度だけ「解決前に page 1 を編集する」実装に差し替える。
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      // save 実行中 (snapshot 後) に page 1 を編集 = race の再現
+      const p1 = usePecoStore.getState().document!.pages.get(1)!;
+      usePecoStore.getState().updatePageData(1, {
+        textBlocks: p1.textBlocks.map((b: any) =>
+          b.id === 'p1' ? { ...b, text: 'P1_DURING_SAVE', isDirty: true } : b,
+        ),
+        isDirty: true,
+      });
+      return new Uint8Array([4, 5, 6]);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // resetDirty(savedPageIndices) は保存に載った page 0 のみクリア。
+    // 保存中に編集された page 1 の isDirty は維持される。
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+    expect(usePecoStore.getState().document!.pages.get(1)!.isDirty).toBe(true);
+    // 未保存ページが残るのでドキュメントレベル isDirty も true
+    expect(usePecoStore.getState().isDirty).toBe(true);
+
+    // 2 回目の保存: page 1 が dirty フィルタに載り、編集が保存スナップショットに含まれる
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Uint8Array([7, 8, 9]));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+    const secondSavedDoc = getLastSavedDoc();
+    // 2 回目スナップショットに page 1 が含まれ、編集後テキストが載っている
+    expect(secondSavedDoc.pages.has(1)).toBe(true);
+    expect(secondSavedDoc.pages.get(1)!.textBlocks[0].text).toBe('P1_DURING_SAVE');
+  });
+});
+
+describe('formatSkippedCharWarning メッセージ改善 (issue #115 Fix 3)', () => {
+  // formatSkippedCharWarning は内部関数のため、save 経由 (skippedChars 付き savePDF) で
+  // トースト文言を観測する。savePDF の 5 引数目 onSkipped(chars) を呼び出すと
+  // _executeSave 内 skippedChars に伝播し、成功トーストに formatSkippedCharWarning が乗る。
+  function setupDirtyDoc(filePath: string) {
+    const dirtyPage = {
+      pageIndex: 0, width: 595, height: 842,
+      textBlocks: [{ id: 'b', text: 'T', isDirty: true }],
+      isDirty: true, thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath, fileName: 'x.pdf', totalPages: 1, metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+  }
+
+  it('#115: スキップ文字のトーストに 各文字・コードポイント・除外回数・合計数が出る', async () => {
+    setupDirtyDoc('/skip/a.pdf');
+
+    // savePDF mock: 5 引数目 onSkipped に skippedChars を渡す
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (_src, _doc, _font, _fallback, onSkipped) => {
+        (onSkipped as (c: unknown[]) => void)([
+          { char: 'A', codePoint: 'U+0041', count: 3, pages: [1], reason: 'unsupported-font' },
+          { char: '', codePoint: 'U+0007', count: 2, pages: [1], reason: 'control-character' },
+        ]);
+        return new Uint8Array([4, 5, 6]);
+      },
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // 成功トースト (isError でない呼び出し) を集める
+    const successCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] !== true);
+    const lastMsg = String(successCalls[successCalls.length - 1][0]);
+    // 合計除外数 (3 + 2 = 5)
+    expect(lastMsg).toContain('計5個');
+    // 印字可能文字 A は実体 + コードポイント + 回数
+    expect(lastMsg).toContain('「A」(U+0041)×3');
+    // 不可視文字 (U+0007) はコードポイントのみ + 回数
+    expect(lastMsg).toContain('U+0007×2');
+  });
+
+  it('#115: スキップ文字が 9 種以上なら「ほかN種」サフィックスが付く', async () => {
+    setupDirtyDoc('/skip/b.pdf');
+
+    const manyChars = Array.from({ length: 10 }, (_, i) => ({
+      char: String.fromCharCode(0x41 + i),
+      codePoint: `U+00${(0x41 + i).toString(16).toUpperCase()}`,
+      count: 1,
+      pages: [1],
+      reason: 'unsupported-font' as const,
+    }));
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (_src, _doc, _font, _fallback, onSkipped) => {
+        (onSkipped as (c: unknown[]) => void)(manyChars);
+        return new Uint8Array([4, 5, 6]);
+      },
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const successCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] !== true);
+    const lastMsg = String(successCalls[successCalls.length - 1][0]);
+    // 10 種中 8 種を表示、残り 2 種は「ほか2種」
+    expect(lastMsg).toContain('ほか2種');
+    expect(lastMsg).toContain('計10個');
+  });
+
+  it('#115: スキップ文字が無ければ警告メッセージは付かない', async () => {
+    setupDirtyDoc('/skip/c.pdf');
+    // savePDF は onSkipped を呼ばない (skippedChars 空のまま)
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Uint8Array([4, 5, 6]));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const successCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] !== true);
+    const lastMsg = String(successCalls[successCalls.length - 1][0]);
+    expect(lastMsg).toContain('保存しました');
+    expect(lastMsg).not.toContain('除外しました');
   });
 });

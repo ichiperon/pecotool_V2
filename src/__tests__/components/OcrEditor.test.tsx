@@ -60,18 +60,63 @@ vi.mock('@dnd-kit/utilities', () => ({
 // テストでは itemContent を全件展開する単純な div に差し替える。
 // issue #92: renderItem の identity を検証するため、最後に渡された itemContent を
 // globalThis に保持してテストから参照できるようにする。
+// issue #116: virtuosoRef.scrollIntoView({index}) を OcrEditor が呼ぶため、
+// ref ハンドルに scrollIntoView spy を載せてテストから検証できるようにする。
+//
+// 仮想化モード (issue #116 の本シナリオ):
+//   既定 (__virtuosoWindowSize=null) では従来どおり totalCount を全件描画する。
+//   __virtuosoWindowSize に数値をセットすると「ビューポート窓」だけを描画し、
+//   窓外のカードを実際にアンマウントする本物の仮想化を再現する。
+//   scrollIntoView({index}) は窓を index 中心へ移動させ、対象カードをマウントする。
+//   これにより「画面外 = 未マウント」のカードへのスクロール挙動を検証できる。
 vi.mock('react-virtuoso', () => {
   const React = require('react') as typeof import('react')
   const Virtuoso = React.forwardRef(function Virtuoso(
     { totalCount, itemContent, className, style }: any,
-    _ref: any
+    ref: any
   ) {
     ;(globalThis as any).__lastVirtuosoItemContent = itemContent
+
+    const windowSize = (globalThis as any).__virtuosoWindowSize as number | null | undefined
+    const isVirtualized = typeof windowSize === 'number' && windowSize > 0
+    // 仮想化モードでは窓の開始 index を state で保持し、scrollIntoView で動かす。
+    const [windowStart, setWindowStart] = React.useState(0)
+
+    React.useImperativeHandle(ref, () => ({
+      scrollIntoView: (...args: any[]) => {
+        ;(globalThis as any).__virtuosoScrollIntoViewCalls ??= []
+        ;(globalThis as any).__virtuosoScrollIntoViewCalls.push(args)
+        // 仮想化モード: 窓を対象 index 中心へ動かし、対象カードを描画範囲に入れる。
+        if (isVirtualized) {
+          const opts = args[0] ?? {}
+          const targetIndex = typeof opts.index === 'number' ? opts.index : 0
+          const half = Math.floor((windowSize as number) / 2)
+          const nextStart = Math.max(
+            0,
+            Math.min(targetIndex - half, Math.max(0, totalCount - (windowSize as number)))
+          )
+          setWindowStart(nextStart)
+          // 実 Virtuoso は scroll 完了後に done() を呼ぶ。マウントを待つ用途で使われる。
+          if (typeof opts.done === 'function') opts.done()
+        }
+      },
+    }))
+
     const items = []
-    for (let i = 0; i < totalCount; i++) {
-      items.push(
-        React.createElement('div', { key: i, 'data-virtuoso-index': i }, itemContent(i))
-      )
+    if (isVirtualized) {
+      // ビューポート窓 [windowStart, windowStart+windowSize) のみ描画。
+      const end = Math.min(totalCount, windowStart + (windowSize as number))
+      for (let i = windowStart; i < end; i++) {
+        items.push(
+          React.createElement('div', { key: i, 'data-virtuoso-index': i }, itemContent(i))
+        )
+      }
+    } else {
+      for (let i = 0; i < totalCount; i++) {
+        items.push(
+          React.createElement('div', { key: i, 'data-virtuoso-index': i }, itemContent(i))
+        )
+      }
     }
     return React.createElement('div', { className, style }, items)
   })
@@ -148,10 +193,14 @@ function expectSelectedIds(expected: string[]) {
 afterEach(() => cleanup())
 
 beforeEach(() => {
+  ;(globalThis as any).__virtuosoScrollIntoViewCalls = []
+  // 既定は「全件描画」モード。仮想化テストのみ各 it 内で window サイズをセットする。
+  ;(globalThis as any).__virtuosoWindowSize = null
   usePecoStore.setState({
     document: null,
     currentPageIndex: 0,
     selectedIds: new Set<string>(),
+    lastSelectedId: null,
     undoStack: [],
     redoStack: [],
     isDirty: false,
@@ -858,6 +907,202 @@ describe('OcrEditor', () => {
       const cards = container.querySelectorAll('.ocr-card')
       fireEvent.click(cards[2])
       expect(usePecoStore.getState().selectedIds.has('b3')).toBe(true)
+    })
+  })
+
+  // ── C-OE-04: BB クリック選択でテキストエディタがスクロール (issue #116) ──
+  describe('C-OE-04: lastSelectedId 変更で Virtuoso がそのブロックへスクロール', () => {
+    // 前提: BB クリックは lastSelectedId を更新するだけで、仮想化された OcrEditor は
+    // 該当ブロックまでスクロールしなかった (OcrCard 側の per-card scrollIntoView は
+    // アンマウント済みカードでは動かないため)。修正後は OcrEditor が lastSelectedId を
+    // 監視し virtuosoRef.scrollIntoView({index}) を呼ぶ。
+
+    const navBlocks = [
+      makeBlock('b1', 'first', 0),
+      makeBlock('b2', 'second', 1),
+      makeBlock('b3', 'third', 2),
+    ]
+
+    function getScrollCalls() {
+      return ((globalThis as any).__virtuosoScrollIntoViewCalls ?? []) as any[][]
+    }
+
+    it('C-OE-04-01: 単一選択で lastSelectedId が変わると該当 index へ scrollIntoView される', () => {
+      setup(navBlocks)
+      // 初期状態 (lastSelectedId=null) ではスクロールしない
+      expect(getScrollCalls().length).toBe(0)
+
+      // BB クリック相当: b3 を単一選択
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b3']), lastSelectedId: 'b3' } as any)
+      })
+
+      const calls = getScrollCalls()
+      expect(calls.length).toBe(1)
+      // filteredBlocks 内 b3 の index = 2、align:'center' / behavior:'auto'
+      expect(calls[0][0]).toEqual({ index: 2, behavior: 'auto', align: 'center' })
+    })
+
+    it('C-OE-04-02: 複数選択時は scrollIntoView しない (一括選択で勝手にジャンプしない)', () => {
+      setup(navBlocks)
+
+      act(() => {
+        usePecoStore.setState({
+          selectedIds: new Set(['b1', 'b2', 'b3']),
+          lastSelectedId: 'b3',
+        } as any)
+      })
+
+      expect(getScrollCalls().length).toBe(0)
+    })
+
+    it('C-OE-04-03: lastSelectedId が現在のフィルタ結果に無いときは scrollIntoView しない', async () => {
+      const user = userEvent.setup()
+      const filterBlocks = [
+        makeBlock('b1', 'apple', 0),
+        makeBlock('b2', 'banana', 1),
+        makeBlock('b3', 'cherry', 2),
+      ]
+      setup(filterBlocks)
+
+      // "apple" のみ表示されるよう絞り込む
+      await user.type(screen.getByPlaceholderText('検索...'), 'apple')
+
+      // フィルタ外の b3 を anchor にしてもスクロールしない (index が見つからない)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b3']), lastSelectedId: 'b3' } as any)
+      })
+
+      expect(getScrollCalls().length).toBe(0)
+    })
+
+    it('C-OE-04-04: フィルタ後の index でスクロールする (生インデックスではない)', async () => {
+      const user = userEvent.setup()
+      const filterBlocks = [
+        makeBlock('b1', 'apple', 0),
+        makeBlock('b2', 'banana match', 1),
+        makeBlock('b3', 'cherry match', 2),
+      ]
+      setup(filterBlocks)
+
+      // "match" で絞り込む → filteredBlocks = [b2, b3]
+      await user.type(screen.getByPlaceholderText('検索...'), 'match')
+
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b3']), lastSelectedId: 'b3' } as any)
+      })
+
+      const calls = getScrollCalls()
+      expect(calls.length).toBe(1)
+      // b3 は生配列では index 2 だが、filteredBlocks (b2,b3) 内では index 1
+      expect(calls[0][0].index).toBe(1)
+    })
+  })
+
+  // ── C-OE-05: 仮想化された(未マウントの)カードへの BB クリックスクロール (issue #116 本シナリオ) ──
+  describe('C-OE-05: 画面外でアンマウントされたカードへ BB クリックでスクロールする', () => {
+    // C-OE-04 のモック Virtuoso は totalCount を全件描画するため、
+    // 「対象カードが未マウント」という issue #116 の本来の失敗状況を再現できない。
+    // ここでは __virtuosoWindowSize をセットして本物の仮想化 (窓外カードのアンマウント)
+    // を再現し、画面外ブロックを単一選択 → virtuosoRef.scrollIntoView({index}) が
+    // 正しいフィルタ後 index で呼ばれること、かつスクロール後に対象カードが
+    // 実際にマウントされることを検証する。
+
+    function getScrollCalls() {
+      return ((globalThis as any).__virtuosoScrollIntoViewCalls ?? []) as any[][]
+    }
+
+    function manyNavBlocks(n: number): TextBlock[] {
+      const out: TextBlock[] = []
+      for (let i = 0; i < n; i++) out.push(makeBlock(`v${i}`, `block ${i}`, i))
+      return out
+    }
+
+    it('C-OE-05-01: 画面外ブロックを単一選択 → 未マウント状態から scrollIntoView でマウントされる', () => {
+      // 窓サイズ 5: 50 ブロック中 index 0..4 のみ初期描画される。
+      ;(globalThis as any).__virtuosoWindowSize = 5
+      const { container } = setup(manyNavBlocks(50))
+
+      // 初期状態: 窓 [0,5) のカードだけが描画され、v40 は未マウント。
+      let mounted = Array.from(
+        container.querySelectorAll('[data-virtuoso-index]')
+      ).map(el => el.getAttribute('data-virtuoso-index'))
+      expect(mounted).toEqual(['0', '1', '2', '3', '4'])
+      // 対象 v40 のカードはまだ DOM に存在しない (= アンマウント済み)。
+      expect(container.querySelector('[data-virtuoso-index="40"]')).toBeNull()
+
+      // BB クリック相当: 画面外の v40 を単一選択する。
+      act(() => {
+        usePecoStore.setState({
+          selectedIds: new Set(['v40']),
+          lastSelectedId: 'v40',
+        } as any)
+      })
+
+      // OcrEditor の lastSelectedId effect が virtuosoRef.scrollIntoView({index:40}) を呼ぶ。
+      const calls = getScrollCalls()
+      expect(calls.length).toBe(1)
+      expect(calls[0][0].index).toBe(40)
+      expect(calls[0][0].align).toBe('center')
+
+      // スクロール後: 窓が v40 中心に移動し、対象カードが実際にマウントされている。
+      mounted = Array.from(
+        container.querySelectorAll('[data-virtuoso-index]')
+      ).map(el => el.getAttribute('data-virtuoso-index'))
+      expect(mounted).toContain('40')
+      // 旧 index 0..4 のカードは窓外になりアンマウントされている (本物の仮想化挙動)。
+      expect(container.querySelector('[data-virtuoso-index="0"]')).toBeNull()
+    })
+
+    it('C-OE-05-02: フィルタ中、画面外ブロックへはフィルタ後 index でスクロールする', async () => {
+      ;(globalThis as any).__virtuosoWindowSize = 4
+      const user = userEvent.setup()
+      // 偶数ブロックだけ "match" を含む → フィルタ後リストは v0,v2,v4,...,v58 (30件)。
+      const filterBlocks: TextBlock[] = []
+      for (let i = 0; i < 60; i++) {
+        filterBlocks.push(makeBlock(`v${i}`, i % 2 === 0 ? `match ${i}` : `other ${i}`, i))
+      }
+      const { container } = setup(filterBlocks)
+
+      await user.type(screen.getByPlaceholderText('検索...'), 'match')
+
+      // フィルタ後の窓には先頭 4 件 (v0,v2,v4,v6) のみ描画。v40 は未マウント。
+      expect(container.querySelector('[data-virtuoso-index="0"]')).not.toBeNull()
+      const v40Mounted = () =>
+        Array.from(container.querySelectorAll('.ocr-card')).some(
+          el => el.getAttribute('data-block-id') === 'v40'
+        )
+      expect(v40Mounted()).toBe(false)
+
+      // 生配列で index 40 の v40 は、偶数フィルタ後リストでは index 20。
+      act(() => {
+        usePecoStore.setState({
+          selectedIds: new Set(['v40']),
+          lastSelectedId: 'v40',
+        } as any)
+      })
+
+      const calls = getScrollCalls()
+      expect(calls.length).toBe(1)
+      // 生 index 40 ではなく、フィルタ後 index 20 でスクロールされること。
+      expect(calls[0][0].index).toBe(20)
+      // スクロール後 v40 のカードがマウントされている。
+      expect(v40Mounted()).toBe(true)
+    })
+
+    it('C-OE-05-03: 仮想化モードでも複数選択では scrollIntoView しない', () => {
+      ;(globalThis as any).__virtuosoWindowSize = 5
+      setup(manyNavBlocks(50))
+
+      // 画面外ブロックを含む複数選択 → 勝手にジャンプしない。
+      act(() => {
+        usePecoStore.setState({
+          selectedIds: new Set(['v40', 'v41', 'v42']),
+          lastSelectedId: 'v42',
+        } as any)
+      })
+
+      expect(getScrollCalls().length).toBe(0)
     })
   })
 

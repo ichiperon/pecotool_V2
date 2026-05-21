@@ -104,7 +104,15 @@ interface PecoState {
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
-  resetDirty: () => void;
+  /**
+   * 保存完了後に isDirty フラグをクリアする。
+   * @param savedPageIndices 実際に保存対象になったページ index の集合。
+   *   指定時はそれらのページだけ isDirty を下ろし、まだ dirty なページが残っていれば
+   *   ドキュメントレベルの isDirty は true のまま保持する (issue #115: 保存中に
+   *   別ページを編集した場合、その新編集の dirty フラグを巻き込まないため)。
+   *   省略時は従来通り全ページの isDirty を一律クリアする (後方互換)。
+   */
+  resetDirty: (savedPageIndices?: ReadonlySet<number> | readonly number[]) => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
   // issue #15: lastSelectedId を明示できるようにする (省略時は末尾 id を anchor とする)。
@@ -358,17 +366,29 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (perf.enabled) perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
   },
 
-  resetDirty: () => set((state) => {
+  resetDirty: (savedPageIndices) => set((state) => {
     if (!state.document) return state;
+    // savedPageIndices 指定時は「保存対象になったページ」だけクリアする。
+    // 配列でも Set でも受けられるよう Set に正規化する (undefined は全クリア扱い)。
+    const scoped = savedPageIndices !== undefined
+      ? (savedPageIndices instanceof Set
+          ? savedPageIndices
+          : new Set<number>(savedPageIndices))
+      : null;
     const newPages = new Map(state.document.pages);
     for (const [idx, page] of newPages.entries()) {
-      if (page.isDirty) {
+      if (page.isDirty && (scoped === null || scoped.has(idx))) {
         newPages.set(idx, { ...page, isDirty: false });
       }
     }
+    // scoped 指定時はクリア後にまだ dirty なページが残っていないか確認し、
+    // 残っていればドキュメントレベルの isDirty は true のまま保持する。
+    // (保存中に編集された未保存ページの isDirty を巻き込まないため: issue #115)
+    const stillDirty = scoped !== null
+      && [...newPages.values()].some((p) => p.isDirty);
     return {
       document: { ...state.document, pages: newPages },
-      isDirty: false
+      isDirty: stillDirty,
     };
   }),
 

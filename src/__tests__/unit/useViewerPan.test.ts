@@ -17,6 +17,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useRef } from 'react';
+import type React from 'react';
 import { useViewerPan } from '../../hooks/useViewerPan';
 
 // keydown / keyup を発火するためのユーティリティ。target は EventTarget。
@@ -256,5 +257,106 @@ describe('useViewerPan: Space 押下中の focus 移動 keyup リグレッショ
       dispatchKey('keyup', 'Space', input);
     });
     expect(result.current.isSpacePressed).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// パンのスクロール量計算。Space 押下中に mousedown → mousemove すると
+// コンテナの scrollLeft/scrollTop を「ドラッグと逆方向」に移動させる。
+// この符号 (panStart.scrollX - dx) と Space 未押下時の no-op がパン体験の
+// 中核。既存テストはキーボード状態遷移のみで、座標計算は未検証だった。
+// ─────────────────────────────────────────────────────────────
+describe('useViewerPan: パンのスクロール量計算', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  /** scrollLeft/scrollTop を持つ可変コンテナを ref に差し込んで返す */
+  function renderPanWithContainer(initial = { scrollLeft: 50, scrollTop: 80 }) {
+    const container = { scrollLeft: initial.scrollLeft, scrollTop: initial.scrollTop } as HTMLDivElement;
+    const hook = renderHook(() => {
+      const ref = useRef<HTMLDivElement | null>(container);
+      return useViewerPan(ref);
+    });
+    return { ...hook, container };
+  }
+
+  /** React.MouseEvent 風の最小スタブ */
+  function mouseEvt(clientX: number, clientY: number) {
+    return {
+      clientX,
+      clientY,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    } as unknown as React.MouseEvent;
+  }
+
+  it('Space 押下中の mousedown→mousemove で scroll はドラッグと逆方向に動く', () => {
+    const { result, container } = renderPanWithContainer({ scrollLeft: 50, scrollTop: 80 });
+
+    // Space 押下
+    act(() => { dispatchKey('keydown', 'Space', document.body); });
+
+    // mousedown (100,100): panStart にコンテナの現在 scroll が記録される
+    act(() => { result.current.handleViewerMouseDown(mouseEvt(100, 100)); });
+    expect(result.current.isPanning).toBe(true);
+
+    // mousemove (130,150): dx=+30, dy=+50 → scroll は逆方向 (start - d)
+    act(() => { result.current.handleViewerMouseMove(mouseEvt(130, 150)); });
+    expect(container.scrollLeft).toBe(50 - 30);   // 20
+    expect(container.scrollTop).toBe(80 - 50);    // 30
+
+    // 逆向きドラッグ: dx=-20, dy=-10 → scroll は + 方向
+    act(() => { result.current.handleViewerMouseMove(mouseEvt(80, 90)); });
+    expect(container.scrollLeft).toBe(50 - -20);  // 70
+    expect(container.scrollTop).toBe(80 - -10);   // 90
+  });
+
+  it('Space 未押下なら mousedown でパンは始まらず scroll も動かない', () => {
+    const { result, container } = renderPanWithContainer({ scrollLeft: 50, scrollTop: 80 });
+
+    // Space を押さずに mousedown
+    act(() => { result.current.handleViewerMouseDown(mouseEvt(100, 100)); });
+    expect(result.current.isPanning).toBe(false);
+
+    // mousemove しても isPanning=false なので scroll 不変
+    act(() => { result.current.handleViewerMouseMove(mouseEvt(200, 200)); });
+    expect(container.scrollLeft).toBe(50);
+    expect(container.scrollTop).toBe(80);
+  });
+
+  it('stopPanning 後の mousemove は scroll を動かさない (mouseup でパン終了)', () => {
+    const { result, container } = renderPanWithContainer({ scrollLeft: 50, scrollTop: 80 });
+
+    act(() => { dispatchKey('keydown', 'Space', document.body); });
+    act(() => { result.current.handleViewerMouseDown(mouseEvt(100, 100)); });
+    act(() => { result.current.handleViewerMouseMove(mouseEvt(120, 120)); });
+    expect(container.scrollLeft).toBe(30);
+
+    // mouseup 相当
+    act(() => { result.current.stopPanning(); });
+    expect(result.current.isPanning).toBe(false);
+
+    // 以降の mousemove は無視される
+    act(() => { result.current.handleViewerMouseMove(mouseEvt(300, 300)); });
+    expect(container.scrollLeft).toBe(30);   // 動かない
+    expect(container.scrollTop).toBe(60);
+  });
+
+  it('mousedown は基準点を撮り直す: 2 回目の mousedown 以降の delta は新基準からの差分', () => {
+    const { result, container } = renderPanWithContainer({ scrollLeft: 0, scrollTop: 0 });
+
+    act(() => { dispatchKey('keydown', 'Space', document.body); });
+
+    // 1 回目: (100,100) で掴んで (140,100) へ → scrollLeft = 0 - 40 = -40
+    act(() => { result.current.handleViewerMouseDown(mouseEvt(100, 100)); });
+    act(() => { result.current.handleViewerMouseMove(mouseEvt(140, 100)); });
+    expect(container.scrollLeft).toBe(-40);
+
+    // 2 回目の mousedown: panStart.scrollX に現在の -40 が記録される
+    act(() => { result.current.handleViewerMouseDown(mouseEvt(200, 200)); });
+    // (210,200) へ → dx=+10 → scrollLeft = -40 - 10 = -50
+    act(() => { result.current.handleViewerMouseMove(mouseEvt(210, 200)); });
+    expect(container.scrollLeft).toBe(-50);
   });
 });
