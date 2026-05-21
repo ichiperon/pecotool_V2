@@ -772,3 +772,236 @@ describe('useBlockDragResize: issue #106 Redo round-trip (Action.after が最新
     expect(afterBbox.y).toBe(beforeBbox.y);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// getHoverCursor: ホバー位置からカーソル種別を決める純粋座標計算。
+// リサイズハンドル (4 隅, 許容半径 hs=10px) / 移動領域 / 描画・分割モードの
+// 判定はすべて zoom スケールに依存するため、ここを誤ると「ハンドルを掴めない」
+// 「掴めるはずのない位置で掴める」回帰につながる。本体に既存テストが無かった。
+// ─────────────────────────────────────────────────────────────
+describe('useBlockDragResize: getHoverCursor (ハンドル判定の座標計算)', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  function renderHover(opts: {
+    block: TextBlock;
+    selectedIds: Set<string>;
+    zoom?: number;
+  }) {
+    const pageData = makePage([opts.block]);
+    return renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: opts.zoom ?? 100,
+        selectedIds: opts.selectedIds,
+        getPageData: () => pageData,
+        updatePageData: vi.fn(),
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+  }
+
+  const normalOpts = { isDrawingMode: false, isSplitMode: false };
+
+  it('選択 BB の 4 隅でそれぞれ対応するリサイズカーソルを返す (zoom=100)', () => {
+    // bbox = (100,100,80,20) → 隅は (100,100)(180,100)(100,120)(180,120)
+    const block = makeBlock();
+    const { result } = renderHover({ block, selectedIds: new Set([block.id]) });
+
+    expect(result.current.getHoverCursor({ x: 100, y: 100 }, normalOpts)).toBe('nw-resize');
+    expect(result.current.getHoverCursor({ x: 180, y: 100 }, normalOpts)).toBe('ne-resize');
+    expect(result.current.getHoverCursor({ x: 100, y: 120 }, normalOpts)).toBe('sw-resize');
+    expect(result.current.getHoverCursor({ x: 180, y: 120 }, normalOpts)).toBe('se-resize');
+  });
+
+  it('ハンドル許容半径 (hs=10px) の内外で判定が切り替わる', () => {
+    const block = makeBlock();
+    const { result } = renderHover({ block, selectedIds: new Set([block.id]) });
+
+    // 隅 (100,100) から 9px ずれ → まだハンドル内 (Math.abs<10)
+    expect(result.current.getHoverCursor({ x: 109, y: 100 }, normalOpts)).toBe('nw-resize');
+    // 10px ちょうどは境界外 (< 10 が条件) → ハンドルではなく BB 内部なので 'move'
+    expect(result.current.getHoverCursor({ x: 110, y: 100 }, normalOpts)).toBe('move');
+  });
+
+  it('BB 内部 (ハンドル外) は move、BB 完全外は default', () => {
+    const block = makeBlock();
+    const { result } = renderHover({ block, selectedIds: new Set([block.id]) });
+
+    // 中央付近 = move
+    expect(result.current.getHoverCursor({ x: 140, y: 110 }, normalOpts)).toBe('move');
+    // BB から完全に離れた点 = default
+    expect(result.current.getHoverCursor({ x: 400, y: 400 }, normalOpts)).toBe('default');
+  });
+
+  it('zoom=200 ではハンドル座標も 2 倍にスケールする', () => {
+    // bbox=(100,100,80,20)。zoom=200 → scale=2 なので nw 隅は screen 座標 (200,200)。
+    const block = makeBlock();
+    const { result } = renderHover({ block, selectedIds: new Set([block.id]), zoom: 200 });
+
+    // zoom=100 の座標 (100,100) ではもうハンドルではない (BB 自体が外)
+    expect(result.current.getHoverCursor({ x: 100, y: 100 }, normalOpts)).toBe('default');
+    // スケール後の nw 隅 (200,200) でハンドル検出
+    expect(result.current.getHoverCursor({ x: 200, y: 200 }, normalOpts)).toBe('nw-resize');
+    // スケール後の se 隅 ((100+80)*2, (100+20)*2) = (360,240)
+    expect(result.current.getHoverCursor({ x: 360, y: 240 }, normalOpts)).toBe('se-resize');
+  });
+
+  it('未選択 BB のハンドル/内部ではカーソルは反応しない (ハンドルは選択中のみ, 内部は move)', () => {
+    const block = makeBlock();
+    // selectedIds 空: resize ハンドルループは回らない
+    const { result } = renderHover({ block, selectedIds: new Set() });
+
+    // 隅でも resize にならず、BB 内部扱いで move (未選択でも move 判定はする)
+    expect(result.current.getHoverCursor({ x: 100, y: 100 }, normalOpts)).toBe('move');
+    expect(result.current.getHoverCursor({ x: 140, y: 110 }, normalOpts)).toBe('move');
+  });
+
+  it('描画モードでは常に crosshair (BB 位置に依らない)', () => {
+    const block = makeBlock();
+    const { result } = renderHover({ block, selectedIds: new Set([block.id]) });
+
+    expect(
+      result.current.getHoverCursor({ x: 100, y: 100 }, { isDrawingMode: true, isSplitMode: false })
+    ).toBe('crosshair');
+    expect(
+      result.current.getHoverCursor({ x: 999, y: 999 }, { isDrawingMode: true, isSplitMode: false })
+    ).toBe('crosshair');
+  });
+
+  it('分割モード: 横書き BB 上は col-resize、縦書き BB 上は row-resize、BB 外は crosshair', () => {
+    const horiz = makeBlock({ id: 'h', writingMode: 'horizontal', bbox: { x: 100, y: 100, width: 80, height: 20 } });
+    const { result: rh } = renderHover({ block: horiz, selectedIds: new Set() });
+    expect(
+      rh.current.getHoverCursor({ x: 140, y: 110 }, { isDrawingMode: false, isSplitMode: true })
+    ).toBe('col-resize');
+    // BB 外は crosshair
+    expect(
+      rh.current.getHoverCursor({ x: 500, y: 500 }, { isDrawingMode: false, isSplitMode: true })
+    ).toBe('crosshair');
+
+    const vert = makeBlock({ id: 'v', writingMode: 'vertical', bbox: { x: 100, y: 100, width: 20, height: 80 } });
+    const { result: rv } = renderHover({ block: vert, selectedIds: new Set() });
+    expect(
+      rv.current.getHoverCursor({ x: 110, y: 140 }, { isDrawingMode: false, isSplitMode: true })
+    ).toBe('row-resize');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// リサイズ 4 方向の座標計算と最小サイズクランプ。
+// 既存テストは resize-se の最小クランプのみ。nw/ne/sw は x/y の移動と
+// width/height の符号 (start ± dx/dy) が方向ごとに異なるため、
+// それぞれ独立した回帰対象になる。
+// ─────────────────────────────────────────────────────────────
+describe('useBlockDragResize: resize 4 方向の bbox 計算', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  /** 指定ハンドルから dx,dy 動かして finishDragResize し、確定 bbox を返す */
+  function resizeAndGetBbox(opts: {
+    block: TextBlock;
+    handle: { x: number; y: number };
+    move: { x: number; y: number };
+    expectedMode: string;
+  }) {
+    const pageData = makePage([opts.block]);
+    const updatePageData = vi.fn();
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([opts.block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+    act(() => {
+      result.current.tryStartDragOrResize(opts.handle, { ctrlKey: false, metaKey: false, shiftKey: false });
+    });
+    expect(result.current.dragMode).toBe(opts.expectedMode);
+    act(() => {
+      result.current.updateDragResize(opts.move);
+    });
+    act(() => { flushRaf(); });
+    act(() => {
+      result.current.finishDragResize();
+    });
+    return updatePageData.mock.calls[0][1].textBlocks[0].bbox as {
+      x: number; y: number; width: number; height: number;
+    };
+  }
+
+  it('resize-nw: 左上ハンドルを左上へ動かすと x,y が減り width,height が増える', () => {
+    // bbox=(100,100,80,20), nw 隅=(100,100)。(80,90) へ → dx=-20, dy=-10
+    const bbox = resizeAndGetBbox({
+      block: makeBlock(),
+      handle: { x: 100, y: 100 },
+      move: { x: 80, y: 90 },
+      expectedMode: 'resize-nw',
+    });
+    expect(bbox.x).toBe(80);              // 100 + dx(-20)
+    expect(bbox.y).toBe(90);              // 100 + dy(-10)
+    expect(bbox.width).toBe(100);         // 80 - dx(-20)
+    expect(bbox.height).toBe(30);         // 20 - dy(-10)
+  });
+
+  it('resize-ne: 右上ハンドルを右上へ動かすと y が減り width,height が増える (x は不変)', () => {
+    // bbox=(100,100,80,20), ne 隅=(180,100)。(200,90) へ → dx=+20, dy=-10
+    const bbox = resizeAndGetBbox({
+      block: makeBlock(),
+      handle: { x: 180, y: 100 },
+      move: { x: 200, y: 90 },
+      expectedMode: 'resize-ne',
+    });
+    expect(bbox.x).toBe(100);             // 不変
+    expect(bbox.y).toBe(90);              // 100 + dy(-10)
+    expect(bbox.width).toBe(100);         // 80 + dx(+20)
+    expect(bbox.height).toBe(30);         // 20 - dy(-10)
+  });
+
+  it('resize-sw: 左下ハンドルを左下へ動かすと x が減り width,height が増える (y は不変)', () => {
+    // bbox=(100,100,80,20), sw 隅=(100,120)。(80,140) へ → dx=-20, dy=+20
+    const bbox = resizeAndGetBbox({
+      block: makeBlock(),
+      handle: { x: 100, y: 120 },
+      move: { x: 80, y: 140 },
+      expectedMode: 'resize-sw',
+    });
+    expect(bbox.x).toBe(80);              // 100 + dx(-20)
+    expect(bbox.y).toBe(100);             // 不変
+    expect(bbox.width).toBe(100);         // 80 - dx(-20)
+    expect(bbox.height).toBe(40);         // 20 + dy(+20)
+  });
+
+  it('resize-nw を逆方向へ大きく動かしても width/height は 1 未満にならず x/y は反対辺-1 でクランプ', () => {
+    // bbox=(100,100,80,20)。nw ハンドルを右下へ大きく動かす: (500,500) へ
+    // → dx=+400, dy=+400。width=80-400 が負 → Math.max(1,...) で 1。
+    //   x は Math.min(startX+width-1, startX+dx) = min(179, 500) = 179。
+    const bbox = resizeAndGetBbox({
+      block: makeBlock(),
+      handle: { x: 100, y: 100 },
+      move: { x: 500, y: 500 },
+      expectedMode: 'resize-nw',
+    });
+    expect(bbox.width).toBe(1);
+    expect(bbox.height).toBe(1);
+    expect(bbox.x).toBe(179);             // 100 + 80 - 1
+    expect(bbox.y).toBe(119);             // 100 + 20 - 1
+  });
+});
