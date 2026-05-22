@@ -104,7 +104,12 @@ export function usePageNavigation({
       if (bboxMetaRef.current === undefined) {
         let nextBBoxMeta: BBoxMeta | null;
         try {
-          nextBBoxMeta = await loadPecoToolBBoxMeta(pdf);
+          nextBBoxMeta = await loadPecoToolBBoxMeta(pdf, {
+            loadBytes: async () => {
+              const { readFile } = await import('@tauri-apps/plugin-fs');
+              return readFile(doc.filePath);
+            },
+          });
         } catch {
           nextBBoxMeta = null;
         }

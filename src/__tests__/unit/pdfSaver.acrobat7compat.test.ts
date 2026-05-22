@@ -116,6 +116,38 @@ async function extractAllContentStreams(bytes: Uint8Array): Promise<string> {
   return parts.join('\n---STREAM-BOUNDARY---\n')
 }
 
+function parseClassicXrefCoverage(pdfText: string): { size: number; covered: Set<number> } {
+  const startMatch = /startxref\s+(\d+)\s+%%EOF\s*$/.exec(pdfText)
+  expect(startMatch).not.toBeNull()
+  const xrefStart = Number(startMatch![1])
+  const tail = pdfText.slice(xrefStart)
+  expect(tail.startsWith('xref')).toBe(true)
+
+  const trailerIndex = tail.search(/\btrailer\b/)
+  expect(trailerIndex).toBeGreaterThan(0)
+  const trailer = tail.slice(trailerIndex)
+  const sizeMatch = /\/Size\s+(\d+)/.exec(trailer)
+  expect(sizeMatch).not.toBeNull()
+  const size = Number(sizeMatch![1])
+
+  const covered = new Set<number>()
+  const lines = tail.slice('xref'.length, trailerIndex).trim().split(/\r?\n/)
+  let i = 0
+  while (i < lines.length) {
+    const header = /^(\d+)\s+(\d+)$/.exec(lines[i].trim())
+    expect(header, `xref subsection header: ${lines[i]}`).not.toBeNull()
+    const first = Number(header![1])
+    const count = Number(header![2])
+    i += 1
+    for (let j = 0; j < count; j++) {
+      expect(lines[i], `xref entry ${first + j}`).toMatch(/^\d{10}\s+\d{5}\s+[nf]\s*$/)
+      covered.add(first + j)
+      i += 1
+    }
+  }
+  return { size, covered }
+}
+
 describe('Acrobat 7.0 compatibility audit for buildPdfDocument', () => {
   let originalBytes: Uint8Array
   let savedBytes: Uint8Array
@@ -221,6 +253,13 @@ describe('Acrobat 7.0 compatibility audit for buildPdfDocument', () => {
       }
     }
     expect(violations).toEqual([])
+  })
+
+  it('(4b) classic xref は /Size 範囲の全 object number を free/in-use entry で覆う', () => {
+    const { size, covered } = parseClassicXrefCoverage(savedLatin1)
+    for (let objectNumber = 0; objectNumber < size; objectNumber++) {
+      expect(covered.has(objectNumber), `missing xref entry for ${objectNumber}`).toBe(true)
+    }
   })
 
   it('(5) 元PDF由来の BT 外 Tj / TJ は保存時に除去される', async () => {

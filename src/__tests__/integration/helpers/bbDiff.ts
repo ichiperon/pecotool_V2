@@ -1,4 +1,5 @@
 import type { BBoxMetaEntry } from './realPdfFixtures';
+import { stripUnsafePdfCopyChars } from '../../../utils/pdfSkippedTextChars';
 
 export interface ExpectedBB {
   x: number;
@@ -21,7 +22,7 @@ export interface Mismatch {
 const EPS = 1e-6;
 
 function matchesExpected(entry: BBoxMetaEntry, expected: ExpectedBB): boolean {
-  if (entry.text !== expected.text) return false;
+  if (entry.text !== stripUnsafePdfCopyChars(expected.text)) return false;
   if (Math.abs(entry.bbox.x - expected.x) > EPS) return false;
   if (Math.abs(entry.bbox.y - expected.y) > EPS) return false;
   if (Math.abs(entry.bbox.width - expected.width) > EPS) return false;
@@ -61,10 +62,11 @@ export function diffBBPages(
         const offNext = next ? matchesExpected(got, next) : false;
         const isOffByOne = offPrev || offNext;
         if (isOffByOne) offByOnePages.add(page);
-        if (got.text !== exp.text) {
+        const expectedText = stripUnsafePdfCopyChars(exp.text);
+        if (got.text !== expectedText) {
           mismatches.push({
             page, idx: i, field: 'text',
-            expected: exp.text, actual: got.text, offByOne: isOffByOne,
+            expected: expectedText, actual: got.text, offByOne: isOffByOne,
           });
         }
         if (Math.abs(got.bbox.x - exp.x) > EPS) {

@@ -6,6 +6,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import { loadPecoToolBBoxMeta } from '../../utils/pdfMetadataLoader';
+import {
+  PDFDocument,
+  PDFHexString,
+  PDFName,
+} from '@cantoo/pdf-lib';
+import { writePecoToolBBoxMetaToPdfDoc } from '../../utils/pdfPecoToolMetadata';
 
 /** PDFDocumentProxy.getMetadata() を最小限スタブ化する */
 function makeFakePdf(rawMeta: string | null) {
@@ -178,5 +184,34 @@ describe('loadPecoToolBBoxMeta', () => {
     );
     expect(result).not.toBeNull();
     expect(result?.['0'][0].text).toBe('hello');
+  });
+
+  it('新形式の private stream を source bytes から優先して読む', async () => {
+    const pdf = await PDFDocument.create();
+    pdf.addPage([100, 100]);
+    writePecoToolBBoxMetaToPdfDoc(pdf, { '0': [validEntry] });
+    const bytes = await pdf.save({ useObjectStreams: false, addDefaultPage: false });
+
+    const result = await loadPecoToolBBoxMeta(makeFakePdf(null), { bytes: new Uint8Array(bytes) });
+
+    expect(result).not.toBeNull();
+    expect(result?.['0']).toHaveLength(1);
+    expect(result?.['0'][0].text).toBe('hello');
+  });
+
+  it('新形式保存時は旧 Info の PecoToolBBoxes を削除する', async () => {
+    const pdf = await PDFDocument.create();
+    pdf.addPage([100, 100]);
+    const infoDict = (pdf as unknown as { getInfoDict(): { get: (k: unknown) => unknown; set: (k: unknown, v: unknown) => void } }).getInfoDict();
+    infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify({ '0': [validEntry] })));
+
+    writePecoToolBBoxMetaToPdfDoc(pdf, { '0': [{ ...validEntry, text: 'private' }] });
+    const bytes = await pdf.save({ useObjectStreams: false, addDefaultPage: false });
+    const reloaded = await PDFDocument.load(bytes, { updateMetadata: false });
+    const reloadedInfo = (reloaded as unknown as { getInfoDict(): { get: (k: unknown) => unknown } }).getInfoDict();
+
+    expect(reloadedInfo.get(PDFName.of('PecoToolBBoxes'))).toBeUndefined();
+    const result = await loadPecoToolBBoxMeta(makeFakePdf(null), { bytes: new Uint8Array(bytes) });
+    expect(result?.['0'][0].text).toBe('private');
   });
 });

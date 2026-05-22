@@ -124,13 +124,36 @@ function withPageCount(count: number): void {
  * 共通の最小 context を生成するヘルパーで補う（extra で lookup 等を追加できる）。
  */
 function makeSweepableContext(extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    lookup: vi.fn(),
+  const context: Record<string, unknown> = {
+    lookup: vi.fn((value) => value),
     delete: vi.fn(),
     enumerateIndirectObjects: vi.fn().mockReturnValue([]),
     trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
+    obj: vi.fn((value) => value),
+    flateStream: vi.fn((contents, dict) => new m.PDFRawStream({ lookup: vi.fn((key: string) => dict?.[key]) }, contents)),
+    register: vi.fn((value) => value),
+  };
+  return {
+    ...context,
     ...extra,
   }
+}
+
+function makeCatalogMock() {
+  return {
+    get: vi.fn().mockReturnValue(undefined),
+    set: vi.fn(),
+    delete: vi.fn(),
+    lookup: vi.fn().mockReturnValue(undefined),
+  }
+}
+
+function readLastMetadataJson(context: any) {
+  const raw = context.flateStream.mock.calls.at(-1)[0] as string | Uint8Array
+  const text = typeof raw === 'string'
+    ? new TextDecoder().decode(Uint8Array.from(raw, (char) => char.charCodeAt(0)))
+    : new TextDecoder().decode(raw)
+  return JSON.parse(text)
 }
 
 // ── setup ──────────────────────────────────────────────────────
@@ -191,13 +214,9 @@ beforeEach(() => {
     save:            m.save,
     commit:            m.save,
     // PR #96 で導入: sweepUnreachableObjects は context.trailerInfo を起点に到達可能性走査する。
-    context: {
-      lookup: vi.fn(),
-      delete: vi.fn(),
-      enumerateIndirectObjects: vi.fn().mockReturnValue([]),
-      trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
-    },
-    getInfoDict:     vi.fn().mockReturnValue({ lookup: vi.fn(), set: vi.fn() }),
+    context: makeSweepableContext(),
+    catalog: makeCatalogMock(),
+    getInfoDict:     vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined), lookup: vi.fn(), set: vi.fn(), delete: vi.fn() }),
   }
   m.pdfLoad.mockResolvedValue(defaultPdfDocMock)
 
@@ -567,9 +586,11 @@ describe('pdfSaver / savePDF', () => {
     })
   })
 
-  describe('U-SV-24: BBox metadata written to info dict', () => {
-    it('mockInfoDict.set is called with PecoToolBBoxes key', async () => {
-      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+  describe('U-SV-24: BBox metadata written to private stream', () => {
+    it('Catalog private stream is written and legacy info key is removed', async () => {
+      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }
+      const mockCatalog = makeCatalogMock()
+      const mockContext = makeSweepableContext() as any
       const u24Page = {
         drawImage:    m.drawImage,
         drawText:     m.drawText,
@@ -599,7 +620,8 @@ describe('pdfSaver / savePDF', () => {
         save:            m.save,
     commit:            m.save,
         // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
-        context: makeSweepableContext(),
+        context: mockContext,
+        catalog: mockCatalog,
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -609,10 +631,10 @@ describe('pdfSaver / savePDF', () => {
       }])
       await savePDF(new Uint8Array(), doc)
 
-      expect(mockInfoDict.set).toHaveBeenCalledWith(
-        'PecoToolBBoxes',
-        expect.anything(),
-      )
+      expect(mockContext.flateStream).toHaveBeenCalled()
+      expect(mockCatalog.set).toHaveBeenCalledWith('PecoTool', expect.anything())
+      expect(mockInfoDict.delete).toHaveBeenCalledWith('PecoToolBBoxes')
+      expect(mockInfoDict.set).not.toHaveBeenCalledWith('PecoToolBBoxes', expect.anything())
     })
   })
 
@@ -627,8 +649,11 @@ describe('pdfSaver / savePDF', () => {
       const mockInfoDict = {
         get: vi.fn().mockReturnValue(mockExistingValue),
         set: vi.fn(),
+        delete: vi.fn(),
         lookup: vi.fn(),
       }
+      const mockCatalog = makeCatalogMock()
+      const mockContext = makeSweepableContext() as any
       const u25Page = {
         drawImage:    m.drawImage,
         drawText:     m.drawText,
@@ -660,7 +685,8 @@ describe('pdfSaver / savePDF', () => {
         save:            m.save,
     commit:            m.save,
         // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
-        context: makeSweepableContext(),
+        context: mockContext,
+        catalog: mockCatalog,
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -679,20 +705,14 @@ describe('pdfSaver / savePDF', () => {
       }
       await savePDF(new Uint8Array(), doc)
 
-      // infoDict.set should be called
-      expect(mockInfoDict.set).toHaveBeenCalled()
-      // The value passed to set should be a JSON string containing page 1 data
-      const setCall = mockInfoDict.set.mock.calls[0]
-      expect(setCall[0]).toBe('PecoToolBBoxes')
-      // The second arg is the result of PDFHexString.fromText(jsonString)
-      // Our mock makes PDFHexString.fromText return the string directly
-      const jsonStr = setCall[1]
-      // Since our PDFHexString.fromText mock just returns the string,
-      // jsonStr IS the JSON string
-      const parsed = JSON.parse(jsonStr as string)
+      expect(mockContext.flateStream).toHaveBeenCalled()
+      const parsed = readLastMetadataJson(mockContext)
       // Page 1 data should exist
+      expect(parsed['0']).toBeDefined()
+      expect(parsed['0'][0].text).toBe('Existing')
       expect(parsed['1']).toBeDefined()
       expect(parsed['1'][0].text).toBe('NewText')
+      expect(mockInfoDict.delete).toHaveBeenCalledWith('PecoToolBBoxes')
     })
   })
 
@@ -745,7 +765,8 @@ describe('pdfSaver / savePDF', () => {
           register: vi.fn().mockReturnValue(mockStreamRef),
           obj: vi.fn().mockImplementation((arr: any[]) => arr),
         }),
-        getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), lookup: vi.fn() }),
+        catalog: makeCatalogMock(),
+        getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }),
       })
 
       const doc = makeDoc([{
@@ -813,7 +834,8 @@ describe('pdfSaver / savePDF', () => {
           register: vi.fn().mockReturnValue(mockStreamRef),
           obj: vi.fn().mockImplementation((arr: any[]) => arr),
         }),
-        getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), lookup: vi.fn() }),
+        catalog: makeCatalogMock(),
+        getInfoDict: vi.fn().mockReturnValue({ get: vi.fn(), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }),
       })
 
       const doc = makeDoc([{
@@ -876,7 +898,8 @@ describe('pdfSaver / savePDF', () => {
 
   describe('U-SV-28: BBox metadata contains correct structure', () => {
     it('metadata entry has bbox, writingMode, order, text fields', async () => {
-      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }
+      const mockContext = makeSweepableContext() as any
       const u28Page = {
         drawImage:    m.drawImage,
         drawText:     m.drawText,
@@ -906,7 +929,8 @@ describe('pdfSaver / savePDF', () => {
         save:            m.save,
     commit:            m.save,
         // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
-        context: makeSweepableContext(),
+        context: mockContext,
+        catalog: makeCatalogMock(),
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -917,9 +941,8 @@ describe('pdfSaver / savePDF', () => {
       }])
       await savePDF(new Uint8Array(), doc)
 
-      expect(mockInfoDict.set).toHaveBeenCalled()
-      const jsonStr = mockInfoDict.set.mock.calls[0][1]
-      const parsed = JSON.parse(jsonStr as string)
+      expect(mockContext.flateStream).toHaveBeenCalled()
+      const parsed = readLastMetadataJson(mockContext)
       const pageEntry = parsed['0']
       expect(pageEntry).toBeDefined()
       expect(pageEntry[0]).toMatchObject({
@@ -933,7 +956,8 @@ describe('pdfSaver / savePDF', () => {
 
   describe('U-SV-29: Blocks sorted by order in metadata', () => {
     it('metadata entries are ordered by block.order', async () => {
-      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), lookup: vi.fn() }
+      const mockInfoDict = { get: vi.fn().mockReturnValue(undefined), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }
+      const mockContext = makeSweepableContext() as any
       const u29Page = {
         drawImage:    m.drawImage,
         drawText:     m.drawText,
@@ -963,7 +987,8 @@ describe('pdfSaver / savePDF', () => {
         save:            m.save,
     commit:            m.save,
         // PR #96: sweepUnreachableObjects が trailerInfo / enumerateIndirectObjects を読む。
-        context: makeSweepableContext(),
+        context: mockContext,
+        catalog: makeCatalogMock(),
         getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
       })
 
@@ -973,8 +998,7 @@ describe('pdfSaver / savePDF', () => {
       ])
       await savePDF(new Uint8Array(), doc)
 
-      const jsonStr = mockInfoDict.set.mock.calls[0][1]
-      const parsed = JSON.parse(jsonStr as string)
+      const parsed = readLastMetadataJson(mockContext)
       expect(parsed['0'][0].text).toBe('First')
       expect(parsed['0'][1].text).toBe('Second')
     })

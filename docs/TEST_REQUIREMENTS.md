@@ -351,7 +351,7 @@
 | U-SV-21 | textWidth=0 → console.warn + スキップ           | 警告出力              |
 | U-SV-22 | 非有限スケール (NaN/Infinity) → スキップ        | 警告出力              |
 | U-SV-23 | dirty ページにテキストなし → フォント非埋め込み | `customFont === null` |
-| U-SV-24 | BBox メタデータが info dict に書き込まれる      | PecoToolBBoxes 存在   |
+| U-SV-24 | BBox メタデータが private stream に書き込まれる | Info 旧キーなし       |
 | U-SV-25 | 既存 BBox メタデータとのマージ                  | 既存+新規の両方を含む |
 
 ---

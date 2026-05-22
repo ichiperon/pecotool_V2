@@ -62,12 +62,7 @@ vi.mock('@cantoo/pdf-lib', () => ({
   PDFString:         { of: vi.fn((s: string) => s), fromText: vi.fn((s: string) => s) },
   PDFHexString: {
     of: vi.fn((s: string) => s),
-    // buildPdfDocument は PDFHexString.fromText(JSON.stringify(bboxMeta)) で書き込む。
-    // テスト側で JSON を捕捉するためにここで横取りする。
-    fromText: vi.fn((s: string) => {
-      m.capturedBBoxJson.value = s
-      return s
-    }),
+    fromText: vi.fn((s: string) => s),
   },
   StandardFonts:     { Helvetica: 'Helvetica' },
   pushGraphicsState: m.pushGsFn,
@@ -126,6 +121,11 @@ function makeDoc(pages: Map<number, PageData>): PecoDocument {
   }
 }
 
+function decodeMetadataPayload(contents: string | Uint8Array): string {
+  if (typeof contents !== 'string') return new TextDecoder().decode(contents)
+  return new TextDecoder().decode(Uint8Array.from(contents, (char) => char.charCodeAt(0)))
+}
+
 /**
  * savePDF が main thread fallback で動作するよう pdf-lib モックをセットアップ。
  * 編集後の textBlocks 数だけ drawText が呼ばれるシナリオを期待する。
@@ -164,7 +164,24 @@ function setupPdfLibMock() {
   const mockInfoDict = {
     get: vi.fn().mockReturnValue(undefined), // 既存 PecoToolBBoxes 無し
     set: m.infoDictSet,
+    delete: vi.fn(),
     lookup: vi.fn(),
+  }
+  const mockContext = {
+    lookup: vi.fn(),
+    delete: vi.fn(),
+    enumerateIndirectObjects: vi.fn().mockReturnValue([]),
+    trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
+    obj: vi.fn((value) => value),
+    register: vi.fn((value) => value),
+    flateStream: vi.fn((contents: string | Uint8Array) => {
+      m.capturedBBoxJson.value = decodeMetadataPayload(contents)
+      return { type: 'peco-metadata-stream' }
+    }),
+  }
+  const mockCatalog = {
+    get: vi.fn().mockReturnValue(undefined),
+    set: vi.fn(),
   }
 
   // テスト内で複数ページの doc を扱うため、getPages はテストが pageCount を後から設定できるよう
@@ -184,12 +201,8 @@ function setupPdfLibMock() {
     save:            m.save,
     commit:            m.save,
     // PR #96: sweepUnreachableObjects が context.trailerInfo を必要とする。
-    context: {
-      lookup: vi.fn(),
-      delete: vi.fn(),
-      enumerateIndirectObjects: vi.fn().mockReturnValue([]),
-      trailerInfo: { Root: undefined, Info: undefined, Encrypt: undefined, ID: undefined },
-    },
+    context: mockContext,
+    catalog: mockCatalog,
     getInfoDict: vi.fn().mockReturnValue(mockInfoDict),
   }
   m.embedFont.mockResolvedValue({

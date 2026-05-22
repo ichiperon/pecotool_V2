@@ -9,13 +9,7 @@
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import {
-  PDFDocument,
-  PDFName,
-  PDFHexString,
-  PDFString,
-  type PDFDict,
-} from '@cantoo/pdf-lib';
+import { PDFDocument } from '@cantoo/pdf-lib';
 
 // Mock: IDB 経路を in-memory に置き換え (pecoStore が触るため)
 const fakeIdb = new Map<string, unknown>();
@@ -48,7 +42,10 @@ import {
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
-import { safeDecodePdfText } from '../../utils/pdfLibSafeDecode';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+} from '../../utils/pdfPecoToolMetadata';
 import { findInputPdf, FONT_PATH } from './helpers/realPdfFixtures';
 import type { PecoDocument, PageData, TextBlock } from '../../types';
 
@@ -56,13 +53,11 @@ const REAL_PDF_PATH = findInputPdf() ?? '';
 const hasRealPdf = REAL_PDF_PATH !== '';
 
 function readBBoxMeta(doc: PDFDocument): Record<string, Array<{ text: string; bbox: any }>> | null {
-  const infoDict = (doc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-  if (!infoDict) return null;
-  const v = infoDict.get(PDFName.of('PecoToolBBoxes'));
-  if (v instanceof PDFHexString || v instanceof PDFString) {
-    try { return JSON.parse(safeDecodePdfText(v)); } catch { return null; }
-  }
-  return null;
+  expect(hasLegacyPecoToolBBoxInfo(doc)).toBe(false);
+  const meta = readPecoToolBBoxMetaFromPdfDoc(doc);
+  return Object.keys(meta).length === 0
+    ? null
+    : meta as Record<string, Array<{ text: string; bbox: any }>>;
 }
 
 function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
@@ -157,7 +152,7 @@ describe.skipIf(!hasRealPdf)('Undo/Redo × save roundtrip (実 PDF)', () => {
     expect(usePecoStore.getState().isDirty).toBe(true); // store は dirty フラグ立ちっぱなし
 
     // save → page.isDirty=false のため dirtyOnly で落ちる
-    //   output PDF には PecoToolBBoxes が書かれない (新規編集なし)
+    //   output PDF には PecoTool メタが書かれない (新規編集なし)
     const { meta } = await saveAndReadMeta(usePecoStore.getState().document!, realBytes);
     expect(meta).toBeNull(); // undo 後の save は meta を一切書き出さない
   }, 120_000);

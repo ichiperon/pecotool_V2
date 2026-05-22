@@ -20,6 +20,11 @@ export interface SweepResult {
   dropped: number;
 }
 
+export interface CompactResult {
+  /** object number が変更された indirect object 数 */
+  renumbered: number;
+}
+
 // PDFRef を数値キーに変換するための倍率。generationNumber は PDF 仕様上
 // 0〜65535 の範囲を取りうるが、実運用では数十までしか観測されない。
 // それでも安全側に倒し 1e6 を倍率とする (objectNumber * 1_000_000 + gen)。
@@ -47,7 +52,7 @@ function isTraversableObject(value: PDFObject): value is PDFRef | PDFDict | PDFA
  * 起点:
  * - trailerInfo.Root（必須。Catalog 経由で Pages, AcroForm, Outlines, Metadata,
  *   StructTreeRoot, MarkInfo, OutputIntents 等が全て辿れる）
- * - trailerInfo.Info（PecoToolBBoxes メタが入っている）
+ * - trailerInfo.Info（文書情報辞書。旧PecoToolBBoxesメタを持つ既存PDFもある）
  * - trailerInfo.Encrypt（encrypted PDF の場合）
  * - trailerInfo.ID（通常は 2 つの string 直値だが、indirect ref 経由のケースで
  *   参照不能になることを防ぐため起点化）
@@ -138,4 +143,88 @@ export function sweepUnreachableObjects(pdfDoc: PDFDocument): SweepResult {
     dropped++;
   }
   return { dropped };
+}
+
+function remapRef(refMap: Map<string, PDFRef>, value: PDFObject | undefined): PDFObject | undefined {
+  if (value instanceof PDFRef) {
+    return refMap.get(value.toString()) ?? value;
+  }
+  return value;
+}
+
+function rewriteRefsInObject(obj: PDFObject, refMap: Map<string, PDFRef>, seen: WeakSet<object>): void {
+  if (obj instanceof PDFRef) return;
+  if (!(obj instanceof PDFDict || obj instanceof PDFArray || obj instanceof PDFStream)) return;
+  if (seen.has(obj)) return;
+  seen.add(obj);
+
+  if (obj instanceof PDFStream) {
+    rewriteRefsInObject(obj.dict, refMap, seen);
+    return;
+  }
+
+  if (obj instanceof PDFDict) {
+    for (const [key, value] of obj.entries()) {
+      const mapped = remapRef(refMap, value);
+      if (mapped && mapped !== value) obj.set(key, mapped);
+      rewriteRefsInObject(mapped ?? value, refMap, seen);
+    }
+    return;
+  }
+
+  for (let i = 0; i < obj.size(); i++) {
+    const value = obj.get(i);
+    const mapped = remapRef(refMap, value);
+    if (mapped && mapped !== value) obj.set(i, mapped);
+    rewriteRefsInObject(mapped ?? value, refMap, seen);
+  }
+}
+
+export function compactIndirectObjectNumbers(pdfDoc: PDFDocument): CompactResult {
+  const context = pdfDoc.context as unknown as {
+    indirectObjects?: Map<PDFRef, PDFObject>;
+    largestObjectNumber: number;
+    enumerateIndirectObjects: () => Array<[PDFRef, PDFObject]>;
+    assign: (ref: PDFRef, object: PDFObject) => void;
+    trailerInfo?: Record<string, PDFObject | undefined>;
+  };
+  const indirectObjects = context.indirectObjects;
+  if (!(indirectObjects instanceof Map)) return { renumbered: 0 };
+
+  const entries = context.enumerateIndirectObjects();
+  if (entries.length === 0) return { renumbered: 0 };
+
+  const refMap = new Map<string, PDFRef>();
+  let renumbered = 0;
+  entries.forEach(([oldRef], index) => {
+    const newRef = PDFRef.of(index + 1, 0);
+    refMap.set(oldRef.toString(), newRef);
+    if (newRef !== oldRef) renumbered += 1;
+  });
+  if (renumbered === 0 && context.largestObjectNumber === entries.length) {
+    return { renumbered: 0 };
+  }
+
+  const seen = new WeakSet<object>();
+  for (const [, object] of entries) {
+    rewriteRefsInObject(object, refMap, seen);
+  }
+
+  const trailerInfo = context.trailerInfo;
+  if (trailerInfo) {
+    const trailerSeen = new WeakSet<object>();
+    for (const key of Object.keys(trailerInfo)) {
+      const mapped = remapRef(refMap, trailerInfo[key]);
+      trailerInfo[key] = mapped;
+      if (mapped) rewriteRefsInObject(mapped, refMap, trailerSeen);
+    }
+  }
+
+  indirectObjects.clear();
+  context.largestObjectNumber = 0;
+  entries.forEach(([, object], index) => {
+    context.assign(PDFRef.of(index + 1, 0), remapRef(refMap, object) ?? object);
+  });
+
+  return { renumbered };
 }

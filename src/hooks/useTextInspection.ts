@@ -222,7 +222,12 @@ export function useTextInspection() {
       await waitForPendingIdbSaves();
       const dirtyPages = await getAllTemporaryPageData(doc.filePath);
       const pdf = await getSharedPdfProxy(doc.filePath);
-      const bboxMeta = await loadPecoToolBBoxMeta(pdf).catch(() => null);
+      const bboxMeta = await loadPecoToolBBoxMeta(pdf, {
+        loadBytes: async () => {
+          const { readFile } = await import('@tauri-apps/plugin-fs');
+          return readFile(doc.filePath);
+        },
+      }).catch(() => null);
 
       for (let pageIndex = 0; pageIndex < doc.totalPages; pageIndex++) {
         const latestBeforeRun = usePecoStore.getState();

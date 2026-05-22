@@ -8,14 +8,14 @@
  *  - 統合: 膨れた PDF を buildPdfDocument で再保存 → 原本級サイズへ収束 (要件2)
  */
 import { describe, it, expect, vi } from 'vitest'
-import { PDFDocument, PDFName, PDFDict } from '@cantoo/pdf-lib'
+import { PDFDocument, PDFName, PDFDict, PDFArray } from '@cantoo/pdf-lib'
 import { stripTextBlocks } from '../../utils/pdfContentStream'
 import {
   isPecoToolFontKey,
   isPecoToolGraphicsStateKey,
   PECO_FONT_KEY_TAG,
 } from '../../utils/pdfPecoToolMarkers'
-import { sweepUnreachableObjects } from '../../utils/pdfReachabilityGc'
+import { compactIndirectObjectNumbers, sweepUnreachableObjects } from '../../utils/pdfReachabilityGc'
 import { buildPdfDocument } from '../../utils/pdfSaver'
 import type { PecoDocument, PageData, TextBlock } from '../../types'
 
@@ -149,6 +149,58 @@ describe('Issue #96 PDF size regression', () => {
       sweepUnreachableObjects(doc)
 
       expect(entriesSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('compacts object numbers and rewrites refs after GC gaps', async () => {
+      const doc = await PDFDocument.create()
+      doc.addPage([595, 842])
+      const gapRef = doc.context.register(doc.context.obj({ Marker: PDFName.of('Gap') }) as PDFDict)
+      const liveRef = doc.context.register(doc.context.obj({ Marker: PDFName.of('Live') }) as PDFDict)
+      doc.catalog.set(PDFName.of('LiveRef'), liveRef)
+      doc.context.delete(gapRef)
+
+      const result = compactIndirectObjectNumbers(doc)
+      const refs = doc.context.enumerateIndirectObjects().map(([ref]) => ref.objectNumber)
+
+      expect(result.renumbered).toBeGreaterThan(0)
+      expect(refs).toEqual(refs.map((_, index) => index + 1))
+      expect((doc.context as any).largestObjectNumber).toBe(refs.length)
+      const rewrittenLiveRef = doc.catalog.get(PDFName.of('LiveRef')) as typeof liveRef
+      expect(rewrittenLiveRef.objectNumber).toBeLessThan(liveRef.objectNumber)
+    })
+
+    it('rewrites indirect objects whose value is a PDFRef', async () => {
+      const doc = await PDFDocument.create()
+      doc.addPage([595, 842])
+      const gapRef = doc.context.register(doc.context.obj({ Marker: PDFName.of('Gap') }) as PDFDict)
+      const targetRef = doc.context.register(doc.context.obj({ Marker: PDFName.of('Target') }) as PDFDict)
+      const aliasObjectRef = doc.context.register(targetRef)
+      doc.catalog.set(PDFName.of('Target'), targetRef)
+      doc.catalog.set(PDFName.of('AliasObject'), aliasObjectRef)
+      doc.context.delete(gapRef)
+
+      compactIndirectObjectNumbers(doc)
+
+      const rewrittenTarget = doc.catalog.get(PDFName.of('Target'))
+      const rewrittenAliasObject = doc.catalog.get(PDFName.of('AliasObject'))
+      const aliasValue = doc.context.lookup(rewrittenAliasObject as never)
+      expect(aliasValue?.toString()).toBe(rewrittenTarget?.toString())
+    })
+
+    it('rewrites refs inside direct trailer objects', async () => {
+      const doc = await PDFDocument.create()
+      doc.addPage([595, 842])
+      const gapRef = doc.context.register(doc.context.obj({ Marker: PDFName.of('Gap') }) as PDFDict)
+      const liveRef = doc.context.register(doc.context.obj({ Marker: PDFName.of('Live') }) as PDFDict)
+      doc.catalog.set(PDFName.of('LiveRef'), liveRef)
+      ;(doc.context as any).trailerInfo.ID = doc.context.obj([liveRef])
+      doc.context.delete(gapRef)
+
+      compactIndirectObjectNumbers(doc)
+
+      const rewrittenLiveRef = doc.catalog.get(PDFName.of('LiveRef'))
+      const trailerId = (doc.context as any).trailerInfo.ID as PDFArray
+      expect(trailerId.get(0)?.toString()).toBe(rewrittenLiveRef?.toString())
     })
   })
 

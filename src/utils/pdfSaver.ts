@@ -1,7 +1,7 @@
 import {
   PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState,
   translate, scale, concatTransformationMatrix,
-  PDFName, PDFHexString, PDFString, PDFRawStream, PDFArray,
+  PDFName, PDFRawStream, PDFArray,
   PDFDict
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
@@ -13,13 +13,18 @@ import {
   hasTextOperatorsOutsideTextObjects,
 } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
-import { safeDecodePdfText } from './pdfLibSafeDecode';
 import {
   PECO_FONT_KEY_TAG,
   isPecoToolFontKey,
   isPecoToolGraphicsStateKey,
 } from './pdfPecoToolMarkers';
-import { sweepUnreachableObjects } from './pdfReachabilityGc';
+import { ensureDenseClassicXref } from './pdfClassicXref';
+import { compactIndirectObjectNumbers, sweepUnreachableObjects } from './pdfReachabilityGc';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+  writePecoToolBBoxMetaToPdfDoc,
+} from './pdfPecoToolMetadata';
 import type {
   SavePdfSource,
   SavePdfWorkerRequest,
@@ -747,19 +752,8 @@ export async function buildPdfDocument(
   const contentRefCounts = collectPageContentRefCounts(pdfDoc);
   const skippedChars = createSkippedTextCollector();
 
-  // getInfoDict() は pdf-lib の public API には無いため、型アサーションで呼び出す
-  const infoDict = (pdfDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-  let existingBBoxMeta: Record<string, unknown> = {};
-
-  if (infoDict) {
-    try {
-      const value = infoDict.get(PDFName.of('PecoToolBBoxes'));
-      // decodeText() は数 MB のメタで stack overflow するため safeDecodePdfText を使う
-      if (value instanceof PDFHexString || value instanceof PDFString) {
-        existingBBoxMeta = JSON.parse(safeDecodePdfText(value));
-      }
-    } catch { /* ignore parse errors */ }
-  }
+  const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
+  const existingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
 
   const bboxMeta = { ...existingBBoxMeta };
   let metaChanged = false;
@@ -1082,8 +1076,8 @@ export async function buildPdfDocument(
     );
   }
 
-  if (metaChanged && infoDict) {
-    infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
+  if (metaChanged || Object.keys(existingBBoxMeta).length > 0 || hadLegacyBBoxMeta) {
+    writePecoToolBBoxMetaToPdfDoc(pdfDoc, bboxMeta);
   }
 
   // 修正 (#30): Catalog の /Version を消す。Acrobat は header と Catalog /Version の
@@ -1099,6 +1093,10 @@ export async function buildPdfDocument(
     addDefaultPage: false,
   };
 
+  if (typeof pdfDoc.flush === 'function') {
+    await pdfDoc.flush();
+  }
+
   // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
   // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
   // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
@@ -1108,8 +1106,10 @@ export async function buildPdfDocument(
       `[buildPdfDocument] GC: dropped ${sweepResult.dropped} unreachable objects`,
     );
   }
+  compactIndirectObjectNumbers(pdfDoc);
 
-  const savedBytes = await pdfDoc.save(saveOptions);
+  let savedBytes = await pdfDoc.save(saveOptions);
+  savedBytes = ensureDenseClassicXref(savedBytes);
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
 
   // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。

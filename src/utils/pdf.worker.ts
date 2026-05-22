@@ -1,5 +1,5 @@
 import {
-  PDFDocument, StandardFonts, PDFName, PDFHexString, PDFString, PDFRawStream,
+  PDFDocument, StandardFonts, PDFName, PDFRawStream,
   pushGraphicsState, popGraphicsState, translate, scale, degrees,
   concatTransformationMatrix, PDFArray,
   PDFDict
@@ -12,13 +12,18 @@ import {
   hasTextOperatorsOutsideTextObjects,
 } from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
-import { safeDecodePdfText } from './pdfLibSafeDecode';
 import {
   PECO_FONT_KEY_TAG,
   isPecoToolFontKey,
   isPecoToolGraphicsStateKey,
 } from './pdfPecoToolMarkers';
-import { sweepUnreachableObjects } from './pdfReachabilityGc';
+import { ensureDenseClassicXref } from './pdfClassicXref';
+import { compactIndirectObjectNumbers, sweepUnreachableObjects } from './pdfReachabilityGc';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+  writePecoToolBBoxMetaToPdfDoc,
+} from './pdfPecoToolMetadata';
 import type {
   SavePdfWorkerRequest,
   SavePdfWorkerResponse,
@@ -588,19 +593,8 @@ async function handleSavePdf(
   const contentRefCounts = collectPageContentRefCounts(pdfDoc);
   const skippedChars = createSkippedTextCollector();
 
-  // getInfoDict() は pdf-lib の public API には無いため、構造型アサーションで呼び出す（pdfSaver.ts と同じ方針）
-  const infoDict = (pdfDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-  let existingBBoxMeta: Record<string, unknown> = {};
-
-  if (infoDict) {
-    try {
-      const value = infoDict.get(PDFName.of('PecoToolBBoxes'));
-      // decodeText() は数 MB のメタで stack overflow するため safeDecodePdfText を使う
-      if (value instanceof PDFHexString || value instanceof PDFString) {
-        existingBBoxMeta = JSON.parse(safeDecodePdfText(value));
-      }
-    } catch { /* ignore parse errors */ }
-  }
+  const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
+  const existingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
 
   const bboxMeta: Record<string, unknown> = { ...existingBBoxMeta };
   let metaChanged = false;
@@ -837,8 +831,8 @@ async function handleSavePdf(
     }
   }
 
-  if (metaChanged && infoDict) {
-    infoDict.set(PDFName.of('PecoToolBBoxes'), PDFHexString.fromText(JSON.stringify(bboxMeta)));
+  if (metaChanged || Object.keys(existingBBoxMeta).length > 0 || hadLegacyBBoxMeta) {
+    writePecoToolBBoxMetaToPdfDoc(pdfDoc, bboxMeta);
   }
 
   // issue #96 要件2: 未編集ページにも空 q-Q ラッパー除去のみ適用 (詳細は pdfSaver.ts 側参照)。
@@ -866,6 +860,10 @@ async function handleSavePdf(
     addDefaultPage: false,
   };
 
+  if (typeof pdfDoc.flush === 'function') {
+    await pdfDoc.flush();
+  }
+
   // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
   // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
   // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
@@ -875,13 +873,15 @@ async function handleSavePdf(
       `[pdf.worker] GC: dropped ${sweepResult.dropped} unreachable objects`,
     );
   }
+  compactIndirectObjectNumbers(pdfDoc);
 
   // pdf-lib save() が pdf-lib 内部で hang する edge case 対策として 90s timeout を設定。
   const savePromise = pdfDoc.save(saveOptions);
   const saveTimeout = new Promise<never>((_, reject) => {
     setTimeout(() => reject(new Error('[pdf.worker] pdfDoc.save() timed out after 90s')), 90_000);
   });
-  const savedBytes = await Promise.race([savePromise, saveTimeout]);
+  let savedBytes = await Promise.race([savePromise, saveTimeout]);
+  savedBytes = ensureDenseClassicXref(savedBytes);
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
 
   // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。

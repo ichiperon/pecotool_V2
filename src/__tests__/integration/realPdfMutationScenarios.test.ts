@@ -33,6 +33,7 @@ import {
   __setSaveWorkerFactoryForTest,
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver';
+import { stripUnsafePdfCopyChars } from '../../utils/pdfSkippedTextChars';
 import type { PecoDocument, TextBlock } from '../../types';
 import {
   findInputPdf,
@@ -78,12 +79,16 @@ function collectExpected(doc: PecoDocument): Map<number, ExpectedBB[]> {
         y: b.bbox.y,
         width: b.bbox.width,
         height: b.bbox.height,
-        text: b.text,
+        text: stripUnsafePdfCopyChars(b.text),
         writingMode: b.writingMode,
       })),
     );
   }
   return map;
+}
+
+function expectedMetaText(text: string): string {
+  return stripUnsafePdfCopyChars(text);
 }
 
 function blockCountMap(doc: PecoDocument): Map<number, number> {
@@ -206,7 +211,7 @@ describe.skipIf(!hasRealPdf)('REAL PDF BB 変形シナリオ (A1 削除 / A2 リ
     // 削減前 index=偶数 の text を期待値として保持 (後の一致検証)
     const evenIndexTexts = new Map<number, string[]>();
     for (const [p, pd] of doc.pages.entries()) {
-      evenIndexTexts.set(p, pd.textBlocks.filter((_, i) => i % 2 === 0).map((b) => b.text));
+      evenIndexTexts.set(p, pd.textBlocks.filter((_, i) => i % 2 === 0).map((b) => expectedMetaText(b.text)));
     }
 
     for (const [p, pd] of doc.pages.entries()) {
@@ -262,7 +267,7 @@ describe.skipIf(!hasRealPdf)('REAL PDF BB 変形シナリオ (A1 削除 / A2 リ
       } else if (len === 2) {
         middleTexts.set(p, []);
       } else {
-        middleTexts.set(p, pd.textBlocks.slice(1, -1).map((b) => b.text));
+        middleTexts.set(p, pd.textBlocks.slice(1, -1).map((b) => expectedMetaText(b.text)));
       }
     }
 

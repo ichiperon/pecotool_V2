@@ -116,7 +116,7 @@ describe.skipIf(!hasRealPdf)('pdfMetadataLoader (production 経路) × 実デー
     // production 経路: pdfjs で saved bytes を開き loadPecoToolBBoxMeta を呼ぶ
     const pdfjsDocSaved = await openWithPdfjs(new Uint8Array(saved));
     const tLoad = Date.now();
-    const meta = await loadPecoToolBBoxMeta(pdfjsDocSaved);
+    const meta = await loadPecoToolBBoxMeta(pdfjsDocSaved, { bytes: new Uint8Array(saved) });
     console.log(`[metaLoader] loadPecoToolBBoxMeta: ${Date.now() - tLoad}ms`);
     try { await pdfjsDocSaved.cleanup(); } catch { /* ignore */ }
     try { await pdfjsDocSaved.destroy(); } catch { /* ignore */ }
@@ -188,7 +188,7 @@ describe.skipIf(!hasRealPdf)('pdfMetadataLoader (production 経路) × 実デー
     const saved = await savePDF({ bytes: new Uint8Array(realBytes) }, doc, fontAB);
 
     const pdfjsDocSaved = await openWithPdfjs(new Uint8Array(saved));
-    const meta = await loadPecoToolBBoxMeta(pdfjsDocSaved);
+    const meta = await loadPecoToolBBoxMeta(pdfjsDocSaved, { bytes: new Uint8Array(saved) });
     try { await pdfjsDocSaved.cleanup(); } catch { /* ignore */ }
     try { await pdfjsDocSaved.destroy(); } catch { /* ignore */ }
 
@@ -250,7 +250,7 @@ describe.skipIf(!hasRealPdf)('pdfMetadataLoader (production 経路) × 実デー
     const saved = await savePDF({ bytes: new Uint8Array(realBytes) }, doc, fontAB);
 
     const pdfjsDocSaved = await openWithPdfjs(new Uint8Array(saved));
-    const meta = await loadPecoToolBBoxMeta(pdfjsDocSaved);
+    const meta = await loadPecoToolBBoxMeta(pdfjsDocSaved, { bytes: new Uint8Array(saved) });
     try { await pdfjsDocSaved.cleanup(); } catch { /* ignore */ }
     try { await pdfjsDocSaved.destroy(); } catch { /* ignore */ }
 

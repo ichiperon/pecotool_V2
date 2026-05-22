@@ -6,14 +6,11 @@ import {
   PDFName,
   PDFRawStream,
   PDFArray,
-  PDFHexString,
-  PDFString,
   type PDFObject,
   type PDFRef,
-  type PDFDict,
 } from '@cantoo/pdf-lib';
 import type { PageData, PecoDocument, TextBlock, WritingMode } from '../../../types';
-import { safeDecodePdfText } from '../../../utils/pdfLibSafeDecode';
+import { readPecoToolBBoxMetaFromPdfDoc } from '../../../utils/pdfPecoToolMetadata';
 
 export const TEST_DIR = resolve(__dirname, '../../../../test');
 export const FONT_PATH = resolve(__dirname, '../../../../public/fonts/NotoSansCJKjp-Regular.otf');
@@ -92,7 +89,7 @@ export async function loadPecoDocumentMetaFirst(
   const totalPages: number = pdfjsDoc.numPages;
 
   const { loadPecoToolBBoxMeta } = await import('../../../utils/pdfMetadataLoader');
-  const meta = await loadPecoToolBBoxMeta(pdfjsDoc);
+  const meta = await loadPecoToolBBoxMeta(pdfjsDoc, { bytes: new Uint8Array(realBytes) });
 
   if (meta) {
     const pages = new Map<number, PageData>();
@@ -299,18 +296,10 @@ export interface BBoxMetaEntry {
 }
 
 export function readBBoxMeta(doc: PDFDocument): Record<string, BBoxMetaEntry[]> | null {
-  const infoDict = (doc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-  if (!infoDict) return null;
-  const v = infoDict.get(PDFName.of('PecoToolBBoxes'));
-  if (v === undefined || v === null) return null;
-  if (v instanceof PDFHexString || v instanceof PDFString) {
-    try {
-      return JSON.parse(safeDecodePdfText(v)) as Record<string, BBoxMetaEntry[]>;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  const parsed = readPecoToolBBoxMetaFromPdfDoc(doc);
+  return Object.keys(parsed).length > 0
+    ? parsed as Record<string, BBoxMetaEntry[]>
+    : null;
 }
 
 /**
@@ -374,7 +363,7 @@ export async function reloadBBoxMetaViaPdfjs(savedBytes: Uint8Array): Promise<{
   const pdfjsDoc = await loadingTask.promise;
   const totalPages: number = pdfjsDoc.numPages;
   const { loadPecoToolBBoxMeta } = await import('../../../utils/pdfMetadataLoader');
-  const parsed = await loadPecoToolBBoxMeta(pdfjsDoc);
+  const parsed = await loadPecoToolBBoxMeta(pdfjsDoc, { bytes: new Uint8Array(savedBytes) });
   try { await pdfjsDoc.cleanup(); } catch { /* ignore */ }
   try { await pdfjsDoc.destroy(); } catch { /* ignore */ }
   if (!parsed) return { meta: null, totalPages };

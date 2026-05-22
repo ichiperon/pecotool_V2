@@ -8,7 +8,7 @@
  *     (1) dirtyOnlyPages フィルタで 1 ページも落ちていない
  *     (2) buildPdfDocument の stripTextBlocks が全 500 ページで実行されている
  *     (3) drawText が全 500 ページで行われている
- *     (4) PecoToolBBoxes info dict に全 500 ページぶんのメタデータが入っている
+ *     (4) private metadata stream に全 500 ページぶんのメタデータが入っている
  *
  * 実装方針:
  *   他の integration テストは @cantoo/pdf-lib を mock しているが、本テストでは
@@ -26,11 +26,8 @@ import {
   PDFName,
   PDFRawStream,
   PDFArray,
-  PDFHexString,
-  PDFString,
   type PDFObject,
   type PDFRef,
-  type PDFDict,
 } from '@cantoo/pdf-lib';
 
 // Tauri / 外部 IO のみ mock。pdf-lib は実物を使う。
@@ -55,6 +52,10 @@ import {
   __setSaveWorkerFactoryForTest,
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+} from '../../utils/pdfPecoToolMetadata';
 import type { PecoDocument, PageData, TextBlock } from '../../types';
 
 const TOTAL_PAGES = 500;
@@ -201,19 +202,10 @@ function decodePageContents(doc: PDFDocument, pageIndex: number): Uint8Array | n
   return out;
 }
 
-/** 出力 PDF の InfoDict から PecoToolBBoxes JSON を取り出す。 */
 function readBBoxMeta(doc: PDFDocument): Record<string, unknown> | null {
-  const infoDict = (doc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-  if (!infoDict) return null;
-  const v = infoDict.get(PDFName.of('PecoToolBBoxes'));
-  if (v instanceof PDFHexString || v instanceof PDFString) {
-    try {
-      return JSON.parse(v.decodeText());
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  expect(hasLegacyPecoToolBBoxInfo(doc)).toBe(false);
+  const meta = readPecoToolBBoxMetaFromPdfDoc(doc);
+  return Object.keys(meta).length === 0 ? null : meta;
 }
 
 beforeAll(() => {

@@ -11,13 +11,7 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import {
-  PDFDocument,
-  PDFName,
-  PDFHexString,
-  PDFString,
-  type PDFDict,
-} from '@cantoo/pdf-lib';
+import { PDFDocument } from '@cantoo/pdf-lib';
 
 const fakeIdb = new Map<string, unknown>();
 vi.mock('../../utils/pdfTemporaryStorage', () => ({
@@ -49,7 +43,10 @@ import {
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
-import { safeDecodePdfText } from '../../utils/pdfLibSafeDecode';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+} from '../../utils/pdfPecoToolMetadata';
 import type { PecoDocument, PageData, TextBlock } from '../../types';
 
 const TEST_DIR = resolve(__dirname, '../../../test');
@@ -68,13 +65,11 @@ const REAL_PDF_PATH = findInputPdf() ?? '';
 const hasRealPdf = REAL_PDF_PATH !== '';
 
 function readBBoxMeta(doc: PDFDocument): Record<string, Array<{ text: string; bbox: any; order: number }>> | null {
-  const infoDict = (doc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-  if (!infoDict) return null;
-  const v = infoDict.get(PDFName.of('PecoToolBBoxes'));
-  if (v instanceof PDFHexString || v instanceof PDFString) {
-    try { return JSON.parse(safeDecodePdfText(v)); } catch { return null; }
-  }
-  return null;
+  expect(hasLegacyPecoToolBBoxInfo(doc)).toBe(false);
+  const meta = readPecoToolBBoxMetaFromPdfDoc(doc);
+  return Object.keys(meta).length === 0
+    ? null
+    : meta as Record<string, Array<{ text: string; bbox: any; order: number }>>;
 }
 
 function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {

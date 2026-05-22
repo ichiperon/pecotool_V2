@@ -2,8 +2,11 @@ import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { inflate } from 'pako';
-import { PDFArray, PDFDocument, PDFHexString, PDFName, PDFRawStream, PDFString } from '@cantoo/pdf-lib';
-import { safeDecodePdfText } from '../../utils/pdfLibSafeDecode';
+import { PDFArray, PDFDocument, PDFName, PDFRawStream } from '@cantoo/pdf-lib';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+} from '../../utils/pdfPecoToolMetadata';
 
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (p: string) => p }));
 vi.mock('@tauri-apps/plugin-fs', () => ({
@@ -181,11 +184,8 @@ function findBrokenContentRefs(doc: PDFDocument): string[] {
 }
 
 function findControlCharsInBBoxMeta(doc: PDFDocument): string[] {
-  const infoDict = (doc as unknown as { getInfoDict(): unknown }).getInfoDict();
-  const value = (infoDict as { get(key: PDFName): unknown } | undefined)?.get(PDFName.of('PecoToolBBoxes'));
-  if (!(value instanceof PDFHexString || value instanceof PDFString)) return [];
-
-  const meta = JSON.parse(safeDecodePdfText(value)) as Record<string, Array<{ text?: string; order?: number }>>;
+  expect(hasLegacyPecoToolBBoxInfo(doc)).toBe(false);
+  const meta = readPecoToolBBoxMetaFromPdfDoc(doc) as Record<string, Array<{ text?: string; order?: number }>>;
   const violations: string[] = [];
   for (const [pageIndex, blocks] of Object.entries(meta)) {
     for (const block of blocks) {

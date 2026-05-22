@@ -21,12 +21,10 @@ import {
   PDFArray,
   PDFRawStream,
   PDFName,
-  PDFHexString,
-  PDFString,
 } from '@cantoo/pdf-lib';
 import { inflate } from 'pako';
 import { buildPdfDocument } from '../../utils/pdfSaver';
-import { safeDecodePdfText } from '../../utils/pdfLibSafeDecode';
+import { readPecoToolBBoxMetaFromPdfDoc } from '../../utils/pdfPecoToolMetadata';
 import type { PageData, PecoDocument, TextBlock } from '../../types';
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
@@ -102,18 +100,10 @@ function decodePage0Contents(doc: PDFDocument): Uint8Array | null {
 }
 
 function readMetaCount(doc: PDFDocument): number {
-  const infoDict = (doc as unknown as { getInfoDict(): { get: (k: PDFName) => unknown } | undefined }).getInfoDict();
-  if (!infoDict) return 0;
-  const v = infoDict.get(PDFName.of('PecoToolBBoxes'));
-  if (!(v instanceof PDFHexString) && !(v instanceof PDFString)) return 0;
-  try {
-    const parsed = JSON.parse(safeDecodePdfText(v)) as Record<string, unknown[]>;
-    let count = 0;
-    for (const arr of Object.values(parsed)) count += Array.isArray(arr) ? arr.length : 0;
-    return count;
-  } catch {
-    return 0;
-  }
+  const parsed = readPecoToolBBoxMetaFromPdfDoc(doc) as Record<string, unknown[]>;
+  let count = 0;
+  for (const arr of Object.values(parsed)) count += Array.isArray(arr) ? arr.length : 0;
+  return count;
 }
 
 describe('pdfSaver issue #25: non-dirty page meta preservation', () => {

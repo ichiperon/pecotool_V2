@@ -23,11 +23,8 @@ import {
   PDFName,
   PDFRawStream,
   PDFArray,
-  PDFHexString,
-  PDFString,
   type PDFObject,
   type PDFRef,
-  type PDFDict,
 } from '@cantoo/pdf-lib';
 
 // Tauri / bitmap だけ mock。pdf-lib と pdfjs は実物を使う。
@@ -43,6 +40,10 @@ import {
   __setSaveWorkerFactoryForTest,
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+} from '../../utils/pdfPecoToolMetadata';
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types';
 
 import { findInputPdf, TEST_DIR, FONT_PATH } from './helpers/realPdfFixtures';
@@ -94,29 +95,14 @@ function decodePageContents(doc: PDFDocument, pageIndex: number): Uint8Array | n
   return out;
 }
 
-import { safeDecodePdfText } from '../../utils/pdfLibSafeDecode';
-
 function readBBoxMeta(doc: PDFDocument): Record<string, unknown> | null {
-  const infoDict = (doc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-  if (!infoDict) {
-    console.log('[readBBoxMeta] infoDict is undefined');
-    return null;
-  }
-  const v = infoDict.get(PDFName.of('PecoToolBBoxes'));
-  if (v === undefined || v === null) {
-    console.log('[readBBoxMeta] PecoToolBBoxes not found in infoDict');
-    return null;
-  }
-  if (v instanceof PDFHexString || v instanceof PDFString) {
-    try {
-      return JSON.parse(safeDecodePdfText(v));
-    } catch (e) {
-      console.log('[readBBoxMeta] JSON parse failed:', e);
-      return null;
-    }
-  }
-  console.log('[readBBoxMeta] PecoToolBBoxes type unexpected:', typeof v, v?.constructor?.name);
-  return null;
+  expect(hasLegacyPecoToolBBoxInfo(doc)).toBe(false);
+  const meta = readPecoToolBBoxMetaFromPdfDoc(doc);
+  return Object.keys(meta).length === 0 ? null : meta;
+}
+
+function normalizePrivateMetaText(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
 }
 
 beforeAll(async () => {
@@ -459,7 +445,7 @@ describe.skipIf(!hasRealPdf)('REAL PDF: 全 OCR 微移動 → 別名保存 → �
     const bboxMeta = readBBoxMeta(savedDoc);
     expect(bboxMeta).not.toBeNull();
     const metaKeys = Object.keys(bboxMeta!);
-    console.log(`[REAL] PecoToolBBoxes entries: ${metaKeys.length}`);
+    console.log(`[REAL] PecoTool BBoxes entries: ${metaKeys.length}`);
 
     // 各ページの content stream 差分検証
     const sameAsOriginal: number[] = [];
@@ -754,8 +740,9 @@ describe.skipIf(!hasRealPdf)('REAL PDF: 全 OCR 微移動 → 別名保存 → �
         if (Math.abs(entries[i].bbox.y - expY) > 1e-6) {
           moveMismatch.push({ page: p, idx: i, reason: `y ${entries[i].bbox.y} != ${expY}` });
         }
-        if (entries[i].text !== orig[i].text) {
-          moveMismatch.push({ page: p, idx: i, reason: `text changed: "${entries[i].text}" vs "${orig[i].text}"` });
+        const expectedText = normalizePrivateMetaText(orig[i].text);
+        if (entries[i].text !== expectedText) {
+          moveMismatch.push({ page: p, idx: i, reason: `text changed: "${entries[i].text}" vs "${expectedText}"` });
         }
       }
     }
@@ -915,8 +902,9 @@ describe.skipIf(!hasRealPdf)('REAL PDF: 全 OCR 微移動 → 別名保存 → �
         if (Math.abs(got[i].bbox.y - orig[i].y) > 1e-6) {
           mismatches.push({ page: p, idx: i, reason: `y ${got[i].bbox.y} vs orig ${orig[i].y}` });
         }
-        if (got[i].text !== orig[i].text) {
-          mismatches.push({ page: p, idx: i, reason: `text "${got[i].text}" vs "${orig[i].text}"` });
+        const expectedText = normalizePrivateMetaText(orig[i].text);
+        if (got[i].text !== expectedText) {
+          mismatches.push({ page: p, idx: i, reason: `text "${got[i].text}" vs "${expectedText}"` });
         }
       }
     }
@@ -1219,8 +1207,9 @@ describe.skipIf(!hasRealPdf)('REAL PDF: 全 OCR 微移動 → 別名保存 → �
         continue;
       }
       for (let i = 0; i < exp.length; i++) {
-        if (got[i].text !== exp[i].text) {
-          textMismatch.push({ page: p, idx: i, expected: exp[i].text, got: got[i].text });
+        const expectedText = normalizePrivateMetaText(exp[i].text);
+        if (got[i].text !== expectedText) {
+          textMismatch.push({ page: p, idx: i, expected: expectedText, got: got[i].text });
         }
         if (
           Math.abs(got[i].bbox.x - exp[i].x) > 1e-6 ||
@@ -1329,8 +1318,9 @@ describe.skipIf(!hasRealPdf)('REAL PDF: 全 OCR 微移動 → 別名保存 → �
       const exp = expectedByPage.get(p)!;
       const got = bboxMeta![String(p)];
       for (let i = 0; i < exp.length; i++) {
-        if (got[i].text !== exp[i].text) {
-          textMismatch.push({ page: p, idx: i, expected: exp[i].text, got: got[i].text });
+        const expectedText = normalizePrivateMetaText(exp[i].text);
+        if (got[i].text !== expectedText) {
+          textMismatch.push({ page: p, idx: i, expected: expectedText, got: got[i].text });
         }
         if (
           got[i].bbox.x !== exp[i].bbox.x ||

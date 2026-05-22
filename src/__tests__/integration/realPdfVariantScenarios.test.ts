@@ -13,8 +13,8 @@
  *          page.isDirty だけを見る保存フィルタに対して、block.isDirty のみ
  *          立っていて page.isDirty が false だと保存されない挙動を固定化。
  *   E2-3c: ba452f5 の大容量 meta silent drop 回帰。
- *          大量 (数千単位) の BB を持つ PecoToolBBoxes を再保存し、
- *          safeDecodePdfText が stack overflow を食らわず既存メタが維持される。
+ *          大量 (数千単位) の BB を持つ private metadata stream を再保存し、
+ *          private stream 読み取りで既存メタが維持される。
  *
  * 実行:
  *   NODE_OPTIONS=--max-old-space-size=6144 npx vitest run \
@@ -22,7 +22,7 @@
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { PDFDocument, StandardFonts, PDFName, PDFHexString, PDFString, type PDFDict } from '@cantoo/pdf-lib';
+import { PDFDocument, StandardFonts } from '@cantoo/pdf-lib';
 
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (p: string) => p }));
 vi.mock('@tauri-apps/plugin-fs', () => ({
@@ -36,7 +36,10 @@ import {
   __setSaveWorkerFactoryForTest,
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver';
-import { safeDecodePdfText } from '../../utils/pdfLibSafeDecode';
+import {
+  hasLegacyPecoToolBBoxInfo,
+  readPecoToolBBoxMetaFromPdfDoc,
+} from '../../utils/pdfPecoToolMetadata';
 import type { PecoDocument, PageData, TextBlock } from '../../types';
 import {
   findInputPdf,
@@ -110,6 +113,10 @@ function collectExpected(
     );
   }
   return map;
+}
+
+function normalizePrivateMetaText(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
 }
 
 describe('REAL PDF バリエーション/回帰シナリオ (C3 / E2-3)', () => {
@@ -295,12 +302,13 @@ describe('REAL PDF バリエーション/回帰シナリオ (C3 / E2-3)', () => 
         for (let i = 0; i < expBlocks.length; i++) {
           const exp = expBlocks[i];
           const got = actBlocks[i];
-          if (got.text !== exp.text) {
+          const expectedText = normalizePrivateMetaText(exp.text);
+          if (got.text !== expectedText) {
             exactMismatchCount++;
-            if (i > 0 && got.text === expBlocks[i - 1].text) offByOneCount++;
+            if (i > 0 && got.text === normalizePrivateMetaText(expBlocks[i - 1].text)) offByOneCount++;
             if (exactMismatchCount < 5) {
               console.log(
-                `[E2-3a] mismatch p=${p} i=${i} exp="${exp.text}" got="${got.text}"`,
+                `[E2-3a] mismatch p=${p} i=${i} exp="${expectedText}" got="${got.text}"`,
               );
             }
           }
@@ -359,7 +367,7 @@ describe('REAL PDF バリエーション/回帰シナリオ (C3 / E2-3)', () => 
       );
 
       // dirtyPages が空 → meta が書かれない (既存 meta も当然無い元 PDF 前提)。
-      // 元 PDF に PecoToolBBoxes が既に付いていた場合はそちらが維持される (消えない)
+      // 元 PDF に PecoTool メタが既に付いていた場合はそちらが維持される (消えない)
       // が、BB の移動は反映されていないはず (= 期待と一致しない)。
       const { meta: metaA } = await reloadBBoxMetaViaPdfjs(new Uint8Array(savedA));
       if (metaA !== null) {
@@ -432,7 +440,7 @@ describe('REAL PDF バリエーション/回帰シナリオ (C3 / E2-3)', () => 
   );
 
   /**
-   * E2-3c: safeDecodePdfText 導入による大容量 PecoToolBBoxes silent drop の回帰固定化。
+   * E2-3c: 大容量 PecoTool メタ silent drop の回帰固定化。
    * 症状: decodeText() が内部で `String.fromCharCode(...bytes)` を spread 呼び出し
    *       しているため、数 MB の hex 文字列で stack overflow → try/catch に
    *       握り潰され existingBBoxMeta = {} として扱われる → 既存メタが消える。
@@ -440,8 +448,7 @@ describe('REAL PDF バリエーション/回帰シナリオ (C3 / E2-3)', () => 
    * 再現方針:
    *   1) 実 PDF の全 BB を大幅に複製して hex 文字列が 2MB 以上になる状況を作る
    *   2) 1 度保存 → その保存済み PDF を入力にもう一度 savePDF
-   *   3) 2 回目の savePDF は「既存 meta を読んでマージ」するステップで
-   *      safeDecodePdfText が正常に decode できる必要がある
+   *   3) 2 回目の savePDF は「既存 meta を private stream から読んでマージ」できる必要がある
    *   4) 結果 meta の件数が ≒ 1 回目と同じ (silent drop していない) ことを確認
    *
    * フォールバックケース: 全 BB を複製して大量作るには時間がかかるので、
@@ -497,24 +504,15 @@ describe('REAL PDF バリエーション/回帰シナリオ (C3 / E2-3)', () => 
         `[E2-3c] first save size=${(savedOnce.byteLength / 1024 / 1024).toFixed(1)} MB`,
       );
 
-      // 1 回目保存結果に PecoToolBBoxes が書かれていることを確認 (+メタサイズ計測)
+      // 1 回目保存結果に private metadata stream が書かれていることを確認 (+メタサイズ計測)
       const savedDoc = await PDFDocument.load(new Uint8Array(savedOnce), {
         throwOnInvalidObject: false,
         ignoreEncryption: true,
         updateMetadata: false,
       });
-      const infoDict = (savedDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
-      expect(infoDict).toBeDefined();
-      const metaVal = infoDict!.get(PDFName.of('PecoToolBBoxes'));
-      expect(metaVal).toBeDefined();
-      expect(
-        metaVal instanceof PDFHexString || metaVal instanceof PDFString,
-      ).toBe(true);
-
-      // safeDecodePdfText が壊れず decode できること = stack overflow 回避の固定化
-      const decoded = safeDecodePdfText(metaVal as PDFHexString | PDFString);
-      expect(decoded.length).toBeGreaterThan(0);
-      const parsed = JSON.parse(decoded) as Record<string, BBoxMetaEntry[]>;
+      expect(hasLegacyPecoToolBBoxInfo(savedDoc)).toBe(false);
+      const parsed = readPecoToolBBoxMetaFromPdfDoc(savedDoc) as Record<string, BBoxMetaEntry[]>;
+      expect(Object.keys(parsed).length).toBeGreaterThan(0);
       let countFirst = 0;
       for (const arr of Object.values(parsed)) countFirst += arr.length;
       console.log(`[E2-3c] first-save meta block count=${countFirst}`);
@@ -522,7 +520,7 @@ describe('REAL PDF バリエーション/回帰シナリオ (C3 / E2-3)', () => 
 
       // 2 回目の保存: 何も編集していない (page.isDirty=false) が、
       // pdfSaver は existingBBoxMeta を読み取って維持する経路を通る。
-      // safeDecodePdfText がないと decodeText() で stack overflow → meta 消失。
+      // 既存 meta 読み取りに失敗すると existingBBoxMeta = {} として扱われる → meta 消失。
       const docPass2: PecoDocument = {
         ...doc,
         pages: new Map(

@@ -135,7 +135,7 @@ async function reloadBBoxMetaViaPdfjs(savedBytes: Uint8Array): Promise<{
   const pdfjsDoc = await loadingTask.promise;
   const totalPages: number = pdfjsDoc.numPages;
   const { loadPecoToolBBoxMeta } = await import('../../utils/pdfMetadataLoader');
-  const parsed = await loadPecoToolBBoxMeta(pdfjsDoc);
+  const parsed = await loadPecoToolBBoxMeta(pdfjsDoc, { bytes: new Uint8Array(savedBytes) });
   try { await pdfjsDoc.cleanup(); } catch { /* ignore */ }
   try { await pdfjsDoc.destroy(); } catch { /* ignore */ }
   if (!parsed) return { meta: null, totalPages };
@@ -487,4 +487,3 @@ describe.skipIf(!hasRealPdf)('REAL PDF 全BB 負荷シナリオ (T1-T5 + R1)', (
     console.log(`[R1] summary: ${JSON.stringify(aggregated, null, 2)}`);
   }, 1500_000);
 });
-
