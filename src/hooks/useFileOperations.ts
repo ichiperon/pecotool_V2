@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { ask, open, save } from '@tauri-apps/plugin-dialog';
-import { readFile } from '@tauri-apps/plugin-fs';
+import { readFile, stat } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
 
 /**
@@ -129,22 +129,98 @@ const inflightPrefetches = new Map<string, Promise<Uint8Array | null>>();
 // 100MB 級の bytes を保持する。直近 1 ファイル分だけ持つことでメモリを抑える
 // (複数ファイル同時編集の UI は無く、ファイル切替時は前ファイルの bytes を
 //  即座に破棄してよい)。
-const originalBytesCache = new Map<string, Uint8Array>();
+type OriginalBytesFingerprint = {
+  mtimeMs?: number;
+  size?: number;
+};
+
+type OriginalBytesCacheEntry = {
+  bytes: Uint8Array;
+  fingerprint?: OriginalBytesFingerprint;
+};
+
+const originalBytesCache = new Map<string, OriginalBytesCacheEntry>();
 const MAX_CACHED_ORIGINAL_FILES = 1;
+
+function normalizeStatNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function normalizeStatMtime(value: unknown): number | undefined {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'string') {
+    const parsedDate = Date.parse(value);
+    if (Number.isFinite(parsedDate)) return parsedDate;
+  }
+  return normalizeStatNumber(value);
+}
+
+async function readOriginalBytesFingerprint(filePath: string): Promise<OriginalBytesFingerprint | undefined> {
+  try {
+    const fileStat = await stat(filePath);
+    const statLike = fileStat as { mtime?: unknown; size?: unknown };
+    const fingerprint: OriginalBytesFingerprint = {
+      mtimeMs: normalizeStatMtime(statLike.mtime),
+      size: normalizeStatNumber(statLike.size),
+    };
+    return fingerprint.mtimeMs === undefined && fingerprint.size === undefined
+      ? undefined
+      : fingerprint;
+  } catch (e) {
+    console.warn('[originalBytesCache] stat failed:', e);
+    return undefined;
+  }
+}
+
+function fingerprintMatches(
+  cached: OriginalBytesFingerprint | undefined,
+  current: OriginalBytesFingerprint | undefined,
+): boolean {
+  if (cached && !current) return false;
+  if (!cached || !current) return true;
+  if (cached.mtimeMs !== undefined && current.mtimeMs !== undefined && cached.mtimeMs !== current.mtimeMs) {
+    return false;
+  }
+  if (cached.size !== undefined && current.size !== undefined && cached.size !== current.size) {
+    return false;
+  }
+  return true;
+}
 
 /**
  * 指定 filePath の originalBytes キャッシュをセットする。
  * 同時に MAX_CACHED_ORIGINAL_FILES を超えた古いエントリを破棄する。
  */
-function setOriginalBytesCache(filePath: string, bytes: Uint8Array): void {
+function setOriginalBytesCache(
+  filePath: string,
+  bytes: Uint8Array,
+  fingerprint?: OriginalBytesFingerprint,
+): void {
   // 既にあれば一旦消して LRU 順を更新 (Map の挿入順を活用)
   originalBytesCache.delete(filePath);
-  originalBytesCache.set(filePath, bytes);
+  originalBytesCache.set(filePath, { bytes, fingerprint });
   while (originalBytesCache.size > MAX_CACHED_ORIGINAL_FILES) {
     const oldestKey = originalBytesCache.keys().next().value;
     if (oldestKey === undefined) break;
     originalBytesCache.delete(oldestKey);
   }
+}
+
+async function getFreshOriginalBytesCache(filePath: string): Promise<Uint8Array | undefined> {
+  const entry = originalBytesCache.get(filePath);
+  if (!entry) return undefined;
+
+  const currentFingerprint = await readOriginalBytesFingerprint(filePath);
+  if (fingerprintMatches(entry.fingerprint, currentFingerprint)) return entry.bytes;
+
+  originalBytesCache.delete(filePath);
+  return undefined;
 }
 
 /**
@@ -153,10 +229,10 @@ function setOriginalBytesCache(filePath: string, bytes: Uint8Array): void {
  */
 export const __originalBytesCacheForTest = {
   get(filePath: string): Uint8Array | undefined {
-    return originalBytesCache.get(filePath);
+    return originalBytesCache.get(filePath)?.bytes;
   },
-  set(filePath: string, bytes: Uint8Array): void {
-    setOriginalBytesCache(filePath, bytes);
+  set(filePath: string, bytes: Uint8Array, fingerprint?: OriginalBytesFingerprint): void {
+    setOriginalBytesCache(filePath, bytes, fingerprint);
   },
   clear(): void {
     originalBytesCache.clear();
@@ -170,18 +246,16 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
   const existing = inflightPrefetches.get(filePath);
   if (existing) return existing;
 
-  const cached = originalBytesCache.get(filePath);
-  if (cached) {
-    return Promise.resolve(cached);
-  }
-
   const run = async (): Promise<Uint8Array | null> => {
+    const cached = await getFreshOriginalBytesCache(filePath);
+    if (cached) return cached;
+
     try {
       // Tauri plugin-fs は v2 で raw binary IPC を使用する。100MB 級でも
       // base64 エンコードのオーバーヘッドは掛からず、HTTP/asset 経路とも無干渉。
       const bytes = await readFile(filePath);
       // 古いエントリは setOriginalBytesCache 内で自動的に追い出される。
-      setOriginalBytesCache(filePath, bytes);
+      setOriginalBytesCache(filePath, bytes, await readOriginalBytesFingerprint(filePath));
       return bytes;
     } catch (e) {
       console.warn('[prefetchOriginalBytes] readFile failed:', e);
@@ -192,11 +266,11 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
   const task = run();
   inflightPrefetches.set(filePath, task);
   // run の外側で cleanup を掛けることで自己参照 (let task; task = ...) を回避
-  task.finally(() => {
+  void task.finally(() => {
     if (inflightPrefetches.get(filePath) === task) {
       inflightPrefetches.delete(filePath);
     }
-  });
+  }).catch(() => {});
   return task;
 }
 
@@ -318,6 +392,7 @@ export function useFileOperations(
       }
 
       const current = usePecoStore.getState();
+      let discardTemporaryChangesFilePath: string | null = null;
       const hasDirtyPages = Array.from(current.document?.pages.values() || []).some((p) => p.isDirty);
       if (current.document && (current.isDirty || hasDirtyPages)) {
         const confirmed = await ask('未保存の変更があります。別のPDFを開きますか？', {
@@ -325,6 +400,11 @@ export function useFileOperations(
           kind: 'warning',
         });
         if (!confirmed) return false;
+        discardTemporaryChangesFilePath = current.document.filePath || null;
+        if (isSavingRef.current) {
+          showToast("保存中はPDFを開けません。");
+          return false;
+        }
       }
 
       let selected = explicitPath;
@@ -336,6 +416,10 @@ export function useFileOperations(
       }
 
       if (selected && typeof selected === 'string') {
+        if (isSavingRef.current) {
+          showToast("保存中はPDFを開けません。");
+          return false;
+        }
         setIsLoadingFile?.(true);
 
         try {
@@ -347,6 +431,16 @@ export function useFileOperations(
           perf.mark('open.loadPdfStart');
           const doc = await loadPDF(selected);
           perf.mark('open.loadPdfDone', { totalPages: doc.totalPages });
+          if (discardTemporaryChangesFilePath) {
+            try {
+              await waitForPendingIdbSaves();
+              await clearTemporaryChanges(discardTemporaryChangesFilePath);
+            } catch (e) {
+              console.warn('[handleOpen] discard temporary changes failed:', e);
+              showToast('未保存の変更を破棄できませんでした。', true);
+              return false;
+            }
+          }
           await clearCachedPages(selected);
           setDocument(doc);
           perf.mark('open.setDoc');
@@ -423,7 +517,7 @@ export function useFileOperations(
     if (!document) return null;
     const sourceFilePath = document.filePath;
 
-    let cachedBytes = originalBytesCache.get(sourceFilePath);
+    let cachedBytes = await withStep('statOriginalBytes', 10_000, () => getFreshOriginalBytesCache(sourceFilePath));
     if (!cachedBytes) {
       showToast("保存用にファイルを読み込み中...");
       const fetched = await withStep('readFile', 90_000, () => ensurePrefetchOriginalBytes(sourceFilePath));
@@ -522,7 +616,7 @@ export function useFileOperations(
     usePecoStore.getState().bumpDocumentEpoch();
     // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
     // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
-    setOriginalBytesCache(writePath, savedBytes);
+    setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
     await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });

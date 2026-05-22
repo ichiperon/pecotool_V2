@@ -431,5 +431,49 @@ describe('PdfCanvas', () => {
       expect(staticDelta).toBeLessThanOrEqual(1)
       expect(staticDelta).toBeLessThan(dynamicDelta)
     })
+
+    it('drag preview redraw does not scan the whole textBlocks array in the dynamic layer', async () => {
+      const blocks = Array.from({ length: 20 }, (_, i) => ({
+        id: `b${i}`,
+        bbox: { x: i * 20, y: 10, width: 18, height: 18 },
+        text: 'x',
+        order: i,
+        pageIndex: 0,
+      }))
+      const forEachSpy = vi.fn(Array.prototype.forEach.bind(blocks))
+      blocks.forEach = forEachSpy as typeof blocks.forEach
+
+      usePecoStore.setState({
+        document: {
+          filePath: 'test.pdf',
+          pages: new Map([[0, { pageIndex: 0, textBlocks: blocks }]]),
+        },
+        zoom: 100,
+        showOcr: true,
+        ocrOpacity: 0.5,
+        selectedIds: new Set(['b3']),
+        isDrawingMode: false,
+        isSplitMode: false,
+        dragPreviewBboxes: null,
+      } as any)
+
+      const { dynamicCtx } = setupCanvasContexts()
+
+      render(<PdfCanvas pageIndex={0} />)
+      await flushAsyncRenders()
+
+      forEachSpy.mockClear()
+      const baseDynamicFillRectCalls = dynamicCtx.fillRect.mock.calls.length
+
+      act(() => {
+        usePecoStore.getState().setDragPreviewBboxes(
+          new Map([['b3', { x: 80, y: 80, width: 18, height: 18 }]])
+        )
+      })
+      await flushAsyncRenders()
+
+      expect(forEachSpy).not.toHaveBeenCalled()
+      expect(dynamicCtx.fillRect.mock.calls.length).toBeGreaterThan(baseDynamicFillRectCalls)
+    })
   })
 });

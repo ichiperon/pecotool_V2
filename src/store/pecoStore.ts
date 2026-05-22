@@ -256,7 +256,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   // issue #118: 保存後にディスク上の PDF が差し替わった際、pdfjs proxy の再取得と
   // ページ画像の再 render をトリガーするためだけに documentEpoch を進める。
   // document 本体・pages・currentPageIndex・zoom・undo/redo・isDirty は不変。
-  bumpDocumentEpoch: () => set((state) => ({ documentEpoch: state.documentEpoch + 1 })),
+  bumpDocumentEpoch: () => set((state) => ({
+    documentEpoch: state.documentEpoch + 1,
+    currentPageProxy: null,
+    currentPageProxyKey: null,
+  })),
 
   setCurrentPage: (index) => {
     perf.mark('nav.click', { to: index });
@@ -352,8 +356,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
           // 保存失敗時は退避していたページをメモリに戻してデータロストを防ぐ（ロールバック）
           set((state) => {
             if (!state.document) return { lastIdbError: err };
+            const currentFilePath = state.document.filePath;
+            const pendingSavesForCurrentDocument = pendingSaves.filter(({ filePath }) => filePath === currentFilePath);
+            if (pendingSavesForCurrentDocument.length === 0) return { lastIdbError: err };
             const restored = new Map(state.document.pages);
-            for (const { idx, page } of pendingSaves) {
+            for (const { idx, page } of pendingSavesForCurrentDocument) {
               if (!restored.has(idx)) restored.set(idx, page);
             }
             return {
@@ -379,11 +386,18 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // 一致せず、その新編集の dirty フラグを巻き込まない (issue #115 / #119)。
     // 省略時は従来通り全ページの isDirty を一律クリアする (後方互換)。
     const newPages = new Map(state.document.pages);
+    let anyDirty = false;
     if (savedPageSnapshots) {
       for (const [idx, savedPage] of savedPageSnapshots.entries()) {
         const livePage = newPages.get(idx);
         if (livePage === savedPage && livePage.isDirty) {
           newPages.set(idx, { ...livePage, isDirty: false });
+        }
+      }
+      for (const page of newPages.values()) {
+        if (page.isDirty) {
+          anyDirty = true;
+          break;
         }
       }
     } else {
@@ -395,7 +409,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     }
     return {
       document: { ...state.document, pages: newPages },
-      isDirty: Array.from(newPages.values()).some((page) => page.isDirty)
+      isDirty: anyDirty
     };
   }),
 

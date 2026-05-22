@@ -7,7 +7,7 @@
  *  - Fix 3: 到達可能性ベース GC スイープ (pdfReachabilityGc.ts)
  *  - 統合: 膨れた PDF を buildPdfDocument で再保存 → 原本級サイズへ収束 (要件2)
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { PDFDocument, PDFName, PDFDict } from '@cantoo/pdf-lib'
 import { stripTextBlocks } from '../../utils/pdfContentStream'
 import {
@@ -120,6 +120,35 @@ describe('Issue #96 PDF size regression', () => {
       // save できること (壊れていない)
       const bytes = await doc.save({ useObjectStreams: false })
       expect(bytes.byteLength).toBeGreaterThan(0)
+    })
+
+    it('returns dropped 0 when trailerInfo.Root is missing', async () => {
+      const doc = await PDFDocument.create()
+      doc.addPage([595, 842])
+      doc.context.register(doc.context.flateStream(new Uint8Array([113, 10, 81, 10])))
+      const trailerInfo = (doc.context as any).trailerInfo
+      trailerInfo.Root = undefined
+
+      const before = doc.context.enumerateIndirectObjects().length
+      const result = sweepUnreachableObjects(doc)
+      const after = doc.context.enumerateIndirectObjects().length
+
+      expect(result.dropped).toBe(0)
+      expect(after).toBe(before)
+    })
+
+    it('expands shared direct objects only once', async () => {
+      const doc = await PDFDocument.create()
+      doc.addPage([595, 842])
+      const shared = doc.context.obj({ Marker: PDFName.of('Shared') }) as PDFDict
+      const entriesSpy = vi.spyOn(shared, 'entries')
+
+      doc.catalog.set(PDFName.of('PecoSharedA'), shared)
+      doc.catalog.set(PDFName.of('PecoSharedB'), shared)
+
+      sweepUnreachableObjects(doc)
+
+      expect(entriesSpy).toHaveBeenCalledTimes(1)
     })
   })
 

@@ -20,8 +20,12 @@ async fn load_meiryo_font() -> Result<Vec<u8>, String> {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
-            return extract_ttc_face(&bytes, 0)
-                .map_err(|e| format!("Meiryo TTC extraction failed ({}): {e}", path.to_string_lossy()));
+            return extract_ttc_face(&bytes, 0).map_err(|e| {
+                format!(
+                    "Meiryo TTC extraction failed ({}): {e}",
+                    path.to_string_lossy()
+                )
+            });
         }
 
         Err("Meiryo font not found".to_string())
@@ -45,6 +49,9 @@ fn extract_ttc_face(ttc: &[u8], face_index: usize) -> Result<Vec<u8>, String> {
         .ok_or("offset overflow")?;
     let font_offset = read_u32(ttc, offset_pos)? as usize;
     let num_tables = read_u16(ttc, font_offset + 4)? as usize;
+    if num_tables == 0 {
+        return Err("TTC face has no tables".to_string());
+    }
     let table_dir = font_offset.checked_add(12).ok_or("table dir overflow")?;
 
     let header_len = 12usize
@@ -92,8 +99,21 @@ fn extract_ttc_face(ttc: &[u8], face_index: usize) -> Result<Vec<u8>, String> {
     write_u16(&mut out, 10, range_shift as u16)?;
 
     for table in &tables {
-        let source = &ttc[table.old_offset..table.old_offset + table.length];
-        out[table.new_offset..table.new_offset + table.length].copy_from_slice(source);
+        let source_end = table
+            .old_offset
+            .checked_add(table.length)
+            .ok_or("table data overflow")?;
+        let target_end = table
+            .new_offset
+            .checked_add(table.length)
+            .ok_or("font output overflow")?;
+        let source = ttc
+            .get(table.old_offset..source_end)
+            .ok_or("table data out of bounds")?;
+        let target = out
+            .get_mut(table.new_offset..target_end)
+            .ok_or("font output out of bounds")?;
+        target.copy_from_slice(source);
         if &table.tag == b"head" {
             write_u32(&mut out, table.new_offset + 8, 0)?;
         }
@@ -102,7 +122,9 @@ fn extract_ttc_face(ttc: &[u8], face_index: usize) -> Result<Vec<u8>, String> {
     for (i, table) in tables.iter().enumerate() {
         let rec = 12 + i * 16;
         let table_checksum = checksum(&out, table.new_offset, table.length);
-        out[rec..rec + 4].copy_from_slice(&table.tag);
+        out.get_mut(rec..rec + 4)
+            .ok_or("table record out of bounds")?
+            .copy_from_slice(&table.tag);
         write_u32(&mut out, rec + 4, table_checksum)?;
         write_u32(&mut out, rec + 8, table.new_offset as u32)?;
         write_u32(&mut out, rec + 12, table.length as u32)?;
@@ -129,23 +151,31 @@ fn pad4(value: usize) -> usize {
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
-    let slice = bytes.get(offset..offset + 2).ok_or("read_u16 out of bounds")?;
+    let slice = bytes
+        .get(offset..offset + 2)
+        .ok_or("read_u16 out of bounds")?;
     Ok(u16::from_be_bytes([slice[0], slice[1]]))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, String> {
-    let slice = bytes.get(offset..offset + 4).ok_or("read_u32 out of bounds")?;
+    let slice = bytes
+        .get(offset..offset + 4)
+        .ok_or("read_u32 out of bounds")?;
     Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 fn write_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<(), String> {
-    let target = bytes.get_mut(offset..offset + 2).ok_or("write_u16 out of bounds")?;
+    let target = bytes
+        .get_mut(offset..offset + 2)
+        .ok_or("write_u16 out of bounds")?;
     target.copy_from_slice(&value.to_be_bytes());
     Ok(())
 }
 
 fn write_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<(), String> {
-    let target = bytes.get_mut(offset..offset + 4).ok_or("write_u32 out of bounds")?;
+    let target = bytes
+        .get_mut(offset..offset + 4)
+        .ok_or("write_u32 out of bounds")?;
     target.copy_from_slice(&value.to_be_bytes());
     Ok(())
 }
@@ -170,12 +200,15 @@ fn checksum(bytes: &[u8], start: usize, length: usize) -> u32 {
 /// 各タプルは (width_pt, height_pt)。/Rotate 90/270 は swap 済み。
 /// パース不能ページは (0.0, 0.0) を返す。load 失敗時のみ Err を返す。
 #[tauri::command]
-async fn get_pdf_page_dimensions(file_path: String) -> Result<Vec<(f64, f64)>, String> {
+async fn get_pdf_page_dimensions(
+    app: tauri::AppHandle,
+    file_path: String,
+) -> Result<Vec<(f64, f64)>, String> {
     tokio::task::spawn_blocking(move || -> Result<Vec<(f64, f64)>, String> {
         use lopdf::{Document, Object, ObjectId};
 
-        let doc = Document::load(&file_path)
-            .map_err(|e| format!("PDF load failed: {}", e))?;
+        let file = validate_allowed_existing_pdf_file_path(&app, &file_path)?;
+        let doc = Document::load(&file).map_err(|e| format!("PDF load failed: {}", e))?;
 
         // Page object から /MediaBox (fallback: /CropBox) を親 Pages ツリーに
         // 遡って取得する。見つからなければ None。
@@ -203,9 +236,12 @@ async fn get_pdf_page_dimensions(file_path: String) -> Result<Vec<(f64, f64)>, S
                                             _ => None,
                                         }
                                     };
-                                    if let (Some(a), Some(b), Some(c), Some(d)) =
-                                        (parse(&arr[0]), parse(&arr[1]), parse(&arr[2]), parse(&arr[3]))
-                                    {
+                                    if let (Some(a), Some(b), Some(c), Some(d)) = (
+                                        parse(&arr[0]),
+                                        parse(&arr[1]),
+                                        parse(&arr[2]),
+                                        parse(&arr[3]),
+                                    ) {
                                         return Some([a, b, c, d]);
                                     }
                                 }
@@ -331,10 +367,13 @@ async fn write_perf_log(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     let safe_name = if safe_name.is_empty() {
-        format!("perf-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0))
+        format!(
+            "perf-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        )
     } else {
         safe_name
     };
@@ -365,10 +404,13 @@ async fn write_operation_log(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     let safe_name = if safe_name.is_empty() {
-        format!("log-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0))
+        format!(
+            "log-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        )
     } else {
         safe_name
     };
@@ -398,15 +440,20 @@ async fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn run_ocr(
+    app: tauri::AppHandle,
     image_path: String,
     page_width: f64,
     page_height: f64,
     render_scale: f64,
 ) -> Result<String, String> {
     let _ = (page_width, page_height); // 座標変換は render_scale のみ使用
-    let result = tokio::task::spawn_blocking(move || do_windows_ocr(&image_path, render_scale))
-        .await
-        .map_err(|e| format!("スレッドエラー: {}", e))??;
+    let result = tokio::task::spawn_blocking(move || {
+        let image = validate_allowed_existing_file_path(&app, &image_path)?;
+        let image = image.to_string_lossy().to_string();
+        do_windows_ocr(&image, render_scale)
+    })
+    .await
+    .map_err(|e| format!("スレッドエラー: {}", e))??;
     Ok(result)
 }
 
@@ -464,11 +511,11 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
         .get()
         .map_err(|e| format!("ビットマップ取得待機失敗: {e}"))?;
 
-    let lang = Language::CreateLanguage(&HSTRING::from("ja"))
-        .map_err(|e| format!("言語設定失敗: {e}"))?;
+    let lang =
+        Language::CreateLanguage(&HSTRING::from("ja")).map_err(|e| format!("言語設定失敗: {e}"))?;
 
-    let engine = OcrEngine::TryCreateFromLanguage(&lang)
-        .map_err(|e| format!("OCRエンジン作成失敗: {e}"))?;
+    let engine =
+        OcrEngine::TryCreateFromLanguage(&lang).map_err(|e| format!("OCRエンジン作成失敗: {e}"))?;
 
     let ocr_result = engine
         .RecognizeAsync(&bitmap)
@@ -485,7 +532,9 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
 
     for i in 0..line_count {
         let line = lines.GetAt(i).map_err(|e| format!("行取得失敗: {e}"))?;
-        let words = line.Words().map_err(|e| format!("ワードリスト取得失敗: {e}"))?;
+        let words = line
+            .Words()
+            .map_err(|e| format!("ワードリスト取得失敗: {e}"))?;
         let word_count = words.Size().map_err(|e| format!("ワード数取得失敗: {e}"))?;
 
         if word_count == 0 {
@@ -526,13 +575,25 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
         let writing_mode = if h > w * 1.5 {
             "vertical"
         } else if word_count > 1 {
-            let first_word = words.GetAt(0).map_err(|e| format!("Word(0)取得失敗: {e}"))?;
-            let last_word = words.GetAt(word_count - 1).map_err(|e| format!("Word(last)取得失敗: {e}"))?;
-            let first_rect = first_word.BoundingRect().map_err(|e| format!("BBox(0)取得失敗: {e}"))?;
-            let last_rect = last_word.BoundingRect().map_err(|e| format!("BBox(last)取得失敗: {e}"))?;
+            let first_word = words
+                .GetAt(0)
+                .map_err(|e| format!("Word(0)取得失敗: {e}"))?;
+            let last_word = words
+                .GetAt(word_count - 1)
+                .map_err(|e| format!("Word(last)取得失敗: {e}"))?;
+            let first_rect = first_word
+                .BoundingRect()
+                .map_err(|e| format!("BBox(0)取得失敗: {e}"))?;
+            let last_rect = last_word
+                .BoundingRect()
+                .map_err(|e| format!("BBox(last)取得失敗: {e}"))?;
             let dy = (last_rect.Y - first_rect.Y).abs();
             let dx = (last_rect.X - first_rect.X).abs();
-            if dy > dx * 2.0 { "vertical" } else { "horizontal" }
+            if dy > dx * 2.0 {
+                "vertical"
+            } else {
+                "horizontal"
+            }
         } else {
             // word_count == 1: アスペクト比条件（h > w * 1.5）で判定済み。
             // ここに来た場合は幅が高さと同程度かそれ以上なので横書きとみなす。
@@ -561,6 +622,8 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
 /// - HTTP-like headers でメタ情報を受け渡し: `x-path` (URL-encoded path), `x-offset` (bytes)
 /// - 最初のチャンクは offset=0 → ファイルを truncate
 /// - 後続は offset 指定で追記
+/// - 中断時は一時 `.tmp` が残り得るが、`replace_pdf_file` まで正式 PDF は不変。
+///   次回の offset=0 書き込みで truncate されるため、残骸は上書き/掃除対象として扱う。
 ///
 /// フロント側はバイナリを Uint8Array のまま `invoke(cmd, bytes, { headers })` で渡す。
 #[tauri::command]
@@ -568,8 +631,8 @@ async fn write_pdf_chunk(
     app: tauri::AppHandle,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    use std::io::{Seek, SeekFrom, Write};
     use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
 
     let headers = request.headers();
     let path_raw = headers
@@ -577,11 +640,7 @@ async fn write_pdf_chunk(
         .and_then(|h| h.to_str().ok())
         .ok_or_else(|| "missing x-path header".to_string())?;
     let path = percent_decode(path_raw);
-    let offset: u64 = headers
-        .get("x-offset")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let offset = parse_pdf_chunk_offset(headers)?;
 
     let bytes: Vec<u8> = match request.body() {
         tauri::ipc::InvokeBody::Raw(b) => b.clone(),
@@ -591,6 +650,7 @@ async fn write_pdf_chunk(
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let path = normalize_child_path(&path)?;
         let target = temp_target_path(&path)?;
+        validate_pdf_file_name(&target)?;
         validate_allowed_resolved_path(&app, &target)?;
 
         // 最初のチャンク (offset==0) は create + truncate、後続は create 無しで open
@@ -604,11 +664,17 @@ async fn write_pdf_chunk(
         let mut f = opts
             .open(&path)
             .map_err(|e| format!("open failed: {} ({})", e, path.to_string_lossy()))?;
+        let current_len = f
+            .metadata()
+            .map_err(|e| format!("metadata failed: {}", e))?
+            .len();
+        validate_pdf_chunk_offset_contiguous(current_len, offset)?;
         if offset > 0 {
             f.seek(SeekFrom::Start(offset))
                 .map_err(|e| format!("seek failed: {}", e))?;
         }
-        f.write_all(&bytes).map_err(|e| format!("write failed: {}", e))?;
+        f.write_all(&bytes)
+            .map_err(|e| format!("write failed: {}", e))?;
         Ok(())
     })
     .await
@@ -629,14 +695,17 @@ async fn replace_pdf_file(
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let temp = normalize_child_path(&temp_path)?;
-        let target = validate_allowed_path(&app, &target_path)?;
+        let target = validate_allowed_pdf_target_path(&app, &target_path)?;
         validate_pdf_temp_target(&temp, &target)?;
         if !temp.exists() {
             return Err(format!("temp file does not exist: {}", temp_path));
         }
-        let len = fs::metadata(&temp)
-            .map_err(|e| format!("metadata failed: {e} ({})", temp_path))?
-            .len();
+        let temp_metadata = fs::metadata(&temp)
+            .map_err(|e| format!("metadata failed: {e} ({})", temp_path))?;
+        if !temp_metadata.is_file() {
+            return Err("temp path must be a file".to_string());
+        }
+        let len = temp_metadata.len();
         if len == 0 {
             return Err("temp file is empty".to_string());
         }
@@ -658,7 +727,12 @@ async fn replace_pdf_file(
 
         match fs::rename(&temp, &target) {
             Ok(()) => {
-                let _ = fs::remove_file(&backup);
+                if let Err(e) = fs::remove_file(&backup) {
+                    eprintln!(
+                        "replace_pdf_file succeeded, but stale backup cleanup failed: {e}; cleanup target: {}",
+                        backup.to_string_lossy()
+                    );
+                }
                 Ok(())
             }
             Err(e) => {
@@ -703,6 +777,54 @@ fn validate_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<std::path
     Ok(resolved)
 }
 
+fn validate_allowed_existing_file_path(
+    app: &tauri::AppHandle,
+    path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_string());
+    }
+    let resolved = path
+        .canonicalize()
+        .map_err(|e| format!("canonicalize file failed: {e}"))?;
+    if !resolved.is_file() {
+        return Err("path must be a file".to_string());
+    }
+    validate_allowed_resolved_path(app, &resolved)?;
+    Ok(resolved)
+}
+
+fn validate_allowed_existing_pdf_file_path(
+    app: &tauri::AppHandle,
+    path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let file = validate_allowed_existing_file_path(app, path)?;
+    validate_pdf_file_name(&file)?;
+    Ok(file)
+}
+
+fn validate_allowed_pdf_target_path(
+    app: &tauri::AppHandle,
+    path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let target = validate_allowed_path(app, path)?;
+    validate_pdf_file_name(&target)?;
+    if target.exists() {
+        let metadata = target
+            .metadata()
+            .map_err(|e| format!("target metadata failed: {e}"))?;
+        if !metadata.is_file() {
+            return Err("target path must be a file".to_string());
+        }
+        let resolved = target
+            .canonicalize()
+            .map_err(|e| format!("canonicalize target failed: {e}"))?;
+        validate_allowed_resolved_path(app, &resolved)?;
+    }
+    Ok(target)
+}
+
 fn validate_allowed_directory_path(
     app: &tauri::AppHandle,
     path: &str,
@@ -731,6 +853,18 @@ fn validate_allowed_resolved_path(
         return Err("path is outside allowed Tauri file scope".to_string());
     }
     Ok(())
+}
+
+fn validate_pdf_file_name(path: &std::path::Path) -> Result<(), String> {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+    {
+        Ok(())
+    } else {
+        Err("path must be a PDF file".to_string())
+    }
 }
 
 fn validate_pdf_temp_path(path: &std::path::Path) -> Result<(), String> {
@@ -787,6 +921,28 @@ fn validate_pdf_temp_target(
     Ok(())
 }
 
+fn parse_pdf_chunk_offset(headers: &tauri::http::HeaderMap) -> Result<u64, String> {
+    let offset_raw = headers
+        .get("x-offset")
+        .ok_or_else(|| "missing x-offset header".to_string())?;
+    let offset = offset_raw
+        .to_str()
+        .map_err(|_| "invalid x-offset header".to_string())?;
+    offset
+        .parse()
+        .map_err(|_| "invalid x-offset header".to_string())
+}
+
+fn validate_pdf_chunk_offset_contiguous(current_len: u64, offset: u64) -> Result<(), String> {
+    if current_len != offset {
+        return Err(format!(
+            "chunk offset mismatch: expected {}, got {}",
+            current_len, offset
+        ));
+    }
+    Ok(())
+}
+
 /// `x-path` header は percent-encoded で受け取るため簡易デコード。
 fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(s.len());
@@ -811,6 +967,64 @@ fn hex_value(c: u8) -> Option<u8> {
         b'a'..=b'f' => Some(c - b'a' + 10),
         b'A'..=b'F' => Some(c - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn extract_ttc_face_rejects_zero_tables() {
+        let mut ttc = Vec::new();
+        ttc.extend_from_slice(b"ttcf");
+        ttc.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        ttc.extend_from_slice(&1u32.to_be_bytes());
+        ttc.extend_from_slice(&16u32.to_be_bytes());
+        ttc.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        ttc.extend_from_slice(&0u16.to_be_bytes());
+
+        let err = extract_ttc_face(&ttc, 0).unwrap_err();
+        assert!(err.contains("no tables"));
+    }
+
+    #[test]
+    fn parse_pdf_chunk_offset_requires_valid_header() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            parse_pdf_chunk_offset(&headers).unwrap_err(),
+            "missing x-offset header"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-offset", HeaderValue::from_static("not-a-number"));
+        assert_eq!(
+            parse_pdf_chunk_offset(&headers).unwrap_err(),
+            "invalid x-offset header"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-offset", HeaderValue::from_static("42"));
+        assert_eq!(parse_pdf_chunk_offset(&headers).unwrap(), 42);
+    }
+
+    #[test]
+    fn validate_pdf_file_name_requires_pdf_extension() {
+        assert!(validate_pdf_file_name(std::path::Path::new("sample.PDF")).is_ok());
+        assert_eq!(
+            validate_pdf_file_name(std::path::Path::new("sample.pdf.tmp")).unwrap_err(),
+            "path must be a PDF file"
+        );
+    }
+
+    #[test]
+    fn validate_pdf_chunk_offset_contiguous_rejects_gaps() {
+        assert!(validate_pdf_chunk_offset_contiguous(8, 8).is_ok());
+        assert_eq!(
+            validate_pdf_chunk_offset_contiguous(8, 12).unwrap_err(),
+            "chunk offset mismatch: expected 8, got 12"
+        );
     }
 }
 

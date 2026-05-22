@@ -642,6 +642,110 @@ describe('useBlockDragResize: issue #91 ドラッグ中は textBlocks を触ら�
   });
 });
 
+describe('useBlockDragResize: H-01 確定時は現行 bbox を基準にする', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('move 確定前に現行 bbox が差し替わってもドラッグ開始時 bbox へ巻き戻さない', () => {
+    const block = makeBlock();
+    let currentPage: PageData = makePage([block]);
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      currentPage = { ...currentPage, ...partial };
+    });
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => currentPage,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    act(() => {
+      result.current.updateDragResize({ x: 150, y: 130 });
+    });
+    act(() => {
+      flushRaf();
+    });
+
+    currentPage = makePage([
+      makeBlock({ bbox: { x: 500, y: 600, width: 80, height: 20 } }),
+    ]);
+
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    const updatedBlock = (updatePageData.mock.calls[0][1].textBlocks as TextBlock[])[0];
+    expect(updatedBlock.bbox).toEqual({ x: 540, y: 620, width: 80, height: 20 });
+    expect(updatedBlock.bbox).not.toEqual({ x: 140, y: 120, width: 80, height: 20 });
+  });
+
+  it('resize 確定前に現行 bbox が差し替わってもドラッグ開始時 bbox へ巻き戻さない', () => {
+    const block = makeBlock();
+    let currentPage: PageData = makePage([block]);
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      currentPage = { ...currentPage, ...partial };
+    });
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => currentPage,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 180, y: 120 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    expect(result.current.dragMode).toBe('resize-se');
+    act(() => {
+      result.current.updateDragResize({ x: 200, y: 140 });
+    });
+    act(() => {
+      flushRaf();
+    });
+
+    currentPage = makePage([
+      makeBlock({ bbox: { x: 300, y: 400, width: 10, height: 10 } }),
+    ]);
+
+    act(() => {
+      result.current.finishDragResize();
+    });
+
+    const updatedBlock = (updatePageData.mock.calls[0][1].textBlocks as TextBlock[])[0];
+    expect(updatedBlock.bbox).toEqual({ x: 300, y: 400, width: 30, height: 30 });
+    expect(updatedBlock.bbox).not.toEqual({ x: 100, y: 100, width: 100, height: 40 });
+  });
+});
+
 // ─────────────────────────────────────────────────────────────
 // issue #106: Redo が効かない (Action.after が before と同じ snapshot)
 // ─────────────────────────────────────────────────────────────

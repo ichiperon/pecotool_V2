@@ -1,6 +1,6 @@
-use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -38,8 +38,7 @@ fn get_backup_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|e| format!("app_data_dir取得失敗: {e}"))?;
     dir.push("backups");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("バックアップディレクトリ作成失敗: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("バックアップディレクトリ作成失敗: {e}"))?;
     Ok(dir)
 }
 
@@ -51,19 +50,86 @@ fn legacy_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> PathBuf {
     backup_dir.join(format!("{}.json", legacy_path_hash(file_path)))
 }
 
-fn direct_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(file_path);
-    if path.extension().and_then(|e| e.to_str()) != Some("json") || !path.is_absolute() {
-        return None;
+fn backup_atomic_temp_file_path(path: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    path.with_extension(format!("json.{}.{}.tmp", std::process::id(), stamp))
+}
+
+fn write_backup_file_atomically(path: &Path, json_str: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let temp = backup_atomic_temp_file_path(path);
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("バックアップ一時ファイル作成失敗: {e}"))?;
+        file.write_all(json_str.as_bytes())
+            .map_err(|e| format!("バックアップ一時ファイル書き込み失敗: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("バックアップ一時ファイル同期失敗: {e}"))?;
+        drop(file);
+        atomic_replace_file(&temp, path)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
     }
 
-    let parent = path.parent()?.canonicalize().ok()?;
-    let backup_dir = backup_dir.canonicalize().ok()?;
-    if parent == backup_dir {
-        Some(path)
-    } else {
-        None
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    let temp_w: Vec<u16> = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target_w: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let ok = unsafe {
+        MoveFileExW(
+            temp_w.as_ptr(),
+            target_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "バックアップ atomic replace 失敗: {}",
+            std::io::Error::last_os_error()
+        ));
     }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
+    std::fs::rename(temp, target).map_err(|e| format!("バックアップ atomic rename 失敗: {e}"))?;
+    if let Some(parent) = target.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 /// `clear_backup` の削除対象パス一覧を返す。
@@ -110,8 +176,8 @@ pub async fn save_backup(
     let backup_dir = get_backup_dir(&app)?;
     let bpath = backup_file_path(&backup_dir, &file_path);
 
-    let pages: serde_json::Value = serde_json::from_str(&pages_json)
-        .map_err(|e| format!("pages_json解析失敗: {e}"))?;
+    let pages: serde_json::Value =
+        serde_json::from_str(&pages_json).map_err(|e| format!("pages_json解析失敗: {e}"))?;
 
     let data = serde_json::json!({
         "version": 1,
@@ -120,12 +186,10 @@ pub async fn save_backup(
         "pages": pages
     });
 
-    let json_str = serde_json::to_string(&data)
-        .map_err(|e| format!("JSON生成失敗: {e}"))?;
+    let json_str = serde_json::to_string(&data).map_err(|e| format!("JSON生成失敗: {e}"))?;
 
     tokio::task::spawn_blocking(move || {
-        std::fs::write(&bpath, json_str)
-            .map_err(|e| format!("バックアップ書き込み失敗: {e}"))?;
+        write_backup_file_atomically(&bpath, &json_str)?;
         let legacy_bpath = legacy_backup_file_path(&backup_dir, &file_path);
         if legacy_bpath != bpath && legacy_bpath.exists() {
             let _ = std::fs::remove_file(legacy_bpath);
@@ -160,7 +224,11 @@ pub async fn check_pending_backups(app: AppHandle) -> Result<Vec<BackupInfo>, St
                     let timestamp = data["timestamp"].as_str().unwrap_or("").to_string();
                     let backup_path = path.to_string_lossy().to_string();
                     if !file_path.is_empty() {
-                        backups.push(BackupInfo { file_path, timestamp, backup_path });
+                        backups.push(BackupInfo {
+                            file_path,
+                            timestamp,
+                            backup_path,
+                        });
                     }
                 }
             }
@@ -180,8 +248,7 @@ pub async fn clear_backup(app: AppHandle, file_path: String) -> Result<(), Strin
     tokio::task::spawn_blocking(move || {
         for path in clear_backup_targets(&backup_dir, &file_path) {
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .map_err(|e| format!("バックアップ削除失敗: {e}"))?;
+                std::fs::remove_file(&path).map_err(|e| format!("バックアップ削除失敗: {e}"))?;
             }
         }
         Ok(())
@@ -197,8 +264,7 @@ pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, St
     let bpath = readable_backup_file_path(&backup_dir, &file_path);
 
     tokio::task::spawn_blocking(move || {
-        std::fs::read_to_string(&bpath)
-            .map_err(|e| format!("バックアップ読み込み失敗: {e}"))
+        std::fs::read_to_string(&bpath).map_err(|e| format!("バックアップ読み込み失敗: {e}"))
     })
     .await
     .map_err(|e| format!("スレッドエラー: {e}"))?
@@ -208,7 +274,7 @@ pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, St
 mod tests {
     use super::{
         backup_file_path, clear_backup_targets, legacy_backup_file_path, legacy_path_hash,
-        path_hash,
+        path_hash, write_backup_file_atomically,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -236,6 +302,27 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("backup_dir 作成失敗");
         // canonicalize しておくと clear_backup_targets が返すパスと比較しやすい
         dir.canonicalize().unwrap_or(dir)
+    }
+
+    #[test]
+    fn write_backup_file_atomically_replaces_existing_json() {
+        let backup_dir = make_backup_dir("atomic");
+        let bpath = backup_file_path(&backup_dir, "C:\\docs\\atomic.pdf");
+
+        write_backup_file_atomically(&bpath, "{\"first\":true}").unwrap();
+        write_backup_file_atomically(&bpath, "{\"second\":true}").unwrap();
+
+        let content = std::fs::read_to_string(&bpath).unwrap();
+        assert_eq!(content, "{\"second\":true}");
+
+        let leftovers: Vec<_> = std::fs::read_dir(&backup_dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp leftovers: {:?}", leftovers);
+
+        let _ = std::fs::remove_dir_all(&backup_dir);
     }
 
     /// clear_backup_targets には direct path 経路が含まれないことを確認する。

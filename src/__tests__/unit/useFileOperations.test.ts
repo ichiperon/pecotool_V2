@@ -12,7 +12,7 @@
  * 重い依存 (loadPDF / fs / dialog / fontLoader / store) は全て mock する。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 
 // ---- 依存 mock ----
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -59,10 +59,12 @@ vi.mock('../../hooks/useFontLoader', () => ({
 // pecoStore は本物を使うが、必要最小限の状態だけ。
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
 import { useFileOperations, __originalBytesCacheForTest, isWriteAccessError } from '../../hooks/useFileOperations';
-import { getAllTemporaryPageData, loadPDF, loadPage } from '../../utils/pdfLoader';
+import { getAllTemporaryPageData, loadPDF, loadPage, clearTemporaryChanges } from '../../utils/pdfLoader';
 import { savePDF } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
 import { invoke } from '@tauri-apps/api/core';
+import { ask } from '@tauri-apps/plugin-dialog';
+import { readFile, stat } from '@tauri-apps/plugin-fs';
 import type { PecoDocument, PageData } from '../../types';
 
 beforeEach(() => {
@@ -90,6 +92,13 @@ beforeEach(() => {
   (savePDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
     new Uint8Array([4, 5, 6]),
   );
+  (readFile as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
+    new Uint8Array([1, 2, 3]),
+  );
+  (stat as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mtime: new Date('2024-01-01'),
+    size: 3,
+  });
 });
 
 function readRecent(): unknown {
@@ -337,6 +346,75 @@ describe('useFileOperations originalBytes module-level cache (issue #29)', () =>
     expect(__originalBytesCacheForTest.get('/old.pdf')).toBeUndefined();
     expect(__originalBytesCacheForTest.get('/new.pdf')).toBeDefined();
   });
+
+  it('同一 filePath の mtime/size が変わったら古い originalBytes cache を使わず再読み込みする', async () => {
+    const dirtyPage = { textBlocks: [], imageBlocks: [], isDirty: true } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/cache/stale.pdf',
+      fileName: 'stale.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/cache/stale.pdf', new Uint8Array([1, 1, 1, 1]), {
+      mtimeMs: new Date('2024-01-01').getTime(),
+      size: 4,
+    });
+    (stat as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      mtime: new Date('2024-01-02'),
+      size: 5,
+    });
+    (readFile as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Uint8Array([9, 9, 9, 9, 9]),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    expect(readFile).toHaveBeenCalledWith('/cache/stale.pdf');
+    const [saveSource] = (savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      { bytes: Uint8Array },
+    ];
+    expect(Array.from(saveSource.bytes)).toEqual([9, 9, 9, 9, 9]);
+  });
+
+  it('fingerprint 付き cache は stat 失敗時も stale とみなして再読み込みする', async () => {
+    const dirtyPage = { textBlocks: [], imageBlocks: [], isDirty: true } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/cache/stat-fail.pdf',
+      fileName: 'stat-fail.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set('/cache/stat-fail.pdf', new Uint8Array([1, 1, 1, 1]), {
+      mtimeMs: new Date('2024-01-01').getTime(),
+      size: 4,
+    });
+    (stat as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('stat failed'));
+    (readFile as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Uint8Array([8, 8, 8, 8]),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    expect(readFile).toHaveBeenCalledWith('/cache/stat-fail.pdf');
+    const [statFailSaveSource] = (savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      { bytes: Uint8Array },
+    ];
+    expect(Array.from(statFailSaveSource.bytes)).toEqual([8, 8, 8, 8]);
+  });
 });
 
 describe('useFileOperations dirty-only save (issue #123)', () => {
@@ -505,6 +583,86 @@ describe('useFileOperations writeFileAtomically EACCES フォールバック (is
 });
 
 describe('useFileOperations handleOpen OCR 実行中ガード (issue #102)', () => {
+  it('未保存変更の破棄を確認して別PDFを開くと旧filePathの temporary changes を消す', async () => {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    } as PageData;
+    usePecoStore.setState({
+      document: {
+        filePath: '/dirty/current.pdf',
+        fileName: 'current.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map([[0, dirtyPage]]),
+      } as PecoDocument,
+      isDirty: true,
+    });
+    (ask as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      filePath: '/next.pdf',
+      fileName: 'next.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map(),
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let opened = false;
+    await act(async () => {
+      opened = await result.current.handleOpen('/next.pdf');
+    });
+
+    expect(opened).toBe(true);
+    expect(clearTemporaryChanges).toHaveBeenCalledWith('/dirty/current.pdf');
+    expect(loadPDF).toHaveBeenCalledWith('/next.pdf');
+    const clearOrder = (clearTemporaryChanges as unknown as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const loadOrder = (loadPDF as unknown as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(loadOrder).toBeLessThan(clearOrder);
+  });
+
+  it('破棄確認後でも別PDFの読み込みに失敗した場合は旧 temporary changes を消さない', async () => {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    } as PageData;
+    const currentDoc = {
+      filePath: '/dirty/current.pdf',
+      fileName: 'current.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as PecoDocument;
+    usePecoStore.setState({
+      document: currentDoc,
+      isDirty: true,
+    });
+    (ask as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('load failed'));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let opened = true;
+    await act(async () => {
+      opened = await result.current.handleOpen('/next.pdf');
+    });
+
+    expect(opened).toBe(false);
+    expect(clearTemporaryChanges).not.toHaveBeenCalledWith('/dirty/current.pdf');
+    expect(usePecoStore.getState().document).toBe(currentDoc);
+  });
+
   it('#102: isOcrRunningRef.current=true なら handleOpen は loadPDF を呼ばず false を返す', async () => {
     usePecoStore.setState({ document: null, isDirty: false });
 
@@ -575,6 +733,55 @@ describe('useFileOperations handleOpen OCR 実行中ガード (issue #102)', () 
 
     expect(opened).toBe(true);
     expect(loadPDF).toHaveBeenCalledTimes(1);
+  });
+
+  it('未保存確認中に保存が始まったら open を中止する', async () => {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    } as PageData;
+    usePecoStore.setState({
+      document: {
+        filePath: '/current.pdf',
+        fileName: 'current.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map([[0, dirtyPage]]),
+      } as PecoDocument,
+      isDirty: true,
+    });
+
+    let resolveAsk!: (value: boolean) => void;
+    const askPromise = new Promise<boolean>((resolve) => { resolveAsk = resolve; });
+    (ask as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(askPromise);
+
+    let resolveSave!: (bytes: Uint8Array) => void;
+    const savePromise = new Promise<Uint8Array>((resolve) => { resolveSave = resolve; });
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(savePromise);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const openPromise = result.current.handleOpen('/next.pdf');
+    await waitFor(() => {
+      expect(ask).toHaveBeenCalled();
+    });
+
+    const saveTask = result.current.handleSave();
+    await waitFor(() => {
+      expect(savePDF).toHaveBeenCalled();
+    });
+
+    resolveAsk(true);
+    await expect(openPromise).resolves.toBe(false);
+    expect(loadPDF).not.toHaveBeenCalledWith('/next.pdf');
+
+    resolveSave(new Uint8Array([9, 9, 9]));
+    await saveTask;
   });
 });
 

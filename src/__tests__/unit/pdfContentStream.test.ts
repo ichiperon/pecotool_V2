@@ -7,7 +7,7 @@
  *   (旧実装は delimiter まで丸ごと喰っていた)。
  */
 import { describe, it, expect } from 'vitest';
-import { stripTextBlocks } from '../../utils/pdfContentStream';
+import { hasTextOperatorsOutsideTextObjects, stripTextBlocks } from '../../utils/pdfContentStream';
 
 const enc = (s: string): Uint8Array => {
   const out = new Uint8Array(s.length);
@@ -85,5 +85,19 @@ describe('stripTextBlocks numeric operand drop (#41)', () => {
     const out = dec(stripTextBlocks(input));
     expect(out).not.toContain('Tw');
     expect(out).toContain('1.2.3');
+  });
+});
+
+describe('hasTextOperatorsOutsideTextObjects', () => {
+  it('BT 外の TL/T*/Tf を検出する', () => {
+    expect(hasTextOperatorsOutsideTextObjects(enc('q\n14 TL\nT*\n/F1 12 Tf\nQ\n'))).toBe(true);
+  });
+
+  it('BT...ET 内の text operators は正常扱いにする', () => {
+    expect(hasTextOperatorsOutsideTextObjects(enc('q\nBT\n/F1 12 Tf\n(Hello T*) Tj\nET\nQ\n'))).toBe(false);
+  });
+
+  it('文字列リテラル内の ET/T* は誤検出しない', () => {
+    expect(hasTextOperatorsOutsideTextObjects(enc('q\nBT\n(Hello ET T*) Tj\nET\nQ\n'))).toBe(false);
   });
 });

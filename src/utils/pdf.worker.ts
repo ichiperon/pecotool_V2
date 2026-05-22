@@ -6,7 +6,11 @@ import {
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { deflate, inflate } from 'pako';
-import { stripTextBlocks, stripEmptyGraphicsStateBlocksOnly } from './pdfContentStream';
+import {
+  stripTextBlocks,
+  stripEmptyGraphicsStateBlocksOnly,
+  hasTextOperatorsOutsideTextObjects,
+} from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import {
@@ -234,7 +238,8 @@ function replacePageTextContentStreams(
       console.warn('[pdf.worker] Skipping text strip: page content stream is not a PDFRawStream', {
         streamType: stream?.constructor?.name ?? typeof stream,
       });
-      return;
+      anyDecodeFailed = true;
+      continue;
     }
     const decoded = decodeStreamContents(stream);
     if (decoded === null) {
@@ -265,6 +270,52 @@ function replacePageTextContentStreams(
       deleteIfUniqueRef(context, streamRef, contentRefCounts);
     }
   }
+}
+
+function pageHasTextOperatorDamage(
+  pageNode: { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
+  context: typeof PDFDocument.prototype.context,
+): boolean {
+  const contentsKey = PDFName.of('Contents');
+  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
+  if (!rawContents) return false;
+
+  const resolved = context.lookup(rawContents);
+  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+  for (const streamRef of streams) {
+    const stream = context.lookup(streamRef);
+    if (!(stream instanceof PDFRawStream)) continue;
+    const decoded = decodeStreamContents(stream);
+    if (decoded !== null && hasTextOperatorsOutsideTextObjects(decoded)) return true;
+  }
+  return false;
+}
+
+function sanitizeBBoxMetaTexts(
+  bboxMeta: Record<string, unknown>,
+  skippedChars: SkippedTextCollector,
+): boolean {
+  let changed = false;
+  for (const [pageKey, entries] of Object.entries(bboxMeta)) {
+    if (!Array.isArray(entries)) continue;
+    const pageIndex = Number(pageKey);
+    const normalizedPageIndex = Number.isInteger(pageIndex) ? pageIndex : undefined;
+    let pageChanged = false;
+    const cleanedEntries = entries.map((entry) => {
+      if (entry === null || typeof entry !== 'object') return entry;
+      const text = (entry as { text?: unknown }).text;
+      if (typeof text !== 'string') return entry;
+      const cleanedText = sanitizeTextForPdfCopy(text, skippedChars, normalizedPageIndex);
+      if (cleanedText === text) return entry;
+      pageChanged = true;
+      return { ...(entry as Record<string, unknown>), text: cleanedText };
+    });
+    if (pageChanged) {
+      bboxMeta[pageKey] = cleanedEntries;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 /**
@@ -553,6 +604,9 @@ async function handleSavePdf(
 
   const bboxMeta: Record<string, unknown> = { ...existingBBoxMeta };
   let metaChanged = false;
+  if (sanitizeBBoxMetaTexts(bboxMeta, skippedChars)) {
+    metaChanged = true;
+  }
 
   // 修正 (#25): existingBBoxMeta から pagesToWrite を pre-populate しない。
   // 以前は existingBBoxMeta の全ページを pagesToWrite に登録していたため、
@@ -583,18 +637,24 @@ async function handleSavePdf(
       if (!Array.isArray(entries) || entries.length === 0) continue;
 
       const page = pdfDoc.getPage(pi);
+      const hasTextOperatorDamage = pageHasTextOperatorDamage(
+        page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
+        pdfDoc.context,
+      );
       const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
       const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
-      if (!fontDict) continue;
 
       let pecoCount = 0;
-      for (const [key] of fontDict.entries()) {
-        if (isPecoToolFontKey(key)) {
-          pecoCount++;
-          if (pecoCount > BLOAT_DETECTION_FONT_THRESHOLD) break;
+      if (fontDict) {
+        for (const [key] of fontDict.entries()) {
+          if (isPecoToolFontKey(key)) {
+            pecoCount++;
+            if (pecoCount > BLOAT_DETECTION_FONT_THRESHOLD) break;
+          }
         }
       }
-      if (pecoCount <= BLOAT_DETECTION_FONT_THRESHOLD) continue;
+      const hasLegacyBloat = pecoCount > BLOAT_DETECTION_FONT_THRESHOLD;
+      if (!hasLegacyBloat && !hasTextOperatorDamage) continue;
 
       const repairBlocks = entries
         .filter(isRepairTextBlock)
@@ -839,6 +899,8 @@ async function handleSavePdf(
 
   return { savedBytes, skippedChars: getSkippedTextChars(skippedChars) };
 }
+
+export const __handleSavePdfForTest = handleSavePdf;
 
 // Worker scope での self 型付け。WebWorker lib を tsconfig で有効化しているため DedicatedWorkerGlobalScope が使える。
 declare const self: DedicatedWorkerGlobalScope;

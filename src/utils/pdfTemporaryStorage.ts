@@ -4,9 +4,127 @@ import { PageData } from '../types';
 const DB_NAME = 'peco_ocr_cache';
 const STORE_NAME = 'pages';
 const STORE_NAME_DIRTY = 'temporary_changes'; // New store for un-saved edits
+const PAGE_CACHE_MAX_ENTRIES = 800;
+const PAGE_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+const PAGE_CACHE_PRUNE_WRITE_INTERVAL = 25;
 
 // DB接続を一度だけ開いて使い回す
 let dbPromise: Promise<IDBDatabase> | null = null;
+let pageCacheWritesSincePrune = PAGE_CACHE_PRUNE_WRITE_INTERVAL;
+let openingPruneStarted = false;
+
+type CachedPageRecord = PageData & {
+  __pecotoolCacheUpdatedAt?: number;
+  __pecotoolCacheBytes?: number;
+};
+
+type CachedPageSummary = {
+  key: IDBValidKey;
+  updatedAt: number;
+  bytes: number;
+};
+
+function estimateCachedPageBytes(record: CachedPageRecord): number {
+  try {
+    return JSON.stringify(record).length * 2;
+  } catch {
+    return 0;
+  }
+}
+
+function stripCacheMetadata(record: CachedPageRecord): PageData {
+  const { __pecotoolCacheUpdatedAt, __pecotoolCacheBytes, ...pageData } = record;
+  void __pecotoolCacheUpdatedAt;
+  void __pecotoolCacheBytes;
+  return pageData;
+}
+
+function withCacheMetadata(data: PageData, updatedAt: number): CachedPageRecord {
+  const record: CachedPageRecord = { ...data, thumbnail: null, __pecotoolCacheUpdatedAt: updatedAt };
+  record.__pecotoolCacheBytes = estimateCachedPageBytes(record);
+  return record;
+}
+
+function waitForTransaction(tx: IDBTransaction, timeoutMessage: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => done(new Error(timeoutMessage)), 10_000);
+    const done = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (err !== undefined) reject(err); else resolve();
+    };
+    tx.oncomplete = () => done();
+    tx.onerror = () => done(tx.error);
+    tx.onabort = () => done(tx.error);
+  });
+}
+
+async function collectCachedPageSummaries(db: IDBDatabase): Promise<CachedPageSummary[]> {
+  const summaries: CachedPageSummary[] = [];
+  const tx = db.transaction(STORE_NAME, 'readonly');
+  const store = tx.objectStore(STORE_NAME);
+  const request = store.openCursor();
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve(summaries);
+    };
+    request.onsuccess = () => {
+      try {
+        const cursor = request.result;
+        if (cursor) {
+          const record = cursor.value as CachedPageRecord;
+          summaries.push({
+            key: cursor.key,
+            updatedAt: typeof record.__pecotoolCacheUpdatedAt === 'number' ? record.__pecotoolCacheUpdatedAt : 0,
+            bytes: typeof record.__pecotoolCacheBytes === 'number'
+              ? record.__pecotoolCacheBytes
+              : estimateCachedPageBytes(record),
+          });
+          cursor.continue();
+        } else {
+          done();
+        }
+      } catch {
+        done();
+      }
+    };
+    request.onerror = () => done();
+    tx.oncomplete = () => done();
+    tx.onerror = () => done();
+    tx.onabort = () => done();
+  });
+}
+
+async function pruneCachedPages(db: IDBDatabase): Promise<void> {
+  try {
+    const summaries = await collectCachedPageSummaries(db);
+    let totalBytes = summaries.reduce((sum, entry) => sum + entry.bytes, 0);
+    if (summaries.length <= PAGE_CACHE_MAX_ENTRIES && totalBytes <= PAGE_CACHE_MAX_BYTES) return;
+
+    summaries.sort((a, b) => a.updatedAt - b.updatedAt);
+    const keysToDelete: IDBValidKey[] = [];
+    let remainingEntries = summaries.length;
+    for (const entry of summaries) {
+      if (remainingEntries <= PAGE_CACHE_MAX_ENTRIES && totalBytes <= PAGE_CACHE_MAX_BYTES) break;
+      keysToDelete.push(entry.key);
+      remainingEntries--;
+      totalBytes -= entry.bytes;
+    }
+    if (keysToDelete.length === 0) return;
+
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    for (const key of keysToDelete) {
+      store.delete(key);
+    }
+    await waitForTransaction(tx, '[pruneCachedPages] tx timeout');
+  } catch { /* ignore cache GC errors */ }
+}
 
 function openDB(): Promise<IDBDatabase> {
   if (!dbPromise) {
@@ -21,10 +139,17 @@ function openDB(): Promise<IDBDatabase> {
           db.createObjectStore(STORE_NAME_DIRTY);
         }
       };
-      request.onsuccess = () => resolve(request.result);
       request.onerror = () => {
         dbPromise = null;
         reject(request.error);
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        if (!openingPruneStarted) {
+          openingPruneStarted = true;
+          void pruneCachedPages(db);
+        }
+        resolve(db);
       };
     });
   }
@@ -187,11 +312,22 @@ export async function getAllTemporaryPageData(filePath: string): Promise<Map<num
 export async function getCachedPage(key: string): Promise<PageData | null> {
   try {
     const db = await openDB();
-    const tx = db.transaction(STORE_NAME, 'readonly');
+    const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
     const request = store.get(key);
     return new Promise((resolve) => {
-      request.onsuccess = () => resolve(request.result || null);
+      request.onsuccess = () => {
+        const record = request.result as CachedPageRecord | undefined;
+        if (!record) {
+          resolve(null);
+          return;
+        }
+        const pageData = stripCacheMetadata(record);
+        try {
+          store.put(withCacheMetadata(pageData, Date.now()), key);
+        } catch { /* ignore LRU touch errors */ }
+        resolve(pageData);
+      };
       request.onerror = () => resolve(null);
     });
   } catch {
@@ -205,7 +341,13 @@ export async function setCachedPage(key: string, data: PageData) {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
     // Remove thumbnail from cached data to save space in IndexedDB
-    const dataToCache = { ...data, thumbnail: null };
+    const dataToCache = withCacheMetadata(data, Date.now());
     store.put(dataToCache, key);
+    await waitForTransaction(tx, '[setCachedPage] tx timeout');
+    pageCacheWritesSincePrune++;
+    if (pageCacheWritesSincePrune >= PAGE_CACHE_PRUNE_WRITE_INTERVAL) {
+      pageCacheWritesSincePrune = 0;
+      await pruneCachedPages(db);
+    }
   } catch { /* ignore write errors */ }
 }

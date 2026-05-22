@@ -230,8 +230,15 @@ describe.skipIf(!hasRealPdf)('Copy/Paste × save roundtrip (実 PDF)', () => {
     // page 0 (範囲内・dirty) は保存され、paste した COPIED ブロックを含む
     expect(meta!['0']).toBeDefined();
     expect(meta!['0'].some(e => e.text === 'COPIED')).toBe(true);
-    // page 1 は実 PDF の範囲外なので meta には現れない (ページ跨ぎでの新規物理ページ生成は不可)
-    expect(meta!['1']).toBeUndefined();
+    if (savedDoc.getPageCount() <= 1) {
+      // page 1 が実 PDF の範囲外なら meta には現れない
+      // (ページ跨ぎでの新規物理ページ生成は不可)。
+      expect(meta!['1']).toBeUndefined();
+    } else {
+      // fixture が複数ページの場合、現ページ page 1 への paste は保存対象になる。
+      expect(meta!['1']).toBeDefined();
+      expect(meta!['1'].some(e => e.text === 'COPIED')).toBe(true);
+    }
   }, 120_000);
 
   it('setDocument で clipboard がリセットされる', async () => {

@@ -113,6 +113,22 @@ describe('useConsoleLogs', () => {
     expect(patchedRef2).toBe(patchedRef1)
   })
 
+  it('購読中だけ window error listeners を登録する', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const addSpy = vi.spyOn(window, 'addEventListener')
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
+    const { useConsoleLogs } = await loadHookFresh()
+    const { unmount } = renderHook(() => useConsoleLogs())
+
+    expect(addSpy).toHaveBeenCalledWith('error', expect.any(Function))
+    expect(addSpy).toHaveBeenCalledWith('unhandledrejection', expect.any(Function))
+
+    unmount()
+
+    expect(removeSpy).toHaveBeenCalledWith('error', expect.any(Function))
+    expect(removeSpy).toHaveBeenCalledWith('unhandledrejection', expect.any(Function))
+  })
+
   it('300 件を超えると古いログが落ちる (上限が守られる)', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {})
     const { useConsoleLogs } = await loadHookFresh()

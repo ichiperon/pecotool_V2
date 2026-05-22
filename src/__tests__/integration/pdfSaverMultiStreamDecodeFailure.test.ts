@@ -25,9 +25,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { PDFDocument, PDFArray, PDFName, PDFRawStream } from '@cantoo/pdf-lib';
 import { inflate, deflate } from 'pako';
 import { buildPdfDocument } from '../../utils/pdfSaver';
+import { __handleSavePdfForTest } from '../../utils/pdf.worker';
 import type { PageData, PecoDocument, TextBlock } from '../../types';
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
+
+function encodeLatin1(s: string): Uint8Array {
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
+  return out;
+}
 
 /**
  * Contents=[A, B, C] のページを持つ PDF を構築する。
@@ -39,14 +46,8 @@ async function makePdfWithMixedFilterStreams(): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([595, 842]);
 
-  const enc = (s: string): Uint8Array => {
-    const out = new Uint8Array(s.length);
-    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
-    return out;
-  };
-
   // Stream A: FlateDecode で BT (legacyA) Tj ET を含む
-  const aRaw = enc('q\nBT /F1 12 Tf (legacyA) Tj ET\nQ');
+  const aRaw = encodeLatin1('q\nBT /F1 12 Tf (legacyA) Tj ET\nQ');
   const aCompressed = deflate(aRaw);
   const aStream = pdf.context.stream(aCompressed, {
     Filter: PDFName.of('FlateDecode'),
@@ -54,13 +55,13 @@ async function makePdfWithMixedFilterStreams(): Promise<Uint8Array> {
 
   // Stream B: LZWDecode (saver の decodeStreamContents は handling 不能)
   // バイト列は実際の LZW 圧縮にする必要は無い (saver は filter 名だけ見て早期 return)
-  const bRaw = enc('q\nBT /F1 12 Tf (legacyB) Tj ET\nQ');
+  const bRaw = encodeLatin1('q\nBT /F1 12 Tf (legacyB) Tj ET\nQ');
   const bStream = pdf.context.stream(bRaw, {
     Filter: PDFName.of('LZWDecode'),
   });
 
   // Stream C: FlateDecode で BT (legacyC) Tj ET を含む
-  const cRaw = enc('q\nBT /F1 12 Tf (legacyC) Tj ET\nQ');
+  const cRaw = encodeLatin1('q\nBT /F1 12 Tf (legacyC) Tj ET\nQ');
   const cCompressed = deflate(cRaw);
   const cStream = pdf.context.stream(cCompressed, {
     Filter: PDFName.of('FlateDecode'),
@@ -73,6 +74,38 @@ async function makePdfWithMixedFilterStreams(): Promise<Uint8Array> {
   const contentsArray = pdf.context.obj([aRef, bRef, cRef]);
   page.node.set(PDFName.of('Contents'), contentsArray);
 
+  return await pdf.save({ useObjectStreams: false, addDefaultPage: false });
+}
+
+async function makePdfWithNonRawMixedStreams(): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([595, 842]);
+
+  const aStream = pdf.context.stream(deflate(encodeLatin1('q\nBT /F1 12 Tf (legacyA) Tj ET\nQ')), {
+    Filter: PDFName.of('FlateDecode'),
+  });
+  const cStream = pdf.context.stream(deflate(encodeLatin1('q\nBT /F1 12 Tf (legacyC) Tj ET\nQ')), {
+    Filter: PDFName.of('FlateDecode'),
+  });
+  const nonStream = pdf.context.obj({ NotAStream: PDFName.of('Yes') });
+
+  const contentsArray = pdf.context.obj([
+    pdf.context.register(aStream),
+    pdf.context.register(nonStream),
+    pdf.context.register(cStream),
+  ]);
+  page.node.set(PDFName.of('Contents'), contentsArray);
+
+  return await pdf.save({ useObjectStreams: false, addDefaultPage: false });
+}
+
+async function makePdfWithSingleTextStream(): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([595, 842]);
+  const stream = pdf.context.stream(deflate(encodeLatin1('q\nBT /F1 12 Tf (legacyText) Tj ET\nQ')), {
+    Filter: PDFName.of('FlateDecode'),
+  });
+  page.node.set(PDFName.of('Contents'), pdf.context.register(stream));
   return await pdf.save({ useObjectStreams: false, addDefaultPage: false });
 }
 
@@ -165,5 +198,50 @@ describe('pdfSaver issue #78: multi-stream decode failure should still strip oth
       }
     }
     expect(violations).toEqual([]);
+  }, 60_000);
+
+  it('M-01: 非 PDFRawStream 混在時も decode 成功 stream の strip を継続する', async () => {
+    const original = await makePdfWithNonRawMixedStreams();
+    const originalText = await decodeAllPage0Contents(original);
+    expect(originalText).toContain('(legacyA) Tj');
+    expect(originalText).toContain('(legacyC) Tj');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const saved = await buildPdfDocument(original, makeNonDirtyDoc());
+    warnSpy.mockRestore();
+
+    const savedText = await decodeAllPage0Contents(saved);
+    expect(savedText).not.toContain('(legacyA)');
+    expect(savedText).not.toContain('(legacyC)');
+  }, 60_000);
+
+  it('W-01: worker 側でも非 PDFRawStream 混在時に decode 成功 stream の strip を継続する', async () => {
+    const original = await makePdfWithNonRawMixedStreams();
+    const page = makeNonDirtyDoc().pages.get(0)!;
+    const { thumbnail: _thumbnail, ...serializedPage } = page;
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { savedBytes } = await __handleSavePdfForTest(
+      original,
+      { pages: { 0: serializedPage } },
+      undefined,
+    );
+    warnSpy.mockRestore();
+
+    const savedText = await decodeAllPage0Contents(savedBytes);
+    expect(savedText).not.toContain('(legacyA)');
+    expect(savedText).not.toContain('(legacyC)');
+  }, 60_000);
+
+  it('M-02: 全 BB 空テキストの dirty 保存は旧 OCR を strip し、描画テキストを追加しない', async () => {
+    const original = await makePdfWithSingleTextStream();
+    const originalText = await decodeAllPage0Contents(original);
+    expect(originalText).toContain('(legacyText) Tj');
+
+    const saved = await buildPdfDocument(original, makeNonDirtyDoc());
+    const savedText = await decodeAllPage0Contents(saved);
+
+    expect(savedText).not.toContain('(legacyText)');
+    expect(savedText).not.toMatch(/\bTj\b|\bTJ\b/);
   }, 60_000);
 });

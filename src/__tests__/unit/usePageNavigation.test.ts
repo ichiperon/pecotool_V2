@@ -657,6 +657,83 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
     })
     expect(loadPecoToolBBoxMetaMock).toHaveBeenCalledTimes(2)
   })
+
+  it('古い bboxMeta resolve がファイル切替後の bboxMetaRef を汚染しない', async () => {
+    const fakePdfA = { numPages: 1, name: 'A' }
+    const fakePdfB = { numPages: 1, name: 'B' }
+    let resolveMetaA!: (m: any) => void
+    let resolveSharedB!: (p: any) => void
+    const metaAPromise = new Promise<any>((res) => { resolveMetaA = res })
+    const sharedBPromise = new Promise<any>((res) => { resolveSharedB = res })
+    const metaA = { '0': [{ bbox: { x: 1, y: 1, width: 10, height: 10 }, writingMode: 'horizontal', order: 0, text: 'old' }] }
+    const metaB = { '0': [{ bbox: { x: 2, y: 2, width: 20, height: 20 }, writingMode: 'horizontal', order: 0, text: 'new' }] }
+
+    getSharedPdfProxyMock.mockImplementation((path: string) =>
+      path === 'a.pdf' ? Promise.resolve(fakePdfA) : sharedBPromise
+    )
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+    loadPecoToolBBoxMetaMock
+      .mockReturnValueOnce(metaAPromise)
+      .mockResolvedValueOnce(metaB)
+    loadPageMock.mockImplementation((_pdf, idx) =>
+      Promise.resolve(makePage(idx))
+    )
+
+    usePecoStore.setState({
+      document: {
+        filePath: 'a.pdf',
+        fileName: 'a.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+        mtime: 100,
+      },
+      documentEpoch: 1,
+      currentPageIndex: 0,
+    } as any)
+
+    const showToast = vi.fn()
+    const triggerThumbnailLoad = vi.fn()
+
+    renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast,
+        triggerThumbnailLoad,
+      })
+    )
+
+    await waitFor(() => {
+      expect(loadPecoToolBBoxMetaMock).toHaveBeenCalledTimes(1)
+    })
+
+    act(() => {
+      usePecoStore.setState({
+        document: {
+          filePath: 'b.pdf',
+          fileName: 'b.pdf',
+          totalPages: 1,
+          metadata: {},
+          pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+          mtime: 200,
+        },
+        documentEpoch: 2,
+        currentPageIndex: 0,
+      } as any)
+    })
+
+    resolveMetaA(metaA)
+    await Promise.resolve()
+    resolveSharedB(fakePdfB)
+
+    await waitFor(() => {
+      expect(loadPageMock).toHaveBeenCalledWith(fakePdfB, 0, 'b.pdf', metaB, 200)
+    })
+    expect(loadPageMock.mock.calls.some((call) => call[2] === 'a.pdf')).toBe(false)
+    expect(loadPageMock.mock.calls.some((call) => call[2] === 'b.pdf' && call[3] === metaA)).toBe(false)
+  })
 })
 
 describe('page input validation', () => {

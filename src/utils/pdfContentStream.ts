@@ -448,6 +448,70 @@ export function stripEmptyGraphicsStateBlocksOnly(decoded: Uint8Array): Uint8Arr
   return stripEmptyGraphicsStateBlocks(decoded);
 }
 
+export function hasTextOperatorsOutsideTextObjects(decoded: Uint8Array): boolean {
+  const len = decoded.length;
+  let state: State = 'NORMAL';
+  let stringDepth = 0;
+  let textDepth = 0;
+  let i = 0;
+
+  while (i < len) {
+    if (state === 'NORMAL') {
+      if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+        i = copyInlineImage(decoded, i, new Uint8Array(0), 0).inputIdx;
+        continue;
+      }
+      if (matchesToken(decoded, i, 0x42, 0x54 /* BT */)) {
+        textDepth += 1;
+        i += 2;
+        continue;
+      }
+      if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
+        if (textDepth === 0) return true;
+        textDepth -= 1;
+        i += 2;
+        continue;
+      }
+      if (
+        textDepth === 0 &&
+        (
+          matchesToken(decoded, i, 0x54, 0x6a /* Tj */) ||
+          matchesToken(decoded, i, 0x54, 0x4a /* TJ */) ||
+          textOperatorOperandCount(decoded, i) !== null
+        )
+      ) {
+        return true;
+      }
+
+      const entry = enterNonNormalState(decoded, i);
+      if (entry) {
+        state = entry.state;
+        stringDepth = entry.stringDepth;
+        i += entry.advance;
+        continue;
+      }
+      i += 1;
+    } else if (state === 'STRING') {
+      const r = scanString(decoded, i, stringDepth);
+      state = r.state;
+      stringDepth = r.stringDepth;
+      i += r.advance;
+    } else if (state === 'HEX') {
+      const r = scanHex(decoded, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    } else {
+      const r = scanComment(decoded, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    }
+  }
+
+  return textDepth !== 0;
+}
+
 function stripEmptyGraphicsStateBlocks(decoded: Uint8Array): Uint8Array {
   const len = decoded.length;
   const result = new Uint8Array(len);

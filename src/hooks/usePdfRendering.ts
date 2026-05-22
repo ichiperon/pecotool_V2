@@ -15,6 +15,7 @@ interface UsePdfRenderingParams {
   filePath: string | undefined;
   totalPages: number | undefined;
   pageIndex: number;
+  documentEpoch?: number;
   zoom: number;
   onFirstRender?: () => void;
   /**
@@ -33,6 +34,12 @@ interface UsePdfRenderingResult {
   retry: () => void;
 }
 
+type RenderPageMeta = {
+  filePath: string;
+  pageIndex: number;
+  documentEpoch: number;
+};
+
 // PDF main render + bitmapCache + viewport/page proxy 管理
 //
 // チラつき対策方針:
@@ -48,6 +55,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     wrapperRef,
     filePath,
     pageIndex,
+    documentEpoch = 0,
     zoom,
     onFirstRender,
     onRenderComplete,
@@ -58,7 +66,13 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const renderDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasCalledFirstRenderRef = useRef<string | null>(null);
   const prevPdfPageRef = useRef<pdfjsLib.PDFPageProxy | null>(null);
+  const lastProxyRequestRef = useRef<{
+    filePath: string;
+    pageIndex: number;
+    documentEpoch: number;
+  } | null>(null);
   const [pdfPage, setPdfPage] = useState<pdfjsLib.PDFPageProxy | null>(null);
+  const [pdfPageMeta, setPdfPageMeta] = useState<RenderPageMeta | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
 
@@ -79,11 +93,10 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const mountedRef = useRef(true);
   const latestParamsRef = useRef<{
     pdfPage: pdfjsLib.PDFPageProxy | null;
+    renderMeta: RenderPageMeta | null;
     zoom: number;
-    filePath: string | undefined;
-    pageIndex: number;
-  }>({ pdfPage: null, zoom, filePath, pageIndex });
-  latestParamsRef.current = { pdfPage, zoom, filePath, pageIndex };
+  }>({ pdfPage: null, renderMeta: null, zoom });
+  latestParamsRef.current = { pdfPage, renderMeta: pdfPageMeta, zoom };
 
   // PDFページの取得
   // ファイル or ページ切替時: 旧 pdfPage は即座にクリアせず、新ページ proxy の
@@ -93,10 +106,18 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       hasCalledFirstRenderRef.current = null;
       // ファイル未選択時は即クリア (表示するものがないため)
       setPdfPage(null);
+      setPdfPageMeta(null);
+      setLoadError(false);
       return;
     }
 
     let cancelled = false;
+    const previousProxyRequest = lastProxyRequestRef.current;
+    const shouldBypassSharedProxy =
+      previousProxyRequest?.filePath === filePath &&
+      previousProxyRequest.pageIndex === pageIndex &&
+      previousProxyRequest.documentEpoch !== documentEpoch;
+    lastProxyRequestRef.current = { filePath, pageIndex, documentEpoch };
 
     (async () => {
       try {
@@ -105,16 +126,20 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         const state = usePecoStore.getState();
         const expectedKey = `${filePath}:${pageIndex}`;
         let page: pdfjsLib.PDFPageProxy | null = null;
-        if (state.currentPageProxyKey === expectedKey && state.currentPageProxy) {
+        if (!shouldBypassSharedProxy && state.currentPageProxyKey === expectedKey && state.currentPageProxy) {
           page = state.currentPageProxy;
         } else {
           page = await getCachedPageProxy(filePath, pageIndex);
         }
         if (cancelled) return;
+        setLoadError(false);
+        setPdfPageMeta({ filePath, pageIndex, documentEpoch });
         setPdfPage(page);
       } catch (err) {
         if (!cancelled && !(err instanceof Error && err.message.includes("file switched"))) {
           console.error("Error loading PDF page:", err);
+          setPdfPage(null);
+          setPdfPageMeta(null);
           setLoadError(true);
         }
       }
@@ -123,7 +148,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     return () => {
       cancelled = true;
     };
-  }, [filePath, pageIndex, retryCount]);
+  }, [filePath, pageIndex, documentEpoch, retryCount]);
 
   // store.currentPageProxy の更新を subscribe: usePageNavigation が later に
   // proxy を publish したケース (未ロードページで effect 側が先行した場合など) に対応。
@@ -131,14 +156,17 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     if (!filePath) return;
     const expectedKey = `${filePath}:${pageIndex}`;
     const unsubscribe = usePecoStore.subscribe((state, prev) => {
+      if (state.documentEpoch !== documentEpoch) return;
       if (state.currentPageProxy === prev.currentPageProxy) return;
       if (state.currentPageProxyKey !== expectedKey) return;
       if (!state.currentPageProxy) return;
       // 同じ proxy 参照なら skip
+      setLoadError(false);
+      setPdfPageMeta({ filePath, pageIndex, documentEpoch });
       setPdfPage((current) => current === state.currentPageProxy ? current : state.currentPageProxy);
     });
     return () => { unsubscribe(); };
-  }, [filePath, pageIndex]);
+  }, [filePath, pageIndex, documentEpoch]);
 
   // unmount 専用 cleanup: 残っている debounce / render task をここで破棄する。
   // effect 再走時の cleanup ではこれをしない (上記 issue #94 の (1))。
@@ -157,7 +185,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
 
   // PDFレンダリング
   useEffect(() => {
-    if (!pdfPage || !pdfCanvasRef.current) return;
+    if (!pdfPage || !pdfPageMeta || !pdfCanvasRef.current) return;
 
     // 同期サイズ同期 (issue #94 (2)): pdfCanvas + 両 overlay + wrapper を
     // 新 zoom の viewport サイズに先取りで合わせる。canvas.width/height への
@@ -179,7 +207,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
 
     // bitmapCache ヒット時は debounce を待たず同期で完了させる (issue #94 (3))。
     // 進行中の古い render があればキャンセルしてからキャッシュ画像を貼る。
-    const cacheKey = `${filePath}:${pageIndex}:${zoom}`;
+    const cacheKey = renderCacheKey(pdfPageMeta, zoom);
     const cached = getBitmapCache(cacheKey);
     if (cached && cached.width === w && cached.height === h) {
       if (renderTaskRef.current) {
@@ -192,14 +220,14 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       });
       if (context) {
         context.drawImage(cached.bitmap, 0, 0);
-        if (perf.enabled) perf.mark('render.drawn', { page: pageIndex, cacheHit: true });
+        if (perf.enabled) perf.mark('render.drawn', { page: pdfPageMeta.pageIndex, cacheHit: true });
       }
-      if (hasCalledFirstRenderRef.current !== filePath) {
-        hasCalledFirstRenderRef.current = filePath ?? null;
+      if (hasCalledFirstRenderRef.current !== pdfPageMeta.filePath) {
+        hasCalledFirstRenderRef.current = pdfPageMeta.filePath;
         onFirstRender?.();
       }
       renderOverlaysRef.current?.();
-      if (perf.enabled) perf.mark('render.complete', { page: pageIndex, cacheHit: true });
+      if (perf.enabled) perf.mark('render.complete', { page: pdfPageMeta.pageIndex, cacheHit: true });
       onRenderComplete?.();
       // ページ切替時の prev 更新: cache hit でも次回判定に使うので忘れず更新。
       prevPdfPageRef.current = pdfPage;
@@ -215,10 +243,9 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       // 最後の値で 1 回だけ render する (coalesce)。
       const latest = latestParamsRef.current;
       const curPage = latest.pdfPage;
-      if (!curPage || !pdfCanvasRef.current) return;
+      const curMeta = latest.renderMeta;
+      if (!curPage || !curMeta || !pdfCanvasRef.current) return;
       const curZoom = latest.zoom;
-      const curFilePath = latest.filePath;
-      const curPageIndex = latest.pageIndex;
 
       const canvas = pdfCanvasRef.current;
       const context = canvas.getContext("2d", { alpha: false, willReadFrequently: false })!;
@@ -227,7 +254,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       const lw = Math.floor(liveViewport.width);
       const lh = Math.floor(liveViewport.height);
 
-      const liveCacheKey = `${curFilePath}:${curPageIndex}:${curZoom}`;
+      const liveCacheKey = renderCacheKey(curMeta, curZoom);
       const liveCached = getBitmapCache(liveCacheKey);
       if (liveCached && liveCached.width === lw && liveCached.height === lh) {
         // debounce 中にキャッシュが用意された (他経路) or 既に上の同期パスで
@@ -245,13 +272,13 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           wrapperRef,
         });
         context.drawImage(liveCached.bitmap, 0, 0);
-        if (perf.enabled) perf.mark('render.drawn', { page: curPageIndex, cacheHit: true });
-        if (hasCalledFirstRenderRef.current !== curFilePath) {
-          hasCalledFirstRenderRef.current = curFilePath ?? null;
+        if (perf.enabled) perf.mark('render.drawn', { page: curMeta.pageIndex, cacheHit: true });
+        if (hasCalledFirstRenderRef.current !== curMeta.filePath) {
+          hasCalledFirstRenderRef.current = curMeta.filePath;
           onFirstRender?.();
         }
         renderOverlaysRef.current?.();
-        if (perf.enabled) perf.mark('render.complete', { page: curPageIndex, cacheHit: true });
+        if (perf.enabled) perf.mark('render.complete', { page: curMeta.pageIndex, cacheHit: true });
         onRenderComplete?.();
         return;
       }
@@ -265,69 +292,74 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       offctx.fillStyle = "#ffffff";
       offctx.fillRect(0, 0, lw, lh);
 
-      const renderContext = {
-        canvasContext: offctx,
-        viewport: liveViewport,
-        canvas: offscreen,
-      };
-
-      if (renderTaskRef.current) {
-        renderTaskRef.current.cancel();
-      }
-      if ((curPage as any)._transport?.destroyed) return;
-      if (perf.enabled) perf.mark('render.start', { page: curPageIndex, zoom: curZoom, w: lw, h: lh });
-      renderTaskRef.current = curPage.render(renderContext);
-
       try {
-        await renderTaskRef.current.promise;
-        if (perf.enabled) perf.mark('render.taskDone', { page: curPageIndex });
-      } catch (err: any) {
-        if (err.name === "RenderingCancelledException") return;
-        if (err instanceof TypeError && err.message.includes("sendWithPromise")) return;
-        console.error("PDF render error:", err);
-        setLoadError(true);
-        return;
+        const renderContext = {
+          canvasContext: offctx,
+          viewport: liveViewport,
+          canvas: offscreen,
+        };
+
+        if (renderTaskRef.current) {
+          renderTaskRef.current.cancel();
+        }
+        if ((curPage as any)._transport?.destroyed) return;
+        if (perf.enabled) perf.mark('render.start', { page: curMeta.pageIndex, zoom: curZoom, w: lw, h: lh });
+        renderTaskRef.current = curPage.render(renderContext);
+
+        try {
+          await renderTaskRef.current.promise;
+          if (perf.enabled) perf.mark('render.taskDone', { page: curMeta.pageIndex });
+        } catch (err: any) {
+          if (err.name === "RenderingCancelledException") return;
+          if (err instanceof TypeError && err.message.includes("sendWithPromise")) return;
+          console.error("PDF render error:", err);
+          setLoadError(true);
+          return;
+        }
+
+        // cleanup 済み (例: さらに新ページに切り替わった) なら on-screen に反映しない
+        if (!mountedRef.current) return;
+        // 直近 latestParams が更に変わっているならその差分を再描画させる
+        // (effect の次回 run か、または既にスケジュールされた debounce が拾う)。
+        const after = latestParamsRef.current;
+        if (after.pdfPage !== curPage || after.renderMeta !== curMeta || after.zoom !== curZoom) {
+          // 古い render 結果は捨てる。新しい parameter での render は次の effect run
+          // / 既存 timeout の発火で改めて開始される。
+          return;
+        }
+
+        // on-screen canvas にサイズ適用してオフスクリーンから一括コピー
+        syncCanvasSizes({
+          w: lw,
+          h: lh,
+          pdfCanvasRef,
+          overlayCanvasRef,
+          staticOverlayCanvasRef,
+          wrapperRef,
+        });
+        context.drawImage(offscreen, 0, 0);
+        if (perf.enabled) perf.mark('render.drawn', { page: curMeta.pageIndex });
+
+        if (hasCalledFirstRenderRef.current !== curMeta.filePath) {
+          hasCalledFirstRenderRef.current = curMeta.filePath;
+          onFirstRender?.();
+        }
+
+        try {
+          const bitmap = await createImageBitmap(offscreen);
+          setBitmapCache(liveCacheKey, { bitmap, zoom: curZoom, width: lw, height: lh });
+        } catch {
+          /* ビットマップ作成失敗は無視 */
+        }
+
+        renderOverlaysRef.current?.();
+        if (perf.enabled) perf.mark('render.complete', { page: curMeta.pageIndex, cacheHit: false });
+        onRenderComplete?.();
+        // prefetch は pdfjs worker のタスクキューを占有して現在ページ描画を遅延させるため廃止
+      } finally {
+        offscreen.width = 0;
+        offscreen.height = 0;
       }
-
-      // cleanup 済み (例: さらに新ページに切り替わった) なら on-screen に反映しない
-      if (!mountedRef.current) return;
-      // 直近 latestParams が更に変わっているならその差分を再描画させる
-      // (effect の次回 run か、または既にスケジュールされた debounce が拾う)。
-      const after = latestParamsRef.current;
-      if (after.pdfPage !== curPage || after.zoom !== curZoom) {
-        // 古い render 結果は捨てる。新しい parameter での render は次の effect run
-        // / 既存 timeout の発火で改めて開始される。
-        return;
-      }
-
-      // on-screen canvas にサイズ適用してオフスクリーンから一括コピー
-      syncCanvasSizes({
-        w: lw,
-        h: lh,
-        pdfCanvasRef,
-        overlayCanvasRef,
-        staticOverlayCanvasRef,
-        wrapperRef,
-      });
-      context.drawImage(offscreen, 0, 0);
-      if (perf.enabled) perf.mark('render.drawn', { page: curPageIndex });
-
-      if (hasCalledFirstRenderRef.current !== curFilePath) {
-        hasCalledFirstRenderRef.current = curFilePath ?? null;
-        onFirstRender?.();
-      }
-
-      try {
-        const bitmap = await createImageBitmap(offscreen);
-        setBitmapCache(liveCacheKey, { bitmap, zoom: curZoom, width: lw, height: lh });
-      } catch {
-        /* ビットマップ作成失敗は無視 */
-      }
-
-      renderOverlaysRef.current?.();
-      if (perf.enabled) perf.mark('render.complete', { page: curPageIndex, cacheHit: false });
-      onRenderComplete?.();
-      // prefetch は pdfjs worker のタスクキューを占有して現在ページ描画を遅延させるため廃止
     };
 
     const isPageChange = prevPdfPageRef.current !== pdfPage;
@@ -359,7 +391,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     // discard する) ため、ここでは何もしない。unmount 時の最終 cleanup は
     // mount-only effect が担う。
     return undefined;
-  }, [pdfPage, zoom]);
+  }, [pdfPage, pdfPageMeta, zoom]);
 
   return {
     pdfPage,
@@ -367,6 +399,10 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     setLoadError,
     retry: () => setRetryCount((c) => c + 1),
   };
+}
+
+function renderCacheKey(meta: RenderPageMeta, zoom: number): string {
+  return `${meta.filePath}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}`;
 }
 
 // 全 Canvas (pdfCanvas + overlay + 静的 overlay + wrapper) のサイズを

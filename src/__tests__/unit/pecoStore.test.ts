@@ -54,6 +54,7 @@ function makeDoc(pages: Map<number, PageData> = new Map([[0, makePage()]])): Pec
 
 const INITIAL_STATE = {
   document:          null,
+  documentEpoch:     0,
   thumbnails:        new Map(),
   currentPageIndex:  0,
   zoom:              100,
@@ -65,6 +66,8 @@ const INITIAL_STATE = {
   selectedIds:       new Set<string>(),
   undoStack:         [] as Action[],
   redoStack:         [] as Action[],
+  currentPageProxy:  null,
+  currentPageProxyKey: null,
   dragPreviewBboxes: null as Map<string, BoundingBox> | null,
 } as const
 
@@ -95,6 +98,24 @@ describe('pecoStore', () => {
       expect(usePecoStore.getState().redoStack).toHaveLength(0)
     })
   })
+
+  describe('documentEpoch', () => {
+    it('bumpDocumentEpoch は古い currentPageProxy も破棄する', () => {
+      const proxy = { id: 'old-proxy' } as any;
+      usePecoStore.setState({
+        documentEpoch: 10,
+        currentPageProxy: proxy,
+        currentPageProxyKey: 'test.pdf:0',
+      });
+
+      usePecoStore.getState().bumpDocumentEpoch();
+
+      const state = usePecoStore.getState();
+      expect(state.documentEpoch).toBe(11);
+      expect(state.currentPageProxy).toBeNull();
+      expect(state.currentPageProxyKey).toBeNull();
+    });
+  });
 
   describe('U-ST-02: Undo 実行', () => {
     it('undo() で before 状態に戻り redoStack に action が移動する', () => {
@@ -950,6 +971,46 @@ describe('pecoStore', () => {
         // ↑ oldPage / newPage の参照は使わなかったが、テスト名の意図 (上書きしない) は検証済み
         expect(oldPage.textBlocks[0].text).toBe('old')
         expect(newPage.textBlocks[0].text).toBe('new')
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('S-02-04: IDB 保存失敗時、別ファイルへ切替済みなら旧ファイルの page を混入させない', async () => {
+      let rejectSave!: (e: Error) => void
+      const rejectLater = new Promise<void>((_, reject) => { rejectSave = reject })
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReturnValueOnce(rejectLater)
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      try {
+        const pages = new Map<number, PageData>()
+        for (let i = 0; i < 50; i++) {
+          pages.set(i, makePage({ pageIndex: i, isDirty: true, textBlocks: [makeBlock({ text: `old-${i}` })] }))
+        }
+        usePecoStore.setState({
+          document: makeDoc(pages),
+          currentPageIndex: 50,
+          pageAccessOrder: Array.from({ length: 50 }, (_, i) => i),
+        })
+
+        usePecoStore.getState().updatePageData(50, makePage({ pageIndex: 50, isDirty: true }), false)
+        expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
+
+        const nextDoc = {
+          ...makeDoc(new Map([[0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'new-doc' })] })]])),
+          filePath: 'next.pdf',
+          fileName: 'next.pdf',
+        }
+        usePecoStore.setState({ document: nextDoc })
+
+        rejectSave(new Error('IDB failure'))
+        await waitForPendingIdbSaves()
+
+        const current = usePecoStore.getState().document!
+        expect(current.filePath).toBe('next.pdf')
+        expect(current.pages.has(49)).toBe(false)
+        expect(current.pages.get(0)?.textBlocks[0]?.text).toBe('new-doc')
+        expect(usePecoStore.getState().lastIdbError).toBeInstanceOf(Error)
       } finally {
         errorSpy.mockRestore()
       }

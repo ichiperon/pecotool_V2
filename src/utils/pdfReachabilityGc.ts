@@ -30,6 +30,10 @@ const REF_KEY_MULTIPLIER = 1_000_000;
 const refKey = (ref: PDFRef): number =>
   ref.objectNumber * REF_KEY_MULTIPLIER + ref.generationNumber;
 
+function isTraversableObject(value: PDFObject): value is PDFRef | PDFDict | PDFArray | PDFStream {
+  return value instanceof PDFRef || value instanceof PDFDict || value instanceof PDFArray || value instanceof PDFStream;
+}
+
 /**
  * /Root を起点に BFS で到達可能な indirect object 集合を求め、
  * それ以外を pdfDoc.context.delete() で削除する。
@@ -53,6 +57,7 @@ export function sweepUnreachableObjects(pdfDoc: PDFDocument): SweepResult {
   // PDFRef ベースの到達可能集合。文字列 toString() を避け、数値キーで管理する
   // ことで大規模 PDF の数十万回呼び出しによるオーバーヘッドを削減する。
   const reachable = new Set<number>();
+  const visitedObjects = new WeakSet<object>();
   const queue: PDFObject[] = [];
 
   const enqueue = (obj: PDFObject | undefined | null): void => {
@@ -70,7 +75,7 @@ export function sweepUnreachableObjects(pdfDoc: PDFDocument): SweepResult {
       ID?: PDFObject;
     };
   }).trailerInfo;
-  if (!trailerInfo || typeof (context as unknown as { enumerateIndirectObjects?: unknown }).enumerateIndirectObjects !== 'function') {
+  if (!trailerInfo?.Root || typeof (context as unknown as { enumerateIndirectObjects?: unknown }).enumerateIndirectObjects !== 'function') {
     return { dropped: 0 };
   }
 
@@ -90,25 +95,31 @@ export function sweepUnreachableObjects(pdfDoc: PDFDocument): SweepResult {
       continue;
     }
     if (obj instanceof PDFStream) {
+      if (visitedObjects.has(obj)) continue;
+      visitedObjects.add(obj);
       // stream dict を辿る（PDFStream は PDFDict ではないので別ブランチ）
       for (const [, value] of obj.dict.entries()) {
-        if (value instanceof PDFRef || value instanceof PDFDict || value instanceof PDFArray) {
+        if (isTraversableObject(value)) {
           enqueue(value);
         }
       }
       continue;
     }
     if (obj instanceof PDFDict) {
+      if (visitedObjects.has(obj)) continue;
+      visitedObjects.add(obj);
       for (const [, value] of obj.entries()) {
-        if (value instanceof PDFRef || value instanceof PDFDict || value instanceof PDFArray) {
+        if (isTraversableObject(value)) {
           enqueue(value);
         }
       }
       continue;
     }
     if (obj instanceof PDFArray) {
+      if (visitedObjects.has(obj)) continue;
+      visitedObjects.add(obj);
       for (const value of obj.asArray()) {
-        if (value instanceof PDFRef || value instanceof PDFDict || value instanceof PDFArray) {
+        if (isTraversableObject(value)) {
           enqueue(value);
         }
       }

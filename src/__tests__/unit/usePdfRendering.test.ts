@@ -77,13 +77,14 @@ function makeRefs() {
 interface HookProps {
   filePath: string | undefined
   pageIndex: number
+  documentEpoch?: number
   zoom: number
 }
 
 beforeEach(() => {
   getCachedPageProxyMock.mockReset()
   // store の currentPageProxy をリセット（前テストの残留を防ぐ）
-  usePecoStore.setState({ currentPageProxy: null, currentPageProxyKey: null } as any)
+  usePecoStore.setState({ currentPageProxy: null, currentPageProxyKey: null, documentEpoch: 0 } as any)
 })
 
 describe('S-01-01: ページ切替時、新 proxy 解決まで旧 pdfPage を維持 (チラつき抑止)', () => {
@@ -261,6 +262,42 @@ describe('S-01-03: ファイル切替 A→B で B 解決まで A を維持、解
     rerender({ filePath: undefined, pageIndex: 0, zoom: 100 })
     expect(result.current.pdfPage).toBeNull()
   })
+
+  it('新ページ取得失敗時は旧 pdfPage を破棄して loadError を立てる', async () => {
+    const refs = makeRefs()
+    const pageA = makeFakePage('A:0')
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    getCachedPageProxyMock.mockImplementation((_fp: string, idx: number) => {
+      if (idx === 0) return Promise.resolve(pageA)
+      return Promise.reject(new Error('page load failed'))
+    })
+
+    try {
+      const { result, rerender } = renderHook(
+        (props: HookProps) =>
+          usePdfRendering({
+            ...refs,
+            filePath: props.filePath,
+            totalPages: 3,
+            pageIndex: props.pageIndex,
+            zoom: props.zoom,
+            renderOverlaysRef: refs.renderOverlaysRef,
+          }),
+        { initialProps: { filePath: 'file-A.pdf', pageIndex: 0, zoom: 100 } }
+      )
+
+      await waitFor(() => expect(result.current.pdfPage).toBe(pageA))
+
+      rerender({ filePath: 'file-A.pdf', pageIndex: 1, zoom: 100 })
+
+      await waitFor(() => {
+        expect(result.current.loadError).toBe(true)
+        expect(result.current.pdfPage).toBeNull()
+      })
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
 })
 
 describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getCachedPageProxy を回避', () => {
@@ -292,6 +329,47 @@ describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getC
     })
     // store のを使ったので getCachedPageProxy は呼ばれていない
     expect(getCachedPageProxyMock).not.toHaveBeenCalled()
+  })
+
+  it('documentEpoch が変わると同じ key の currentPageProxy を使わず proxy を取り直す', async () => {
+    const refs = makeRefs()
+    const stalePage = makeFakePage('stale:A:0')
+    const refreshedPage = makeFakePage('fresh:A:0')
+
+    usePecoStore.setState({
+      currentPageProxy: stalePage as any,
+      currentPageProxyKey: 'file-A.pdf:0',
+      documentEpoch: 1,
+    } as any)
+    getCachedPageProxyMock.mockResolvedValue(refreshedPage)
+
+    const { result, rerender } = renderHook(
+      (props: HookProps) =>
+        usePdfRendering({
+          ...refs,
+          filePath: props.filePath,
+          totalPages: 3,
+          pageIndex: props.pageIndex,
+          documentEpoch: props.documentEpoch,
+          zoom: props.zoom,
+          renderOverlaysRef: refs.renderOverlaysRef,
+        }),
+      { initialProps: { filePath: 'file-A.pdf', pageIndex: 0, documentEpoch: 1, zoom: 100 } }
+    )
+
+    await waitFor(() => {
+      expect(result.current.pdfPage).toBe(stalePage)
+    })
+    expect(getCachedPageProxyMock).not.toHaveBeenCalled()
+
+    usePecoStore.setState({ documentEpoch: 2 } as any)
+    rerender({ filePath: 'file-A.pdf', pageIndex: 0, documentEpoch: 2, zoom: 100 })
+
+    await waitFor(() => {
+      expect(result.current.pdfPage).toBe(refreshedPage)
+    })
+    expect(getCachedPageProxyMock).toHaveBeenCalledWith('file-A.pdf', 0)
+    expect(getCachedPageProxyMock).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -469,7 +547,7 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
     const bitmap = { close: vi.fn() } as unknown as ImageBitmap
     // viewport(scale=1) は 200x100 になる
     vi.mocked(cacheModule.getBitmapCache).mockImplementation((key) => {
-      if (key === 'file-A.pdf:0:100') {
+      if (key === 'file-A.pdf:0:0:100') {
         return { bitmap, zoom: 100, width: 200, height: 100 } as any
       }
       return undefined
@@ -504,5 +582,75 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
 
     // 後続テストのために mock を戻す (next describe テストが期待する null 返却に)
     vi.mocked(cacheModule.getBitmapCache).mockReturnValue(undefined as any)
+  })
+
+  it('documentEpoch 変更前に開始した render 結果を新 epoch の cache key に保存しない', async () => {
+    const cacheModule = await import('../../utils/bitmapCache')
+    vi.mocked(cacheModule.setBitmapCache).mockClear()
+
+    const originalCreateImageBitmap = globalThis.createImageBitmap
+    ;(globalThis as any).createImageBitmap = vi.fn().mockResolvedValue({ close: vi.fn() } as unknown as ImageBitmap)
+
+    const pageEpoch1 = makeScalingPage('A:0:e1', 210, 100)
+    const pageEpoch2 = makeScalingPage('A:0:e2', 220, 100)
+    let resolveEpoch1Render!: () => void
+    const epoch1RenderPromise = new Promise<void>((res) => { resolveEpoch1Render = res })
+    pageEpoch1.render = vi.fn().mockReturnValue({
+      promise: epoch1RenderPromise,
+      cancel: vi.fn(),
+    })
+    pageEpoch2.render = vi.fn().mockReturnValue({
+      promise: Promise.resolve(),
+      cancel: vi.fn(),
+    })
+    getCachedPageProxyMock
+      .mockResolvedValueOnce(pageEpoch1)
+      .mockResolvedValueOnce(pageEpoch2)
+
+    let unmountHook: (() => void) | undefined
+    try {
+      const refs = makeRefs()
+      const staticOverlay = window.document.createElement('canvas')
+      const { result, rerender, unmount } = renderHook(
+        (props: HookProps) =>
+          usePdfRendering({
+            ...refs,
+            staticOverlayCanvasRef: { current: staticOverlay } as React.RefObject<HTMLCanvasElement | null>,
+            filePath: props.filePath,
+            totalPages: 3,
+            pageIndex: props.pageIndex,
+            documentEpoch: props.documentEpoch,
+            zoom: props.zoom,
+            renderOverlaysRef: refs.renderOverlaysRef,
+          }),
+        { initialProps: { filePath: 'file-A.pdf', pageIndex: 0, documentEpoch: 1, zoom: 100 } }
+      )
+      unmountHook = unmount
+
+      await waitFor(() => expect(result.current.pdfPage).toBe(pageEpoch1))
+      await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+      expect(pageEpoch1.render).toHaveBeenCalled()
+
+      rerender({ filePath: 'file-A.pdf', pageIndex: 0, documentEpoch: 2, zoom: 100 })
+      await waitFor(() => expect(result.current.pdfPage).toBe(pageEpoch2))
+
+      await act(async () => {
+        resolveEpoch1Render()
+        await epoch1RenderPromise
+        await Promise.resolve()
+      })
+
+      expect(cacheModule.setBitmapCache).not.toHaveBeenCalledWith(
+        'file-A.pdf:0:2:100',
+        expect.objectContaining({ width: 210 }),
+      )
+    } finally {
+      unmountHook?.()
+      if (originalCreateImageBitmap) {
+        ;(globalThis as any).createImageBitmap = originalCreateImageBitmap
+      } else {
+        delete (globalThis as any).createImageBitmap
+      }
+    }
   })
 })

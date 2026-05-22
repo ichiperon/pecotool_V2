@@ -7,7 +7,11 @@ import {
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
 import { deflate, inflate } from 'pako';
-import { stripTextBlocks, stripEmptyGraphicsStateBlocksOnly } from './pdfContentStream';
+import {
+  stripTextBlocks,
+  stripEmptyGraphicsStateBlocksOnly,
+  hasTextOperatorsOutsideTextObjects,
+} from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import { safeDecodePdfText } from './pdfLibSafeDecode';
 import {
@@ -254,8 +258,8 @@ function replacePageTextContentStreams(
   // #78: 旧実装は途中 1 つの stream が decode 失敗すると early return しており、
   // それより前に decodedStreams へ積まれた stream が merge/strip されないまま元のまま残り、
   // 後段で部分書換 (B のみ書き換え + A,C は原本) になって Double OCR が部分残存していた。
-  // 修正後: decode 失敗の stream は個別 in-place で cleanContentStream を試み、
-  // 成功した stream のみ per-stream strip する。merge 経路は decode 失敗が無い場合のみ。
+  // 修正後: decode 失敗/非 PDFRawStream は merge 経路を諦め、
+  // 成功した stream のみ per-stream strip する。
   let anyDecodeFailed = false;
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
@@ -263,12 +267,11 @@ function replacePageTextContentStreams(
       // issue #44: 暗号化 PDF や indirect chain で stream が PDFRawStream 以外になる
       // ケースがあり、その場合 text strip が silent でスキップされて Double OCR が
       // 残る。原因切り分けのため警告を出す。
-      // #78: ここで return すると他 stream の strip もスキップされ部分書換になるが、
-      //       より厳しい原本維持を選ぶ (warning は維持)。
       console.warn('[pdfSaver] Skipping text strip: page content stream is not a PDFRawStream', {
         streamType: stream?.constructor?.name ?? typeof stream,
       });
-      return;
+      anyDecodeFailed = true;
+      continue;
     }
     const decoded = decodeStreamContents(stream);
     if (decoded === null) {
@@ -304,6 +307,52 @@ function replacePageTextContentStreams(
       deleteIfUniqueRef(context, streamRef, contentRefCounts);
     }
   }
+}
+
+function pageHasTextOperatorDamage(
+  pageNode: { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
+  context: typeof PDFDocument.prototype.context,
+): boolean {
+  const contentsKey = PDFName.of('Contents');
+  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
+  if (!rawContents) return false;
+
+  const resolved = context.lookup(rawContents);
+  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+  for (const streamRef of streams) {
+    const stream = context.lookup(streamRef);
+    if (!(stream instanceof PDFRawStream)) continue;
+    const decoded = decodeStreamContents(stream);
+    if (decoded !== null && hasTextOperatorsOutsideTextObjects(decoded)) return true;
+  }
+  return false;
+}
+
+function sanitizeBBoxMetaTexts(
+  bboxMeta: Record<string, unknown>,
+  skippedChars: SkippedTextCollector,
+): boolean {
+  let changed = false;
+  for (const [pageKey, entries] of Object.entries(bboxMeta)) {
+    if (!Array.isArray(entries)) continue;
+    const pageIndex = Number(pageKey);
+    const normalizedPageIndex = Number.isInteger(pageIndex) ? pageIndex : undefined;
+    let pageChanged = false;
+    const cleanedEntries = entries.map((entry) => {
+      if (entry === null || typeof entry !== 'object') return entry;
+      const text = (entry as { text?: unknown }).text;
+      if (typeof text !== 'string') return entry;
+      const cleanedText = sanitizeTextForPdfCopy(text, skippedChars, normalizedPageIndex);
+      if (cleanedText === text) return entry;
+      pageChanged = true;
+      return { ...(entry as Record<string, unknown>), text: cleanedText };
+    });
+    if (pageChanged) {
+      bboxMeta[pageKey] = cleanedEntries;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 /**
@@ -714,6 +763,9 @@ export async function buildPdfDocument(
 
   const bboxMeta = { ...existingBBoxMeta };
   let metaChanged = false;
+  if (sanitizeBBoxMetaTexts(bboxMeta, skippedChars)) {
+    metaChanged = true;
+  }
 
   // 修正 (#25): existingBBoxMeta から pagesToWrite を pre-populate しない。
   // 以前は existingBBoxMeta の全ページを pagesToWrite に登録していたため、
@@ -773,18 +825,24 @@ export async function buildPdfDocument(
       if (!Array.isArray(entries) || entries.length === 0) continue; // (b)
 
       const page = pdfDoc.getPage(pi);
+      const hasTextOperatorDamage = pageHasTextOperatorDamage(
+        page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
+        pdfDoc.context,
+      );
       const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
       const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
-      if (!fontDict) continue;
 
       let pecoCount = 0;
-      for (const [key] of fontDict.entries()) {
-        if (isPecoToolFontKey(key)) {
-          pecoCount++;
-          if (pecoCount > BLOAT_DETECTION_FONT_THRESHOLD) break;
+      if (fontDict) {
+        for (const [key] of fontDict.entries()) {
+          if (isPecoToolFontKey(key)) {
+            pecoCount++;
+            if (pecoCount > BLOAT_DETECTION_FONT_THRESHOLD) break;
+          }
         }
       }
-      if (pecoCount <= BLOAT_DETECTION_FONT_THRESHOLD) continue; // (c)
+      const hasLegacyBloat = pecoCount > BLOAT_DETECTION_FONT_THRESHOLD;
+      if (!hasLegacyBloat && !hasTextOperatorDamage) continue; // (c)
 
       // Bloated と判定。dirty 相当として pagesToWrite に追加
       // (テキストは existingBBoxMeta から復元)。
@@ -836,6 +894,7 @@ export async function buildPdfDocument(
     const sortedBlocks = [...pageData.textBlocks]
       .map((block) => ({ ...block, text: sanitizeTextForPdfCopy(block.text, skippedChars, pageIndex) }))
       .sort((a, b) => a.order - b.order);
+    const hasDrawableBlocks = sortedBlocks.some((block) => stripUnsafePdfCopyChars(block.text).trim() !== '');
     bboxMeta[String(pageIndex)] = sortedBlocks.map(b => ({
       bbox: b.bbox,
       writingMode: b.writingMode,
@@ -867,7 +926,7 @@ export async function buildPdfDocument(
       contentRefCounts,
     );
 
-    if (!customFont) continue;
+    if (!customFont || !hasDrawableBlocks) continue;
     const pageFontKeys = new Map<PDFFont, PDFName>();
     setPageFontWithStableKey(page, customFont, pageFontKeys);
 

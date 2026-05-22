@@ -15,6 +15,7 @@ import { usePdfRendering } from "../hooks/usePdfRendering";
 import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
 import { useBlockDragResize } from "../hooks/useBlockDragResize";
 import { useInspectionStore } from "../store/inspectionStore";
+import type { TextBlock } from "../types";
 import type { InspectionIssue } from "../utils/textInspection";
 
 interface PdfCanvasProps {
@@ -23,6 +24,146 @@ interface PdfCanvasProps {
   showInspectionHighlights?: boolean;
   onFirstRender?: () => void;
   onRenderComplete?: () => void;
+}
+
+type StaticBlockCacheEntry = {
+  canvas: HTMLCanvasElement;
+  x: number;
+  y: number;
+};
+
+function staticBlockCacheKey(block: TextBlock, scale: number, opacity: number): string {
+  const { x, y, width, height } = block.bbox;
+  return [
+    block.id,
+    block.text,
+    block.writingMode,
+    x,
+    y,
+    width,
+    height,
+    scale,
+    opacity,
+  ].join('|');
+}
+
+function drawStaticBlock(
+  context: CanvasRenderingContext2D,
+  block: TextBlock,
+  scale: number,
+  opacity: number,
+  offsetX = 0,
+  offsetY = 0,
+): void {
+  const x = block.bbox.x * scale + offsetX;
+  const y = block.bbox.y * scale + offsetY;
+  const w = block.bbox.width * scale;
+  const h = block.bbox.height * scale;
+  const inset = 1;
+  const baseAlpha = opacity;
+  const fillAlpha = opacity * 0.25;
+
+  context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
+  context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+
+  context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+  context.lineWidth = 1;
+  context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+
+  if (!block.text) return;
+  if (block.writingMode === "vertical") {
+    const fontSize = Math.max(10, w * 0.8);
+    context.save();
+    context.font = `bold ${fontSize}px sans-serif`;
+    context.textBaseline = "top";
+
+    const naturalHeight = block.text.length * fontSize;
+    const sy = h / naturalHeight;
+
+    context.translate(x + w, y + 2);
+    context.scale(1, sy);
+    context.rotate(Math.PI / 2);
+    context.lineWidth = 3 / sy;
+    context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+    context.strokeText(block.text, 0, 0);
+    context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+    context.fillText(block.text, 0, 0);
+    context.restore();
+    return;
+  }
+
+  const fontSize = Math.max(10, h * 0.8);
+  context.save();
+  context.font = `bold ${fontSize}px sans-serif`;
+  context.textBaseline = "top";
+
+  const textWidth = context.measureText(block.text).width || 1;
+  const sx = w / textWidth;
+
+  context.translate(x, y + 2);
+  context.scale(sx, 1);
+  context.lineWidth = 3 / sx;
+  context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+  context.strokeText(block.text, 0, 0);
+  context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+  context.fillText(block.text, 0, 0);
+  context.restore();
+}
+
+function drawCachedStaticBlock(
+  context: CanvasRenderingContext2D,
+  cache: Map<string, StaticBlockCacheEntry>,
+  usedKeys: Set<string>,
+  block: TextBlock,
+  scale: number,
+  opacity: number,
+): void {
+  const key = staticBlockCacheKey(block, scale, opacity);
+  usedKeys.add(key);
+  let entry = cache.get(key);
+  if (!entry) {
+    const x = block.bbox.x * scale;
+    const y = block.bbox.y * scale;
+    const w = block.bbox.width * scale;
+    const h = block.bbox.height * scale;
+    const pad = 8;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(w + pad * 2));
+    canvas.height = Math.max(1, Math.ceil(h + pad * 2));
+    const blockContext = canvas.getContext('2d');
+    if (!blockContext) return;
+    drawStaticBlock(blockContext, block, scale, opacity, pad - x, pad - y);
+    entry = { canvas, x: x - pad, y: y - pad };
+    cache.set(key, entry);
+  }
+  context.drawImage(entry.canvas, entry.x, entry.y);
+}
+
+function renderStaticLayer(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  cache: Map<string, StaticBlockCacheEntry>,
+  textBlocks: TextBlock[] | null | undefined,
+  selectedIds: Set<string>,
+  showOcr: boolean,
+  zoom: number,
+  opacity: number,
+): void {
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (!showOcr || !textBlocks) {
+    cache.clear();
+    return;
+  }
+
+  const scale = zoom / 100;
+  const usedKeys = new Set<string>();
+  for (const block of textBlocks) {
+    if (selectedIds.has(block.id)) continue;
+    drawCachedStaticBlock(context, cache, usedKeys, block, scale, opacity);
+  }
+  for (const key of cache.keys()) {
+    if (!usedKeys.has(key)) cache.delete(key);
+  }
 }
 
 export function PdfCanvas({
@@ -41,10 +182,18 @@ export function PdfCanvas({
   const renderOverlaysRef = useRef<(() => void) | null>(null);
 
   const document = usePecoStore((s) => s.document);
+  const documentEpoch = usePecoStore((s) => s.documentEpoch);
   // overlay 再描画 effect は textBlocks のみを依存とし、PageData の他フィールド
   // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
   // 再描画 effect が走らないようにする (issue #22)。
   const currentTextBlocks = usePecoStore(selectCurrentPageTextBlocks);
+  const currentTextBlocksById = useMemo(() => {
+    const map = new Map<string, TextBlock>();
+    for (const block of currentTextBlocks ?? []) {
+      map.set(block.id, block);
+    }
+    return map;
+  }, [currentTextBlocks]);
   const zoom = usePecoStore(selectZoom);
   const showOcr = usePecoStore(selectShowOcr);
   const ocrOpacity = usePecoStore(selectOcrOpacity);
@@ -84,6 +233,7 @@ export function PdfCanvas({
     filePath: document?.filePath,
     totalPages: document?.totalPages,
     pageIndex,
+    documentEpoch,
     zoom,
     onFirstRender,
     onRenderComplete,
@@ -205,6 +355,7 @@ export function PdfCanvas({
 
   // 静的層: 非選択 BB の塗・枠・テキストを描画
   const staticOverlayRafRef = useRef<number | null>(null);
+  const staticBlockCacheRef = useRef<Map<string, StaticBlockCacheEntry>>(new Map());
   useEffect(() => {
     if (!staticOverlayCanvasRef.current || !pdfPage) return;
 
@@ -214,73 +365,16 @@ export function PdfCanvas({
       const context = canvas.getContext("2d");
       if (!context) return;
 
-      context.clearRect(0, 0, canvas.width, canvas.height);
-
-      const textBlocks = currentTextBlocks;
-      if (!showOcr || !textBlocks) return;
-
-      const curSelected = selectedIdsRef.current;
-      const scale = zoom / 100;
-
-      textBlocks.forEach((block) => {
-        if (curSelected.has(block.id)) return; // 選択 BB は動的層に任せる
-
-        const x = block.bbox.x * scale;
-        const y = block.bbox.y * scale;
-        const w = block.bbox.width * scale;
-        const h = block.bbox.height * scale;
-
-        const inset = 1;
-        const baseAlpha = ocrOpacity;
-        const fillAlpha = ocrOpacity * 0.25;
-
-        context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
-        context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-
-        context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-        context.lineWidth = 1;
-        context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-
-        if (block.text) {
-          if (block.writingMode === "vertical") {
-            const fontSize = Math.max(10, w * 0.8);
-            context.save();
-            context.font = `bold ${fontSize}px sans-serif`;
-            context.textBaseline = "top";
-
-            const textLen = block.text.length;
-            const naturalHeight = textLen * fontSize;
-            const sy = h / naturalHeight;
-
-            context.translate(x + w, y + 2);
-            context.scale(1, sy);
-            context.rotate(Math.PI / 2);
-            context.lineWidth = 3 / sy;
-            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-            context.strokeText(block.text, 0, 0);
-            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-            context.fillText(block.text, 0, 0);
-            context.restore();
-          } else {
-            const fontSize = Math.max(10, h * 0.8);
-            context.save();
-            context.font = `bold ${fontSize}px sans-serif`;
-            context.textBaseline = "top";
-
-            const textWidth = context.measureText(block.text).width || 1;
-            const sx = w / textWidth;
-
-            context.translate(x, y + 2);
-            context.scale(sx, 1);
-            context.lineWidth = 3 / sx;
-            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-            context.strokeText(block.text, 0, 0);
-            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-            context.fillText(block.text, 0, 0);
-            context.restore();
-          }
-        }
-      });
+      renderStaticLayer(
+        context,
+        canvas,
+        staticBlockCacheRef.current,
+        currentTextBlocks,
+        selectedIdsRef.current,
+        showOcr,
+        zoom,
+        ocrOpacity,
+      );
     };
 
     if (staticOverlayRafRef.current) cancelAnimationFrame(staticOverlayRafRef.current);
@@ -362,14 +456,18 @@ export function PdfCanvas({
         const baseAlpha = Math.min(1.0, ocrOpacity * 2);
         const fillAlpha = Math.min(0.4, ocrOpacity * 0.625);
 
-        // 選択された BB のみ描画 (O(|selectedIds|))。textBlocks 全体を走査するが
-        // bbox/text 取得は選択分だけで済む。selectedIds が小さければ高速。
+        // 選択/drag preview 対象だけ描画する。
         // issue #91: ドラッグ中は dragPreviewBboxes に動いた bbox が入っているので
         // それを優先的に参照する (textBlocks 側は finishDragResize まで変わらない)。
-        textBlocks.forEach((block) => {
-          if (!selectedIds.has(block.id)) return;
+        const dynamicBlockIds = new Set(selectedIds);
+        for (const id of dragPreviewBboxes?.keys() ?? []) {
+          dynamicBlockIds.add(id);
+        }
+        for (const id of dynamicBlockIds) {
+          const block = currentTextBlocksById.get(id);
+          if (!block) continue;
 
-          const previewBbox = dragPreviewBboxes?.get(block.id);
+          const previewBbox = dragPreviewBboxes?.get(id);
           const bbox = previewBbox ?? block.bbox;
           const x = bbox.x * scale;
           const y = bbox.y * scale;
@@ -438,7 +536,7 @@ export function PdfCanvas({
               context.restore();
             }
           }
-        });
+        }
       }
 
       if (showInspectionHighlights) {
@@ -518,6 +616,7 @@ export function PdfCanvas({
   }, [
     zoom,
     currentTextBlocks,
+    currentTextBlocksById,
     pageIndex,
     showOcr,
     ocrOpacity,
@@ -551,71 +650,16 @@ export function PdfCanvas({
     if (staticOverlayRafRef.current) cancelAnimationFrame(staticOverlayRafRef.current);
     staticOverlayRafRef.current = requestAnimationFrame(() => {
       staticOverlayRafRef.current = null;
-      context.clearRect(0, 0, canvas.width, canvas.height);
-
-      const textBlocks = currentTextBlocks;
-      if (!showOcr || !textBlocks) return;
-
-      const scale = zoom / 100;
-      textBlocks.forEach((block) => {
-        if (selectedIds.has(block.id)) return;
-
-        const x = block.bbox.x * scale;
-        const y = block.bbox.y * scale;
-        const w = block.bbox.width * scale;
-        const h = block.bbox.height * scale;
-
-        const inset = 1;
-        const baseAlpha = ocrOpacity;
-        const fillAlpha = ocrOpacity * 0.25;
-
-        context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
-        context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-
-        context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-        context.lineWidth = 1;
-        context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-
-        if (block.text) {
-          if (block.writingMode === "vertical") {
-            const fontSize = Math.max(10, w * 0.8);
-            context.save();
-            context.font = `bold ${fontSize}px sans-serif`;
-            context.textBaseline = "top";
-
-            const textLen = block.text.length;
-            const naturalHeight = textLen * fontSize;
-            const sy = h / naturalHeight;
-
-            context.translate(x + w, y + 2);
-            context.scale(1, sy);
-            context.rotate(Math.PI / 2);
-            context.lineWidth = 3 / sy;
-            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-            context.strokeText(block.text, 0, 0);
-            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-            context.fillText(block.text, 0, 0);
-            context.restore();
-          } else {
-            const fontSize = Math.max(10, h * 0.8);
-            context.save();
-            context.font = `bold ${fontSize}px sans-serif`;
-            context.textBaseline = "top";
-
-            const textWidth = context.measureText(block.text).width || 1;
-            const sx = w / textWidth;
-
-            context.translate(x, y + 2);
-            context.scale(sx, 1);
-            context.lineWidth = 3 / sx;
-            context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-            context.strokeText(block.text, 0, 0);
-            context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-            context.fillText(block.text, 0, 0);
-            context.restore();
-          }
-        }
-      });
+      renderStaticLayer(
+        context,
+        canvas,
+        staticBlockCacheRef.current,
+        currentTextBlocks,
+        selectedIds,
+        showOcr,
+        zoom,
+        ocrOpacity,
+      );
     });
 
     return () => {

@@ -10,6 +10,9 @@ const TRUNCATED_SUFFIX = '... [truncated]';
 type Subscriber = (entry: ConsoleLogEntry) => void;
 
 const subscribers = new Set<Subscriber>();
+let windowListenersAttached = false;
+let onWindowError: ((e: ErrorEvent) => void) | null = null;
+let onUnhandledRejection: ((e: PromiseRejectionEvent) => void) | null = null;
 
 function formatMessage(args: unknown[]): string {
   const message = args.map(a => {
@@ -25,6 +28,7 @@ function formatMessage(args: unknown[]): string {
 
 function emit(level: 'error' | 'warn' | 'log', args: unknown[]): void {
   if (args.some(isTauriWindowNotFoundError)) return;
+  if (subscribers.size === 0) return;
   const entry: ConsoleLogEntry = {
     level,
     message: formatMessage(args),
@@ -33,6 +37,39 @@ function emit(level: 'error' | 'warn' | 'log', args: unknown[]): void {
   subscribers.forEach(sub => {
     try { sub(entry); } catch { /* ignore subscriber errors */ }
   });
+}
+
+function attachWindowListeners(): void {
+  if (windowListenersAttached || typeof window === 'undefined') return;
+  onWindowError = (e: ErrorEvent) => {
+    if (isTauriWindowNotFoundError(e.error) || isTauriWindowNotFoundError(e.message)) return;
+    emit('error', [`[UncaughtError] ${e.message}`, e.error].filter(Boolean));
+  };
+  onUnhandledRejection = (e: PromiseRejectionEvent) => {
+    if (isTauriWindowNotFoundError(e.reason)) return;
+    emit('error', [`[UnhandledRejection]`, e.reason].filter(Boolean));
+  };
+  window.addEventListener('error', onWindowError);
+  window.addEventListener('unhandledrejection', onUnhandledRejection);
+  windowListenersAttached = true;
+}
+
+function detachWindowListeners(): void {
+  if (!windowListenersAttached || typeof window === 'undefined') return;
+  if (onWindowError) window.removeEventListener('error', onWindowError);
+  if (onUnhandledRejection) window.removeEventListener('unhandledrejection', onUnhandledRejection);
+  onWindowError = null;
+  onUnhandledRejection = null;
+  windowListenersAttached = false;
+}
+
+function subscribe(sub: Subscriber): () => void {
+  subscribers.add(sub);
+  attachWindowListeners();
+  return () => {
+    subscribers.delete(sub);
+    if (subscribers.size === 0) detachWindowListeners();
+  };
 }
 
 // Module-level singleton: console を一度だけ上書きする。
@@ -52,17 +89,6 @@ function patchConsoleOnce(): void {
   console.error = (...args: unknown[]) => { origError(...args); emit('error', args); };
   console.warn = (...args: unknown[]) => { origWarn(...args); emit('warn', args); };
   console.log = (...args: unknown[]) => { origLog(...args); emit('log', args); };
-
-  if (typeof window !== 'undefined') {
-    window.addEventListener('error', (e: ErrorEvent) => {
-      if (isTauriWindowNotFoundError(e.error) || isTauriWindowNotFoundError(e.message)) return;
-      emit('error', [`[UncaughtError] ${e.message}`, e.error].filter(Boolean));
-    });
-    window.addEventListener('unhandledrejection', (e: PromiseRejectionEvent) => {
-      if (isTauriWindowNotFoundError(e.reason)) return;
-      emit('error', [`[UnhandledRejection]`, e.reason].filter(Boolean));
-    });
-  }
 }
 
 patchConsoleOnce();
@@ -72,14 +98,33 @@ export function useConsoleLogs() {
   const [showConsole, setShowConsole] = useState(false);
 
   useEffect(() => {
-    const sub: Subscriber = (entry) => {
+    let active = true;
+    let flushScheduled = false;
+    let pending: ConsoleLogEntry[] = [];
+
+    const flush = () => {
+      flushScheduled = false;
+      if (!active || pending.length === 0) return;
+      const batch = pending;
+      pending = [];
       setLogs(prev => {
-        const next = prev.length >= MAX_LOG_ENTRIES ? prev.slice(-(MAX_LOG_ENTRIES - 1)) : prev;
-        return [...next, entry];
+        const next = [...prev, ...batch];
+        return next.length > MAX_LOG_ENTRIES ? next.slice(-MAX_LOG_ENTRIES) : next;
       });
     };
-    subscribers.add(sub);
-    return () => { subscribers.delete(sub); };
+
+    const sub: Subscriber = (entry) => {
+      pending.push(entry);
+      if (flushScheduled) return;
+      flushScheduled = true;
+      queueMicrotask(flush);
+    };
+    const unsubscribe = subscribe(sub);
+    return () => {
+      active = false;
+      pending = [];
+      unsubscribe();
+    };
   }, []);
 
   const clearLogs = useCallback(() => setLogs([]), []);

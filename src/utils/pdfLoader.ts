@@ -287,34 +287,6 @@ export function destroySharedPdfProxy() {
 }
 
 
-export async function generateThumbnail(filePath: string, pageIndex: number): Promise<string> {
-  const page = await getCachedPageProxy(filePath, pageIndex);
-  const unscaledViewport = page.getViewport({ scale: 1.0 });
-  const scale = Math.min(150 / unscaledViewport.width, 1.0); // 最大幅150pxに制限
-  const viewport = page.getViewport({ scale });
-  const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false })!;
-
-  // 背景を白に塗る（jpegの黒背景化防止）
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  await page.render({ canvasContext: ctx, viewport, canvas }).promise;
-
-  // Convert to Blob instead of Base64 to save memory (Low quality JPEG for thumbnails)
-  return new Promise((resolve) => {
-    canvas.toBlob((blob) => {
-      if (blob) {
-        resolve(URL.createObjectURL(blob));
-      } else {
-        resolve("");
-      }
-    }, 'image/jpeg', 0.5); // 品質を0.7から0.5に下げてさらに高速化
-  });
-}
-
 // 責務分離後の後方互換 re-export: 既存 import 文を一切変更しないため pdfLoader から透過的に公開する
 export { loadPecoToolBBoxMeta } from './pdfMetadataLoader';
 export {

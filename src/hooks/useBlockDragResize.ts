@@ -194,7 +194,13 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
   // issue #91: ドラッグ中の bbox を計算して Map に書き出すだけのヘルパ。
   // textBlocks 配列を毎フレーム複製していた従来実装をやめ、O(選択 BB 数) の
   // Map 構築のみ行う。確定書き込みは finishDragResize で 1 度だけ行う。
-  const computeDragPreviewBboxes = (pos: { x: number; y: number }): Map<string, BoundingBox> | null => {
+  const computeDragPreviewBboxes = (
+    pos: { x: number; y: number },
+    base?: {
+      moveBboxes?: Map<string, BoundingBox>;
+      resizeBbox?: BoundingBox;
+    },
+  ): Map<string, BoundingBox> | null => {
     if (!draggedId || dragMode === "none") return null;
     const scale = zoom / 100;
     const dx = (pos.x - dragStartMouse.x) / scale;
@@ -205,7 +211,8 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       // 選択された (= dragStartBboxes に登録された) ブロックだけ動かす。
       // dragStartBboxes は move 開始時にスナップショット済みなので
       // textBlocks 配列の参照は不要。
-      dragStartBboxes.forEach((startBbox, id) => {
+      const moveBboxes = base?.moveBboxes ?? dragStartBboxes;
+      moveBboxes.forEach((startBbox, id) => {
         preview.set(id, {
           x: startBbox.x + dx,
           y: startBbox.y + dy,
@@ -214,8 +221,8 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
         });
       });
     } else {
-      if (!dragStartBbox) return null;
-      const startBbox: BoundingBox = dragStartBbox;
+      const startBbox = base?.resizeBbox ?? dragStartBbox;
+      if (!startBbox) return null;
       const newBbox: BoundingBox = { ...startBbox };
       if (dragMode === "resize-se") {
         newBbox.width = Math.max(1, startBbox.width + dx);
@@ -277,6 +284,25 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     });
   };
 
+  const computeFinalPreviewBboxes = (
+    pageData: PageData,
+    finalPos: { x: number; y: number },
+  ): Map<string, BoundingBox> | null => {
+    if (dragMode === "move") {
+      const currentBboxes = new Map<string, BoundingBox>();
+      for (const id of dragStartBboxes.keys()) {
+        const block = pageData.textBlocks.find((b) => b.id === id);
+        if (block) currentBboxes.set(id, { ...block.bbox });
+      }
+      return computeDragPreviewBboxes(finalPos, { moveBboxes: currentBboxes });
+    }
+
+    const block = pageData.textBlocks.find((b) => b.id === draggedId);
+    return computeDragPreviewBboxes(finalPos, {
+      resizeBbox: block ? { ...block.bbox } : undefined,
+    });
+  };
+
   const finishDragResize = () => {
     if (draggedId && dragMode !== "none") {
       // ドロップ位置を確実に反映するため、保留中の RAF をキャンセル。
@@ -297,10 +323,10 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       // (2) 直前に RAF で適用済みの pos → (3) dragStartMouse (フォールバック)。
       // RAF が flush 済みの場合 (1) は null だが、(2) があれば最新位置で確定可能。
       const finalPos = pending ?? lastAppliedDragPosRef.current ?? dragStartMouse;
-      const finalPreview = computeDragPreviewBboxes(finalPos);
       lastAppliedDragPosRef.current = null;
 
       const pageData = getPageData();
+      const finalPreview = pageData ? computeFinalPreviewBboxes(pageData, finalPos) : null;
       if (pageData && finalPreview && hasBboxChanges(pageData, finalPreview)) {
         // ドラッグ中に動いた BB だけ新オブジェクトに差し替える。
         // 動いていない BB は元参照のまま (React の === 比較で skip 可能)。

@@ -105,4 +105,17 @@ describe('bitmapCache', () => {
     expect(getBitmapCache('C:\\docs\\a.pdf:0:100')).toBe(entryA);
     expect(getBitmapCache('C:\\docs\\b.pdf:0:100')).toBe(entryB);
   });
+
+  it('U-BC-12: total byte limit evicts oldest oversized footprint first', () => {
+    const oldBitmap = makeBitmap();
+    const newBitmap = makeBitmap();
+
+    setBitmapCache('old.pdf:0:100', makeEntry(oldBitmap, 1, 10_000, 5_000));
+    setBitmapCache('new.pdf:0:100', makeEntry(newBitmap, 1, 10_000, 5_000));
+
+    expect(getBitmapCache('old.pdf:0:100')).toBeUndefined();
+    expect(getBitmapCache('new.pdf:0:100')).toBeDefined();
+    expect((oldBitmap as any).close).toHaveBeenCalledOnce();
+    expect((newBitmap as any).close).not.toHaveBeenCalled();
+  });
 });

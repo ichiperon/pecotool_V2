@@ -58,12 +58,16 @@ export function usePageNavigation({
   const currentLoadAbortRef = useRef<AbortController | null>(null);
   const bboxMetaRef = useRef<BBoxMeta | null | undefined>(undefined);
 
-  const loadCurrentPage = useCallback(async (pageIdx: number) => {
+  const loadCurrentPage = useCallback(async (
+    pageIdx: number,
+    owner?: { controller: AbortController | null },
+  ) => {
     perf.mark('nav.loadEntry', { page: pageIdx });
     // 前回の読み込みをキャンセルし、新しい AbortController を発行
     currentLoadAbortRef.current?.abort();
     const controller = new AbortController();
     currentLoadAbortRef.current = controller;
+    if (owner) owner.controller = controller;
     const signal = controller.signal;
 
     const stateAtStart = usePecoStore.getState();
@@ -98,12 +102,22 @@ export function usePageNavigation({
       //       一括ロードは行わず、実際にそのページを表示する時のみ loadPage する。
       //       meta 取得自体は metadata stream 1 回読みのみで getTextContent には介入しない。
       if (bboxMetaRef.current === undefined) {
+        let nextBBoxMeta: BBoxMeta | null;
         try {
-          bboxMetaRef.current = await loadPecoToolBBoxMeta(pdf);
+          nextBBoxMeta = await loadPecoToolBBoxMeta(pdf);
         } catch {
-          bboxMetaRef.current = null;
+          nextBBoxMeta = null;
         }
-        if (signal.aborted) return;
+        const liveState = usePecoStore.getState();
+        const liveDoc = liveState.document;
+        if (
+          signal.aborted ||
+          liveState.documentEpoch !== capturedDocumentEpoch ||
+          !liveDoc ||
+          liveDoc.filePath !== doc.filePath ||
+          liveDoc.mtime !== doc.mtime
+        ) return;
+        bboxMetaRef.current = nextBBoxMeta;
       }
 
       // ページ寸法を先行取得してfitToScreenを即時発火（getTextContent待ちをなくす）
@@ -202,9 +216,10 @@ export function usePageNavigation({
 
   useEffect(() => {
     if (!filePath) return;
+    const loadOwner = { controller: null as AbortController | null };
     // 未ロード、またはOCR全消去で作られたダミー（width===0）の場合はロードする
     if (!currentPageExists || currentPageWidth === 0) {
-      loadCurrentPage(currentPageIndex);
+      loadCurrentPage(currentPageIndex, loadOwner);
     } else {
       // 既に viewport 寸法が取れているページでも、新ページに移った瞬間は
       // usePdfRendering の render() がまだ流れていないため、render 完了待ち状態
@@ -229,8 +244,10 @@ export function usePageNavigation({
       })();
     }
     return () => {
-      // ページ切替・アンマウント時は進行中ロードを中止
-      currentLoadAbortRef.current?.abort();
+      // この effect run が開始したロードだけを中止する。
+      if (loadOwner.controller && currentLoadAbortRef.current === loadOwner.controller) {
+        loadOwner.controller.abort();
+      }
     };
     // currentPageWidth/currentPageExists は loadCurrentPage 後の
     // updatePageData で変化するが、依存に含めると「ロード直後に effect 再実行 →
