@@ -2,7 +2,7 @@ import {
   PDFDocument, StandardFonts, PDFName, PDFRawStream,
   pushGraphicsState, popGraphicsState, translate, scale, degrees,
   concatTransformationMatrix, PDFArray,
-  PDFDict
+  PDFDict, PDFHexString
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { deflate, inflate } from 'pako';
@@ -24,6 +24,7 @@ import {
   readPecoToolBBoxMetaFromPdfDoc,
   writePecoToolBBoxMetaToPdfDoc,
 } from './pdfPecoToolMetadata';
+import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
 import type {
   SavePdfWorkerRequest,
   SavePdfWorkerResponse,
@@ -577,6 +578,8 @@ async function handleSavePdf(
   fallbackFontBytes: ArrayBuffer[] = [],
 ): Promise<{ savedBytes: Uint8Array; skippedChars: ReturnType<typeof getSkippedTextChars> }> {
   const originalVersion = extractPdfVersion(originalPdfBytes);
+  // Acrobat dirty-flag 回避: 入力 PDF の trailer /ID を保存後に書き戻す。
+  const originalTrailerId = extractTrailerId(originalPdfBytes);
   // forIncrementalUpdate + commit() は subset フォントの glyf を破損させるため撤回。
   // 全書き換えは 91ms 程度 (ベンチ実測) で速度差はほぼない。
   // throwOnInvalidObject:false → 不正オブジェクトの回復試行をスキップして高速化
@@ -595,6 +598,15 @@ async function handleSavePdf(
 
   const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
   const existingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+
+  // Acrobat dirty-flag 回避 short-circuit (詳細は pdfSaver.ts 側参照)。
+  if (
+    dirtyPages.length === 0 &&
+    !hadLegacyBBoxMeta &&
+    Object.keys(existingBBoxMeta).length === 0
+  ) {
+    return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars) };
+  }
 
   const bboxMeta: Record<string, unknown> = { ...existingBBoxMeta };
   let metaChanged = false;
@@ -864,6 +876,16 @@ async function handleSavePdf(
     await pdfDoc.flush();
   }
 
+  // Acrobat dirty-flag 回避: 入力 PDF に /ID があれば pdf-lib trailer にも同じ /ID を
+  // 書き出させる。pdf-lib は trailerInfo.ID が未設定だと /ID を一切出力しないため、
+  // 明示的に同値で上書きする。後段 overwriteTrailerId は念のための binary 安全網。
+  if (originalTrailerId) {
+    pdfDoc.context.trailerInfo.ID = pdfDoc.context.obj([
+      PDFHexString.of(originalTrailerId.id0Hex),
+      PDFHexString.of(originalTrailerId.id1Hex),
+    ]);
+  }
+
   // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
   // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
   // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
@@ -882,6 +904,9 @@ async function handleSavePdf(
   });
   let savedBytes = await Promise.race([savePromise, saveTimeout]);
   savedBytes = ensureDenseClassicXref(savedBytes);
+  if (originalTrailerId) {
+    savedBytes = overwriteTrailerId(savedBytes, originalTrailerId);
+  }
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
 
   // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。

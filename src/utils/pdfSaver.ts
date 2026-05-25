@@ -2,7 +2,7 @@ import {
   PDFDocument, StandardFonts, degrees, pushGraphicsState, popGraphicsState,
   translate, scale, concatTransformationMatrix,
   PDFName, PDFRawStream, PDFArray,
-  PDFDict
+  PDFDict, PDFHexString
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { PecoDocument } from '../types';
@@ -25,6 +25,7 @@ import {
   readPecoToolBBoxMetaFromPdfDoc,
   writePecoToolBBoxMetaToPdfDoc,
 } from './pdfPecoToolMetadata';
+import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
 import type {
   SavePdfSource,
   SavePdfWorkerRequest,
@@ -732,6 +733,8 @@ export async function buildPdfDocument(
 ): Promise<Uint8Array> {
   const originalPdfBytes = await resolveBuildPdfSource(source);
   const originalVersion = extractPdfVersion(originalPdfBytes);
+  // Acrobat dirty-flag 回避: 入力 PDF の trailer /ID を保存後に書き戻す。
+  const originalTrailerId = extractTrailerId(originalPdfBytes);
   // forIncrementalUpdate + commit() を試したが、subset embedFont と組み合わせると
   // fontkit 生成 subset の glyf table が OTS 検証をパスしない状態 (Acrobat でも
   // 「フォントを抽出できません」) になる。ベンチ実測では pdfDoc.save() 全書き換えと
@@ -754,6 +757,19 @@ export async function buildPdfDocument(
 
   const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
   const existingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+
+  // Acrobat dirty-flag 回避 short-circuit:
+  // 編集なし & PecoTool メタ (旧 Info 形式 / 新 stream 形式) が皆無のとき、
+  // pdf-lib roundtrip を完全にスキップして入力 bytes をそのまま返す。
+  // pdf-lib の save() は (たとえ no-op でも) trailer /ID 再生成・xref 再配置で
+  // 微妙な byte 差分を生み、Acrobat が dirty 判定する原因になる。
+  if (
+    dirtyPages.length === 0 &&
+    !hadLegacyBBoxMeta &&
+    Object.keys(existingBBoxMeta).length === 0
+  ) {
+    return originalPdfBytes;
+  }
 
   const bboxMeta = { ...existingBBoxMeta };
   let metaChanged = false;
@@ -1097,6 +1113,16 @@ export async function buildPdfDocument(
     await pdfDoc.flush();
   }
 
+  // Acrobat dirty-flag 回避: 入力 PDF に /ID があれば pdf-lib trailer にも同じ /ID を
+  // 書き出させる。pdf-lib は trailerInfo.ID が未設定だと /ID を一切出力しないため、
+  // 明示的に同値で上書きする。後段 overwriteTrailerId は念のための binary 安全網。
+  if (originalTrailerId) {
+    pdfDoc.context.trailerInfo.ID = pdfDoc.context.obj([
+      PDFHexString.of(originalTrailerId.id0Hex),
+      PDFHexString.of(originalTrailerId.id1Hex),
+    ]);
+  }
+
   // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
   // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
   // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
@@ -1110,6 +1136,9 @@ export async function buildPdfDocument(
 
   let savedBytes = await pdfDoc.save(saveOptions);
   savedBytes = ensureDenseClassicXref(savedBytes);
+  if (originalTrailerId) {
+    savedBytes = overwriteTrailerId(savedBytes, originalTrailerId);
+  }
   if (originalVersion) restorePdfVersion(savedBytes, originalVersion);
 
   // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。
