@@ -26,37 +26,14 @@ interface PdfCanvasProps {
   onRenderComplete?: () => void;
 }
 
-type StaticBlockCacheEntry = {
-  canvas: HTMLCanvasElement;
-  x: number;
-  y: number;
-};
-
-function staticBlockCacheKey(block: TextBlock, scale: number, opacity: number): string {
-  const { x, y, width, height } = block.bbox;
-  return [
-    block.id,
-    block.text,
-    block.writingMode,
-    x,
-    y,
-    width,
-    height,
-    scale,
-    opacity,
-  ].join('|');
-}
-
-function drawStaticBlock(
+export function drawStaticBlock(
   context: CanvasRenderingContext2D,
   block: TextBlock,
   scale: number,
   opacity: number,
-  offsetX = 0,
-  offsetY = 0,
 ): void {
-  const x = block.bbox.x * scale + offsetX;
-  const y = block.bbox.y * scale + offsetY;
+  const x = block.bbox.x * scale;
+  const y = block.bbox.y * scale;
   const w = block.bbox.width * scale;
   const h = block.bbox.height * scale;
   const inset = 1;
@@ -110,59 +87,26 @@ function drawStaticBlock(
   context.restore();
 }
 
-function drawCachedStaticBlock(
-  context: CanvasRenderingContext2D,
-  cache: Map<string, StaticBlockCacheEntry>,
-  usedKeys: Set<string>,
-  block: TextBlock,
-  scale: number,
-  opacity: number,
-): void {
-  const key = staticBlockCacheKey(block, scale, opacity);
-  usedKeys.add(key);
-  let entry = cache.get(key);
-  if (!entry) {
-    const x = block.bbox.x * scale;
-    const y = block.bbox.y * scale;
-    const w = block.bbox.width * scale;
-    const h = block.bbox.height * scale;
-    const pad = 8;
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.ceil(w + pad * 2));
-    canvas.height = Math.max(1, Math.ceil(h + pad * 2));
-    const blockContext = canvas.getContext('2d');
-    if (!blockContext) return;
-    drawStaticBlock(blockContext, block, scale, opacity, pad - x, pad - y);
-    entry = { canvas, x: x - pad, y: y - pad };
-    cache.set(key, entry);
-  }
-  context.drawImage(entry.canvas, entry.x, entry.y);
-}
-
-function renderStaticLayer(
+export function renderStaticLayer(
   context: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
-  cache: Map<string, StaticBlockCacheEntry>,
   textBlocks: TextBlock[] | null | undefined,
   selectedIds: Set<string>,
   showOcr: boolean,
   zoom: number,
   opacity: number,
 ): void {
+  // 注: 以前は block 単位の offscreen canvas キャッシュ + drawImage 経由で描画していたが、
+  // drawImage の非整数 dst 座標でサブピクセル補間が発生し、OCR overlay が
+  // 実テキストより上方向に 2-4px ズレて見える視覚的回帰を起こしたため、
+  // v2.0.4 以前の直接描画に戻している。
   context.clearRect(0, 0, canvas.width, canvas.height);
-  if (!showOcr || !textBlocks) {
-    cache.clear();
-    return;
-  }
+  if (!showOcr || !textBlocks) return;
 
   const scale = zoom / 100;
-  const usedKeys = new Set<string>();
   for (const block of textBlocks) {
     if (selectedIds.has(block.id)) continue;
-    drawCachedStaticBlock(context, cache, usedKeys, block, scale, opacity);
-  }
-  for (const key of cache.keys()) {
-    if (!usedKeys.has(key)) cache.delete(key);
+    drawStaticBlock(context, block, scale, opacity);
   }
 }
 
@@ -355,7 +299,6 @@ export function PdfCanvas({
 
   // 静的層: 非選択 BB の塗・枠・テキストを描画
   const staticOverlayRafRef = useRef<number | null>(null);
-  const staticBlockCacheRef = useRef<Map<string, StaticBlockCacheEntry>>(new Map());
   useEffect(() => {
     if (!staticOverlayCanvasRef.current || !pdfPage) return;
 
@@ -368,7 +311,6 @@ export function PdfCanvas({
       renderStaticLayer(
         context,
         canvas,
-        staticBlockCacheRef.current,
         currentTextBlocks,
         selectedIdsRef.current,
         showOcr,
@@ -653,7 +595,6 @@ export function PdfCanvas({
       renderStaticLayer(
         context,
         canvas,
-        staticBlockCacheRef.current,
         currentTextBlocks,
         selectedIds,
         showOcr,
