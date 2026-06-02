@@ -12,6 +12,7 @@ export function arcFromThreePoints(
   p3: { x: number; y: number },
 ): (CurveDefinition & { type: 'arc' }) | null {
   // 外接円の中心を perpendicular bisector 2 本の交点で求める
+  // a=p1, b=p2, c=p3 (外接円計算の慣習的略称)
   const ax = p1.x, ay = p1.y;
   const bx = p2.x, by = p2.y;
   const cx = p3.x, cy = p3.y;
