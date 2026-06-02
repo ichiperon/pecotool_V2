@@ -1430,6 +1430,11 @@ body, #root {
   border-radius: 3px;
   -webkit-user-select: none;
   user-select: none;
+  /* button 要素として使われるためデフォルトの border/background を打ち消す */
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: inherit;
 }
 
 .console-toggle-btn:hover {

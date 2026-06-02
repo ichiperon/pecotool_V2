@@ -727,10 +727,22 @@ function App() {
           {!isLoadingFile && isLoadingPage && <div className="status-item status-loading">⏳ ページ読込中...</div>}
           {isSaving && <div className="status-item status-loading">💾 保存中...</div>}
           {!isSaving && (isDirty || currentPage?.isDirty) && <div className="status-item unsaved">● 未保存の変更あり</div>}
-          <div className={`status-item console-toggle-btn${logs.filter(l => l.level === 'error').length > 0 ? ' has-errors' : ''}`} onClick={() => setShowConsole(v => !v)} title="コンソールを開く">
-            <Terminal size={12} /><span>コンソール</span>
-            {logs.filter(l => l.level === 'error').length > 0 && <span className="console-error-badge">{logs.filter(l => l.level === 'error').length}</span>}
-          </div>
+          {(() => {
+            const errorCount = logs.filter(l => l.level === 'error').length;
+            const label = errorCount > 0 ? `コンソールを開く (エラー ${errorCount} 件)` : 'コンソールを開く';
+            return (
+              <button
+                type="button"
+                className={`status-item console-toggle-btn${errorCount > 0 ? ' has-errors' : ''}`}
+                onClick={() => setShowConsole(v => !v)}
+                title="コンソールを開く"
+                aria-label={label}
+              >
+                <Terminal size={12} aria-hidden="true" /><span>コンソール</span>
+                {errorCount > 0 && <span className="console-error-badge" aria-hidden="true">{errorCount}</span>}
+              </button>
+            );
+          })()}
         </div>
       </footer>
       {isSaving && (
