@@ -43,7 +43,7 @@ export function arcFromThreePoints(
 /**
  * arc の 3 ハンドル位置を viewport 座標で返す。
  * - handles[0]: 始点 (startAngle)
- * - handles[1]: 中点 ((startAngle + endAngle) / 2、折り返し考慮)
+ * - handles[1]: 中点 (sweep 方向を考慮した短弧側)
  * - handles[2]: 終点 (endAngle)
  */
 export function arcHandlePositions(
@@ -52,12 +52,11 @@ export function arcHandlePositions(
   startAngle: number,
   endAngle: number,
 ): [{ x: number; y: number }, { x: number; y: number }, { x: number; y: number }] {
-  // 折り返しを考慮した中間角
-  let midAngle = (startAngle + endAngle) / 2;
-  // 短弧側の中点にするため、差が π を超える場合は π ずらす
-  if (Math.abs(endAngle - startAngle) > Math.PI) {
-    midAngle += Math.PI;
-  }
+  // delta を [-π, π] に正規化して sweep 方向を保持した短弧側の中点を求める
+  let delta = endAngle - startAngle;
+  while (delta > Math.PI) delta -= 2 * Math.PI;
+  while (delta < -Math.PI) delta += 2 * Math.PI;
+  const midAngle = startAngle + delta / 2;
 
   const polar = (a: number) => ({
     x: center.x + radius * Math.cos(a),
