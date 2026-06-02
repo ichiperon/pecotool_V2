@@ -133,6 +133,11 @@ export function PdfCanvas({
   // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
   // 再描画 effect が走らないようにする (issue #22)。
   const currentTextBlocks = usePecoStore(selectCurrentPageTextBlocks);
+  // TODO(#183): 500-5000 BB ページで currentTextBlocks 参照が変わるたびに
+  // Map を全件再構築するため GC pressure になる。将来 pecoStore 側で
+  // id-indexed Map を state として持ち、updateBlock / addBlock / removeBlock で
+  // incremental に更新する形に移行したい。当面はシンプルさ優先で useMemo
+  // 維持 (currentTextBlocks の参照変化はページ切替/編集発生時のみ)。
   const currentTextBlocksById = useMemo(() => {
     const map = new Map<string, TextBlock>();
     for (const block of currentTextBlocks ?? []) {

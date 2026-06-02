@@ -1324,6 +1324,13 @@ export async function savePDF(
       }
 
       const transferables: Transferable[] = [];
+      // TODO(#184): 現状 save worker を毎回 spawn するため、保存のたびに
+      // フォントバイト列 (Meiryo ~3MB + fallbacks 数MB) を slice() で full copy
+      // して transfer している。本来は save worker をシングルトン化して
+      // 初回 LOAD で 1 度だけフォントを送り、以降は ArrayBuffer をプールから
+      // 再利用したい。要・別 enhancement issue で対応。当面は安全側で
+      // 都度 clone のまま維持 (worker への transfer はメインヒープを破壊するため
+      // 短命 worker と心中させる現方針が事故率は低い)。
       const fontBytesClone = fontBytes instanceof ArrayBuffer ? fontBytes.slice(0) : undefined;
       if (fontBytesClone) transferables.push(fontBytesClone);
       const fallbackFontBytesClone = fallbackFontBytes.map((bytes) => bytes.slice(0));
