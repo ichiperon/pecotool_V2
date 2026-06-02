@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { RibbonTab } from './RibbonTab';
 import { FileTab } from './tabs/FileTab';
 import { EditTab } from './tabs/EditTab';
@@ -88,11 +88,39 @@ export interface RibbonProps {
   onCheckUpdate: () => void;
 }
 
+type CompactClass = '' | 'ribbon--compact' | 'ribbon--icon-only';
+
 export const Ribbon: React.FC<RibbonProps> = (props) => {
   const [activeTab, setActiveTab] = useState<TabKey>('file');
+  const [compactClass, setCompactClass] = useState<CompactClass>('');
+  const ribbonRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ribbonRef.current;
+    if (!el) return;
+
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      if (width < 700) {
+        setCompactClass('ribbon--icon-only');
+      } else if (width < 900) {
+        setCompactClass('ribbon--compact');
+      } else {
+        setCompactClass('');
+      }
+    });
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   return (
-    <div className="ribbon" role="toolbar" aria-label="リボン">
+    <div
+      ref={ribbonRef}
+      className={`ribbon${compactClass ? ` ${compactClass}` : ''}`}
+      role="toolbar"
+      aria-label="リボン"
+    >
       <div className="ribbon-tabs" role="tablist">
         <RibbonTab
           id="file"

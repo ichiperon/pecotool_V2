@@ -1,7 +1,18 @@
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest'
 import { Ribbon } from '../../components/Ribbon/Ribbon'
 import type { PageData } from '../../types'
+
+// jsdom does not implement ResizeObserver; provide a no-op stub
+beforeAll(() => {
+  if (typeof window.ResizeObserver === 'undefined') {
+    window.ResizeObserver = class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+})
 
 vi.mock('lucide-react', () => {
   const s = (name: string) => (props: any) => <span data-icon={name} {...props} />
@@ -261,4 +272,5 @@ describe('Ribbon', () => {
     const editTab = screen.getByText('編集').closest('button')!
     expect(editTab.getAttribute('aria-selected')).toBe('false')
   })
+
 })
