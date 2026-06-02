@@ -381,6 +381,17 @@ body, #root {
   outline: none;
 }
 
+/* issue #196: 検索ヒット数バッジ */
+.search-hit-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #6b7280;
+  white-space: nowrap;
+  padding: 0 4px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* Issue #168: 検索フィルタ中の DnD 無効化ヒント */
 .search-filter-hint {
   margin-top: 4px;

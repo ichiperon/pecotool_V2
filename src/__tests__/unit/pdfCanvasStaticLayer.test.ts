@@ -282,3 +282,131 @@ describe('PdfCanvas static layer – curve block (Phase 4 #188)', () => {
     expect(ctx.fillRect).toHaveBeenCalledTimes(text.length)
   })
 })
+
+// ── issue #196: 検索ヒットの黄色ハイライト ──────────────────────────
+describe('PdfCanvas static layer – search highlight (issue #196)', () => {
+  it('searchTerm が空のとき黄色 fillRect は追加で呼ばれない (axis-aligned)', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: 'hello world', bbox: { x: 10, y: 20, width: 100, height: 30 } })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      '', // searchTerm 空
+    )
+
+    // 通常の青 fillRect のみ (1回)
+    expect(ctx.fillRect).toHaveBeenCalledTimes(1)
+  })
+
+  it('searchTerm がヒットすると黄色 fillRect が追加で呼ばれる (axis-aligned)', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: 'hello world', bbox: { x: 10, y: 20, width: 100, height: 30 } })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      'hello', // searchTerm ヒット
+      0,       // searchHitIndex=0 → activeHit
+    )
+
+    // 青 fillRect(1回) + 黄色 fillRect(1回) = 合計 2回
+    expect(ctx.fillRect).toHaveBeenCalledTimes(2)
+  })
+
+  it('searchTerm がヒットして activeHit のとき黄色 strokeRect が呼ばれる', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: 'hello', bbox: { x: 10, y: 20, width: 100, height: 30 } })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      'hello',
+      0, // activeHit
+    )
+
+    // 赤 strokeRect(1回) + オレンジ strokeRect(1回 active) = 合計 2回
+    expect(ctx.strokeRect).toHaveBeenCalledTimes(2)
+  })
+
+  it('searchTerm がヒットしても activeHit でなければ strokeRect は追加されない', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: 'hello', bbox: { x: 10, y: 20, width: 100, height: 30 } })
+
+    // searchHitIndex=1 だが block は 0番目のヒットなので activeHit にならない
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      'hello',
+      1, // activeHit ではない
+    )
+
+    // 赤 strokeRect のみ (1回)
+    expect(ctx.strokeRect).toHaveBeenCalledTimes(1)
+  })
+
+  it('searchTerm にヒットしないブロックには黄色 fillRect が呼ばれない', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: 'goodbye', bbox: { x: 10, y: 20, width: 100, height: 30 } })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      'hello', // ヒットしない
+    )
+
+    // 青 fillRect(1回) のみ
+    expect(ctx.fillRect).toHaveBeenCalledTimes(1)
+  })
+
+  it('大文字小文字を区別せずにヒットする', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: 'Hello World', bbox: { x: 10, y: 20, width: 100, height: 30 } })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      'hello', // 小文字でもヒット
+      0,
+    )
+
+    // 黄色 fillRect が呼ばれている (青+黄色=2回)
+    expect(ctx.fillRect).toHaveBeenCalledTimes(2)
+  })
+})

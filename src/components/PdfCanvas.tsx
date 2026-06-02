@@ -11,6 +11,8 @@ import {
   selectCurrentPageTextBlocks,
   selectDocumentFilePath,
   selectDocumentTotalPages,
+  selectSearchTerm,
+  selectSearchHitIndex,
 } from "../store/pecoStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
@@ -33,10 +35,12 @@ export function drawStaticBlock(
   block: TextBlock,
   scale: number,
   opacity: number,
+  searchTerm?: string,
+  isActiveHit?: boolean,
 ): void {
   // curve 付き block は per-glyph の curve 描画パスへ
   if (block.curve && isCurveDefinition(block.curve)) {
-    drawStaticBlockCurve(context, block, scale, opacity);
+    drawStaticBlockCurve(context, block, scale, opacity, searchTerm, isActiveHit);
     return;
   }
 
@@ -55,6 +59,19 @@ export function drawStaticBlock(
   context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
   context.lineWidth = 1;
   context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+
+  // issue #196: 検索ヒットの黄色ハイライト
+  if (searchTerm && block.text.toLowerCase().includes(searchTerm.toLowerCase())) {
+    context.fillStyle = isActiveHit
+      ? 'rgba(255, 180, 0, 0.7)'
+      : 'rgba(255, 230, 0, 0.4)';
+    context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+    if (isActiveHit) {
+      context.strokeStyle = 'rgba(255, 140, 0, 1)';
+      context.lineWidth = 2;
+      context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+    }
+  }
 
   if (!block.text) return;
   if (block.writingMode === "vertical") {
@@ -106,6 +123,8 @@ function drawStaticBlockCurve(
   block: TextBlock,
   scale: number,
   opacity: number,
+  searchTerm?: string,
+  isActiveHit?: boolean,
 ): void {
   const h = block.bbox.height * scale;
   const fontSize = Math.max(10, h * 0.8);
@@ -145,6 +164,25 @@ function drawStaticBlockCurve(
 
     context.restore();
   }
+
+  // issue #196: curve block の検索ヒット黄色ハイライトは bbox 全体に重ねる
+  if (searchTerm && block.text.toLowerCase().includes(searchTerm.toLowerCase())) {
+    const bx = block.bbox.x * scale;
+    const by = block.bbox.y * scale;
+    const bw = block.bbox.width * scale;
+    const bh = block.bbox.height * scale;
+    context.save();
+    context.fillStyle = isActiveHit
+      ? 'rgba(255, 180, 0, 0.7)'
+      : 'rgba(255, 230, 0, 0.4)';
+    context.fillRect(bx + 1, by + 1, bw - 2, bh - 2);
+    if (isActiveHit) {
+      context.strokeStyle = 'rgba(255, 140, 0, 1)';
+      context.lineWidth = 2;
+      context.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
+    }
+    context.restore();
+  }
 }
 
 export function renderStaticLayer(
@@ -155,6 +193,8 @@ export function renderStaticLayer(
   showOcr: boolean,
   zoom: number,
   opacity: number,
+  searchTerm?: string,
+  searchHitIndex?: number,
 ): void {
   // 注: 以前は block 単位の offscreen canvas キャッシュ + drawImage 経由で描画していたが、
   // drawImage の非整数 dst 座標でサブピクセル補間が発生し、OCR overlay が
@@ -164,9 +204,19 @@ export function renderStaticLayer(
   if (!showOcr || !textBlocks) return;
 
   const scale = zoom / 100;
+  // issue #196: searchTerm が空でない場合、ヒットするブロックを収集して activeHit を決定する
+  const term = searchTerm && searchTerm.length > 0 ? searchTerm : undefined;
+  let hitCounter = -1;
+  const activeIndex = searchHitIndex ?? 0;
+
   for (const block of textBlocks) {
     if (selectedIds.has(block.id)) continue;
-    drawStaticBlock(context, block, scale, opacity);
+    let isActiveHit = false;
+    if (term && block.text.toLowerCase().includes(term.toLowerCase())) {
+      hitCounter++;
+      isActiveHit = hitCounter === activeIndex;
+    }
+    drawStaticBlock(context, block, scale, opacity, term, isActiveHit);
   }
 }
 
@@ -214,6 +264,8 @@ export function PdfCanvas({
   const isDrawingMode = usePecoStore(selectIsDrawingMode);
   const isSplitMode = usePecoStore(selectIsSplitMode);
   const isCurveMode = usePecoStore(selectIsCurveMode);
+  const searchTerm = usePecoStore(selectSearchTerm);
+  const searchHitIndex = usePecoStore(selectSearchHitIndex);
   const updatePageData = usePecoStore((s) => s.updatePageData);
   const toggleDrawingMode = usePecoStore((s) => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore((s) => s.toggleSplitMode);
@@ -409,6 +461,8 @@ export function PdfCanvas({
         showOcr,
         zoom,
         ocrOpacity,
+        searchTerm || undefined,
+        searchHitIndex,
       );
     };
 
@@ -424,7 +478,7 @@ export function PdfCanvas({
         staticOverlayRafRef.current = null;
       }
     };
-  }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage]);
+  }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage, searchTerm, searchHitIndex]);
 
   // 動的層: 選択 BB ハイライト + drawing/altDrag プレビュー
   const overlayRafRef = useRef<number | null>(null);
@@ -744,6 +798,8 @@ export function PdfCanvas({
         showOcr,
         zoom,
         ocrOpacity,
+        searchTerm || undefined,
+        searchHitIndex,
       );
     });
 

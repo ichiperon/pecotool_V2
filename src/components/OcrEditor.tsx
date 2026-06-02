@@ -19,7 +19,7 @@ import {
 } from '@dnd-kit/sortable';
 import { useState } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
-import { usePecoStore, selectCurrentPage } from '../store/pecoStore';
+import { usePecoStore, selectCurrentPage, selectSearchTerm, selectSearchHitIndex } from '../store/pecoStore';
 import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
 import { Search } from 'lucide-react';
@@ -45,7 +45,12 @@ export function OcrEditor({
   const updatePageData = usePecoStore(s => s.updatePageData);
   const toggleSelection = usePecoStore(s => s.toggleSelection);
   const setSelectedIds = usePecoStore(s => s.setSelectedIds);
-  const [searchTerm, setSearchTerm] = useState("");
+  // issue #196: searchTerm を store で共有 (PdfCanvas もハイライトに使う)
+  const searchTerm = usePecoStore(selectSearchTerm);
+  const searchHitIndex = usePecoStore(selectSearchHitIndex);
+  const setSearchTerm = usePecoStore(s => s.setSearchTerm);
+  const nextSearchHit = usePecoStore(s => s.nextSearchHit);
+  const prevSearchHit = usePecoStore(s => s.prevSearchHit);
   const [activeId, setActiveId] = useState<string | null>(null);
 
   // 仮想化対応: マウント/アンマウントされる各カードへの ref を id でひける Map に保持。
@@ -159,6 +164,60 @@ export function OcrEditor({
         : [],
     [isExtracting, currentPage?.textBlocks, searchTerm]
   );
+
+  // issue #196: 現在ページの全ブロックのうち searchTerm にヒットするものを順番に収集。
+  // filteredBlocks とは異なり、全 textBlocks を対象にする（フィルタ前）。
+  // この配列のインデックスが searchHitIndex に対応する。
+  const searchHitBlocks = useMemo(() => {
+    if (!searchTerm || !currentPage?.textBlocks) return [];
+    const lower = searchTerm.toLowerCase();
+    return currentPage.textBlocks.filter(b => b.text.toLowerCase().includes(lower));
+  }, [searchTerm, currentPage?.textBlocks]);
+
+  const totalHits = searchHitBlocks.length;
+
+  // issue #196: 現在の active ヒットブロックを画面中央にスクロールする。
+  // PdfCanvas の selectedIds スクロールと同パターン。
+  const scrollToHitBlock = useCallback((hitIndex: number, blocks: typeof searchHitBlocks) => {
+    const block = blocks[hitIndex];
+    if (!block) return;
+    const container = window.document.querySelector('.pdf-viewer-panel');
+    if (!container) return;
+    // zoom は store から直接読む
+    const zoom = usePecoStore.getState().zoom;
+    const scale = zoom / 100;
+    const x = block.bbox.x * scale;
+    const y = block.bbox.y * scale;
+    const w = block.bbox.width * scale;
+    const h = block.bbox.height * scale;
+    const containerRect = container.getBoundingClientRect();
+    const targetX = x - containerRect.width / 2 + w / 2;
+    const targetY = y - containerRect.height / 2 + h / 2;
+    container.scrollTo({
+      left: Math.max(0, targetX),
+      top: Math.max(0, targetY),
+      behavior: 'smooth',
+    });
+  }, []);
+
+  // searchHitBlocks を ref で持って scrollToHitBlock から最新を参照する
+  const searchHitBlocksRef = useRef(searchHitBlocks);
+  searchHitBlocksRef.current = searchHitBlocks;
+
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    if (totalHits === 0) return;
+    e.preventDefault();
+    if (e.shiftKey) {
+      prevSearchHit(totalHits);
+      const nextIdx = (searchHitIndex - 1 + totalHits) % totalHits;
+      scrollToHitBlock(nextIdx, searchHitBlocksRef.current);
+    } else {
+      nextSearchHit(totalHits);
+      const nextIdx = (searchHitIndex + 1) % totalHits;
+      scrollToHitBlock(nextIdx, searchHitBlocksRef.current);
+    }
+  }, [totalHits, searchHitIndex, nextSearchHit, prevSearchHit, scrollToHitBlock]);
 
   // SortableContext には全ての id を渡す必要があるため、フィルタ後 id 配列を memo 化。
   const filteredBlockIds = useMemo(
@@ -386,8 +445,14 @@ export function OcrEditor({
             className="search-box"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
             title={searchTerm ? '検索フィルタ中は並び替え (DnD) できません' : undefined}
           />
+          {searchTerm && (
+            <span className="search-hit-badge" aria-live="polite" aria-label={`${totalHits > 0 ? searchHitIndex + 1 : 0} / ${totalHits}`}>
+              {totalHits > 0 ? `${searchHitIndex + 1}/${totalHits}` : '0/0'}
+            </span>
+          )}
         </div>
         {/* Issue #168: 検索フィルタ適用中は DnD が無効化される旨をユーザーに伝える */}
         {searchTerm && (
