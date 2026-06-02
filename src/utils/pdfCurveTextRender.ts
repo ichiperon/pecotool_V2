@@ -102,6 +102,8 @@ export function buildCurveBlockOperators(
   pageHeight: number,
   rotationCm: PDFOperator[],
 ): PDFOperator[] {
+  // Empty text curve block is intentionally skipped — no operators to emit.
+  if (!text) return [];
   const inner = buildCurveGlyphOperators(text, curve, font, fontKey, fontSize, pageHeight);
   if (inner.length === 0) return [];
   return [pushGraphicsState(), ...rotationCm, ...inner, popGraphicsState()];
