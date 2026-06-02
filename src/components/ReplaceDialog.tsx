@@ -148,6 +148,12 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
             </label>
           ))}
         </div>
+        {/* issue #139: 選択BB スコープは現在表示中ページの選択のみを対象とする旨を明示 */}
+        {scope === 'selection' && (
+          <div className="replace-dialog-row replace-dialog-scope-hint">
+            <small>※ 現在ページの選択BBのみ対象です（他ページの選択は対象外）。</small>
+          </div>
+        )}
 
         <div className="replace-dialog-row replace-dialog-options">
           <label>

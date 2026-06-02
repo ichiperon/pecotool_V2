@@ -618,6 +618,14 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
   },
 
+  /**
+   * scope について:
+   *  - 'current'  : 現在ページの全 BB
+   *  - 'all'      : 全ページ。LRU で in-memory から退避されたページも IDB から読み戻して対象に含める
+   *  - 'selection': **現在ページの選択 BB のみ**。LRU 退避された他ページに対する選択は対象外。
+   *                 (実装上 selectedIds は currentPage と紐づくため、退避ページに選択が残っていても
+   *                  basePages に他ページが入らないので対象に上がらない。issue #139)
+   */
   replaceText: async ({ scope, pattern, replacement, caseSensitive, useRegex, skipBlockIds }) => {
     const state = get();
     const document = state.document;
