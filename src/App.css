@@ -1949,3 +1949,9 @@ body, #root {
   border-radius: 2px;
   font-weight: 600;
 }
+
+/* issue #165: 正規表現入力エラー時の input 赤枠 (色のみに頼らないエラー提示) */
+.regex-input-error {
+  border: 1.5px solid #dc2626;
+  outline-color: #dc2626;
+}

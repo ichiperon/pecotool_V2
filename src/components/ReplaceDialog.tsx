@@ -9,7 +9,7 @@
  *  - 全ページスコープでヒット数 > 50 の場合は ask() で確認 (親側責務)。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { X, AlertCircle } from 'lucide-react';
 import { Modal, useModalTitleId } from './ui/Modal';
 import {
   useFindReplace,
@@ -101,6 +101,7 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
             ref={patternInputRef}
             data-autofocus
             type="text"
+            className={regexError ? 'regex-input-error' : undefined}
             value={pattern}
             onChange={(e) => setPattern(e.target.value)}
             onKeyDown={(e) => {
@@ -179,9 +180,19 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
             id="replace-regex-error"
             className="replace-dialog-error"
             role="alert"
-            style={{ color: '#dc2626', fontSize: 12, marginTop: 4 }}
+            style={{
+              color: '#dc2626',
+              fontSize: 12,
+              marginTop: 4,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
           >
-            正規表現エラー: {regexError}
+            <AlertCircle size={14} aria-hidden="true" />
+            <span>
+              <strong>正規表現エラー:</strong> {regexError}
+            </span>
           </div>
         )}
 
