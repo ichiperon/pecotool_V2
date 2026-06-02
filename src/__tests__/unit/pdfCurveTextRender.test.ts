@@ -99,11 +99,11 @@ describe('buildCurveGlyphOperators — arc path', () => {
     expect(str).toContain('Tf');
     // Tr (setTextRenderingMode = 3 invisible)
     expect(str).toContain('3 Tr');
-    // Tm (setTextMatrix) が 3 文字分存在
+    // Tm (setTextMatrix) が 3 文字 + word-break スペース分で 4 回
     const tmCount = (str.match(/ Tm/g) ?? []).length;
-    expect(tmCount).toBe(3);
-    // encodeText が各文字について呼ばれる
-    expect(font.encodeText).toHaveBeenCalledTimes(3);
+    expect(tmCount).toBe(4);
+    // encodeText が各文字 + word-break U+0020 の計 4 回呼ばれる (issue #1)
+    expect(font.encodeText).toHaveBeenCalledTimes(4);
   });
 
   it('空文字列 → 空配列', () => {
@@ -113,14 +113,16 @@ describe('buildCurveGlyphOperators — arc path', () => {
     expect(ops).toHaveLength(0);
   });
 
-  it('1 文字 → Tm が 1 回, encodeText が 1 回', () => {
+  it('1 文字 → Tm が 2 回 (glyph + word-break), encodeText が 2 回', () => {
     const font = makeMockFont();
     const fontKey = makeMockFontKey();
     const ops = buildCurveGlyphOperators('X', arcCurve, font, fontKey, FONT_SIZE, PAGE_HEIGHT);
     const str = ops.map(String).join(' ');
-    expect((str.match(/ Tm/g) ?? []).length).toBe(1);
-    expect(font.encodeText).toHaveBeenCalledTimes(1);
+    // glyph 'X' + word-break U+0020 の 2 Tm (issue #1)
+    expect((str.match(/ Tm/g) ?? []).length).toBe(2);
+    expect(font.encodeText).toHaveBeenCalledTimes(2);
     expect(font.encodeText).toHaveBeenCalledWith('X');
+    expect(font.encodeText).toHaveBeenCalledWith(' ');
   });
 
   it('時計回り arc (endAngle < startAngle) でも ops が生成される', () => {
@@ -135,14 +137,15 @@ describe('buildCurveGlyphOperators — arc path', () => {
     };
     const ops = buildCurveGlyphOperators('AB', cwArc, font, fontKey, FONT_SIZE, PAGE_HEIGHT);
     expect(ops.length).toBeGreaterThan(0);
-    expect(font.encodeText).toHaveBeenCalledTimes(2);
+    // 'A', 'B' + word-break U+0020 の計 3 回 (issue #1)
+    expect(font.encodeText).toHaveBeenCalledTimes(3);
   });
 });
 
 // ── buildCurveGlyphOperators — polyline パス ──────────────────────────────
 
 describe('buildCurveGlyphOperators — polyline path', () => {
-  it('polyline curve + 4 文字 → BT...ET + 4 Tm + 4 Tj が返る', () => {
+  it('polyline curve + 4 文字 → BT...ET + 5 Tm + 5 Tj が返る (word-break 含む)', () => {
     const font = makeMockFont();
     const fontKey = makeMockFontKey();
     const ops = buildCurveGlyphOperators('Test', polylineCurve, font, fontKey, FONT_SIZE, PAGE_HEIGHT);
@@ -150,8 +153,9 @@ describe('buildCurveGlyphOperators — polyline path', () => {
     const str = ops.map(String).join(' ');
     expect(str).toContain('BT');
     expect(str).toContain('ET');
-    expect((str.match(/ Tm/g) ?? []).length).toBe(4);
-    expect(font.encodeText).toHaveBeenCalledTimes(4);
+    // 4 glyph + 1 word-break space = 5 Tm (issue #1)
+    expect((str.match(/ Tm/g) ?? []).length).toBe(5);
+    expect(font.encodeText).toHaveBeenCalledTimes(5);
   });
 
   it('頂点 1 つだけの polyline (長さ 0) → 空配列', () => {
@@ -232,8 +236,8 @@ describe('buildCurveBlockOperators', () => {
     expect(ops.length).toBeGreaterThan(3);
     expect(String(ops[0])).toBe('q');
     expect(String(ops[ops.length - 1])).toBe('Q');
-    // encodeText は文字数分呼ばれる
-    expect(font.encodeText).toHaveBeenCalledTimes(4);
+    // 'P','O','L','Y' の 4 文字 + word-break U+0020 = 5 回 (issue #1)
+    expect(font.encodeText).toHaveBeenCalledTimes(5);
   });
 
   it('layoutTextOnCurve が空配列を返す (degenerate polyline) → 空配列', () => {
@@ -247,12 +251,13 @@ describe('buildCurveBlockOperators', () => {
     expect(ops).toHaveLength(0);
   });
 
-  it('サロゲートペア文字 (emoji) 1 個 → encodeText が 1 回呼ばれる', () => {
+  it('サロゲートペア文字 (emoji) 1 個 → encodeText が 2 回呼ばれる (glyph + word-break)', () => {
     const font = makeMockFont();
     const fontKey = makeMockFontKey();
     const emoji = '\u{1F600}'; // 😀 (U+1F600 = surrogate pair)
     const ops = buildCurveBlockOperators(emoji, arcCurve, font, fontKey, FONT_SIZE, PAGE_HEIGHT, []);
     expect(ops.length).toBeGreaterThan(0);
-    expect(font.encodeText).toHaveBeenCalledTimes(1);
+    // emoji glyph + word-break U+0020 = 2 回 (issue #1)
+    expect(font.encodeText).toHaveBeenCalledTimes(2);
   });
 });

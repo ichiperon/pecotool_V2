@@ -62,6 +62,18 @@ export function buildCurveGlyphOperators(
     ops.push(showText(font.encodeText(g.char)));
   }
 
+  // issue #1 (Ctrl+A copy): axis-aligned 経路 (issue #100) と同じく、BT...ET の末尾に
+  // invisible U+0020 を 1 文字追加する。Acrobat の全選択テキスト抽出は座標ヒューリスティクス
+  // で隣接 BT ブロックを連結するため、word-break スペースが無いと隣接ブロックの文字が結合され
+  // 欠落や文字化けが発生する。最後の glyph と同じ Tm 位置でスペースを発行する（Acrobat 7 互換）。
+  if (transforms.length > 0) {
+    const last = transforms[transforms.length - 1];
+    const cos = Math.cos(last.rotation);
+    const sin = Math.sin(last.rotation);
+    ops.push(setTextMatrix(cos, sin, -sin, cos, last.x, last.y));
+    ops.push(showText(font.encodeText(' ')));
+  }
+
   ops.push(endText());
   return ops;
 }
