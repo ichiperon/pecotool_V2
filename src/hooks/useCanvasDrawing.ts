@@ -61,6 +61,8 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
         const cy = y + height / 2;
 
         const sorted = [...pageData.textBlocks].sort((a, b) => a.order - b.order);
+        // 仕様: 複数 BB が選択されている場合は order が最大のもの (= 視覚上「最後の選択」)
+        // の直後に挿入する。reduce で常に最後にヒットした index を返すことで実現。
         const selectedInsertIndex = sorted.reduce(
           (lastIndex, block, index) => selectedIds.has(block.id) ? index : lastIndex,
           -1
