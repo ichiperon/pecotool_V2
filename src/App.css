@@ -1089,6 +1089,54 @@ body, #root {
   flex: 1;
 }
 
+/* Issue #158: BackupRestoreDialog ボタンの focus-visible 表現 */
+.backup-restore-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.backup-restore-action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.backup-restore-action-btn:focus-visible {
+  outline: 2px solid #89b4fa;
+  outline-offset: 2px;
+}
+.backup-restore-action-btn--restore {
+  background: #89b4fa;
+  color: #1e1e2e;
+  font-weight: 600;
+  border: none;
+}
+.backup-restore-action-btn--discard {
+  background: transparent;
+  color: #f38ba8;
+  border: 1px solid #45475a;
+}
+.backup-restore-action-btn--discard-confirm {
+  background: #f38ba8;
+  color: #1e1e2e;
+  font-weight: 600;
+  border: 1px solid #f38ba8;
+}
+.backup-restore-action-btn--cancel {
+  background: transparent;
+  color: #a6adc8;
+  border: 1px solid #45475a;
+  padding: 6px 10px;
+}
+.backup-restore-close-btn:focus-visible {
+  outline: 2px solid #89b4fa;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .help-divider {
   height: 1px;
   background: var(--border-color);

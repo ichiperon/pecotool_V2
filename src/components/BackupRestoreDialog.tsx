@@ -129,21 +129,29 @@ export function BackupRestoreDialog({
                   </div>
 
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <button
-                      onClick={() => onRestore(backup)}
-                      disabled={isAnyProcessing}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: '6px',
-                        padding: '6px 12px', border: 'none', borderRadius: '4px',
-                        background: '#89b4fa', color: '#1e1e2e',
-                        fontSize: '12px', fontWeight: 600,
-                        cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
-                        opacity: isAnyProcessing ? 0.6 : 1,
-                      }}
-                    >
-                      <RotateCcw size={13} />
-                      {isProcessing ? '復元中...' : '復元する'}
-                    </button>
+                    {isProcessing ? (
+                      <button
+                        type="button"
+                        onClick={() => onRestore(backup)}
+                        disabled={isAnyProcessing}
+                        aria-busy="true"
+                        className="backup-restore-action-btn backup-restore-action-btn--restore"
+                      >
+                        <RotateCcw size={13} />
+                        復元中...
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onRestore(backup)}
+                        disabled={isAnyProcessing}
+                        aria-busy="false"
+                        className="backup-restore-action-btn backup-restore-action-btn--restore"
+                      >
+                        <RotateCcw size={13} />
+                        復元する
+                      </button>
+                    )}
                     {isConfirmingDiscard ? (
                       <button
                         type="button"
@@ -153,16 +161,7 @@ export function BackupRestoreDialog({
                         }}
                         disabled={isAnyProcessing}
                         aria-pressed="true"
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: '6px',
-                          padding: '6px 12px',
-                          border: '1px solid #f38ba8',
-                          borderRadius: '4px',
-                          background: '#f38ba8', color: '#1e1e2e',
-                          fontSize: '12px', fontWeight: 600,
-                          cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
-                          opacity: isAnyProcessing ? 0.6 : 1,
-                        }}
+                        className="backup-restore-action-btn backup-restore-action-btn--discard-confirm"
                       >
                         <Trash2 size={13} />
                         本当に破棄する
@@ -173,16 +172,7 @@ export function BackupRestoreDialog({
                         onClick={() => setConfirmDiscardPath(backup.file_path)}
                         disabled={isAnyProcessing}
                         aria-pressed="false"
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: '6px',
-                          padding: '6px 12px',
-                          border: '1px solid #45475a',
-                          borderRadius: '4px',
-                          background: 'transparent', color: '#f38ba8',
-                          fontSize: '12px',
-                          cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
-                          opacity: isAnyProcessing ? 0.6 : 1,
-                        }}
+                        className="backup-restore-action-btn backup-restore-action-btn--discard"
                       >
                         <Trash2 size={13} />
                         破棄する
@@ -193,12 +183,7 @@ export function BackupRestoreDialog({
                         type="button"
                         onClick={() => setConfirmDiscardPath(null)}
                         disabled={isAnyProcessing}
-                        style={{
-                          padding: '6px 10px', border: '1px solid #45475a', borderRadius: '4px',
-                          background: 'transparent', color: '#a6adc8',
-                          fontSize: '12px',
-                          cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
-                        }}
+                        className="backup-restore-action-btn backup-restore-action-btn--cancel"
                       >
                         キャンセル
                       </button>
