@@ -25,7 +25,7 @@ import { describe, it, expect, vi } from 'vitest'
 vi.mock('pdfjs-dist', () => ({ default: {} }))
 vi.mock('../../utils/pdfLoader', () => ({ getCachedPageProxy: vi.fn() }))
 
-import { drawStaticBlock, renderStaticLayer } from '../../components/PdfCanvas'
+import { drawStaticBlock, renderStaticLayer } from '../../utils/pdfCanvasRender'
 import type { TextBlock, CurveDefinition } from '../../types'
 
 function makeMockContext() {
@@ -42,6 +42,7 @@ function makeMockContext() {
     translate: vi.fn(),
     scale: vi.fn(),
     rotate: vi.fn(),
+    setTransform: vi.fn(),
     setLineDash: vi.fn(),
     fillStyle: '',
     strokeStyle: '',
@@ -235,7 +236,7 @@ describe('PdfCanvas static layer – curve block (Phase 4 #188)', () => {
     expect(ctx.drawImage).not.toHaveBeenCalled()
   })
 
-  it('curve 描画で save / restore / translate / rotate が呼ばれる (字ごと回転)', () => {
+  it('curve 描画で save / restore はループ外で 1 回、setTransform が字数分呼ばれる (#240)', () => {
     const ctx = makeMockContext()
     const text = 'XYZ'
     drawStaticBlock(
@@ -244,11 +245,11 @@ describe('PdfCanvas static layer – curve block (Phase 4 #188)', () => {
       1,
       0.5,
     )
-    // 3 文字 → save/restore/translate/rotate 各 3 回以上
-    expect(ctx.save).toHaveBeenCalledTimes(text.length)
-    expect(ctx.restore).toHaveBeenCalledTimes(text.length)
-    expect(ctx.translate).toHaveBeenCalledTimes(text.length)
-    expect(ctx.rotate).toHaveBeenCalledTimes(text.length)
+    // #240: save/restore はループ外で 1 回だけ (per-glyph save/restore は廃止)
+    expect(ctx.save).toHaveBeenCalledTimes(1)
+    expect(ctx.restore).toHaveBeenCalledTimes(1)
+    // ループ内では setTransform で translate+rotate を直接設定する (字数分)
+    expect(ctx.setTransform).toHaveBeenCalledTimes(text.length + 1) // +1 は恒等行列リセット
   })
 
   it('axis-aligned (curve なし) block は依然として fillRect が 1 回', () => {

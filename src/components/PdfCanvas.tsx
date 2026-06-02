@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   usePecoStore,
   selectZoom,
@@ -19,10 +19,11 @@ import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
 import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
 import { useBlockDragResize } from "../hooks/useBlockDragResize";
+import { useCurveEditor } from "../hooks/useCurveEditor";
 import { isCurveDefinition } from "../utils/curveDefinition";
-import { layoutTextOnCurveViewport } from "../utils/curveGlyphLayout";
-import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
-import type { TextBlock, BoundingBox, CurveDefinition } from "../types";
+import { arcHandlePositions } from "../utils/arcFromThreePoints";
+import { renderStaticLayer } from "../utils/pdfCanvasRender";
+import type { TextBlock, BoundingBox } from "../types";
 
 // #236: resize/curve handle sizes
 const RESIZE_HANDLE_SIZE = 6;
@@ -41,232 +42,6 @@ interface PdfCanvasProps {
   /** #226: 低信頼ハイライト設定を親から受け取る (直接 store 購読を避ける) */
   confidenceThreshold?: number;
   showLowConfidenceHighlight?: boolean;
-}
-
-export function drawStaticBlock(
-  context: CanvasRenderingContext2D,
-  block: TextBlock,
-  scale: number,
-  opacity: number,
-  searchTerm?: string,
-  isActiveHit?: boolean,
-  confidenceThreshold?: number,
-  showLowConfidenceHighlight?: boolean,
-): void {
-  // curve 付き block は per-glyph の curve 描画パスへ
-  if (block.curve && isCurveDefinition(block.curve)) {
-    drawStaticBlockCurve(context, block, scale, opacity, searchTerm, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
-    return;
-  }
-
-  // ── 既存 axis-aligned パス (変更禁止) ──────────────────────────────────
-  const x = block.bbox.x * scale;
-  const y = block.bbox.y * scale;
-  const w = block.bbox.width * scale;
-  const h = block.bbox.height * scale;
-  const inset = 1;
-  const baseAlpha = opacity;
-  const fillAlpha = opacity * 0.25;
-
-  // #192: 低信頼ブロックは赤系塗り、通常は青系
-  const isLowConfidence =
-    showLowConfidenceHighlight === true &&
-    block.confidence !== undefined &&
-    confidenceThreshold !== undefined &&
-    block.confidence <= confidenceThreshold;
-
-  context.fillStyle = isLowConfidence
-    ? `rgba(220, 38, 38, ${fillAlpha})`
-    : `rgba(0, 150, 255, ${fillAlpha})`;
-  context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-
-  context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-  context.lineWidth = 1;
-  context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-
-  // issue #196: 検索ヒットの黄色ハイライト
-  if (searchTerm && block.text.toLowerCase().includes(searchTerm.toLowerCase())) {
-    context.fillStyle = isActiveHit
-      ? 'rgba(255, 180, 0, 0.7)'
-      : 'rgba(255, 230, 0, 0.4)';
-    context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-    if (isActiveHit) {
-      context.strokeStyle = 'rgba(255, 140, 0, 1)';
-      context.lineWidth = 2;
-      context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-    }
-  }
-
-  if (!block.text) return;
-  if (block.writingMode === "vertical") {
-    const fontSize = Math.max(10, w * 0.8);
-    context.save();
-    context.font = `bold ${fontSize}px sans-serif`;
-    context.textBaseline = "top";
-
-    const naturalHeight = block.text.length * fontSize;
-    const sy = h / naturalHeight;
-
-    context.translate(x + w, y + 2);
-    context.scale(1, sy);
-    context.rotate(Math.PI / 2);
-    context.lineWidth = 3 / sy;
-    context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-    context.strokeText(block.text, 0, 0);
-    context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-    context.fillText(block.text, 0, 0);
-    context.restore();
-    return;
-  }
-
-  const fontSize = Math.max(10, h * 0.8);
-  context.save();
-  context.font = `bold ${fontSize}px sans-serif`;
-  context.textBaseline = "top";
-
-  const textWidth = context.measureText(block.text).width || 1;
-  const sx = w / textWidth;
-
-  context.translate(x, y + 2);
-  context.scale(sx, 1);
-  context.lineWidth = 3 / sx;
-  context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-  context.strokeText(block.text, 0, 0);
-  context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-  context.fillText(block.text, 0, 0);
-  context.restore();
-}
-
-/**
- * curve 付き TextBlock の static overlay 描画 (issue #188 / Phase 4)。
- * 各文字を viewport 座標系上のカーブに沿って配置し、
- * 文字幅×文字高の矩形を青塗り + 赤テキストで描く (inset=1)。
- */
-function drawStaticBlockCurve(
-  context: CanvasRenderingContext2D,
-  block: TextBlock,
-  scale: number,
-  opacity: number,
-  searchTerm?: string,
-  isActiveHit?: boolean,
-  confidenceThreshold?: number,
-  showLowConfidenceHighlight?: boolean,
-): void {
-  const h = block.bbox.height * scale;
-  const fontSize = Math.max(10, h * 0.8);
-  const inset = 1;
-  const baseAlpha = opacity;
-  const fillAlpha = opacity * 0.25;
-
-  // #192: 低信頼ブロックは赤系塗り、通常は青系
-  const isLowConfidence =
-    showLowConfidenceHighlight === true &&
-    block.confidence !== undefined &&
-    confidenceThreshold !== undefined &&
-    block.confidence <= confidenceThreshold;
-  const fillColor = isLowConfidence
-    ? `rgba(220, 38, 38, ${fillAlpha})`
-    : `rgba(0, 150, 255, ${fillAlpha})`;
-
-  context.font = `bold ${fontSize}px sans-serif`;
-  context.textBaseline = "top";
-
-  // curve! が valid である前提 (呼び出し元で guard 済み)
-  const glyphs = layoutTextOnCurveViewport(block.text, block.curve!, fontSize);
-
-  // #240: save/restore をループ外で 1 回に削減。
-  // ループ内では setTransform で translate+rotate を直接設定し、
-  // glyph ごとの save/restore オーバーヘッドを排除する。
-  context.save();
-  // ループ外で変わらない描画状態を先に設定
-  context.lineWidth = 3;
-
-  for (const g of glyphs) {
-    const gx = g.x * scale;
-    const gy = g.y * scale;
-    // 簡易文字幅は fontSize 相当の正方形 (等幅概算)
-    const gw = fontSize;
-    const gh = fontSize;
-
-    const cos = Math.cos(g.rotation);
-    const sin = Math.sin(g.rotation);
-    // setTransform(a, b, c, d, e, f) = 2D affine: translate(gx,gy) * rotate(rotation)
-    context.setTransform(cos, sin, -sin, cos, gx, gy);
-
-    // 文字背景: 低信頼は赤系、通常は青系
-    context.fillStyle = fillColor;
-    context.fillRect(-gw / 2 + inset, -inset, gw - inset * 2, gh - inset * 2);
-
-    // 文字本体: 赤テキスト
-    if (block.text) {
-      context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-      context.strokeText(g.char, -gw / 2, -gh * 0.1);
-      context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-      context.fillText(g.char, -gw / 2, -gh * 0.1);
-    }
-  }
-
-  // transform を恒等行列に戻してから restore (後続の描画を保護)
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.restore();
-
-  // issue #196: curve block の検索ヒット黄色ハイライトは bbox 全体に重ねる
-  if (searchTerm && block.text.toLowerCase().includes(searchTerm.toLowerCase())) {
-    const bx = block.bbox.x * scale;
-    const by = block.bbox.y * scale;
-    const bw = block.bbox.width * scale;
-    const bh = block.bbox.height * scale;
-    context.save();
-    context.fillStyle = isActiveHit
-      ? 'rgba(255, 180, 0, 0.7)'
-      : 'rgba(255, 230, 0, 0.4)';
-    context.fillRect(bx + 1, by + 1, bw - 2, bh - 2);
-    if (isActiveHit) {
-      context.strokeStyle = 'rgba(255, 140, 0, 1)';
-      context.lineWidth = 2;
-      context.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
-    }
-    context.restore();
-  }
-}
-
-export function renderStaticLayer(
-  context: CanvasRenderingContext2D,
-  canvas: HTMLCanvasElement,
-  textBlocks: TextBlock[] | null | undefined,
-  selectedIds: Set<string>,
-  showOcr: boolean,
-  zoom: number,
-  opacity: number,
-  searchTerm?: string,
-  searchHitIndex?: number,
-  confidenceThreshold?: number,
-  showLowConfidenceHighlight?: boolean,
-): void {
-  // 注: 以前は block 単位の offscreen canvas キャッシュ + drawImage 経由で描画していたが、
-  // drawImage の非整数 dst 座標でサブピクセル補間が発生し、OCR overlay が
-  // 実テキストより上方向に 2-4px ズレて見える視覚的回帰を起こしたため、
-  // v2.0.4 以前の直接描画に戻している。
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  if (!showOcr || !textBlocks) return;
-
-  const scale = zoom / 100;
-  // issue #196: searchTerm が空でない場合、ヒットするブロックを収集して activeHit を決定する
-  const term = searchTerm && searchTerm.length > 0 ? searchTerm : undefined;
-  // #220: toLowerCase を N 回呼ばずループ外で 1 度だけ計算してキャッシュ
-  const termLower = term ? term.toLowerCase() : undefined;
-  let hitCounter = -1;
-  const activeIndex = searchHitIndex ?? 0;
-
-  for (const block of textBlocks) {
-    if (selectedIds.has(block.id)) continue;
-    let isActiveHit = false;
-    if (termLower && block.text.toLowerCase().includes(termLower)) {
-      hitCounter++;
-      isActiveHit = hitCounter === activeIndex;
-    }
-    drawStaticBlock(context, block, scale, opacity, term, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
-  }
 }
 
 export function PdfCanvas({
@@ -344,21 +119,6 @@ export function PdfCanvas({
   // 正しく取得できるようにする。
   const getPageData = () => usePecoStore.getState().document?.pages.get(pageIndex);
 
-  // ── Curve mode state (issue #189) ─────────────────────────────
-  // 3 点クリックで arc を作成する際に収集する中間点（viewport 座標 / zoom 適用前）
-  const [curveClickPoints, setCurveClickPoints] = useState<Array<{ x: number; y: number }>>([]);
-  // handle drag: どの handle を掴んでいるか (0=始点 1=中点 2=終点)、null=非ドラッグ
-  const curveHandleDragRef = useRef<{ handleIndex: number; blockId: string } | null>(null);
-
-  // ── #205: Polyline 作成 draft state ───────────────────────────
-  // ダブルクリックで開始、シングルクリックで点追加、Enter で確定、Esc でキャンセル
-  const [polylineDraftPoints, setPolylineDraftPoints] = useState<Array<{ x: number; y: number }>>([]);
-  const [polylineDraftActive, setPolylineDraftActive] = useState(false);
-  // マウス現在位置 (canvas 座標) を ref で保持して preview 線に使う（再レンダ不要）
-  const polylineMousePosRef = useRef<{ x: number; y: number } | null>(null);
-  // ダブルクリック直後のシングルクリックイベントを抑制するためのタイムスタンプ ref
-  const lastDoubleClickTimeRef = useRef<number>(0);
-
   // ── #191: 範囲指定 OCR ドラッグ状態 ───────────────────────────
   const [rangeOcrDrag, setRangeOcrDrag] = useState<{
     isDrawing: boolean;
@@ -403,6 +163,29 @@ export function PdfCanvas({
     setDragPreviewBboxes,
   });
 
+  // ── Curve mode (issue #218: extracted to useCurveEditor) ──────
+  const overlayRafRef = useRef<number | null>(null);
+
+  const curveEditor = useCurveEditor({
+    pageIndex,
+    zoom,
+    isCurveMode,
+    selectedIds,
+    currentTextBlocksById,
+    getPageData,
+    updatePageData,
+    overlayCanvasRef,
+    renderOverlaysRef,
+    overlayRafRef,
+  });
+
+  const {
+    curveClickPoints,
+    polylineDraftPoints,
+    polylineDraftActive,
+    polylineMousePosRef,
+  } = curveEditor;
+
   const getMousePos = (e: React.MouseEvent) => {
     const rect = overlayCanvasRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
@@ -411,48 +194,6 @@ export function PdfCanvas({
       y: e.clientY - rect.top,
     };
   };
-
-  // ── Curve mode helpers (issue #189) ────────────────────────────
-
-  /**
-   * canvas 座標 (zoom 適用済み) → viewport 座標 (zoom 等倍) に戻す。
-   * curveDefinition / arcFromThreePoints は zoom 非適用の viewport 座標で扱う。
-   */
-  const canvasToViewport = useCallback((pos: { x: number; y: number }) => {
-    const scale = zoom / 100;
-    return { x: pos.x / scale, y: pos.y / scale };
-  }, [zoom]);
-
-  /**
-   * 選択中 BB の arc handle に pos が当たっているか確認し、
-   * hit した handle index を返す。hit なし → -1。
-   */
-  const hitTestCurveHandle = useCallback((pos: { x: number; y: number }): { blockId: string; handleIndex: number } | null => {
-    if (!isCurveMode) return null;
-    const scale = zoom / 100;
-    const HIT_RADIUS = 10; // px
-
-    for (const id of selectedIds) {
-      const block = currentTextBlocksById.get(id);
-      if (!block?.curve || !isCurveDefinition(block.curve)) continue;
-      const curve = block.curve;
-
-      const handles: Array<{ x: number; y: number }> =
-        curve.type === "arc"
-          ? arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle)
-          : curve.points;
-
-      for (let hi = 0; hi < handles.length; hi++) {
-        const hx = handles[hi].x * scale;
-        const hy = handles[hi].y * scale;
-        const dist = Math.sqrt((pos.x - hx) ** 2 + (pos.y - hy) ** 2);
-        if (dist <= HIT_RADIUS) {
-          return { blockId: id, handleIndex: hi };
-        }
-      }
-    }
-    return null;
-  }, [isCurveMode, zoom, selectedIds, currentTextBlocksById]);
 
   // 選択されたブロックへの自動スクロール。
   // 依存に `currentPage` (PageData 全体) を入れると updatePageData による
@@ -552,8 +293,6 @@ export function PdfCanvas({
   }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage, searchTerm, searchHitIndex]);
 
   // 動的層: 選択 BB ハイライト + drawing/altDrag プレビュー
-  const overlayRafRef = useRef<number | null>(null);
-
   useEffect(() => {
     if (!overlayCanvasRef.current || !pdfPage) return;
 
@@ -971,55 +710,8 @@ export function PdfCanvas({
       return;
     }
 
-    // curve mode: handle drag 開始 or 3 点クリック収集 or polyline draft 点追加
-    if (isCurveMode && selectedIds.size === 1) {
-      const selectedId = Array.from(selectedIds)[0];
-
-      // #205: polyline draft 中はシングルクリックで点を追加する
-      // ダブルクリック直後の synthetic click を無視するため 300ms ガード
-      if (polylineDraftActive) {
-        const now = Date.now();
-        if (now - lastDoubleClickTimeRef.current < 300) return;
-        const pdfPos = canvasToViewport(pos);
-        setPolylineDraftPoints((prev) => [...prev, pdfPos]);
-        return;
-      }
-
-      // handle hit-test (既存 curve がある場合)
-      const hit = hitTestCurveHandle(pos);
-      if (hit) {
-        curveHandleDragRef.current = { handleIndex: hit.handleIndex, blockId: hit.blockId };
-        return;
-      }
-
-      // 3 点クリック収集 (arc 作成)
-      const pdfPos = canvasToViewport(pos);
-      const newPoints = [...curveClickPoints, pdfPos];
-      if (newPoints.length < 3) {
-        setCurveClickPoints(newPoints);
-        return;
-      }
-
-      // 3 点目: arc を算出して TextBlock に set
-      const [p1, p2, p3] = newPoints;
-      const arc = arcFromThreePoints(p1, p2, p3);
-      if (!arc) {
-        // 3 点が直線上 → 収集をリセットしてトースト (後で追加可能)
-        setCurveClickPoints([]);
-        return;
-      }
-
-      // undoable で curve を書き込む
-      const page = getPageData();
-      if (page) {
-        const newBlocks = page.textBlocks.map((b) =>
-          b.id === selectedId ? { ...b, curve: arc as CurveDefinition, isDirty: true } : b,
-        );
-        updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
-      }
-      setCurveClickPoints([]);
-      return;
-    }
+    // curve mode: useCurveEditor に委譲
+    if (curveEditor.handleMouseDownCurve(pos)) return;
 
     const handled = drag.tryStartDragOrResize(pos, {
       ctrlKey: e.ctrlKey,
@@ -1054,52 +746,8 @@ export function PdfCanvas({
       return;
     }
 
-    // #205: polyline draft 中はマウス位置を ref に保持して preview 線を描画
-    if (polylineDraftActive) {
-      polylineMousePosRef.current = pos;
-      // preview 再描画は RAF 経由でスケジュール
-      if (renderOverlaysRef.current) {
-        if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
-        overlayRafRef.current = requestAnimationFrame(() => {
-          renderOverlaysRef.current?.();
-          overlayRafRef.current = null;
-        });
-      }
-      return;
-    }
-
-    // curve handle drag 中: handle 位置を更新して curve を再算出
-    if (curveHandleDragRef.current) {
-      const { blockId, handleIndex } = curveHandleDragRef.current;
-      const block = currentTextBlocksById.get(blockId);
-      if (block?.curve && isCurveDefinition(block.curve)) {
-        const pdfPos = canvasToViewport(pos);
-        const curve = block.curve;
-
-        let newCurve: CurveDefinition | null = null;
-        if (curve.type === "arc") {
-          // 3 ハンドル位置を取得して移動先を反映
-          const handles = arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle);
-          handles[handleIndex] = pdfPos;
-          newCurve = arcFromThreePoints(handles[0], handles[1], handles[2]);
-        } else if (curve.type === "polyline") {
-          const newPoints = curve.points.map((p, i) => (i === handleIndex ? pdfPos : p));
-          newCurve = { type: "polyline", points: newPoints };
-        }
-
-        if (newCurve) {
-          const page = getPageData();
-          if (page) {
-            const newBlocks = page.textBlocks.map((b) =>
-              b.id === blockId ? { ...b, curve: newCurve as CurveDefinition, isDirty: true } : b,
-            );
-            // drag 中は undoable=false で頻度を抑える。mouseUp で確定
-            updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
-          }
-        }
-      }
-      return;
-    }
+    // curve mode: useCurveEditor に委譲
+    if (curveEditor.handleMouseMoveCurve(pos)) return;
 
     if (drag.updateDragResize(pos)) {
       return;
@@ -1109,73 +757,17 @@ export function PdfCanvas({
     if (mouseMoveRafRef.current) return;
     mouseMoveRafRef.current = requestAnimationFrame(() => {
       mouseMoveRafRef.current = null;
-      // curve mode 中に handle の上ではポインターカーソルを出す
-      if (isCurveMode) {
-        const hit = hitTestCurveHandle(pos);
-        if (overlayCanvasRef.current) {
-          overlayCanvasRef.current.style.cursor = hit ? "pointer" : "crosshair";
-        }
-        return;
-      }
       const hoverCursor = drag.getHoverCursor(pos, { isDrawingMode, isSplitMode });
       if (overlayCanvasRef.current) overlayCanvasRef.current.style.cursor = hoverCursor;
     });
   };
 
-  // #205: polyline draft 確定ヘルパー
-  const confirmPolylineDraft = useCallback(() => {
-    if (!polylineDraftActive || polylineDraftPoints.length < 2) return;
-    const selectedId = selectedIds.size === 1 ? Array.from(selectedIds)[0] : null;
-    if (!selectedId) return;
-    const page = getPageData();
-    if (page) {
-      const newCurve: CurveDefinition = { type: "polyline", points: polylineDraftPoints };
-      const newBlocks = page.textBlocks.map((b) =>
-        b.id === selectedId ? { ...b, curve: newCurve, isDirty: true } : b,
-      );
-      updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
-    }
-    setPolylineDraftPoints([]);
-    setPolylineDraftActive(false);
-    polylineMousePosRef.current = null;
-  }, [polylineDraftActive, polylineDraftPoints, selectedIds, getPageData, updatePageData, pageIndex]);
-
-  // #205: ダブルクリックで polyline 作成開始
+  // #205: ダブルクリックで polyline 作成開始 (useCurveEditor に委譲)
   const handleDoubleClick = (e: React.MouseEvent) => {
     if (disableDrawing) return;
-    if (!isCurveMode || selectedIds.size !== 1) return;
-    // polyline draft が既にアクティブな場合はダブルクリックで確定
-    if (polylineDraftActive) {
-      confirmPolylineDraft();
-      return;
-    }
     const pos = getMousePos(e);
-    const pdfPos = canvasToViewport(pos);
-    lastDoubleClickTimeRef.current = Date.now();
-    // arc 収集をリセットしてから polyline draft 開始
-    setCurveClickPoints([]);
-    setPolylineDraftPoints([pdfPos]);
-    setPolylineDraftActive(true);
-    polylineMousePosRef.current = pos;
+    curveEditor.handleDoubleClickCurve(pos);
   };
-
-  // #205: キーボードで Enter 確定 / Esc キャンセル
-  useEffect(() => {
-    if (!polylineDraftActive) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        confirmPolylineDraft();
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        setPolylineDraftPoints([]);
-        setPolylineDraftActive(false);
-        polylineMousePosRef.current = null;
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [polylineDraftActive, confirmPolylineDraft]);
 
   const handleMouseUp = () => {
     if (disableDrawing) return;
@@ -1196,24 +788,8 @@ export function PdfCanvas({
       return;
     }
 
-    // curve handle drag 確定: 最終位置を undoable で書き込む
-    if (curveHandleDragRef.current) {
-      const { blockId } = curveHandleDragRef.current;
-      curveHandleDragRef.current = null;
-      // mouseMove 中は undoable=false で書き込んでいるため、mouseUp 時点の
-      // 最新 curve を undoable=true で再書き込みして undo スタックに積む。
-      const page = getPageData();
-      if (page) {
-        const block = page.textBlocks.find((b) => b.id === blockId);
-        if (block) {
-          const newBlocks = page.textBlocks.map((b) =>
-            b.id === blockId ? { ...b, isDirty: true } : b,
-          );
-          updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
-        }
-      }
-      return;
-    }
+    // curve handle drag 確定: useCurveEditor に委譲
+    if (curveEditor.handleMouseUpCurve()) return;
 
     if (drag.isAltDragging) {
       drag.finishAltDrag();
