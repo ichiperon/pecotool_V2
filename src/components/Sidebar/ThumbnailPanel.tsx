@@ -4,7 +4,6 @@ import type { PecoDocument } from '../../types';
 
 interface ThumbnailItemProps {
   index: number;
-  isDirty?: boolean;
   loadEpoch: number;
   onSelect: (index: number) => void;
   onRequest: (index: number) => void;
@@ -15,12 +14,17 @@ interface ThumbnailItemProps {
   // 全 ThumbnailItemNode が再レンダされてしまう。
   onSubscribeActivePage: (index: number, cb: () => void) => () => void;
   onGetIsActivePage: (index: number) => boolean;
+  // issue #173: dirty 状態も同様に pub/sub。document を依存に持たないことで
+  // updatePageData による itemContent 再生成 → 全件 unmount/remount を防ぐ。
+  onSubscribeDirtyPage: (index: number, cb: () => void) => () => void;
+  onGetIsDirtyPage: (index: number) => boolean;
 }
 
 export const ThumbnailItemNode = React.memo(({
-  index, isDirty, loadEpoch,
+  index, loadEpoch,
   onSelect, onRequest, onSubscribeThumbnail, onGetThumbnail,
   onSubscribeActivePage, onGetIsActivePage,
+  onSubscribeDirtyPage, onGetIsDirtyPage,
 }: ThumbnailItemProps) => {
   const [, forceUpdate] = useReducer(x => x + 1, 0);
 
@@ -35,8 +39,14 @@ export const ThumbnailItemNode = React.memo(({
     return onSubscribeActivePage(index, forceUpdate);
   }, [index, onSubscribeActivePage]);
 
+  // issue #173: このアイテム専用の dirty 状態変化を購読する。
+  useEffect(() => {
+    return onSubscribeDirtyPage(index, forceUpdate);
+  }, [index, onSubscribeDirtyPage]);
+
   const thumbnailData = onGetThumbnail(index);
   const isActive = onGetIsActivePage(index);
+  const isDirty = onGetIsDirtyPage(index);
 
   // サムネイルが未取得 or ファイル切替後に再リクエスト
   useEffect(() => {
@@ -72,12 +82,16 @@ interface ThumbnailPanelProps {
   // issue #68: active 状態は prop drill せず subscribe で配る。
   onSubscribeActivePage: (index: number, cb: () => void) => () => void;
   onGetIsActivePage: (index: number) => boolean;
+  // issue #173: dirty 状態も subscribe で配る (document 依存を排除)。
+  onSubscribeDirtyPage: (index: number, cb: () => void) => () => void;
+  onGetIsDirtyPage: (index: number) => boolean;
 }
 
 export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   width, document, currentPageIndex, loadEpoch, isOcrRunning,
   onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail,
   onSubscribeActivePage, onGetIsActivePage,
+  onSubscribeDirtyPage, onGetIsDirtyPage,
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
@@ -85,15 +99,15 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
     virtuosoRef.current?.scrollIntoView({ index: currentPageIndex, behavior: 'smooth', done: () => {} });
   }, [currentPageIndex]);
 
-  // issue #68: itemContent を毎レンダで新規生成すると Virtuoso の memoization が効かず、
-  // 親 (ThumbnailPanel) が再レンダされる度に可視範囲の全アイテムが再レンダされる。
-  // currentPageIndex に依存させない（active 状態は subscribe で配るため）ことで、
-  // ページ切替では itemContent identity を保つ。
+  // issue #68 / #173: itemContent を毎レンダで新規生成すると Virtuoso の
+  // memoization が効かず、親 (ThumbnailPanel) が再レンダされる度に可視範囲の
+  // 全アイテムが再レンダされる。currentPageIndex / document に依存させない
+  // (active / dirty 状態は subscribe で配るため) ことで、ページ切替・編集では
+  // itemContent identity を保つ。
   const itemContent = useCallback(
     (i: number) => (
       <ThumbnailItemNode
         index={i}
-        isDirty={document?.pages.get(i)?.isDirty}
         loadEpoch={loadEpoch}
         onSelect={onSelectPage}
         onRequest={onRequestThumbnail}
@@ -101,9 +115,11 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
         onGetThumbnail={onGetThumbnail}
         onSubscribeActivePage={onSubscribeActivePage}
         onGetIsActivePage={onGetIsActivePage}
+        onSubscribeDirtyPage={onSubscribeDirtyPage}
+        onGetIsDirtyPage={onGetIsDirtyPage}
       />
     ),
-    [document, loadEpoch, onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail, onSubscribeActivePage, onGetIsActivePage],
+    [loadEpoch, onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail, onSubscribeActivePage, onGetIsActivePage, onSubscribeDirtyPage, onGetIsDirtyPage],
   );
 
   return (

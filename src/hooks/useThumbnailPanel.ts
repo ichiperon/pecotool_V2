@@ -41,6 +41,13 @@ export function useThumbnailPanel() {
   const activeListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
   // 現在の active page index を ref で保持（リスナーが pull する形）。
   const activePageRef = useRef<number>(0);
+  // issue #173: dirty 状態も index 単位で購読する。
+  // 旧実装は itemContent useCallback の依存に `document` を入れていたため、
+  // updatePageData で document 参照が新規になる度に itemContent identity が変わり、
+  // Virtuoso 可視範囲の全 ThumbnailItemNode が unmount→remount され
+  // サムネ画像が一瞬消える問題が起きていた。active と同形の pub/sub に分離する。
+  const dirtyListenersRef = useRef<Map<number, Set<() => void>>>(new Map());
+  const dirtyPagesRef = useRef<Set<number>>(new Set());
 
   const [loadEpoch, setLoadEpoch] = useState(0);
 
@@ -115,6 +122,47 @@ export function useThumbnailPanel() {
   // アイテムが自分の active 状態を取得する
   const getIsActivePage = useCallback((index: number) => {
     return activePageRef.current === index;
+  }, []);
+
+  // issue #173: dirty 状態の pub/sub。subscribe/get の関数 identity は不変なので
+  // itemContent useCallback の依存も安定し、document 更新で再生成されない。
+  const subscribeDirtyPage = useCallback((index: number, cb: () => void) => {
+    if (!dirtyListenersRef.current.has(index)) {
+      dirtyListenersRef.current.set(index, new Set());
+    }
+    dirtyListenersRef.current.get(index)!.add(cb);
+    return () => {
+      dirtyListenersRef.current.get(index)?.delete(cb);
+    };
+  }, []);
+
+  const getIsDirtyPage = useCallback((index: number) => {
+    return dirtyPagesRef.current.has(index);
+  }, []);
+
+  // pecoStore.subscribe で document を監視し、各ページの isDirty 差分を計算して
+  // 変化した index のリスナーだけに通知する。Virtuoso 可視範囲外のアイテムは
+  // 通知されてもまだ subscribe しておらず無害。
+  useEffect(() => {
+    const recompute = (doc: ReturnType<typeof selectDocument>) => {
+      const next = new Set<number>();
+      if (doc) {
+        doc.pages.forEach((page, idx) => {
+          if (page.isDirty) next.add(idx);
+        });
+      }
+      const prev = dirtyPagesRef.current;
+      const changed: number[] = [];
+      next.forEach((idx) => { if (!prev.has(idx)) changed.push(idx); });
+      prev.forEach((idx) => { if (!next.has(idx)) changed.push(idx); });
+      dirtyPagesRef.current = next;
+      changed.forEach((idx) => dirtyListenersRef.current.get(idx)?.forEach((cb) => cb()));
+    };
+    // 初期同期
+    recompute(usePecoStore.getState().document);
+    return usePecoStore.subscribe((state, prevState) => {
+      if (state.document !== prevState.document) recompute(state.document);
+    });
   }, []);
 
   // currentPageIndex 変更時、変化した 2 件 (旧アクティブ / 新アクティブ) だけに通知する。
@@ -431,5 +479,5 @@ export function useThumbnailPanel() {
     ? { totalPages: document.totalPages, pages: document.pages }
     : null;
 
-  return { loadEpoch, subscribeThumbnail, getThumbnail, subscribeActivePage, getIsActivePage, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument, triggerThumbnailLoad };
+  return { loadEpoch, subscribeThumbnail, getThumbnail, subscribeActivePage, getIsActivePage, subscribeDirtyPage, getIsDirtyPage, requestThumbnail, handleSelectPage, currentPageIndex, fakeDocument, triggerThumbnailLoad };
 }

@@ -47,6 +47,9 @@ function makeFakePanel() {
     // Thumbnail 周りは本テストの関心外: 何もしない no-op。
     subscribeThumbnail(_index: number, _cb: () => void) { return () => {}; },
     getThumbnail(_index: number) { return undefined; },
+    // issue #173: dirty pub/sub も本テストの関心外なので no-op を返す。
+    subscribeDirtyPage(_index: number, _cb: () => void) { return () => {}; },
+    getIsDirtyPage(_index: number) { return false; },
     onSelectPage: vi.fn(),
     onRequestThumbnail: vi.fn(),
   };
@@ -66,7 +69,6 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
         <ThumbnailItemNode
           key={i}
           index={i}
-          isDirty={false}
           loadEpoch={0}
           onSelect={fake.onSelectPage}
           onRequest={fake.onRequestThumbnail}
@@ -74,6 +76,8 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
           onGetThumbnail={fake.getThumbnail}
           onSubscribeActivePage={fake.subscribeActivePage}
           onGetIsActivePage={getIsActiveSpy}
+          onSubscribeDirtyPage={fake.subscribeDirtyPage}
+          onGetIsDirtyPage={fake.getIsDirtyPage}
         />
       );
       return <>{[0, 1, 2].map(renderItem)}</>;
@@ -127,7 +131,6 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
       <>
         <ThumbnailItemNode
           index={0}
-          isDirty={false}
           loadEpoch={0}
           onSelect={fake.onSelectPage}
           onRequest={fake.onRequestThumbnail}
@@ -135,10 +138,11 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
           onGetThumbnail={fake.getThumbnail}
           onSubscribeActivePage={fake.subscribeActivePage}
           onGetIsActivePage={fake.getIsActivePage}
+          onSubscribeDirtyPage={fake.subscribeDirtyPage}
+          onGetIsDirtyPage={fake.getIsDirtyPage}
         />
         <ThumbnailItemNode
           index={1}
-          isDirty={false}
           loadEpoch={0}
           onSelect={fake.onSelectPage}
           onRequest={fake.onRequestThumbnail}
@@ -146,6 +150,8 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
           onGetThumbnail={fake.getThumbnail}
           onSubscribeActivePage={fake.subscribeActivePage}
           onGetIsActivePage={fake.getIsActivePage}
+          onSubscribeDirtyPage={fake.subscribeDirtyPage}
+          onGetIsDirtyPage={fake.getIsDirtyPage}
         />
       </>,
     );
@@ -172,7 +178,6 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
     type ItemProps = React.ComponentProps<typeof ThumbnailItemNode>;
     const probe: ItemProps = {
       index: 0,
-      isDirty: false,
       loadEpoch: 0,
       onSelect: () => {},
       onRequest: () => {},
@@ -180,9 +185,13 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
       onGetThumbnail: () => undefined,
       onSubscribeActivePage: () => () => {},
       onGetIsActivePage: () => false,
+      onSubscribeDirtyPage: () => () => {},
+      onGetIsDirtyPage: () => false,
     };
     // currentPageIndex というキーが存在しないことを assertion (型 narrowing 用)
     expect('currentPageIndex' in probe).toBe(false);
+    // issue #173: isDirty も prop ではなくなり pub/sub 経由になっている。
+    expect('isDirty' in probe).toBe(false);
   });
 });
 
@@ -202,7 +211,6 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
             <ThumbnailItemNode
               key={i}
               index={i}
-              isDirty={false}
               loadEpoch={0}
               onSelect={fake.onSelectPage}
               onRequest={fake.onRequestThumbnail}
@@ -210,6 +218,8 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
               onGetThumbnail={fake.getThumbnail}
               onSubscribeActivePage={fake.subscribeActivePage}
               onGetIsActivePage={getIsActiveSpy}
+              onSubscribeDirtyPage={fake.subscribeDirtyPage}
+              onGetIsDirtyPage={fake.getIsDirtyPage}
             />
           ))}
         </>
@@ -240,7 +250,6 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
     let lastItemContent: ((i: number) => React.ReactElement) | null = null;
     function Probe({
       currentPageIndex,
-      document,
       loadEpoch,
       onSelectPage,
       onRequestThumbnail,
@@ -248,10 +257,13 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
       onGetThumbnail,
       onSubscribeActivePage,
       onGetIsActivePage,
+      onSubscribeDirtyPage,
+      onGetIsDirtyPage,
     }: any) {
       const itemContent = React.useCallback(
         (i: number) => <div data-index={i} />,
-        [document, loadEpoch, onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail, onSubscribeActivePage, onGetIsActivePage],
+        // ThumbnailPanel 本体と同じ列。document は依存に含めない (issue #173)。
+        [loadEpoch, onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail, onSubscribeActivePage, onGetIsActivePage, onSubscribeDirtyPage, onGetIsDirtyPage],
       );
       lastItemContent = itemContent;
       void currentPageIndex;
@@ -259,7 +271,6 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
     }
 
     const stableDeps = {
-      document: { totalPages: 5, pages: new Map() },
       loadEpoch: 0,
       onSelectPage: () => {},
       onRequestThumbnail: () => {},
@@ -267,6 +278,8 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
       onGetThumbnail: () => undefined,
       onSubscribeActivePage: () => () => {},
       onGetIsActivePage: () => false,
+      onSubscribeDirtyPage: () => () => {},
+      onGetIsDirtyPage: () => false,
     };
 
     const { rerender } = render(<Probe currentPageIndex={0} {...stableDeps} />);
@@ -276,6 +289,56 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
     const second = lastItemContent;
 
     // currentPageIndex を依存に含めていないため identity 保持
+    expect(second).toBe(first);
+  });
+
+  it('issue #173: document 更新 (updatePageData) で itemContent identity が変わらない', () => {
+    // 旧実装は useCallback 依存に `document` を含めていたため、updatePageData で
+    // 新しい document オブジェクトが生まれる度 itemContent が再生成され、
+    // Virtuoso 可視範囲の全 ThumbnailItemNode が unmount/remount → サムネが一瞬消えた。
+    // dirty も pub/sub になったので document を依存から外せる。
+    let lastItemContent: ((i: number) => React.ReactElement) | null = null;
+    function Probe({
+      doc,
+      loadEpoch,
+      onSelectPage,
+      onRequestThumbnail,
+      onSubscribeThumbnail,
+      onGetThumbnail,
+      onSubscribeActivePage,
+      onGetIsActivePage,
+      onSubscribeDirtyPage,
+      onGetIsDirtyPage,
+    }: any) {
+      const itemContent = React.useCallback(
+        (i: number) => <div data-index={i} />,
+        [loadEpoch, onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail, onSubscribeActivePage, onGetIsActivePage, onSubscribeDirtyPage, onGetIsDirtyPage],
+      );
+      lastItemContent = itemContent;
+      void doc;
+      return null;
+    }
+
+    const stableDeps = {
+      loadEpoch: 0,
+      onSelectPage: () => {},
+      onRequestThumbnail: () => {},
+      onSubscribeThumbnail: () => () => {},
+      onGetThumbnail: () => undefined,
+      onSubscribeActivePage: () => () => {},
+      onGetIsActivePage: () => false,
+      onSubscribeDirtyPage: () => () => {},
+      onGetIsDirtyPage: () => false,
+    };
+
+    const doc1 = { totalPages: 5, pages: new Map() };
+    const doc2 = { totalPages: 5, pages: new Map() }; // updatePageData 後の新参照
+    const { rerender } = render(<Probe doc={doc1} {...stableDeps} />);
+    const first = lastItemContent;
+
+    rerender(<Probe doc={doc2} {...stableDeps} />);
+    const second = lastItemContent;
+
     expect(second).toBe(first);
   });
 });
