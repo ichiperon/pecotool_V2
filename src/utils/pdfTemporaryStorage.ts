@@ -24,12 +24,15 @@ type CachedPageSummary = {
   bytes: number;
 };
 
+// JSON.stringify は大規模 textBlocks で実測 10ms 級になり setCachedPage の
+// 書き込み毎に走る。textBlocks 1 件 ≒ 256byte (text + bbox + 属性) + メタ overhead
+// として推定する近似値で代替する。pruneCachedPages の閾値比較は近似値同士の
+// 比較なので絶対精度より一貫した単位の方が重要。
+const HEURISTIC_BYTES_PER_TEXT_BLOCK = 256;
+const HEURISTIC_RECORD_OVERHEAD = 1024;
 function estimateCachedPageBytes(record: CachedPageRecord): number {
-  try {
-    return JSON.stringify(record).length * 2;
-  } catch {
-    return 0;
-  }
+  const blockCount = Array.isArray(record.textBlocks) ? record.textBlocks.length : 0;
+  return blockCount * HEURISTIC_BYTES_PER_TEXT_BLOCK + HEURISTIC_RECORD_OVERHEAD;
 }
 
 function stripCacheMetadata(record: CachedPageRecord): PageData {
