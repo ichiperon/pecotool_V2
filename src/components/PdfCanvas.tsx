@@ -8,13 +8,12 @@ import {
   selectIsDrawingMode,
   selectIsSplitMode,
   selectCurrentPageTextBlocks,
-  selectDragPreviewBboxes,
 } from "../store/pecoStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
 import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
 import { useBlockDragResize } from "../hooks/useBlockDragResize";
-import type { TextBlock } from "../types";
+import type { TextBlock, BoundingBox } from "../types";
 
 interface PdfCanvasProps {
   pageIndex: number;
@@ -149,7 +148,13 @@ export function PdfCanvas({
   const pushAction = usePecoStore((s) => s.pushAction);
   const setDragPreviewBboxes = usePecoStore((s) => s.setDragPreviewBboxes);
   // issue #91: ドラッグ中のみ非 null。動的層 overlay で選択 BB の bbox を上書きする。
-  const dragPreviewBboxes = usePecoStore(selectDragPreviewBboxes);
+  // issue #172: usePecoStore(selectDragPreviewBboxes) で購読すると毎フレーム
+  // setDragPreviewBboxes 毎に PdfCanvas 全体が再レンダされ、useEffect 再走の
+  // コストが BB 500+ で顕著になる。ref に同期して React 再レンダを抑え、
+  // 値変化時は overlay の RAF redraw だけを直接スケジュールする。
+  const dragPreviewBboxesRef = useRef<Map<string, BoundingBox> | null>(
+    usePecoStore.getState().dragPreviewBboxes,
+  );
 
   // issue #106: render 時点の `document` state を closure 保持すると、
   // 同一 React tick 内で updatePageData() 直後に再度呼んだ getPageData が
@@ -321,6 +326,8 @@ export function PdfCanvas({
         // 選択/drag preview 対象だけ描画する。
         // issue #91: ドラッグ中は dragPreviewBboxes に動いた bbox が入っているので
         // それを優先的に参照する (textBlocks 側は finishDragResize まで変わらない)。
+        // issue #172: ref から最新値を読み出す (購読は別 effect で同期)。
+        const dragPreviewBboxes = dragPreviewBboxesRef.current;
         const dynamicBlockIds = new Set(selectedIds);
         for (const id of dragPreviewBboxes?.keys() ?? []) {
           dynamicBlockIds.add(id);
@@ -487,9 +494,28 @@ export function PdfCanvas({
     drag.isAltDragging,
     drag.altDragStart,
     drag.altDragEnd,
-    // issue #91: ドラッグ中の preview bbox 更新で動的層を再描画
-    dragPreviewBboxes,
+    // issue #172: dragPreviewBboxes は ref 経由で読み、購読 effect で
+    // RAF redraw を直接スケジュールする。ここでは依存に含めないことで
+    // BB 500+ 環境での毎フレーム再 render を回避する。
   ]);
+
+  // issue #172: dragPreviewBboxes をストア subscribe で ref に同期し、
+  // 変化時は renderOverlaysRef 経由で動的層だけを RAF redraw する。
+  // この経路では React 再 render が走らないため、ドラッグ中の毎フレーム
+  // re-render → useEffect 再走の山が消える。
+  useEffect(() => {
+    return usePecoStore.subscribe((state, prevState) => {
+      if (state.dragPreviewBboxes === prevState.dragPreviewBboxes) return;
+      dragPreviewBboxesRef.current = state.dragPreviewBboxes;
+      const render = renderOverlaysRef.current;
+      if (!render) return;
+      if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
+      overlayRafRef.current = requestAnimationFrame(() => {
+        render();
+        overlayRafRef.current = null;
+      });
+    });
+  }, []);
 
   // selectedIds が変化したとき、静的層は selectedIdsRef を介して読むだけで
   // 再走しない。しかし「新たに非選択になった BB」を静的層に書き戻す必要があるため、
