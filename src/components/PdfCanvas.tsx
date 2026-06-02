@@ -671,50 +671,19 @@ export function PdfCanvas({
       />
       {loadError && !pdfPage && (
         <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
-            minHeight: "200px",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: "rgba(30, 41, 59, 0.85)",
-            zIndex: 10,
-            gap: "12px",
-          }}
+          className="pdf-load-error-overlay"
+          role="alert"
         >
-          <span
-            style={{
-              color: "#94a3b8",
-              fontSize: "14px",
-            }}
-          >
+          <span className="pdf-load-error-message">
             ページの表示に失敗しました
           </span>
           <button
             type="button"
+            className="pdf-load-error-retry-btn"
+            aria-label="ページの読み込みを再試行する"
             onClick={() => {
               setLoadError(false);
               retry();
-            }}
-            style={{
-              padding: "6px 16px",
-              backgroundColor: "#334155",
-              color: "#e2e8f0",
-              border: "1px solid #475569",
-              borderRadius: "4px",
-              cursor: "pointer",
-              fontSize: "13px",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = "#475569";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = "#334155";
             }}
           >
             再試行
