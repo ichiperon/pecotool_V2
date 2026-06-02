@@ -1313,3 +1313,209 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
     expect(s.isDirty).toBe(true);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// executeSaveAs — cancel / reject パス (test gap fill wave 2)
+// ────────────────────────────────────────────────────────────────────────
+
+describe('useFileOperations executeSaveAs — cancel / error paths (wave 2)', () => {
+  function setupSavableDoc(filePath: string): PecoDocument {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'blk', text: 'HELLO', isDirty: true }],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true, undoStack: [], redoStack: [] });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  // ── U-FOp-01: ユーザー cancel (savePath=null) → no-op ────────────────
+
+  it('U-FOp-01: user cancels save dialog (path=null) → executeSaveAs is a no-op', async () => {
+    setupSavableDoc('/saveas/cancel.pdf');
+
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    // save ダイアログが null を返したら toast も呼ばれず、savePDF も呼ばれない
+    expect(savePDF).not.toHaveBeenCalled();
+    // store の filePath は変わっていない
+    expect(usePecoStore.getState().document!.filePath).toBe('/saveas/cancel.pdf');
+    // isDirty も変わらない
+    expect(usePecoStore.getState().isDirty).toBe(true);
+  });
+
+  // ── U-FOp-02: document が null → executeSaveAs は何もしない ──────────
+
+  it('U-FOp-02: document=null → executeSaveAs returns without calling savePDF', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  // ── U-FOp-03: isSaving=true → executeSaveAs は toast を出して no-op ──
+
+  it('U-FOp-03: isSavingRef.current=true → executeSaveAs shows toast and returns early', async () => {
+    setupSavableDoc('/saveas/locked.pdf');
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    // handleSave を先に開始して isSavingRef=true を作る
+    let resolveSavePdf!: (bytes: Uint8Array) => void;
+    const hangSave = new Promise<Uint8Array>((resolve) => { resolveSavePdf = resolve; });
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(hangSave);
+
+    // handleSave を非同期に開始しておく
+    const saveTask = result.current.handleSave();
+
+    // savePDF が呼ばれるまで待機 → isSavingRef=true になっている
+    await vi.waitFor(() => {
+      expect(savePDF).toHaveBeenCalled();
+    });
+
+    // isSaving 中に executeSaveAs を呼ぶ
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    // isSaving 中のトーストが出ている
+    const toastCalls = showToast.mock.calls.map(([msg]: [string]) => msg);
+    expect(toastCalls.some((m) => m.includes('保存処理が進行中'))).toBe(true);
+
+    // 後片付け: hang を解放する
+    resolveSavePdf(new Uint8Array([9, 9, 9]));
+    await saveTask;
+  });
+
+  // ── U-FOp-04: writeFile reject (EACCES) → error toast が出る ─────────
+
+  it('U-FOp-04: writeFile (replace_pdf_file) throws on SaveAs → error toast shown', async () => {
+    setupSavableDoc('/saveas/eacces-src.pdf');
+
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce('/saveas/eacces-dst.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') {
+        return Promise.reject(new Error('rename failed: EACCES: permission denied'));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    // エラートーストが出ている
+    const errorCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] === true);
+    expect(errorCalls.length).toBeGreaterThan(0);
+    // 「名前を付けて保存に失敗」メッセージ
+    const lastErrorMsg = String(errorCalls[errorCalls.length - 1][0]);
+    expect(lastErrorMsg).toMatch(/名前を付けて保存に失敗/);
+  });
+
+  // ── U-FOp-05: 正常 SaveAs → success toast + filePath 更新 ──────────
+
+  it('U-FOp-05: successful SaveAs → success toast and filePath updated in store', async () => {
+    setupSavableDoc('/saveas/src.pdf');
+
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce('/saveas/dst.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation(() => Promise.resolve(undefined));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    // 成功トーストが出ている
+    const successCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] !== true);
+    expect(successCalls.length).toBeGreaterThan(0);
+    const lastSuccessMsg = String(successCalls[successCalls.length - 1][0]);
+    expect(lastSuccessMsg).toMatch(/名前を付けて保存/);
+
+    // filePath が新しいパスに更新されている
+    expect(usePecoStore.getState().document!.filePath).toBe('/saveas/dst.pdf');
+  });
+
+  // ── U-FOp-06: onRequestSaveDialog 指定時の EACCES フォールバック ────────
+
+  it('U-FOp-06: onRequestSaveDialog callback is invoked when EACCES error occurs during handleSave', async () => {
+    setupSavableDoc('/saveas/dialog-cb.pdf');
+
+    const onRequestSaveDialog = vi.fn();
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') {
+        return Promise.reject(new Error('Access is denied. (os error 5)'));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(
+        showToast,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        onRequestSaveDialog,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // エラートーストが出ている
+    const errorCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] === true);
+    expect(errorCalls.length).toBeGreaterThan(0);
+
+    // EACCES 系エラーのとき action.onClick で onRequestSaveDialog が呼ばれる
+    const lastErrorCall = errorCalls[errorCalls.length - 1] as unknown[];
+    const actionObj = lastErrorCall[2] as { label: string; onClick: () => void } | undefined;
+    expect(actionObj).toBeDefined();
+    expect(actionObj!.label).toBe('別名で保存');
+
+    // onClick を呼ぶと onRequestSaveDialog が起動される
+    actionObj!.onClick();
+    expect(onRequestSaveDialog).toHaveBeenCalledTimes(1);
+  });
+});
