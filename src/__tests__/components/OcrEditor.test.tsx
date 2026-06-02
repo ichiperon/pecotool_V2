@@ -209,6 +209,9 @@ beforeEach(() => {
     undoStack: [],
     redoStack: [],
     isDirty: false,
+    // issue #196: searchTerm を store 化したのでテスト間でリセット必須
+    searchTerm: '',
+    searchHitIndex: -1,
   } as any)
 })
 
