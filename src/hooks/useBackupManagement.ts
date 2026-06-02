@@ -1,18 +1,29 @@
 import { useState } from 'react';
+import type { RefObject } from 'react';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { useAutoBackup, PendingBackup } from './useAutoBackup';
 
 interface UseBackupManagementOptions {
   showToast: (message: string, isError?: boolean) => void;
   handleOpen: (path: string) => Promise<boolean | void>;
+  /**
+   * issue #137: 手動保存中フラグ。useFileOperations の isSavingRef を渡して、
+   * 自動バックアップが手動保存と並走しないようガードする。
+   */
+  externalIsSavingRef?: RefObject<boolean>;
 }
 
 // バックアップ復元ダイアログ周りの state とハンドラを集約
-export function useBackupManagement({ showToast, handleOpen }: UseBackupManagementOptions) {
+export function useBackupManagement({ showToast, handleOpen, externalIsSavingRef }: UseBackupManagementOptions) {
   const [pendingBackups, setPendingBackups] = useState<PendingBackup[]>([]);
   const [processingBackupPath, setProcessingBackupPath] = useState<string | null>(null);
 
-  const { clearBackup, loadBackupData } = useAutoBackup((backups) => setPendingBackups(backups));
+  const { clearBackup, loadBackupData } = useAutoBackup(
+    (backups) => setPendingBackups(backups),
+    undefined,
+    undefined,
+    externalIsSavingRef,
+  );
 
   const handleRestoreBackup = async (backup: PendingBackup) => {
     if (processingBackupPath) return;

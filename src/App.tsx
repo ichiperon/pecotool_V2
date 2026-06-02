@@ -138,7 +138,7 @@ function App() {
   });
   // #102: isOcrRunning の最新値を ref 同期 (handleOpen 内ガードで参照)。
   isOcrRunningRef.current = isOcrRunning;
-  const { handleOpen, handleSave, executeSaveAs } = useFileOperations(
+  const { handleOpen, handleSave, executeSaveAs, isSavingRef: fileOpsIsSavingRef } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
     (doc) => { checkAndPromptOcrZero(doc); },
     isOcrRunningRef,
@@ -154,7 +154,7 @@ function App() {
     processingBackupPath,
     handleRestoreBackup,
     handleDiscardBackup,
-  } = useBackupManagement({ showToast, handleOpen });
+  } = useBackupManagement({ showToast, handleOpen, externalIsSavingRef: fileOpsIsSavingRef });
 
   const {
     isLoadingPage,

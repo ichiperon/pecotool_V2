@@ -754,5 +754,9 @@ export function useFileOperations(
   // ref へ最新参照を入れる (関数定義順の循環参照を回避する目的)。
   executeSaveAsRef.current = executeSaveAs;
 
-  return { handleOpen, handleSave, executeSaveAs };
+  // issue #137: useAutoBackup から保存中ガードに使う共有 ref。
+  // 旧実装は useAutoBackup 内で独自の isSavingRef を持っていたため、
+  // useFileOperations の保存中に autoBackup の performBackup が並走しうる
+  // (Rust 側の writeFileAtomically と save_backup が同一ファイルを取り合う) 状態だった。
+  return { handleOpen, handleSave, executeSaveAs, isSavingRef };
 }

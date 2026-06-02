@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import type { RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
@@ -95,6 +96,12 @@ export function useAutoBackup(
   onBackupsFound: (backups: PendingBackup[]) => void,
   intervalMs = DEFAULT_INTERVAL_MS,
   quietPeriodMs = DEFAULT_QUIET_PERIOD_MS,
+  /**
+   * issue #137: useFileOperations の保存中フラグ。手動保存と auto backup が
+   * 同一ファイルへ並走するのを防ぐため、共有 ref を受け取って performBackup
+   * 冒頭でガードする。未指定時は従来挙動 (auto backup のみのローカルガード)。
+   */
+  externalIsSavingRef?: RefObject<boolean>,
 ) {
   const isSavingRef = useRef(false);
   // 直近編集時刻 (epoch ms)。store の document.pages 参照が変わったタイミングで更新する。
@@ -138,6 +145,8 @@ export function useAutoBackup(
   /** ダーティページを収集してバックアップファイルへ書き出す */
   const performBackup = useCallback(async () => {
     if (isSavingRef.current) return;
+    // issue #137: 手動保存中は同一ファイルへの並走を避けてスキップ
+    if (externalIsSavingRef?.current) return;
 
     const state = usePecoStore.getState();
     const { document, isDirty } = state;
@@ -193,7 +202,7 @@ export function useAutoBackup(
     } finally {
       isSavingRef.current = false;
     }
-  }, [quietPeriodMs]);
+  }, [quietPeriodMs, externalIsSavingRef]);
 
   // 定期実行タイマーの設定
   useEffect(() => {
