@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { X, RotateCcw, Trash2 } from 'lucide-react';
 import type { PendingBackup } from '../hooks/useAutoBackup';
 import { Modal, useModalTitleId } from './ui/Modal';
@@ -38,6 +39,8 @@ export function BackupRestoreDialog({
   const titleId = useModalTitleId();
   // Issue #42: 復元 or 破棄処理が進行中なら、Esc / backdrop / ✕ どれでも閉じさせない
   const isAnyProcessing = processingFilePath != null;
+  // Issue #169: 破棄ボタンは 2 段階確認方式。同時に確認状態に入れるのは 1 つのバックアップのみ。
+  const [confirmDiscardPath, setConfirmDiscardPath] = useState<string | null>(null);
 
   return (
     <Modal
@@ -105,6 +108,7 @@ export function BackupRestoreDialog({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {backups.map((backup) => {
               const isProcessing = processingFilePath === backup.file_path;
+              const isConfirmingDiscard = confirmDiscardPath === backup.file_path;
               return (
                 <div key={backup.file_path} style={{
                   background: '#181825',
@@ -121,7 +125,7 @@ export function BackupRestoreDialog({
                     バックアップ日時: {formatTimestamp(backup.timestamp)}
                   </div>
 
-                  <div style={{ display: 'flex', gap: '8px' }}>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <button
                       onClick={() => onRestore(backup)}
                       disabled={isAnyProcessing}
@@ -137,21 +141,70 @@ export function BackupRestoreDialog({
                       <RotateCcw size={13} />
                       {isProcessing ? '復元中...' : '復元する'}
                     </button>
-                    <button
-                      onClick={() => onDiscard(backup)}
-                      disabled={isAnyProcessing}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: '6px',
-                        padding: '6px 12px', border: '1px solid #45475a', borderRadius: '4px',
-                        background: 'transparent', color: '#f38ba8',
-                        fontSize: '12px',
-                        cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
-                        opacity: isAnyProcessing ? 0.6 : 1,
-                      }}
-                    >
-                      <Trash2 size={13} />
-                      破棄する
-                    </button>
+                    {isConfirmingDiscard ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmDiscardPath(null);
+                          onDiscard(backup);
+                        }}
+                        disabled={isAnyProcessing}
+                        aria-pressed="true"
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '6px',
+                          padding: '6px 12px',
+                          border: '1px solid #f38ba8',
+                          borderRadius: '4px',
+                          background: '#f38ba8', color: '#1e1e2e',
+                          fontSize: '12px', fontWeight: 600,
+                          cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
+                          opacity: isAnyProcessing ? 0.6 : 1,
+                        }}
+                      >
+                        <Trash2 size={13} />
+                        本当に破棄する
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDiscardPath(backup.file_path)}
+                        disabled={isAnyProcessing}
+                        aria-pressed="false"
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '6px',
+                          padding: '6px 12px',
+                          border: '1px solid #45475a',
+                          borderRadius: '4px',
+                          background: 'transparent', color: '#f38ba8',
+                          fontSize: '12px',
+                          cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
+                          opacity: isAnyProcessing ? 0.6 : 1,
+                        }}
+                      >
+                        <Trash2 size={13} />
+                        破棄する
+                      </button>
+                    )}
+                    {isConfirmingDiscard && (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDiscardPath(null)}
+                        disabled={isAnyProcessing}
+                        style={{
+                          padding: '6px 10px', border: '1px solid #45475a', borderRadius: '4px',
+                          background: 'transparent', color: '#a6adc8',
+                          fontSize: '12px',
+                          cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        キャンセル
+                      </button>
+                    )}
+                    {isConfirmingDiscard && (
+                      <span style={{ fontSize: '11px', color: '#f9e2af', marginLeft: '4px' }}>
+                        もう一度押すと破棄します
+                      </span>
+                    )}
                   </div>
                 </div>
               );
