@@ -140,4 +140,82 @@ describe('extractPagesToNewPdf', () => {
 
     expect(saveSpy).toHaveBeenCalledWith({ useObjectStreams: false });
   });
+
+  // ── wave 5 additions ────────────────────────────────────────────────────
+
+  it('PDFDocument.load is called with throwOnInvalidObject:false (lenient parse)', async () => {
+    await extractPagesToNewPdf(makeBytes(3), [0]);
+
+    expect(m.pdfLoad).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      expect.objectContaining({ throwOnInvalidObject: false }),
+    );
+  });
+
+  it('PDFDocument.load is called with updateMetadata:false (preserve Catalog metadata)', async () => {
+    await extractPagesToNewPdf(makeBytes(3), [0]);
+
+    expect(m.pdfLoad).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      expect.objectContaining({ updateMetadata: false }),
+    );
+  });
+
+  it('error message for out-of-range index includes the actual index and valid range', async () => {
+    setSrcPageCount(2);
+    let errorMsg = '';
+    try {
+      await extractPagesToNewPdf(makeBytes(2), [0, 5]);
+    } catch (e) {
+      errorMsg = (e as Error).message;
+    }
+
+    // Must mention the bad index and the valid upper bound
+    expect(errorMsg).toContain('5');
+    expect(errorMsg).toContain('out of range');
+  });
+
+  it('error message for negative index includes the negative value', async () => {
+    let errorMsg = '';
+    try {
+      await extractPagesToNewPdf(makeBytes(3), [-3]);
+    } catch (e) {
+      errorMsg = (e as Error).message;
+    }
+
+    expect(errorMsg).toContain('-3');
+    expect(errorMsg).toContain('out of range');
+  });
+
+  it('all-pages extract: dst page count equals src page count', async () => {
+    setSrcPageCount(4);
+    await extractPagesToNewPdf(makeBytes(4), [0, 1, 2, 3]);
+
+    expect(m.dstDocInstance._pages).toHaveLength(4);
+  });
+
+  it('single page extract: dst has exactly 1 page', async () => {
+    setSrcPageCount(5);
+    m.dstDocInstance._pages.length = 0;
+    await extractPagesToNewPdf(makeBytes(5), [3]);
+
+    expect(m.dstDocInstance._pages).toHaveLength(1);
+    expect(m.dstDocInstance._pages[0]).toMatchObject({ _id: 3 });
+  });
+
+  it('PDFDocument.create is always called to build a fresh dst doc', async () => {
+    await extractPagesToNewPdf(makeBytes(3), [1]);
+
+    expect(m.pdfCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns Uint8Array that starts with %PDF magic bytes', async () => {
+    const bytes = await extractPagesToNewPdf(makeBytes(3), [0]);
+
+    // The mock save() returns [0x25, 0x50, 0x44, 0x46] = "%PDF"
+    expect(bytes[0]).toBe(0x25); // %
+    expect(bytes[1]).toBe(0x50); // P
+    expect(bytes[2]).toBe(0x44); // D
+    expect(bytes[3]).toBe(0x46); // F
+  });
 });
