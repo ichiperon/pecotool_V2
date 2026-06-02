@@ -307,11 +307,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     // afterOrder に残ったページの元 pageIndex を新しい連番 (0-based) に再マッピング
     // 新しい pages Map: key=新pageIndex, value=元ページデータ (pageIndex フィールドを更新)
+    // perf(#221): pageIndex が変わらないページは shallow copy を避けてオブジェクト参照を再利用する
     const afterPages = new Map<number, PageData>();
     afterOrder.forEach((origPageIndex, newIdx) => {
       const page = beforePages.get(origPageIndex);
       if (page) {
-        afterPages.set(newIdx, { ...page, pageIndex: newIdx });
+        afterPages.set(newIdx, page.pageIndex === newIdx ? page : { ...page, pageIndex: newIdx });
       }
     });
 
@@ -413,11 +414,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     newOrder.splice(toDisplayIndex, 0, moved);
 
     // pages Map も新しいインデックスで再構築
+    // perf(#221): pageIndex が変わらないページは shallow copy を避けてオブジェクト参照を再利用する
     const newPages = new Map<number, PageData>();
     newOrder.forEach((origPageIndex, newIdx) => {
       const page = state.document!.pages.get(origPageIndex);
       if (page) {
-        newPages.set(newIdx, { ...page, pageIndex: newIdx });
+        newPages.set(newIdx, page.pageIndex === newIdx ? page : { ...page, pageIndex: newIdx });
       }
     });
 
