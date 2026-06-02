@@ -86,7 +86,8 @@ export function BackupRestoreDialog({
               onClose();
             }}
             disabled={isAnyProcessing}
-            aria-label="閉じる"
+            aria-label="閉じて次回起動時に再表示する"
+            className="backup-restore-close-btn"
             style={{
               background: 'none', border: 'none',
               cursor: isAnyProcessing ? 'not-allowed' : 'pointer',
@@ -102,7 +103,9 @@ export function BackupRestoreDialog({
         {/* 本文 */}
         <div style={{ padding: '16px' }}>
           <p style={{ margin: '0 0 14px', fontSize: '13px', color: '#a6adc8', lineHeight: 1.6 }}>
-            前回の終了時に保存されなかった編集内容が見つかりました。復元するファイルを選択してください。
+            前回の終了時に保存されなかった編集内容が見つかりました。
+            <br />
+            「復元する」「破棄する」または ✕（次回起動時に再表示）から操作を選んでください。
           </p>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
