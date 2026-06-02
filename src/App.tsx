@@ -227,6 +227,8 @@ function App() {
     savePdf: handleSave,
     // issue #243: sidecar save routes through handleSaveTo so OCR data is preserved
     savePdfAs: handleSaveTo,
+    // issue #252: provide document snapshot without store direct access in hook
+    getDocumentSnapshot: () => usePecoStore.getState().document,
     showToast,
   });
 

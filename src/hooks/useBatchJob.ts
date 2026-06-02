@@ -13,7 +13,6 @@ import { useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
-import { usePecoStore } from '../store/pecoStore';
 import { exportTextFromDocument } from '../utils/textExport';
 
 const STORAGE_KEY = 'peco-batch-job-v1';
@@ -119,6 +118,11 @@ export interface UseBatchJobCallbacks {
    * instead of writing raw pdfjs bytes (which would silently drop textBlocks).
    */
   savePdfAs?: (targetPath: string) => Promise<boolean>;
+  /**
+   * issue #252: Return a snapshot of the current PecoDocument without accessing
+   * the store directly. Decouples executeLoop from usePecoStore internals.
+   */
+  getDocumentSnapshot: () => import('../types').PecoDocument | null;
   /** Show a toast notification. */
   showToast: (msg: string, isError?: boolean) => void;
 }
@@ -151,13 +155,25 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
   // ── Internal execution loop ─────────────────────────────────────────────
 
   const executeLoop = useCallback(
+    // issue #248: callers (startJob / resumeJob) always pass the latest BatchJob snapshot
+    // as the `job` argument, so the loop never reads a stale files list.
+    // resumeJob constructs `resumable` (with processing→pending reset) before calling here.
     async (job: BatchJob): Promise<void> => {
       if (isRunningRef.current) return;
       isRunningRef.current = true;
       setIsRunning(true);
       cancelledRef.current = false;
 
+      // issue #267: only persist on finalize / cancellation, not on every per-file update.
+      // State-only update (no localStorage write on every iteration).
       const update = (updater: (j: BatchJob) => BatchJob) => {
+        setCurrentJob((prev) => {
+          if (!prev) return prev;
+          return updater(prev);
+        });
+      };
+      // Persist-aware update: used only at finalize or when capturing mid-run state for resume.
+      const updateAndPersist = (updater: (j: BatchJob) => BatchJob) => {
         setCurrentJob((prev) => {
           if (!prev) return prev;
           const next = updater(prev);
@@ -196,17 +212,18 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
               throw new Error('PDFを開けませんでした');
             }
 
-            // 2. Get page count from store
-            const doc = usePecoStore.getState().document;
+            // 2. Get page count via callback (issue #252: no store direct access)
+            const doc = callbacks.getDocumentSnapshot();
             if (!doc || doc.filePath !== filePath) {
               throw new Error('PDFのロードに失敗しました');
             }
             pageCount = doc.totalPages;
 
             // 3. Count pages with existing OCR errors before OCR
-            const preOcrErrorCount = Array.from(doc.pages.values()).filter(
-              (p) => (p.textBlocks?.length ?? 0) === 0,
-            ).length;
+            let preOcrErrorCount = 0;
+            for (const p of doc.pages.values()) {
+              if ((p.textBlocks?.length ?? 0) === 0) preOcrErrorCount++;
+            }
 
             // 4. Run OCR all pages
             const ocrOk = await callbacks.runOcrAllPagesSilent();
@@ -217,24 +234,29 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
             }
 
             // 5. Measure OCR error count (pages still empty after OCR)
-            const postDoc = usePecoStore.getState().document;
+            // issue #252: use callback instead of store direct access
+            // issue #268: iterate pages.values() directly to avoid intermediate array
+            const postDoc = callbacks.getDocumentSnapshot();
             if (postDoc && postDoc.filePath === filePath) {
-              ocrErrorCount = Array.from(postDoc.pages.values()).filter(
-                (p) => (p.textBlocks?.length ?? 0) === 0,
-              ).length;
+              let postEmptyCount = 0;
+              for (const p of postDoc.pages.values()) {
+                if ((p.textBlocks?.length ?? 0) === 0) postEmptyCount++;
+              }
               // Clamp: only count pages that were newly empty (not pre-existing empties)
-              ocrErrorCount = Math.max(0, ocrErrorCount - preOcrErrorCount);
+              ocrErrorCount = Math.max(0, postEmptyCount - preOcrErrorCount);
             }
 
             // 6. Save PDF
+            // issue #258: savePath is intentionally absent for overwrite mode —
+            // the document already has the correct filePath and savePdf() uses it.
+            // For sidecar mode, sidecarPath is computed here and scoped to this branch.
             let saveOk: boolean;
             if (job.saveMode === 'overwrite') {
+              // Overwrite: save back to the original filePath (no explicit path arg needed)
               saveOk = await callbacks.savePdf();
             } else {
-              // issue #243: sidecar mode routes through savePdfAs callback so that
-              // OCR results (textBlocks) are included in the written PDF.
-              // The old saveSidecar helper wrote raw pdfjs bytes and silently
-              // dropped all OCR data.
+              // Sidecar: issue #243: routes through savePdfAs so OCR textBlocks are preserved.
+              // The old saveSidecar helper wrote raw pdfjs bytes and silently dropped OCR data.
               const stem = fileName.replace(/\.pdf$/i, '');
               const sidecarPath = await join(job.outputDir, `${stem}.peco.pdf`);
               if (callbacks.savePdfAs) {
@@ -250,14 +272,16 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
             }
 
             // 7. Export text (if requested)
+            // issue #252: use callback instead of store direct access
+            // issue #259: exportFormat is narrowed to Exclude<ExportFormat, 'none'> — no cast needed
             if (job.exportFormat !== 'none') {
-              const exportDoc = usePecoStore.getState().document;
+              const exportDoc = callbacks.getDocumentSnapshot();
               if (exportDoc && exportDoc.filePath === filePath) {
                 const stem = fileName.replace(/\.pdf$/i, '');
                 const ext = job.exportFormat;
                 const exportFileName = `${stem}.ocr.${ext}`;
                 exportPath = await join(job.outputDir, exportFileName);
-                const text = exportTextFromDocument(exportDoc, job.exportFormat as 'txt' | 'md' | 'json' | 'csv');
+                const text = exportTextFromDocument(exportDoc, job.exportFormat);
                 await writeTextFile(exportPath, text);
               }
             }
@@ -293,10 +317,10 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
           }
         } // end for loop
 
-        // Finalize
+        // Finalize: persist here (issue #267: only finalize and cancellation trigger localStorage)
         const wasCancelled = cancelledRef.current;
         let finalJob: BatchJob | null = null;
-        update((j) => {
+        updateAndPersist((j) => {
           const next: BatchJob = { ...j, finishedAt: Date.now(), cancelled: wasCancelled };
           finalJob = next;
           return next;

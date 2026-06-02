@@ -64,6 +64,9 @@ function makeCallbacks(overrides: Partial<UseBatchJobCallbacks> = {}): UseBatchJ
     runOcrAllPagesSilent: vi.fn().mockResolvedValue(true),
     savePdf: vi.fn().mockResolvedValue(true),
     savePdfAs: vi.fn().mockResolvedValue(true),
+    // issue #252: getDocumentSnapshot delegates to the mocked store
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    getDocumentSnapshot: vi.fn(() => (usePecoStore.getState() as any).document ?? null),
     showToast: vi.fn(),
     ...overrides,
   };
