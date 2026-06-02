@@ -201,8 +201,11 @@ let globalSharedPdfProxy: { filePath: string, promise: Promise<pdfjsLib.PDFDocum
 // 単調増加カウンタ：ファイル切り替え時に古い非同期処理を識別して無視するために使う
 let globalLoadId = 0;
 
-// LRUキャッシュ：挿入順序を利用してMapで最大50ページ分を保持
-const PAGE_PROXY_CACHE_LIMIT = 50;
+// LRUキャッシュ：挿入順序を利用してMapで最大30ページ分を保持。
+// page.cleanup() は pdfjs の表層 (operatorList 等) しか解放せず、_transport の
+// 内部 PageProxy / FontFaceObject キャッシュは proxy alive な間保持される。
+// 上限を 50 → 30 に下げて、pdfjs 内部キャッシュの肥大を緩和する (issue #180)。
+const PAGE_PROXY_CACHE_LIMIT = 30;
 const pageProxyCache = new Map<string, pdfjsLib.PDFPageProxy>();
 
 function evictPageProxyCache() {
