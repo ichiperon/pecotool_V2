@@ -427,6 +427,22 @@ function App() {
     },
   });
 
+  // issue #163: OCR 実行中の Esc キーで cancelOcr。
+  // overlay 表示中はそれ以外の入力路がほぼ無効になるため、capture フェーズで
+  // どこからでも拾えるようにする (input にフォーカスがあっても効く)。
+  useEffect(() => {
+    if (!isOcrRunning) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        cancelOcr();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [isOcrRunning, cancelOcr]);
+
   // issue #74 / CloseGuard: isSaving の最新値を ref に同期。
   // useTauriCloseGuard と F5 ガードに渡す前に宣言する必要がある (TDZ 回避)。
   const isSavingRef = useRef(isSaving);
@@ -688,6 +704,16 @@ function App() {
                     : `OCR処理中... (${ocrProgress.current}/${ocrProgress.total})`
                   : 'OCR処理中...'}
               </div>
+              {/* issue #163: overlay 内に大きなキャンセル動線を配置。
+                  従来は Toolbar の小さな X だけで気付きにくく、Esc も効かなかった。 */}
+              <button
+                type="button"
+                className="ocr-cancel-button"
+                onClick={cancelOcr}
+                aria-label="OCR処理をキャンセル"
+              >
+                キャンセル (Esc)
+              </button>
             </div>
           )}
         </section>

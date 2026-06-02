@@ -1645,6 +1645,32 @@ body, #root {
   color: #e5e7eb;
 }
 
+/* issue #163: OCR 実行中オーバーレイ内のキャンセル動線。
+   overlay は pointer-events: all なので button は素直にクリック可能。
+   親の cursor: not-allowed を override してポインタを正しく表示する。 */
+.ocr-cancel-button {
+  margin-top: 16px;
+  padding: 8px 20px;
+  background: #dc2626;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  transition: background 0.15s;
+}
+
+.ocr-cancel-button:hover {
+  background: #b91c1c;
+}
+
+.ocr-cancel-button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
 .thumbnails-panel {
   position: relative;
 }
