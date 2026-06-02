@@ -256,6 +256,13 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   // issue #118: 保存後にディスク上の PDF が差し替わった際、pdfjs proxy の再取得と
   // ページ画像の再 render をトリガーするためだけに documentEpoch を進める。
   // document 本体・pages・currentPageIndex・zoom・undo/redo・isDirty は不変。
+  //
+  // issue #149: bumpDocumentEpoch 自体は非同期 IDB save (pendingIdbSaves) と
+  // 同期しない。呼び出し側 (useFileOperations など) は本関数を呼ぶ前に必ず
+  //   await waitForPendingIdbSaves();
+  // を実行し、ディスク上の PDF が IDB の最新 state と一致してから epoch を
+  // bump する責務を持つ。さもなくば pdfjs が古い IDB blob を再読込して
+  // 直前の編集が消えて見える race が発生する。
   bumpDocumentEpoch: () => set((state) => ({
     documentEpoch: state.documentEpoch + 1,
     currentPageProxy: null,
@@ -438,6 +445,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   clearSelection: () => set({ selectedIds: new Set(), lastSelectedId: null }),
 
   copySelected: () => {
+    // issue #146: copy 対象は currentPage に存在する選択 BB のみ。
+    // 仕様上、選択 (selectedIds) はページ切替時に clearSelection されるため
+    // cross-page 選択は発生しないという前提を採っている。将来サムネイル側で
+    // 跨ぎ選択を許容する場合は document.pages 全体を走査して BB を集める
+    // 実装に拡張する必要がある (現状は意図的に未対応)。
     const { document, currentPageIndex, selectedIds } = get();
     if (!document || selectedIds.size === 0) return;
     const page = document.pages.get(currentPageIndex);
