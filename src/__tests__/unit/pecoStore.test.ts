@@ -2184,4 +2184,249 @@ describe('pecoStore', () => {
       expect(usePecoStore.getState().undoStack).toHaveLength(0)
     })
   })
+
+  // ─── deletePages 境界値テスト (test gap fill wave 2) ────────────────────
+
+  describe('U-ST-#193-BV: deletePages boundary values (wave 2)', () => {
+    function makeFivePagesDoc() {
+      const pages = new Map<number, PageData>()
+      for (let i = 0; i < 5; i++) {
+        pages.set(i, makePage({ pageIndex: i }))
+      }
+      return {
+        filePath: 'test.pdf',
+        fileName: 'test.pdf',
+        totalPages: 5,
+        metadata: {},
+        pages,
+      } as PecoDocument
+    }
+
+    // ── BV-01: 全ページ削除ガード (afterOrder.length === 0) ────────────────
+
+    it('BV-01: deleting all pages is blocked (stays at 5 pages)', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      // 全 5 ページを一度に削除しようとする
+      usePecoStore.getState().deletePages([0, 1, 2, 3, 4])
+
+      const state = usePecoStore.getState()
+      // 実装が全削除をブロックするため totalPages はそのまま
+      expect(state.document!.totalPages).toBe(5)
+      // undoStack も変化しない
+      expect(state.undoStack).toHaveLength(0)
+    })
+
+    // ── BV-02: 全ページ削除ガード (2ページ doc) ──────────────────────────
+
+    it('BV-02: 2-page doc — deleting both pages is blocked', () => {
+      const doc = makeDoc(new Map([
+        [0, makePage({ pageIndex: 0 })],
+        [1, makePage({ pageIndex: 1 })],
+      ]))
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([0, 1])
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(2)
+      expect(state.undoStack).toHaveLength(0)
+    })
+
+    // ── BV-03: 存在しない pageOrder インデックス → ガード (no-op) ─────────
+
+    it('BV-03: displayIndex out of range (negative) → no-op', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      // 負のインデックスは pageOrder.filter で除外されるため afterOrder は full
+      usePecoStore.getState().deletePages([-1])
+
+      const state = usePecoStore.getState()
+      // 実装上 -1 は deleteDisplaySet に入るが filter では i=-1 が来ないため
+      // afterOrder は元のまま 5 件 → afterOrder.length > 0 → 削除が実行される
+      // ただし「displayIndex -1 が実際には何も削除しない」ことを確認する
+      // (負インデックスはフィルタで無視されるので totalPages は変わらないはず)
+      // 実装の filter は `!deleteDisplaySet.has(di)` で di=0..4 を評価するため、
+      // Set に -1 があっても di=-1 は来ない → afterOrder.length=5 → 全ページ残る
+      expect(state.document!.totalPages).toBe(5)
+    })
+
+    // ── BV-04: 範囲外の大きいインデックス → 無視 ─────────────────────────
+
+    it('BV-04: displayIndex beyond pageOrder.length → ignored (no actual deletion)', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      // インデックス 99 は pageOrder に存在しないので filter で無視
+      usePecoStore.getState().deletePages([99])
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(5)
+    })
+
+    // ── BV-05: 同一ページの重複削除指定 → 1 回だけ削除 ──────────────────
+
+    it('BV-05: duplicate displayIndex in array → deduplicated (only 1 page deleted)', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      // インデックス 2 を重複指定 — Set に変換されるので実質 1 回削除
+      usePecoStore.getState().deletePages([2, 2, 2])
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(4)
+    })
+
+    // ── BV-06: 空配列 → no-op ──────────────────────────────────────────
+
+    it('BV-06: empty displayIndices array → no-op', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([])
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(5)
+      expect(state.undoStack).toHaveLength(0)
+    })
+
+    // ── BV-07: document=null → no-op ─────────────────────────────────
+
+    it('BV-07: document=null → deletePages is no-op', () => {
+      usePecoStore.setState({ document: null, undoStack: [] })
+      expect(() => usePecoStore.getState().deletePages([0])).not.toThrow()
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
+
+    // ── BV-08: undo で完全復元 (pages / pageOrder / currentPageIndex) ───────
+
+    it('BV-08: undo after deletePages fully restores pages, pageOrder, and currentPageIndex', () => {
+      const doc = makeFivePagesDoc()
+      const beforeCurrentPageIndex = 2
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: beforeCurrentPageIndex,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      // ページ 1 と 3 を削除
+      usePecoStore.getState().deletePages([1, 3])
+
+      const afterDelete = usePecoStore.getState()
+      expect(afterDelete.document!.totalPages).toBe(3)
+
+      // undo
+      usePecoStore.getState().undo()
+
+      const afterUndo = usePecoStore.getState()
+      expect(afterUndo.document!.totalPages).toBe(5)
+      // pageOrder が元の [0,1,2,3,4] に戻る
+      expect(afterUndo.pageOrder).toEqual([0, 1, 2, 3, 4])
+      // currentPageIndex が削除前の値に戻る
+      expect(afterUndo.currentPageIndex).toBe(beforeCurrentPageIndex)
+      // undoStack は消え redoStack に移動
+      expect(afterUndo.undoStack).toHaveLength(0)
+      expect(afterUndo.redoStack).toHaveLength(1)
+    })
+
+    // ── BV-09: undo → redo で削除がやり直せる ────────────────────────────
+
+    it('BV-09: undo → redo restores the deleted state', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([0])
+      expect(usePecoStore.getState().document!.totalPages).toBe(4)
+
+      usePecoStore.getState().undo()
+      expect(usePecoStore.getState().document!.totalPages).toBe(5)
+
+      usePecoStore.getState().redo()
+      expect(usePecoStore.getState().document!.totalPages).toBe(4)
+    })
+
+    // ── BV-10: 先頭ページを削除すると isDirty=true ──────────────────────
+
+    it('BV-10: deletePages sets isDirty=true', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        isDirty: false,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([0])
+
+      expect(usePecoStore.getState().isDirty).toBe(true)
+    })
+
+    // ── BV-11: currentPageIndex が削除後も 0 以上 totalPages-1 以下に収まる ─
+
+    it('BV-11: currentPageIndex stays within [0, totalPages-1] after deleting last page', () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 4, // 末尾ページを表示中
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([4])
+
+      const state = usePecoStore.getState()
+      const totalPages = state.document!.totalPages // 4
+      expect(state.currentPageIndex).toBeGreaterThanOrEqual(0)
+      expect(state.currentPageIndex).toBeLessThan(totalPages)
+    })
+  })
 })
