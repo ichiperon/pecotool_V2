@@ -299,5 +299,7 @@ export {
   clearTemporaryChanges,
   clearCachedPages,
   getAllTemporaryPageData,
+  deleteTemporaryPageKeys,
+  renameTemporaryPageKeys,
 } from './pdfTemporaryStorage';
 export { loadPage } from './pdfTextExtractor';

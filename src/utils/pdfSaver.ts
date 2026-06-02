@@ -758,6 +758,37 @@ export async function buildPdfDocument(
     updateMetadata: false,
   });
   pdfDoc.registerFontkit(fontkit);
+  const originalPdfPageCount = typeof (pdfDoc as unknown as { getPageCount?: () => number }).getPageCount === 'function'
+    ? pdfDoc.getPageCount()
+    : documentState.totalPages;
+
+  // issue #193: pageOrder に基づきページを削除/並べ替えする。
+  // documentState.pageOrder が未設定または [0,1,...,n-1] の場合はスキップ。
+  const pageOrder = documentState.pageOrder;
+  const isDefaultOrder =
+    !pageOrder ||
+    (pageOrder.length === originalPdfPageCount &&
+      pageOrder.every((v, i) => v === i));
+  if (!isDefaultOrder && pageOrder) {
+    // pageOrder は「新しい表示順に対応する元 pdfDoc ページインデックス」の配列。
+    // 例: pageOrder=[2,0,1] → 新ページ0=旧ページ2, 新ページ1=旧ページ0, 新ページ2=旧ページ1
+    // pdf-lib では直接 movePage API がないため、copyPages + removePage で並べ替える。
+    const srcDoc = pdfDoc;
+    // 新しい順序でページをコピー
+    const copiedPages = await srcDoc.copyPages(srcDoc, pageOrder);
+    // 既存の全ページを後ろから削除 (インデックスずれを防ぐため末尾から)
+    for (let i = originalPdfPageCount - 1; i >= 0; i--) {
+      srcDoc.removePage(i);
+    }
+    // コピーしたページを新しい順序で挿入
+    for (const page of copiedPages) {
+      srcDoc.addPage(page);
+    }
+    // bboxMeta も新しいページ順序に合わせてキーを更新 (後で読み込まれる existingBBoxMeta を上書き)
+    // この時点では existingBBoxMeta はまだ元のインデックスを持つ。
+    // 後処理で更新するため、ここではページの物理順を変えるだけ。
+  }
+
   const pdfPageCount = typeof (pdfDoc as unknown as { getPageCount?: () => number }).getPageCount === 'function'
     ? pdfDoc.getPageCount()
     : documentState.totalPages;

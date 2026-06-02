@@ -194,6 +194,16 @@ function App() {
   });
 
   // --- Handlers ---
+
+  // issue #193: ページ削除 / 並べ替えハンドラ (store action への安定参照)
+  const handleDeletePages = useCallback((displayIndices: number[]) => {
+    usePecoStore.getState().deletePages(displayIndices);
+  }, []);
+
+  const handleMovePage = useCallback((fromDisplayIndex: number, toDisplayIndex: number) => {
+    usePecoStore.getState().movePage(fromDisplayIndex, toDisplayIndex);
+  }, []);
+
   const handleReload = useCallback(async () => {
     if (isSaving) {
       showToast('保存中は再読み込みできません。');
@@ -745,6 +755,8 @@ function App() {
           onGetIsActivePage={getIsActivePage}
           onSubscribeDirtyPage={subscribeDirtyPage}
           onGetIsDirtyPage={getIsDirtyPage}
+          onDeletePages={handleDeletePages}
+          onMovePage={handleMovePage}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
         <section

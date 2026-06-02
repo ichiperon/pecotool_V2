@@ -82,6 +82,12 @@ export interface PecoDocument {
   metadata: PDFMetadata;
   pages: Map<number, PageData>;
   mtime?: number;
+  /**
+   * issue #193: ページの表示順序 (元 pageIndex の配列)。
+   * 未設定時は [0, 1, ..., totalPages-1] として扱う。
+   * pdfSaver はこの配列を使って PDF を再構築する。
+   */
+  pageOrder?: number[];
 }
 
 export interface UpdatePageAction {
@@ -106,7 +112,33 @@ export interface UpdatePagesAction {
   }>;
 }
 
-export type Action = UpdatePageAction | UpdatePagesAction;
+/**
+ * ページ削除操作を表す Action (issue #193)。
+ * before: 削除前の pages Map (全ページ)、beforeOrder: 削除前の pageOrder。
+ * after: 削除後の pages Map、afterOrder: 削除後の pageOrder。
+ */
+export interface DeletePagesAction {
+  type: 'delete_pages';
+  beforePages: Map<number, PageData>;
+  afterPages: Map<number, PageData>;
+  beforeOrder: number[];
+  afterOrder: number[];
+  beforeCurrentPageIndex: number;
+  afterCurrentPageIndex: number;
+  beforeTotalPages: number;
+  afterTotalPages: number;
+}
+
+/**
+ * ページ並べ替え操作を表す Action (issue #193)。
+ */
+export interface ReorderPagesAction {
+  type: 'reorder_pages';
+  beforeOrder: number[];
+  afterOrder: number[];
+}
+
+export type Action = UpdatePageAction | UpdatePagesAction | DeletePagesAction | ReorderPagesAction;
 
 export interface OcrResultBlock {
   text: string;

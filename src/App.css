@@ -298,6 +298,7 @@ body, #root {
 
 .thumbnails-panel {
   flex-shrink: 0;
+  width: var(--panel-width);
 }
 
 .editor-panel {
@@ -457,6 +458,69 @@ body, #root {
   margin-top: 6px;
   font-size: 11px;
   color: #6b7280;
+}
+
+/* issue #193: ページ操作 DnD / コンテキストメニュー */
+
+.thumbnail-virtuoso {
+  height: 100%;
+}
+
+.thumbnail-sortable-wrapper {
+  touch-action: none;
+}
+
+.thumbnail-sortable-wrapper--dragging .thumbnail-item {
+  opacity: 0.4;
+}
+
+.thumbnail-drag-overlay {
+  opacity: 0.9;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.thumbnail-drag-cursor {
+  cursor: grabbing;
+}
+
+.thumbnail-grab-handle {
+  cursor: grab;
+}
+
+.thumbnail-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.thumbnail-context-menu {
+  background: #ffffff;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  min-width: 160px;
+  padding: 4px 0;
+  z-index: 9999;
+}
+
+.thumbnail-context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-color);
+  text-align: left;
+}
+
+.thumbnail-context-menu-item:hover {
+  background-color: #f3f4f6;
+}
+
+.thumbnail-context-menu-item--danger {
+  color: var(--danger-color);
 }
 
 /* OCR Card List */

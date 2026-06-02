@@ -5,6 +5,8 @@ import {
   saveTemporaryPageDataBatch,
   clearTemporaryChanges,
   getAllTemporaryPageData,
+  deleteTemporaryPageKeys,
+  renameTemporaryPageKeys,
 } from '../utils/pdfLoader';
 import { perf } from '../utils/perfLogger';
 
@@ -54,6 +56,12 @@ interface PecoState {
    */
   documentEpoch: number;
   pageAccessOrder: number[]; // For page data LRU (1000ページ対応)
+  /**
+   * issue #193: ページの表示順序。元の pageIndex (PDF 内での 0-based インデックス) の配列。
+   * deletePages / movePage で更新される。初期状態は [0, 1, 2, ..., n-1]。
+   * pdfSaver はこの配列を使って PDF を再構築する。
+   */
+  pageOrder: number[];
   currentPageIndex: number;
   zoom: number;
   isDirty: boolean;
@@ -103,6 +111,17 @@ interface PecoState {
   dragPreviewBboxes: Map<string, BoundingBox> | null;
 
   // Actions
+  /**
+   * issue #193: 指定した pageOrder インデックス (displayIndices) のページを削除する。
+   * displayIndices は pageOrder 配列上のインデックス (表示順序の位置)。
+   * undoable=true (default) で undo スタックに積む。
+   */
+  deletePages: (displayIndices: number[]) => void;
+  /**
+   * issue #193: ドラッグ並べ替えでページ順序を変更する。
+   * fromDisplayIndex / toDisplayIndex は pageOrder 配列上のインデックス。
+   */
+  movePage: (fromDisplayIndex: number, toDisplayIndex: number) => void;
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
@@ -181,6 +200,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
   documentEpoch: 0,
   pageAccessOrder: [],
+  pageOrder: [],
   currentPageIndex: 0,
   zoom: 100,
   isDirty: false,
@@ -202,6 +222,195 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   dragPreviewBboxes: null,
   searchTerm: '',
   searchHitIndex: 0,
+
+  // issue #193: ページ削除
+  deletePages: (displayIndices) => {
+    const state = get();
+    if (!state.document || displayIndices.length === 0) return;
+
+    const beforeOrder = [...state.pageOrder];
+    const beforePages = new Map(state.document.pages);
+    const beforeTotalPages = state.document.totalPages;
+    const beforeCurrentPageIndex = state.currentPageIndex;
+
+    // displayIndices を Set に変換 (重複排除)
+    const deleteDisplaySet = new Set(displayIndices);
+
+    // 削除後の新しい pageOrder (表示順) を構築
+    const afterOrder = beforeOrder.filter((_, di) => !deleteDisplaySet.has(di));
+
+    if (afterOrder.length === 0) {
+      // 全ページ削除は許可しない
+      console.warn('[pecoStore] deletePages: cannot delete all pages');
+      return;
+    }
+
+    // afterOrder に残ったページの元 pageIndex を新しい連番 (0-based) に再マッピング
+    // 新しい pages Map: key=新pageIndex, value=元ページデータ (pageIndex フィールドを更新)
+    const afterPages = new Map<number, PageData>();
+    afterOrder.forEach((origPageIndex, newIdx) => {
+      const page = beforePages.get(origPageIndex);
+      if (page) {
+        afterPages.set(newIdx, { ...page, pageIndex: newIdx });
+      }
+    });
+
+    // 削除後の currentPageIndex を調整
+    // 現在ページが削除対象なら次ページ (なければ末尾) へ
+    // 現在ページが削除対象でないなら新しいインデックスを計算
+    const isCurrentDeleted = deleteDisplaySet.has(state.currentPageIndex);
+    let afterCurrentPageIndex: number;
+    if (isCurrentDeleted) {
+      // 削除対象: 現在位置より後に残るページがあればその先頭、なければ末尾
+      const nextSurvivorDisplayIndex = (() => {
+        for (let di = state.currentPageIndex; di < beforeOrder.length; di++) {
+          if (!deleteDisplaySet.has(di)) {
+            // afterOrder 内での新しいインデックスを計算
+            return afterOrder.indexOf(beforeOrder[di]);
+          }
+        }
+        return afterOrder.length - 1;
+      })();
+      afterCurrentPageIndex = Math.max(0, Math.min(nextSurvivorDisplayIndex, afterOrder.length - 1));
+    } else {
+      // 削除対象でない: 現在ページが新しい pageOrder の何番目か
+      const newDisplayIndex = afterOrder.indexOf(beforeOrder[state.currentPageIndex]);
+      afterCurrentPageIndex = Math.max(0, newDisplayIndex);
+    }
+
+    const afterTotalPages = afterOrder.length;
+
+    // Store を更新
+    set({
+      document: {
+        ...state.document,
+        pages: afterPages,
+        totalPages: afterTotalPages,
+      },
+      pageOrder: afterOrder.map((_, newIdx) => newIdx), // 再マッピング後は 0..n-1
+      currentPageIndex: afterCurrentPageIndex,
+      isDirty: true,
+      undoStack: [...state.undoStack, {
+        type: 'delete_pages' as const,
+        beforePages,
+        afterPages,
+        beforeOrder,
+        afterOrder: afterOrder.map((_, newIdx) => newIdx),
+        beforeCurrentPageIndex,
+        afterCurrentPageIndex,
+        beforeTotalPages,
+        afterTotalPages,
+      }].slice(-100),
+      redoStack: [],
+    });
+
+    // IDB: 削除されたページのエントリを削除し、残るページの key を新 pageIndex で更新
+    const filePath = state.document.filePath;
+    const deletedOrigIndices = beforeOrder.filter((_, di) => deleteDisplaySet.has(di));
+    const renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }> = [];
+    afterOrder.forEach((origPageIndex, newIdx) => {
+      if (origPageIndex !== newIdx) {
+        renamedEntries.push({ oldPageIndex: origPageIndex, newPageIndex: newIdx });
+      }
+    });
+
+    const idbWork = deleteTemporaryPageKeys(filePath, deletedOrigIndices)
+      .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
+      .then(() => {
+        if (get().lastIdbError) set({ lastIdbError: null });
+      })
+      .catch((e: unknown) => {
+        const err = e instanceof Error ? e : new Error(String(e));
+        console.error('[Store] deletePages IDB 同期失敗:', err);
+        set({ lastIdbError: err });
+      });
+    const tracked: Promise<void> = idbWork.finally(() => {
+      pendingIdbSaves.delete(tracked);
+    });
+    pendingIdbSaves.add(tracked);
+  },
+
+  // issue #193: ページ並べ替え
+  movePage: (fromDisplayIndex, toDisplayIndex) => {
+    const state = get();
+    if (!state.document) return;
+    if (fromDisplayIndex === toDisplayIndex) return;
+    if (fromDisplayIndex < 0 || fromDisplayIndex >= state.pageOrder.length) return;
+    if (toDisplayIndex < 0 || toDisplayIndex >= state.pageOrder.length) return;
+
+    const beforeOrder = [...state.pageOrder];
+
+    // 並べ替え後の pageOrder (元ページの originalIndex を移動)
+    const newOrder = [...beforeOrder];
+    const [moved] = newOrder.splice(fromDisplayIndex, 1);
+    newOrder.splice(toDisplayIndex, 0, moved);
+
+    // pages Map も新しいインデックスで再構築
+    const newPages = new Map<number, PageData>();
+    newOrder.forEach((origPageIndex, newIdx) => {
+      const page = state.document!.pages.get(origPageIndex);
+      if (page) {
+        newPages.set(newIdx, { ...page, pageIndex: newIdx });
+      }
+    });
+
+    // currentPageIndex の追従: 移動元/移動先に応じて更新
+    let newCurrentPageIndex = state.currentPageIndex;
+    if (state.currentPageIndex === fromDisplayIndex) {
+      newCurrentPageIndex = toDisplayIndex;
+    } else if (fromDisplayIndex < toDisplayIndex) {
+      if (state.currentPageIndex > fromDisplayIndex && state.currentPageIndex <= toDisplayIndex) {
+        newCurrentPageIndex = state.currentPageIndex - 1;
+      }
+    } else {
+      if (state.currentPageIndex >= toDisplayIndex && state.currentPageIndex < fromDisplayIndex) {
+        newCurrentPageIndex = state.currentPageIndex + 1;
+      }
+    }
+
+    const afterOrder = newOrder.map((_, newIdx) => newIdx);
+
+    set({
+      document: {
+        ...state.document,
+        pages: newPages,
+      },
+      pageOrder: afterOrder,
+      currentPageIndex: newCurrentPageIndex,
+      isDirty: true,
+      undoStack: [...state.undoStack, {
+        type: 'reorder_pages' as const,
+        beforeOrder,
+        afterOrder,
+      }].slice(-100),
+      redoStack: [],
+    });
+
+    // IDB: 並べ替えに応じて key を更新
+    const filePath = state.document.filePath;
+    const renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }> = [];
+    newOrder.forEach((origPageIndex, newIdx) => {
+      if (origPageIndex !== newIdx) {
+        renamedEntries.push({ oldPageIndex: origPageIndex, newPageIndex: newIdx });
+      }
+    });
+
+    if (renamedEntries.length > 0) {
+      const idbWork = renameTemporaryPageKeys(filePath, renamedEntries)
+        .then(() => {
+          if (get().lastIdbError) set({ lastIdbError: null });
+        })
+        .catch((e: unknown) => {
+          const err = e instanceof Error ? e : new Error(String(e));
+          console.error('[Store] movePage IDB 同期失敗:', err);
+          set({ lastIdbError: err });
+        });
+      const tracked: Promise<void> = idbWork.finally(() => {
+        pendingIdbSaves.delete(tracked);
+      });
+      pendingIdbSaves.add(tracked);
+    }
+  },
 
   setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
   setCurrentPageProxy: (filePath, pageIndex, proxy) => {
@@ -225,6 +434,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // 保持し、ループ内で getState().documentEpoch と比較する。
       documentEpoch: get().documentEpoch + 1,
       pageAccessOrder: [],
+      // issue #193: 新規ドキュメント開放時は pageOrder を 0..n-1 で初期化する
+      pageOrder: doc ? Array.from({ length: doc.totalPages }, (_, i) => i) : [],
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく
       isDirty: restoration !== null && doc !== null,
@@ -572,6 +783,46 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         set,
         get,
       );
+    } else if (action.type === 'delete_pages') {
+      // issue #193: ページ削除を巻き戻す (削除前の状態に戻す)
+      set({
+        document: {
+          ...document,
+          pages: action.beforePages,
+          totalPages: action.beforeTotalPages,
+        },
+        pageOrder: action.beforeOrder,
+        currentPageIndex: action.beforeCurrentPageIndex,
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
+      // IDB は afterPages -> beforePages への逆変換が複雑なため、
+      // beforePages の全ページを IDB に書き込んで強制同期する
+      schedulePendingIdbWrite(
+        Array.from(action.beforePages.entries()).map(([pi, page]) => ({
+          filePath: document.filePath,
+          pageIndex: pi,
+          data: page,
+        })),
+        set,
+        get,
+      );
+    } else if (action.type === 'reorder_pages') {
+      // issue #193: ページ並べ替えを巻き戻す
+      // beforeOrder から pages を再構築
+      const restoredPages = new Map<number, PageData>();
+      action.beforeOrder.forEach((_, newIdx) => {
+        const page = document.pages.get(newIdx);
+        if (page) restoredPages.set(newIdx, { ...page, pageIndex: newIdx });
+      });
+      set({
+        document: { ...document, pages: restoredPages },
+        pageOrder: action.beforeOrder,
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
     }
   },
 
@@ -613,6 +864,43 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         set,
         get,
       );
+    } else if (action.type === 'delete_pages') {
+      // issue #193: ページ削除をやり直す
+      set({
+        document: {
+          ...document,
+          pages: action.afterPages,
+          totalPages: action.afterTotalPages,
+        },
+        pageOrder: action.afterOrder,
+        currentPageIndex: action.afterCurrentPageIndex,
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
+      schedulePendingIdbWrite(
+        Array.from(action.afterPages.entries()).map(([pi, page]) => ({
+          filePath: document.filePath,
+          pageIndex: pi,
+          data: page,
+        })),
+        set,
+        get,
+      );
+    } else if (action.type === 'reorder_pages') {
+      // issue #193: ページ並べ替えをやり直す
+      const restoredPages = new Map<number, PageData>();
+      action.afterOrder.forEach((_, newIdx) => {
+        const page = document.pages.get(newIdx);
+        if (page) restoredPages.set(newIdx, { ...page, pageIndex: newIdx });
+      });
+      set({
+        document: { ...document, pages: restoredPages },
+        pageOrder: action.afterOrder,
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
     }
   },
 
@@ -862,6 +1150,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
 // ─── Selectors ─── (細粒度購読でApp全体の再レンダリング波及を防ぐ)
 export const selectDocument = (s: PecoState) => s.document;
+// issue #193: ページ表示順序
+export const selectPageOrder = (s: PecoState) => s.pageOrder;
 export const selectCurrentPageIndex = (s: PecoState) => s.currentPageIndex;
 export const selectZoom = (s: PecoState) => s.zoom;
 export const selectShowOcr = (s: PecoState) => s.showOcr;

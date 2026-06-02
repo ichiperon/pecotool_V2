@@ -12,6 +12,9 @@ vi.mock('../../utils/pdfLoader', () => ({
   saveTemporaryPageDataBatch: vi.fn().mockResolvedValue(undefined),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
+  // issue #193: ページ操作で使う IDB ヘルパのモック
+  deleteTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
+  renameTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
 }))
 
 // ── ヘルパー ──────────────────────────────────────────────────
@@ -1837,6 +1840,228 @@ describe('pecoStore', () => {
       usePecoStore.getState().prevSearchHit(0)
 
       expect(usePecoStore.getState().searchHitIndex).toBe(1)
+    })
+  })
+
+  // ─── issue #193: ページ削除 / 並べ替え ──────────────────────────
+
+  describe('U-ST-#193: deletePages', () => {
+    function makeThreePagesDoc() {
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0 })],
+        [1, makePage({ pageIndex: 1 })],
+        [2, makePage({ pageIndex: 2 })],
+      ])
+      return makeDoc(pages)
+    }
+
+    it('中間ページを削除すると pages が詰め直される', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([1]) // 表示インデックス 1 (元ページ1) を削除
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(2)
+      expect(state.document!.pages.size).toBe(2)
+      expect(state.document!.pages.get(0)?.pageIndex).toBe(0)
+      expect(state.document!.pages.get(1)?.pageIndex).toBe(1)
+      expect(state.isDirty).toBe(true)
+    })
+
+    it('現在ページを削除すると currentPageIndex が次のページへ移動する', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 1,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([1])
+
+      const state = usePecoStore.getState()
+      // ページ1削除後、残り [0, 2] → 再インデックス → [0, 1]
+      // currentPageIndex は 1 → 元の position 1 以降の最初の生き残り = 新インデックス 1
+      expect(state.currentPageIndex).toBe(1)
+    })
+
+    it('末尾ページを削除すると currentPageIndex が末尾に収まる', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 2,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([2])
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(2)
+      expect(state.currentPageIndex).toBe(1) // 末尾(1)に収まる
+    })
+
+    it('最後のページは削除できない (1ページ時は何もしない)', () => {
+      const doc = makeDoc(new Map([[0, makePage()]]))
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([0])
+
+      // 1ページしかない場合は何もしない
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(1)
+    })
+
+    it('削除後に undo で元の状態に戻る', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([1])
+      expect(usePecoStore.getState().document!.totalPages).toBe(2)
+
+      usePecoStore.getState().undo()
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(3)
+      expect(state.undoStack).toHaveLength(0)
+      expect(state.redoStack).toHaveLength(1)
+    })
+
+    it('undoStack に delete_pages action が積まれる', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().deletePages([2])
+
+      const state = usePecoStore.getState()
+      expect(state.undoStack).toHaveLength(1)
+      expect(state.undoStack[0].type).toBe('delete_pages')
+    })
+  })
+
+  describe('U-ST-#193: movePage', () => {
+    function makeThreePagesDoc() {
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0 })],
+        [1, makePage({ pageIndex: 1 })],
+        [2, makePage({ pageIndex: 2 })],
+      ])
+      return makeDoc(pages)
+    }
+
+    it('from=0 to=2 で先頭ページが末尾に移動する', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().movePage(0, 2)
+
+      const state = usePecoStore.getState()
+      // 元順 [0,1,2] → 0を末尾へ → [1,2,0]
+      // 再インデックス後 pages: 新0=元1, 新1=元2, 新2=元0
+      expect(state.document!.pages.size).toBe(3)
+      expect(state.isDirty).toBe(true)
+    })
+
+    it('並べ替え後に currentPageIndex が移動元に追従する', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().movePage(0, 2)
+
+      // currentPageIndex=0 のページが from=0 → to=2 へ移動したので追従
+      expect(usePecoStore.getState().currentPageIndex).toBe(2)
+    })
+
+    it('from === to の場合は何も変わらない', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().movePage(1, 1)
+
+      const state = usePecoStore.getState()
+      expect(state.undoStack).toHaveLength(0)
+      expect(state.isDirty).toBe(false)
+    })
+
+    it('undoStack に reorder_pages action が積まれる', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().movePage(0, 1)
+
+      const state = usePecoStore.getState()
+      expect(state.undoStack).toHaveLength(1)
+      expect(state.undoStack[0].type).toBe('reorder_pages')
+    })
+
+    it('並べ替え後に undo で元の順序に戻る', () => {
+      const doc = makeThreePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().movePage(0, 2)
+      usePecoStore.getState().undo()
+
+      const state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([0, 1, 2])
+      expect(state.undoStack).toHaveLength(0)
+      expect(state.redoStack).toHaveLength(1)
     })
   })
 })
