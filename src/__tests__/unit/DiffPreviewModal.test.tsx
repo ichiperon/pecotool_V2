@@ -4,6 +4,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 
+// lucide-react: 明示的にモックして importOriginal() 呼び出しを回避
+vi.mock('lucide-react', () => ({
+  X: () => null,
+}));
+
 // Modal は内部実装をスキップしてコンテンツのみレンダリング
 vi.mock('../../components/ui/Modal', () => ({
   Modal: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
