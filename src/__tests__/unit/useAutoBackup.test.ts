@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
+import type React from 'react';
 
 const invokeMock = vi.fn<(cmd: string, args?: unknown) => Promise<unknown>>();
 
@@ -552,6 +553,176 @@ describe('useAutoBackup lastEditTime tracking (#67 setDocument を編集とみ�
 
     const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
     expect(saveCalls).toHaveLength(0);
+
+    nowSpy.mockRestore();
+  });
+});
+
+// ── Wave-3: isSavingRef 排他ロック / externalIsSavingRef ガード ─────────────
+
+/**
+ * isSavingRef 排他: performBackup の冒頭で isSavingRef.current=true を設定し、
+ * finally で false に戻す。並走呼び出しは冒頭チェックで早期 return する。
+ *
+ * externalIsSavingRef: 手動保存中フラグ (useFileOperations から渡す shared ref)。
+ * true のときは performBackup がスキップされる (issue #137)。
+ */
+
+/** quietPeriodMs を超えるよう Date.now を設定して performBackup が走れる状態にする */
+function setupBackupReadyState(
+  nowSpy: ReturnType<typeof vi.spyOn>,
+  quietMs: number,
+): void {
+  // t=1: PDF オープン (setDocument)
+  nowSpy.mockReturnValue(1);
+  usePecoStore.setState({ document: makeDoc(), isDirty: false });
+  // t=1000: 編集発生 (pages 参照変化)
+  nowSpy.mockReturnValue(1000);
+  usePecoStore.setState({
+    document: makeDoc(new Map([[0, makePage({ isDirty: true })]])),
+    isDirty: true,
+  });
+  // t=1000 + quietMs + 1: 静止期間経過後
+  nowSpy.mockReturnValue(1000 + quietMs + 1);
+}
+
+describe('useAutoBackup isSavingRef 排他ロック (Wave-3 issue #137)', () => {
+  beforeEach(() => {
+    resetStore();
+    vi.mocked(getAllTemporaryPageData).mockReset().mockResolvedValue(new Map());
+    vi.mocked(saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(clearTemporaryChanges).mockReset().mockResolvedValue(undefined);
+    // デフォルト: save_backup は成功
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_pending_backups') return [];
+      if (cmd === 'save_backup') return undefined;
+      return undefined;
+    });
+  });
+
+  // S-137-01: isSavingRef=true 中は並走呼び出しが skip される
+  it('S-137-01: isSavingRef=true 中に performBackup を呼ぶと save_backup が 1 回だけ呼ばれる', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    let resolveBackup!: () => void;
+    // 1 回目の save_backup を一時停止させる
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_pending_backups') return [];
+      if (cmd === 'save_backup') {
+        await new Promise<void>((resolve) => { resolveBackup = resolve; });
+        return undefined;
+      }
+      return undefined;
+    });
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    // renderHook 後に state を設定 (既存テストのパターンに合わせる)
+    setupBackupReadyState(nowSpy, quietMs);
+
+    // 1 回目: 走り始めるが pause 中
+    const p1 = act(async () => { await result.current.performBackup(); });
+    // microtask を少し進めて isSavingRef.current=true になるのを待つ
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    // 2 回目: isSavingRef=true のため skip される
+    await act(async () => { await result.current.performBackup(); });
+
+    // 1 回目を完了させる
+    resolveBackup();
+    await p1;
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    // isSavingRef=true の間に入ってきた 2 回目は skip → save_backup は 1 回のみ
+    expect(saveCalls).toHaveLength(1);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-137-02: isSavingRef が false に戻った後の呼び出しは正常実行
+  it('S-137-02: isSavingRef=false 後の performBackup は正常に save_backup を呼ぶ', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    setupBackupReadyState(nowSpy, quietMs);
+
+    // 1 回目: 完了まで待つ
+    await act(async () => { await result.current.performBackup(); });
+
+    // 1 回目完了後に再度編集・静止してから 2 回目を呼ぶ
+    nowSpy.mockReturnValue(2000);
+    usePecoStore.setState({
+      document: makeDoc(new Map([[0, makePage({ isDirty: true })]])),
+      isDirty: true,
+    });
+    nowSpy.mockReturnValue(2000 + quietMs + 1);
+
+    await act(async () => { await result.current.performBackup(); });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    // 2 回実行される
+    expect(saveCalls).toHaveLength(2);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-137-03: externalIsSavingRef=true のとき performBackup は skip される (issue #137)
+  it('S-137-03: externalIsSavingRef=true のとき save_backup は呼ばれない', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    // externalIsSavingRef を true に設定
+    const externalRef = { current: true } as React.RefObject<boolean>;
+
+    const { result } = renderHook(() =>
+      useAutoBackup(() => {}, 5 * 60 * 1000, quietMs, externalRef)
+    );
+    setupBackupReadyState(nowSpy, quietMs);
+
+    await act(async () => { await result.current.performBackup(); });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(0);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-137-04: externalIsSavingRef=false のときは skip されない
+  it('S-137-04: externalIsSavingRef=false のとき save_backup は正常に呼ばれる', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const externalRef = { current: false } as React.RefObject<boolean>;
+
+    const { result } = renderHook(() =>
+      useAutoBackup(() => {}, 5 * 60 * 1000, quietMs, externalRef)
+    );
+    setupBackupReadyState(nowSpy, quietMs);
+
+    await act(async () => { await result.current.performBackup(); });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(1);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-137-05: externalIsSavingRef=undefined のとき従来挙動 (ガードなし)
+  it('S-137-05: externalIsSavingRef=undefined のとき save_backup は呼ばれる (従来挙動)', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    // externalIsSavingRef を渡さない
+    const { result } = renderHook(() =>
+      useAutoBackup(() => {}, 5 * 60 * 1000, quietMs, undefined)
+    );
+    setupBackupReadyState(nowSpy, quietMs);
+
+    await act(async () => { await result.current.performBackup(); });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(1);
 
     nowSpy.mockRestore();
   });
