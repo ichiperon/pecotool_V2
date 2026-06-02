@@ -99,6 +99,9 @@ export function ThumbnailWindow() {
   const isPdfReadyRef = useRef(false);
 
   const thumbnailQueueRef = useRef<number[]>([]);
+  // issue #181: requestThumbnail の重複チェックを O(N) includes から O(1) Set lookup に。
+  // キュー操作 (push/shift/clear) と必ず同期して更新すること。
+  const thumbnailQueueSetRef = useRef<Set<number>>(new Set());
   const isProcessingRef = useRef(false);
   const epochRef = useRef(0);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
@@ -251,7 +254,9 @@ export function ThumbnailWindow() {
         if (epochRef.current !== epoch) break;
         const batch: number[] = [];
         while (batch.length < CONCURRENCY && thumbnailQueueRef.current.length > 0) {
-          batch.push(thumbnailQueueRef.current.shift()!);
+          const idx = thumbnailQueueRef.current.shift()!;
+          thumbnailQueueSetRef.current.delete(idx);
+          batch.push(idx);
         }
         if (batch.length === 0) continue;
 
@@ -291,8 +296,9 @@ export function ThumbnailWindow() {
 
   const requestThumbnail = useCallback((pageIndex: number) => {
     if (thumbnailsRef.current.has(pageIndex)) return;
-    if (!thumbnailQueueRef.current.includes(pageIndex)) {
+    if (!thumbnailQueueSetRef.current.has(pageIndex)) {
       thumbnailQueueRef.current.push(pageIndex);
+      thumbnailQueueSetRef.current.add(pageIndex);
     }
     const epoch = epochRef.current;
     setTimeout(() => processThumbnailQueue(epoch), 0);
@@ -309,6 +315,7 @@ export function ThumbnailWindow() {
         epochRef.current++;
         const epoch = epochRef.current;
         thumbnailQueueRef.current = [];
+        thumbnailQueueSetRef.current.clear();
         isProcessingRef.current = false;
         isPdfReadyRef.current = false; // ★ ファイル切り替え時にリセット
 
@@ -374,6 +381,7 @@ export function ThumbnailWindow() {
       unlisteners.push(await listen('thumbnail:file-closed', () => {
         epochRef.current++;
         thumbnailQueueRef.current = [];
+        thumbnailQueueSetRef.current.clear();
         isProcessingRef.current = false;
         isPdfReadyRef.current = false;
         loadResolvesRef.current.forEach((r, i) => {
