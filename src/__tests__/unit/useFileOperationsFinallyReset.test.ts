@@ -409,4 +409,63 @@ describe('useFileOperations _executeSave finally リセット (wave 4)', () => {
       true,
     );
   });
+
+  // ── T-9: onRequestDiffPreview reject → finally リセット + error toast ──
+
+  it('T-9: onRequestDiffPreview が reject した場合、isSavingRef は false にリセットされ error toast が出る', async () => {
+    setupDirtyDoc('/finally/diff-preview-reject.pdf');
+
+    // undoStack に update_page アクションを積んで diffSummary.entries.length > 0 を作る
+    usePecoStore.setState({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      undoStack: [{
+        type: 'update_page',
+        pageIndex: 0,
+        before: { textBlocks: [{ id: 'blk', text: 'A', isDirty: false }] } as any,
+        after: { textBlocks: [{ id: 'blk', text: 'B', isDirty: true }] } as any,
+      }] as any,
+      lastSavedActionIndex: 0,
+    });
+
+    const onRequestDiffPreview = vi.fn().mockRejectedValueOnce(
+      new Error('dialog destroyed'),
+    );
+    const showToast = vi.fn();
+    const setIsSaving = vi.fn();
+    const setSaveStep = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(
+        showToast,
+        setIsSaving,
+        undefined,
+        undefined,
+        undefined,
+        setSaveStep,
+        undefined,
+        onRequestDiffPreview,
+      ),
+    );
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    // 保存は失敗
+    expect(saveResult).toBe(false);
+    // onRequestDiffPreview は isSavingRef=true になる前に呼ばれるため、
+    // reject catch 後の isSavingRef は初期値 false のまま
+    expect(result.current.isSavingRef.current).toBe(false);
+    // setIsSaving(false) が呼ばれている (reject catch 内の明示リセット)
+    expect(setIsSaving).toHaveBeenCalledWith(false);
+    // setSaveStep(null) が呼ばれている (reject catch 内の明示リセット)
+    expect(setSaveStep).toHaveBeenCalledWith(null);
+    // error toast が出ている
+    const errorCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] === true);
+    expect(errorCalls.length).toBeGreaterThan(0);
+    const lastErrorMsg = String(errorCalls[errorCalls.length - 1][0]);
+    expect(lastErrorMsg).toMatch(/保存プレビューでエラー/);
+    // savePDF は呼ばれない (DiffPreview reject で中断)
+    expect(savePDF).not.toHaveBeenCalled();
+  });
 });

@@ -6,17 +6,19 @@ import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 import { useOcrSettingsStore } from "../store/ocrSettingsStore";
 import { perf } from "../utils/perfLogger";
-import { flushActiveOcrCardText } from "../utils/ocrEditFlush";
+import { commitActiveOcrCardEdit as _commitActiveOcrCardEdit } from "../utils/ocrCardCommit";
 
 export interface OcrCardHandle {
   focusContent: () => void;
 }
 
-/** store アクセス付きラッパー。保存前コミット等の caller から呼ぶ。 */
-export function commitActiveOcrCardEdit(): boolean {
-  const { updatePageData, document } = usePecoStore.getState();
-  return flushActiveOcrCardText(updatePageData, document);
-}
+/**
+ * Re-exported from utils/ocrCardCommit for backwards compatibility.
+ * The implementation now lives in ocrCardCommit.ts to decouple callers
+ * (e.g. useFileOperations) from the @dnd-kit/core dependency carried by
+ * this file.
+ */
+export const commitActiveOcrCardEdit: () => boolean = _commitActiveOcrCardEdit;
 
 interface OcrCardProps {
   block: TextBlock;

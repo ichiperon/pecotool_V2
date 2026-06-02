@@ -26,7 +26,7 @@ import {
 } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
-import { commitActiveOcrCardEdit } from '../components/OcrCard';
+import { commitActiveOcrCardEdit } from '../utils/ocrCardCommit';
 import { computeSaveDiff } from '../utils/saveDiffSummary';
 import type { SaveDiffSummary } from '../utils/saveDiffSummary';
 
@@ -632,7 +632,18 @@ export function useFileOperations(
       const { undoStack, lastSavedActionIndex } = usePecoStore.getState();
       const diffSummary = computeSaveDiff(undoStack, lastSavedActionIndex);
       if (diffSummary.entries.length > 0) {
-        const confirmed = await onRequestDiffPreview(diffSummary);
+        let confirmed: boolean;
+        try {
+          confirmed = await onRequestDiffPreview(diffSummary);
+        } catch (previewErr) {
+          console.error('[handleSave] onRequestDiffPreview rejected:', previewErr);
+          const previewMsg = previewErr instanceof Error ? previewErr.message : String(previewErr);
+          showToast(`保存プレビューでエラーが発生しました: ${previewMsg}`, true);
+          setSaveStep?.(null);
+          isSavingRef.current = false;
+          setIsSaving?.(false);
+          return false;
+        }
         if (!confirmed) return false;
       }
     }
