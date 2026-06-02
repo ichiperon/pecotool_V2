@@ -25,8 +25,7 @@ export interface UpdaterUpdate {
 export async function checkForUpdateAdapter(): Promise<UpdaterUpdate | null> {
   // Dynamic import so the module is only resolved inside the Tauri runtime.
   // In non-Tauri environments (tests, browser) the import throws — callers handle that.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { check } = await import('@tauri-apps/plugin-updater' as any);
+  const { check } = await (import('@tauri-apps/plugin-updater') as Promise<typeof import('@tauri-apps/plugin-updater')>);
   return check() as Promise<UpdaterUpdate | null>;
 }
 
@@ -39,7 +38,7 @@ const INITIAL_STATE: AppUpdateState = {
 };
 
 export function useAppUpdater(
-  _checkAdapter: () => Promise<UpdaterUpdate | null> = checkForUpdateAdapter
+  checkAdapter: () => Promise<UpdaterUpdate | null> = checkForUpdateAdapter
 ): {
   state: AppUpdateState;
   checkForUpdate: () => Promise<void>;
@@ -50,8 +49,8 @@ export function useAppUpdater(
   const updateRef = useRef<UpdaterUpdate | null>(null);
   // Keep a stable ref to the adapter so it can change between renders without
   // triggering callback re-creation (tests can pass a mock without issues)
-  const adapterRef = useRef(_checkAdapter);
-  adapterRef.current = _checkAdapter;
+  const adapterRef = useRef(checkAdapter);
+  adapterRef.current = checkAdapter;
 
   const checkForUpdate = useCallback(async () => {
     setState(s => ({ ...s, isChecking: true, error: null }));
