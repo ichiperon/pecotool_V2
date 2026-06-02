@@ -760,8 +760,8 @@ function App() {
           </div>
         </div>
       )}
-      {notification && (
-        <div className={`toast ${notification.isError ? 'toast-error' : 'toast-success'}`}>
+      {notification && (notification.isError ? (
+        <div className="toast toast-error" role="alert" aria-live="assertive">
           <span>{notification.message}</span>
           {notification.action && (
             <button
@@ -777,7 +777,24 @@ function App() {
             </button>
           )}
         </div>
-      )}
+      ) : (
+        <div className="toast toast-success" role="status" aria-live="polite">
+          <span>{notification.message}</span>
+          {notification.action && (
+            <button
+              type="button"
+              className="toast-action-btn"
+              onClick={() => {
+                const action = notification.action;
+                setNotification(null);
+                action?.onClick();
+              }}
+            >
+              {notification.action.label}
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
