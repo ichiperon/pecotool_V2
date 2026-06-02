@@ -161,6 +161,12 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
           return true;
         }
 
+        // issue #135: toggleSelection は React state を更新するため、同 tick 内では
+        // props.selectedIds は前値のまま。dragStartBboxes を「選択確定後の集合」で
+        // 構築する必要があるので、期待動作をローカルで先取り再現する:
+        //   - 修飾キーなし: 単独選択 = {block.id}
+        //   - Ctrl/Meta/Shift: 既存 selection ∪ {block.id} （上の has(id) 早期 return で除外済の追加分）
+        // 不変条件: 計算後の curSelectedIds は必ず block.id を含む。
         let curSelectedIds = selectedIds;
         if (!selectedIds.has(block.id)) {
           toggleSelection(block.id, mods.ctrlKey || mods.metaKey || mods.shiftKey);
@@ -171,6 +177,10 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
             curSelectedIds = new Set([block.id]);
           }
         }
+        console.assert(
+          curSelectedIds.has(block.id),
+          "[useBlockDragResize] curSelectedIds must contain just-clicked block.id",
+        );
         preDragPageRef.current = { ...pageData, textBlocks: [...pageData.textBlocks] };
         setDraggedId(block.id);
         setDragMode("move");
