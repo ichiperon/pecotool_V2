@@ -21,6 +21,11 @@ export const MIXED_ORDER_LABELS: Record<MixedOrder, string> = {
   'horizontal-first': '横書き → 縦書き',
 };
 
+export interface OcrLanguageInfo {
+  tag: string;
+  display_name: string;
+}
+
 export interface OcrSortSettings {
   horizontal: {
     rowOrder: RowOrder;       // 行の読み順（主軸）
@@ -35,12 +40,16 @@ export interface OcrSortSettings {
 }
 
 interface OcrSettingsState extends OcrSortSettings {
+  ocrLanguage: string;
+  availableLanguages: OcrLanguageInfo[];
   setHorizontalRowOrder: (order: RowOrder) => void;
   setHorizontalColumnOrder: (order: ColumnOrder) => void;
   setVerticalColumnOrder: (order: ColumnOrder) => void;
   setVerticalRowOrder: (order: RowOrder) => void;
   setGroupTolerance: (val: number) => void;
   setMixedOrder: (order: MixedOrder) => void;
+  setOcrLanguage: (tag: string) => void;
+  setAvailableLanguages: (langs: OcrLanguageInfo[]) => void;
 }
 
 export const useOcrSettingsStore = create<OcrSettingsState>()(
@@ -56,6 +65,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       },
       groupTolerance: 20,
       mixedOrder: 'vertical-first',
+      ocrLanguage: 'ja',
+      availableLanguages: [],
       setHorizontalRowOrder: (order) =>
         set((s) => ({ horizontal: { ...s.horizontal, rowOrder: order } })),
       setHorizontalColumnOrder: (order) =>
@@ -66,7 +77,19 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
         set((s) => ({ vertical: { ...s.vertical, rowOrder: order } })),
       setGroupTolerance: (val) => set({ groupTolerance: val }),
       setMixedOrder: (order) => set({ mixedOrder: order }),
+      setOcrLanguage: (tag) => set({ ocrLanguage: tag }),
+      setAvailableLanguages: (langs) => set({ availableLanguages: langs }),
     }),
-    { name: 'peco-ocr-settings' }
+    {
+      name: 'peco-ocr-settings',
+      // availableLanguages はランタイム取得値なので persist しない
+      partialize: (s) => ({
+        horizontal: s.horizontal,
+        vertical: s.vertical,
+        groupTolerance: s.groupTolerance,
+        mixedOrder: s.mixedOrder,
+        ocrLanguage: s.ocrLanguage,
+      }),
+    }
   )
 );

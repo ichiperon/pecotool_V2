@@ -87,6 +87,7 @@ async function runOcrForPage(
   pageIndex: number,
   pageWidth: number,
   pageHeight: number,
+  languageTag?: string,
 ): Promise<{ result: OcrResult }> {
   let tempPath: string | null = null;
   try {
@@ -97,6 +98,7 @@ async function runOcrForPage(
       pageWidth,
       pageHeight,
       renderScale: RENDER_SCALE,
+      languageTag: languageTag ?? null,
     });
     let parsed: OcrResult;
     try {
@@ -217,12 +219,14 @@ export function useOcrEngine(
         }
 
         try {
+          const settings = useOcrSettingsStore.getState();
           const { result } = await runOcrForPage(
             ocrPdf,
             doc.filePath,
             i,
             size.pageWidth,
             size.pageHeight,
+            settings.ocrLanguage,
           );
           if (!isCurrentDocument(capturedEpoch)) {
             cancelTokenRef.current = true;
@@ -233,7 +237,6 @@ export function useOcrEngine(
             console.error(`[OCR] ページ ${i + 1} エラー: ${result.message}`);
             continue;
           }
-          const settings = useOcrSettingsStore.getState();
           // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
           // pdfSaver が page.getRotation() を読んで cm で位置補正する。
           const newBlocks = toTextBlocks(result.blocks ?? [], settings);
@@ -306,12 +309,14 @@ export function useOcrEngine(
     try {
       if (!isCurrentDocument(capturedEpoch)) return;
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
+      const settings = useOcrSettingsStore.getState();
       const { result } = await runOcrForPage(
         ocrPdf,
         doc.filePath,
         pageIdx,
         pageData.width,
         pageData.height,
+        settings.ocrLanguage,
       );
       if (!isCurrentDocument(capturedEpoch)) {
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
@@ -322,8 +327,6 @@ export function useOcrEngine(
         showToast(`OCRエラー: ${result.message}`, true);
         return;
       }
-
-      const settings = useOcrSettingsStore.getState();
       // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
       // pdfSaver が page.getRotation() を読んで cm で位置補正する。
       const newBlocks = toTextBlocks(result.blocks ?? [], settings);

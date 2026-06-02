@@ -438,6 +438,59 @@ async fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct OcrLanguageInfo {
+    tag: String,
+    display_name: String,
+}
+
+#[tauri::command]
+async fn list_ocr_languages() -> Result<Vec<OcrLanguageInfo>, String> {
+    tokio::task::spawn_blocking(|| {
+        use windows::{
+            Media::Ocr::OcrEngine,
+            Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
+        };
+
+        let needs_uninit = unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            if hr.is_err() && hr.0 != 0x00000001u32 as i32 {
+                return Err(format!("COM初期化失敗: {:?}", hr));
+            }
+            hr.0 == 0 || hr.0 == 1
+        };
+
+        struct ComGuard;
+        impl Drop for ComGuard {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
+        }
+        let _com_guard = if needs_uninit { Some(ComGuard) } else { None };
+
+        let langs = OcrEngine::AvailableRecognizerLanguages()
+            .map_err(|e| format!("言語リスト取得失敗: {e}"))?;
+        let count = langs.Size().map_err(|e| format!("言語数取得失敗: {e}"))?;
+
+        let mut result = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let lang = langs.GetAt(i).map_err(|e| format!("言語取得失敗 [{}]: {e}", i))?;
+            let tag = lang
+                .LanguageTag()
+                .map_err(|e| format!("LanguageTag取得失敗: {e}"))?
+                .to_string();
+            let display_name = lang
+                .DisplayName()
+                .map_err(|e| format!("DisplayName取得失敗: {e}"))?
+                .to_string();
+            result.push(OcrLanguageInfo { tag, display_name });
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("スレッドエラー: {}", e))?
+}
+
 #[tauri::command]
 async fn run_ocr(
     app: tauri::AppHandle,
@@ -445,19 +498,21 @@ async fn run_ocr(
     page_width: f64,
     page_height: f64,
     render_scale: f64,
+    language_tag: Option<String>,
 ) -> Result<String, String> {
     let _ = (page_width, page_height); // 座標変換は render_scale のみ使用
     let result = tokio::task::spawn_blocking(move || {
         let image = validate_allowed_existing_file_path(&app, &image_path)?;
         let image = image.to_string_lossy().to_string();
-        do_windows_ocr(&image, render_scale)
+        let tag = language_tag.unwrap_or_else(|| "ja".to_string());
+        do_windows_ocr(&image, render_scale, &tag)
     })
     .await
     .map_err(|e| format!("スレッドエラー: {}", e))??;
     Ok(result)
 }
 
-fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String> {
+fn do_windows_ocr(image_path: &str, render_scale: f64, language_tag: &str) -> Result<String, String> {
     use windows::{
         core::HSTRING,
         Globalization::Language,
@@ -512,10 +567,13 @@ fn do_windows_ocr(image_path: &str, render_scale: f64) -> Result<String, String>
         .map_err(|e| format!("ビットマップ取得待機失敗: {e}"))?;
 
     let lang =
-        Language::CreateLanguage(&HSTRING::from("ja")).map_err(|e| format!("言語設定失敗: {e}"))?;
+        Language::CreateLanguage(&HSTRING::from(language_tag)).map_err(|e| format!("言語設定失敗 ({}): {e}", language_tag))?;
 
-    let engine =
-        OcrEngine::TryCreateFromLanguage(&lang).map_err(|e| format!("OCRエンジン作成失敗: {e}"))?;
+    let engine = OcrEngine::TryCreateFromLanguage(&lang)
+        .map_err(|e| format!(
+            "OCRエンジン作成失敗 ({}): {e}。言語パックがインストールされていない可能性があります。Windows の設定 > 時刻と言語 > 言語と地域 から対象言語を追加してください。",
+            language_tag
+        ))?;
 
     let ocr_result = engine
         .RecognizeAsync(&bitmap)
@@ -1046,6 +1104,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             load_meiryo_font,
+            list_ocr_languages,
             run_ocr,
             get_pdf_page_dimensions,
             list_pdf_files_in_folder,

@@ -134,4 +134,41 @@ describe('ocrSettingsStore', () => {
     })
   })
 
+  describe('U-OS-15~18: OCR language state', () => {
+    it('U-OS-15: ocrLanguage defaults to "ja"', () => {
+      expect(useOcrSettingsStore.getState().ocrLanguage).toBe('ja')
+    })
+
+    it('U-OS-16: availableLanguages defaults to empty array', () => {
+      expect(useOcrSettingsStore.getState().availableLanguages).toEqual([])
+    })
+
+    it('U-OS-17: setOcrLanguage updates ocrLanguage only', () => {
+      const before = useOcrSettingsStore.getState()
+      useOcrSettingsStore.getState().setOcrLanguage('en-US')
+      const after = useOcrSettingsStore.getState()
+
+      expect(after.ocrLanguage).toBe('en-US')
+      expect(after.horizontal).toEqual(before.horizontal)
+      expect(after.vertical).toEqual(before.vertical)
+      expect(after.groupTolerance).toBe(before.groupTolerance)
+      expect(after.mixedOrder).toBe(before.mixedOrder)
+    })
+
+    it('U-OS-18: setAvailableLanguages stores list with correct shape', () => {
+      const langs = [
+        { tag: 'ja', display_name: 'Japanese' },
+        { tag: 'en-US', display_name: 'English (United States)' },
+        { tag: 'zh-Hans-CN', display_name: 'Chinese Simplified (China)' },
+      ]
+      useOcrSettingsStore.getState().setAvailableLanguages(langs)
+      const state = useOcrSettingsStore.getState()
+
+      expect(state.availableLanguages).toHaveLength(3)
+      expect(state.availableLanguages[0].tag).toBe('ja')
+      expect(state.availableLanguages[0].display_name).toBe('Japanese')
+      expect(state.availableLanguages[2].tag).toBe('zh-Hans-CN')
+    })
+  })
+
 })

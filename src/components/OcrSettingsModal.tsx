@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import {
   useOcrSettingsStore,
   RowOrder, ColumnOrder, MixedOrder,
   ROW_ORDER_LABELS, COLUMN_ORDER_LABELS, MIXED_ORDER_LABELS,
+  OcrLanguageInfo,
 } from '../store/ocrSettingsStore';
 import { Modal, useModalTitleId } from './ui/Modal';
 
@@ -17,13 +19,32 @@ interface OcrSettingsModalProps {
 export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) => {
   const {
     horizontal, vertical, groupTolerance, mixedOrder,
+    ocrLanguage, availableLanguages,
     setHorizontalRowOrder, setHorizontalColumnOrder,
     setVerticalColumnOrder, setVerticalRowOrder,
     setGroupTolerance, setMixedOrder,
+    setOcrLanguage, setAvailableLanguages,
   } = useOcrSettingsStore();
 
   const [toleranceInput, setToleranceInput] = useState(String(groupTolerance));
+  const [langLoading, setLangLoading] = useState(false);
   const titleId = useModalTitleId();
+
+  useEffect(() => {
+    if (availableLanguages.length > 0) return;
+    setLangLoading(true);
+    invoke<OcrLanguageInfo[]>('list_ocr_languages')
+      .then((langs) => {
+        setAvailableLanguages(langs);
+      })
+      .catch((e) => {
+        console.warn('[OcrSettingsModal] list_ocr_languages failed:', e);
+      })
+      .finally(() => {
+        setLangLoading(false);
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <Modal
@@ -148,6 +169,41 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) =
             </tr>
           </tbody>
         </table>
+
+        {/* OCR 言語設定 */}
+        <div className="modal-section-title ocr-settings-section-title">OCR 言語</div>
+        {langLoading ? (
+          <div className="ocr-settings-lang-loading">言語リスト取得中...</div>
+        ) : availableLanguages.length === 0 ? (
+          <div className="ocr-settings-lang-empty">
+            <p>利用可能な言語パックが見つかりませんでした。</p>
+            <p>
+              Windows の設定 &gt; 時刻と言語 &gt; 言語と地域 から、OCR を利用したい言語パックを追加してください。
+            </p>
+          </div>
+        ) : (
+          <table className="ocr-settings-table">
+            <tbody>
+              <tr>
+                <td className="label">言語</td>
+                <td className="value">
+                  <select
+                    id="ocr-language-select"
+                    aria-label="OCR 言語"
+                    value={ocrLanguage}
+                    onChange={(e) => setOcrLanguage(e.target.value)}
+                  >
+                    {availableLanguages.map((lang) => (
+                      <option key={lang.tag} value={lang.tag}>
+                        {lang.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
 
         <div className="ocr-settings-note">
           設定はOCR実行時に適用されます。
