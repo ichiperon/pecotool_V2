@@ -433,7 +433,7 @@ export function OcrEditor({
   );
 
   return (
-    <aside className="editor-panel" style={{ width: `${width}px` }}>
+    <aside className="editor-panel" style={{ width: `${width}px` }} data-tour="ocr-editor">
       <div className="panel-header">
         <div className="search-container">
           <Search size={14} className="search-icon" />

@@ -2093,3 +2093,130 @@ body, #root {
   border: 1.5px solid #dc2626;
   outline-color: #dc2626;
 }
+
+/* ─── Feature #203: Onboarding Tour ─── */
+.onboarding-tour-root {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  pointer-events: none;
+}
+
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.onboarding-spotlight-border {
+  position: fixed;
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px #60a5fa, 0 0 0 5px rgba(96, 165, 250, 0.4);
+  pointer-events: none;
+  z-index: 100000;
+}
+
+.onboarding-tooltip {
+  background: #1e293b;
+  color: #f1f5f9;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255,255,255,0.08);
+  padding: 20px 20px 16px;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  pointer-events: auto;
+  z-index: 100001;
+}
+
+.onboarding-progress {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.onboarding-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  transition: background 0.2s;
+}
+
+.onboarding-dot.active {
+  background: #60a5fa;
+  width: 18px;
+  border-radius: 3px;
+}
+
+.onboarding-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin: 0 0 8px;
+  line-height: 1.4;
+}
+
+.onboarding-description {
+  font-size: 13px;
+  color: #94a3b8;
+  line-height: 1.7;
+  margin: 0 0 10px;
+}
+
+.onboarding-step-counter {
+  font-size: 11px;
+  color: #64748b;
+  margin-bottom: 14px;
+  text-align: right;
+}
+
+.onboarding-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.onboarding-btn-group {
+  display: flex;
+  gap: 8px;
+}
+
+.onboarding-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.onboarding-btn-skip {
+  background: transparent;
+  color: #64748b;
+  padding-left: 0;
+}
+
+.onboarding-btn-skip:hover {
+  color: #94a3b8;
+}
+
+.onboarding-btn-back {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+.onboarding-btn-back:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.onboarding-btn-next {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.onboarding-btn-next:hover {
+  background: #2563eb;
+}
