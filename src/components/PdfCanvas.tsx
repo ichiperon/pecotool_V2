@@ -8,6 +8,7 @@ import {
   selectIsDrawingMode,
   selectIsSplitMode,
   selectIsCurveMode,
+  selectIsRangeOcrMode,
   selectCurrentPageTextBlocks,
   selectDocumentFilePath,
   selectDocumentTotalPages,
@@ -29,6 +30,8 @@ interface PdfCanvasProps {
   disableDrawing?: boolean;
   onFirstRender?: () => void;
   onRenderComplete?: () => void;
+  /** #191: 範囲指定 OCR: ドラッグ完了時に呼ばれる。pdfCanvas ref と canvas ピクセル矩形を渡す */
+  onRangeOcr?: (canvas: HTMLCanvasElement, rect: { x: number; y: number; width: number; height: number }) => void;
 }
 
 export function drawStaticBlock(
@@ -251,6 +254,7 @@ export function PdfCanvas({
   disableDrawing = false,
   onFirstRender,
   onRenderComplete,
+  onRangeOcr,
 }: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   // 静的層: 全 BB の塗・枠・テキスト (非選択分のみ)
@@ -290,6 +294,7 @@ export function PdfCanvas({
   const isDrawingMode = usePecoStore(selectIsDrawingMode);
   const isSplitMode = usePecoStore(selectIsSplitMode);
   const isCurveMode = usePecoStore(selectIsCurveMode);
+  const isRangeOcrMode = usePecoStore(selectIsRangeOcrMode);
   const searchTerm = usePecoStore(selectSearchTerm);
   const searchHitIndex = usePecoStore(selectSearchHitIndex);
   // #192: 低信頼ハイライト設定
@@ -325,6 +330,13 @@ export function PdfCanvas({
   const [curveClickPoints, setCurveClickPoints] = useState<Array<{ x: number; y: number }>>([]);
   // handle drag: どの handle を掴んでいるか (0=始点 1=中点 2=終点)、null=非ドラッグ
   const curveHandleDragRef = useRef<{ handleIndex: number; blockId: string } | null>(null);
+
+  // ── #191: 範囲指定 OCR ドラッグ状態 ───────────────────────────
+  const [rangeOcrDrag, setRangeOcrDrag] = useState<{
+    isDrawing: boolean;
+    startPos: { x: number; y: number };
+    currentPos: { x: number; y: number };
+  }>({ isDrawing: false, startPos: { x: 0, y: 0 }, currentPos: { x: 0, y: 0 } });
 
   const { pdfPage, loadError, setLoadError, retry } = usePdfRendering({
     pdfCanvasRef,
@@ -708,6 +720,23 @@ export function PdfCanvas({
         context.setLineDash([]);
       }
 
+      // #191: 範囲指定 OCR ドラッグプレビュー
+      if (rangeOcrDrag.isDrawing) {
+        const rx = Math.min(rangeOcrDrag.startPos.x, rangeOcrDrag.currentPos.x);
+        const ry = Math.min(rangeOcrDrag.startPos.y, rangeOcrDrag.currentPos.y);
+        const rw = Math.abs(rangeOcrDrag.currentPos.x - rangeOcrDrag.startPos.x);
+        const rh = Math.abs(rangeOcrDrag.currentPos.y - rangeOcrDrag.startPos.y);
+        context.save();
+        context.strokeStyle = "rgba(255, 140, 0, 0.9)";
+        context.lineWidth = 2;
+        context.setLineDash([5, 4]);
+        context.strokeRect(rx, ry, rw, rh);
+        context.fillStyle = "rgba(255, 140, 0, 0.1)";
+        context.fillRect(rx, ry, rw, rh);
+        context.setLineDash([]);
+        context.restore();
+      }
+
       if (drag.isAltDragging) {
         context.strokeStyle = "rgba(255, 165, 0, 0.9)";
         context.lineWidth = 2;
@@ -784,6 +813,7 @@ export function PdfCanvas({
     drag.altDragEnd,
     isCurveMode,
     curveClickPoints,
+    rangeOcrDrag,
     // issue #172: dragPreviewBboxes は ref 経由で読み、購読 effect で
     // RAF redraw を直接スケジュールする。ここでは依存に含めないことで
     // BB 500+ 環境での毎フレーム再 render を回避する。
@@ -850,6 +880,12 @@ export function PdfCanvas({
   const handleMouseDown = (e: React.MouseEvent) => {
     if (disableDrawing) return;
     const pos = getMousePos(e);
+
+    // #191: 範囲指定 OCR モード: ドラッグ開始
+    if (isRangeOcrMode) {
+      setRangeOcrDrag({ isDrawing: true, startPos: pos, currentPos: pos });
+      return;
+    }
 
     if (e.altKey && !isDrawingMode && !isSplitMode && !isCurveMode) {
       drag.beginAltDrag(pos);
@@ -923,6 +959,12 @@ export function PdfCanvas({
     if (disableDrawing) return;
     const pos = getMousePos(e);
 
+    // #191: 範囲指定 OCR ドラッグ中
+    if (rangeOcrDrag.isDrawing) {
+      setRangeOcrDrag((prev) => ({ ...prev, currentPos: pos }));
+      return;
+    }
+
     if (drag.isAltDragging) {
       drag.updateAltDrag(pos);
       return;
@@ -990,6 +1032,22 @@ export function PdfCanvas({
   const handleMouseUp = () => {
     if (disableDrawing) return;
 
+    // #191: 範囲指定 OCR ドラッグ確定
+    if (rangeOcrDrag.isDrawing) {
+      const { startPos, currentPos } = rangeOcrDrag;
+      setRangeOcrDrag({ isDrawing: false, startPos: { x: 0, y: 0 }, currentPos: { x: 0, y: 0 } });
+
+      const rx = Math.min(startPos.x, currentPos.x);
+      const ry = Math.min(startPos.y, currentPos.y);
+      const rw = Math.abs(currentPos.x - startPos.x);
+      const rh = Math.abs(currentPos.y - startPos.y);
+
+      if (rw > 4 && rh > 4 && pdfCanvasRef.current && onRangeOcr) {
+        onRangeOcr(pdfCanvasRef.current, { x: rx, y: ry, width: rw, height: rh });
+      }
+      return;
+    }
+
     // curve handle drag 確定: 最終位置を undoable で書き込む
     if (curveHandleDragRef.current) {
       const { blockId } = curveHandleDragRef.current;
@@ -1025,7 +1083,7 @@ export function PdfCanvas({
   return (
     <div
       ref={wrapperRef}
-      className={`canvas-wrapper ${isDrawingMode ? "drawing-mode" : ""} ${isCurveMode ? "curve-mode" : ""}`}
+      className={`canvas-wrapper ${isDrawingMode ? "drawing-mode" : ""} ${isCurveMode ? "curve-mode" : ""} ${isRangeOcrMode ? "range-ocr-mode" : ""}`}
       style={{
         position: "relative",
         display: "inline-block",
@@ -1054,7 +1112,9 @@ export function PdfCanvas({
           left: 0,
           zIndex: 2,
           cursor:
-            isCurveMode
+            isRangeOcrMode
+              ? "crosshair"
+              : isCurveMode
               ? "crosshair"
               : isDrawingMode || isSplitMode
               ? "crosshair"

@@ -10,6 +10,7 @@ import {
   selectIsDrawingMode,
   selectIsSplitMode,
   selectIsCurveMode,
+  selectIsRangeOcrMode,
   selectIsDirty,
   selectUndoStack,
   selectRedoStack,
@@ -99,6 +100,7 @@ function App() {
   const isDrawingMode = usePecoStore(selectIsDrawingMode);
   const isSplitMode = usePecoStore(selectIsSplitMode);
   const isCurveMode = usePecoStore(selectIsCurveMode);
+  const isRangeOcrMode = usePecoStore(selectIsRangeOcrMode);
   const isDirty = usePecoStore(selectIsDirty);
   const undoStack = usePecoStore(selectUndoStack);
   const redoStack = usePecoStore(selectRedoStack);
@@ -111,6 +113,7 @@ function App() {
   const toggleDrawingMode = usePecoStore(s => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore(s => s.toggleSplitMode);
   const toggleCurveMode = usePecoStore(s => s.toggleCurveMode);
+  const toggleRangeOcrMode = usePecoStore(s => s.toggleRangeOcrMode);
   const copySelected = usePecoStore(s => s.copySelected);
   const pasteClipboard = usePecoStore(s => s.pasteClipboard);
   const clearOcrCurrentPage = usePecoStore(s => s.clearOcrCurrentPage);
@@ -165,7 +168,8 @@ function App() {
     runOcrRange,
     runOcrFolder,
     cancelOcr,
-    checkAndPromptOcrZero
+    checkAndPromptOcrZero,
+    runOcrOnRegion,
   } = useOcrEngine(showToast, {
     openPdf: (path) => folderOpenPdfRef.current(path),
     savePdf: () => folderSavePdfRef.current(),
@@ -748,14 +752,14 @@ function App() {
       <Toolbar
         isFileLoaded={isFileLoaded} currentPage={currentPage ?? undefined} isDirty={isDirty}
         undoStackLength={undoStack.length} redoStackLength={redoStack.length}
-        zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode} isCurveMode={isCurveMode}
+        zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode} isCurveMode={isCurveMode} isRangeOcrMode={isRangeOcrMode}
         selectedIdsCount={selectedIds.size} showOcr={showOcr} ocrOpacity={ocrOpacity}
         reorderThreshold={reorderThreshold} isPreviewOpen={isPreviewOpen}
         showSettingsDropdown={showSettingsDropdown}
         isOcrRunning={isOcrRunning} ocrProgress={ocrProgress}
         onUndo={undo} onRedo={redo} onZoomIn={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }}
         onZoomOut={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom - 10)); }}
-        onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode} onToggleCurve={toggleCurveMode}
+        onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode} onToggleCurve={toggleCurveMode} onToggleRangeOcr={toggleRangeOcrMode}
         onGroup={handleGroup} onDeduplicate={handleDeduplicate} onSelectAllText={handleSelectAllText} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
         onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity}
         onSetReorderThreshold={(val) => { setReorderThreshold(writeReorderThreshold(val)); }}
@@ -809,7 +813,7 @@ function App() {
           onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={stopPanning} onMouseLeave={stopPanning}
         >
           <div className="pdf-canvas-container">
-            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
+            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} onRangeOcr={(canvas, rect) => { void runOcrOnRegion(canvas, rect, currentPageIndex, zoom); }} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
           {(isLoadingFile || isLoadingPageMeta) && (
             <div className="loading-overlay">

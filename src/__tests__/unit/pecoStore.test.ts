@@ -66,6 +66,8 @@ const INITIAL_STATE = {
   showTextPreview:   false,
   isDrawingMode:     false,
   isSplitMode:       false,
+  isCurveMode:       false,
+  isRangeOcrMode:    false,
   selectedIds:       new Set<string>(),
   undoStack:         [] as Action[],
   redoStack:         [] as Action[],
@@ -2616,6 +2618,67 @@ describe('pecoStore', () => {
       const totalPages = state.document!.totalPages // 4
       expect(state.currentPageIndex).toBeGreaterThanOrEqual(0)
       expect(state.currentPageIndex).toBeLessThan(totalPages)
+    })
+  })
+
+  // ── #191: isRangeOcrMode ────────────────────────────────────────────────────
+
+  describe('#191 isRangeOcrMode', () => {
+    it('初期値は false', () => {
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+    })
+
+    it('toggleRangeOcrMode で true になる', () => {
+      usePecoStore.getState().toggleRangeOcrMode()
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
+    })
+
+    it('toggleRangeOcrMode を 2 回呼ぶと false に戻る', () => {
+      usePecoStore.getState().toggleRangeOcrMode()
+      usePecoStore.getState().toggleRangeOcrMode()
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+    })
+
+    it('toggleRangeOcrMode ON で isDrawingMode が OFF になる', () => {
+      usePecoStore.setState({ isDrawingMode: true })
+      usePecoStore.getState().toggleRangeOcrMode()
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
+      expect(usePecoStore.getState().isDrawingMode).toBe(false)
+    })
+
+    it('toggleRangeOcrMode ON で isSplitMode が OFF になる', () => {
+      usePecoStore.setState({ isSplitMode: true })
+      usePecoStore.getState().toggleRangeOcrMode()
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
+      expect(usePecoStore.getState().isSplitMode).toBe(false)
+    })
+
+    it('toggleRangeOcrMode ON で isCurveMode が OFF になる', () => {
+      usePecoStore.setState({ isCurveMode: true })
+      usePecoStore.getState().toggleRangeOcrMode()
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
+      expect(usePecoStore.getState().isCurveMode).toBe(false)
+    })
+
+    it('toggleDrawingMode ON で isRangeOcrMode が OFF になる', () => {
+      usePecoStore.setState({ isRangeOcrMode: true })
+      usePecoStore.getState().toggleDrawingMode()
+      expect(usePecoStore.getState().isDrawingMode).toBe(true)
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+    })
+
+    it('toggleSplitMode ON で isRangeOcrMode が OFF になる', () => {
+      usePecoStore.setState({ isRangeOcrMode: true })
+      usePecoStore.getState().toggleSplitMode()
+      expect(usePecoStore.getState().isSplitMode).toBe(true)
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+    })
+
+    it('toggleCurveMode ON で isRangeOcrMode が OFF になる', () => {
+      usePecoStore.setState({ isRangeOcrMode: true })
+      usePecoStore.getState().toggleCurveMode()
+      expect(usePecoStore.getState().isCurveMode).toBe(true)
+      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
     })
   })
 })

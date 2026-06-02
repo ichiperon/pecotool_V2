@@ -718,6 +718,139 @@ export function useOcrEngine(
     }
   };
 
+  /**
+   * #191: 矩形範囲指定 OCR。
+   * pdfCanvas 上でドラッグした矩形領域（canvas ピクセル座標）をクロップし、
+   * 一時ファイルへ書き出して run_ocr に渡す。
+   * 結果の OcrResultBlock[] は現在ページの textBlocks に追加する（undoable）。
+   *
+   * @param sourceCanvas  pdfCanvas (PDF 描画済みの canvas 要素)
+   * @param rect          canvas ピクセル座標での矩形 (x, y, width, height)
+   * @param pageIndex     現在ページのインデックス
+   * @param zoom          現在の zoom (100 = 等倍)
+   */
+  const runOcrOnRegion = async (
+    sourceCanvas: HTMLCanvasElement,
+    rect: { x: number; y: number; width: number; height: number },
+    pageIndex: number,
+    zoom: number,
+  ) => {
+    const state = usePecoStore.getState();
+    const doc = state.document;
+    if (!doc) return;
+
+    const pageData = doc.pages.get(pageIndex);
+    if (!pageData) {
+      showToast(`ページ ${pageIndex + 1} のデータが見つかりません。`, true);
+      return;
+    }
+
+    // canvas ピクセル座標での矩形
+    const sx = Math.round(rect.x);
+    const sy = Math.round(rect.y);
+    const sw = Math.round(rect.width);
+    const sh = Math.round(rect.height);
+
+    if (sw < 2 || sh < 2) return;
+
+    setOcrRunning(true);
+    let tempPath: string | null = null;
+    try {
+      // pdfCanvas からクロップ画像を生成
+      const cropCanvas = document.createElement('canvas');
+      cropCanvas.width = sw;
+      cropCanvas.height = sh;
+      const ctx = cropCanvas.getContext('2d')!;
+      ctx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+
+      const blob = await new Promise<Blob>((res) => cropCanvas.toBlob((b) => res(b!), 'image/png'));
+      const arrayBuffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+
+      cropCanvas.width = 0;
+      cropCanvas.height = 0;
+
+      const tmp = await tempDir();
+      const fileName = `peco_region_ocr_${pageIndex}_${Date.now()}.png`;
+      tempPath = await join(tmp, fileName);
+      await writeFile(tempPath, bytes);
+
+      const scale = zoom / 100;
+      // クロップ画像は zoom 済みピクセルなので renderScale として zoom / 100 を渡す。
+      // pageWidth/pageHeight はクロップ前のページ全体サイズ（座標変換に使われる）。
+      const settings = useOcrSettingsStore.getState();
+      const raw = await invoke<string>('run_ocr', {
+        imagePath: tempPath,
+        pageWidth: pageData.width,
+        pageHeight: pageData.height,
+        renderScale: scale,
+        languageTag: settings.ocrLanguage ?? null,
+      });
+
+      let parsed: import('../types').OcrResult;
+      try {
+        parsed = JSON.parse(raw) as import('../types').OcrResult;
+      } catch (e) {
+        showToast(`OCR結果のパースに失敗しました: ${e}`, true);
+        return;
+      }
+
+      if (parsed.status === 'error') {
+        showToast(`OCRエラー: ${parsed.message}`, true);
+        return;
+      }
+
+      const ocrBlocks = parsed.blocks ?? [];
+      if (ocrBlocks.length === 0) {
+        showToast('範囲内にテキストが検出されませんでした。');
+        return;
+      }
+
+      // クロップ画像での bbox を元ページの viewport 座標に変換する。
+      // OCR 結果の bbox はクロップ画像基準 (renderScale=zoom/100 でスケール済み) なので、
+      // 元ページ viewport 座標に戻すには: bbox_viewport = bbox_ocr / (zoom/100) + offset_viewport
+      // offset_viewport = { x: sx / scale, y: sy / scale }
+      const offsetX = sx / scale;
+      const offsetY = sy / scale;
+      const adjustedBlocks = ocrBlocks.map((b) => ({
+        ...b,
+        bbox: {
+          x: b.bbox.x + offsetX,
+          y: b.bbox.y + offsetY,
+          width: b.bbox.width,
+          height: b.bbox.height,
+        },
+      }));
+
+      const newBlocks = toTextBlocks(adjustedBlocks, settings);
+      const currentPage = usePecoStore.getState().document?.pages.get(pageIndex);
+      const existingBlocks = currentPage?.textBlocks ?? [];
+      const mergedBlocks = [
+        ...existingBlocks,
+        ...newBlocks.map((b, i) => ({ ...b, order: existingBlocks.length + i })),
+      ];
+
+      usePecoStore.getState().updatePageData(pageIndex, {
+        textBlocks: mergedBlocks,
+        isDirty: true,
+        isTextExtracted: true,
+        ocrCleared: false,
+      }, true);
+
+      showToast(`範囲指定OCRが完了しました（${newBlocks.length}件追加）`);
+    } catch (e) {
+      console.error('[OCR] 範囲指定OCR エラー:', e);
+      showToast(`範囲指定OCRに失敗しました: ${e}`, true);
+    } finally {
+      if (tempPath) {
+        remove(tempPath).catch((e) => {
+          console.warn(`[OCR] テンポラリファイルの削除に失敗: ${tempPath}`, e);
+        });
+      }
+      setOcrRunning(false);
+    }
+  };
+
   // hasDocument / currentPageIndex は Toolbar の disabled 制御用に返す
   return {
     isOcrRunning,
@@ -730,5 +863,6 @@ export function useOcrEngine(
     checkAndPromptOcrZero,
     hasDocument,
     currentPageIndex,
+    runOcrOnRegion,
   };
 }

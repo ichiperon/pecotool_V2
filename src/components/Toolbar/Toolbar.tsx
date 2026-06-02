@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace, SquareCheckBig, Spline
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace, SquareCheckBig, Spline, Crop
 } from "lucide-react";
 import { PageData } from '../../types';
 
@@ -17,6 +17,7 @@ interface ToolbarProps {
   isDrawingMode: boolean;
   isSplitMode: boolean;
   isCurveMode: boolean;
+  isRangeOcrMode: boolean;
   selectedIdsCount: number;
   showOcr: boolean;
   ocrOpacity: number;
@@ -40,6 +41,7 @@ interface ToolbarProps {
   onToggleDrawing: () => void;
   onToggleSplit: () => void;
   onToggleCurve: () => void;
+  onToggleRangeOcr: () => void;
   onGroup: () => void;
   onDeduplicate: () => void;
   onSelectAllText: () => void;
@@ -103,6 +105,11 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
           <button type="button" onClick={props.onToggleCurve} title="湾曲モード" className="active" aria-pressed="true" disabled={!props.isFileLoaded}><Spline size={18} /><span>湾曲</span></button>
         ) : (
           <button type="button" onClick={props.onToggleCurve} title="湾曲モード" aria-pressed="false" disabled={!props.isFileLoaded}><Spline size={18} /><span>湾曲</span></button>
+        )}
+        {props.isRangeOcrMode ? (
+          <button type="button" onClick={props.onToggleRangeOcr} title="範囲指定OCR" className="active" aria-pressed="true" disabled={!props.isFileLoaded || props.isOcrRunning}><Crop size={18} /><span>範囲OCR</span></button>
+        ) : (
+          <button type="button" onClick={props.onToggleRangeOcr} title="範囲指定OCR" aria-pressed="false" disabled={!props.isFileLoaded || props.isOcrRunning}><Crop size={18} /><span>範囲OCR</span></button>
         )}
         <button onClick={props.onGroup} title="グループ化" disabled={props.selectedIdsCount < 2}><Group size={18} /><span>グループ化</span></button>
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>

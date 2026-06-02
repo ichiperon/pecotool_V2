@@ -101,6 +101,15 @@ interface PecoState {
    */
   searchHitIndex: number;
 
+  // ─── #191: 範囲指定 OCR (末尾に集約) ───────────────────────────────────────
+  /**
+   * issue #191: PDF ビュー上で矩形ドラッグして部分領域を OCR するモード。
+   * isDrawingMode / isSplitMode / isCurveMode と排他。
+   */
+  isRangeOcrMode: boolean;
+  /** issue #191: 範囲指定 OCR モードをトグルする。他モードは OFF になる。 */
+  toggleRangeOcrMode(): void;
+
   /**
    * ドラッグ中のみ非 null。ドラッグ対象 BB の id -> 現在の bbox の Map。
    * issue #91: textBlocks 配列を毎フレーム map() で複製すると BB 1000+ ページで
@@ -255,6 +264,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   dragPreviewBboxes: null,
   searchTerm: '',
   searchHitIndex: 0,
+  // #191: 範囲指定 OCR モード (末尾に集約)
+  isRangeOcrMode: false,
 
   // issue #193: ページ削除
   deletePages: (displayIndices) => {
@@ -506,6 +517,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       isDrawingMode: false,
       isSplitMode: false,
       isCurveMode: false,
+      isRangeOcrMode: false,
       selectedIds: new Set(),
       lastSelectedId: null,
       clipboard: [],
@@ -583,11 +595,14 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   toggleTextPreview: () => set((state) => ({ showTextPreview: !state.showTextPreview })),
 
-  toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode, isSplitMode: false, isCurveMode: false })),
+  toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode, isSplitMode: false, isCurveMode: false, isRangeOcrMode: false })),
 
-  toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false, isCurveMode: false })),
+  toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false, isCurveMode: false, isRangeOcrMode: false })),
 
-  toggleCurveMode: () => set((state) => ({ isCurveMode: !state.isCurveMode, isDrawingMode: false, isSplitMode: false })),
+  toggleCurveMode: () => set((state) => ({ isCurveMode: !state.isCurveMode, isDrawingMode: false, isSplitMode: false, isRangeOcrMode: false })),
+
+  // #191: 範囲指定 OCR モード toggle (drawing/split/curve と排他)
+  toggleRangeOcrMode: () => set((state) => ({ isRangeOcrMode: !state.isRangeOcrMode, isDrawingMode: false, isSplitMode: false, isCurveMode: false })),
 
   updatePageData: (pageIndex, data, undoable = true) => {
     if (perf.enabled) perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
@@ -1415,3 +1430,5 @@ export const selectDragPreviewBboxes = (s: PecoState) => s.dragPreviewBboxes;
 // issue #196: 検索ハイライト共有
 export const selectSearchTerm = (s: PecoState) => s.searchTerm;
 export const selectSearchHitIndex = (s: PecoState) => s.searchHitIndex;
+// issue #191: 範囲指定 OCR モード
+export const selectIsRangeOcrMode = (s: PecoState) => s.isRangeOcrMode;

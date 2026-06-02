@@ -591,6 +591,152 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     expect(toasts.some((t) => t.msg.includes('別のPDF'))).toBe(true);
   });
 
+  // ── #191: 範囲指定 OCR ──────────────────────────────────────────────────────
+
+  describe('#191 runOcrOnRegion', () => {
+    function makeOffscreenCanvas(w: number, h: number): HTMLCanvasElement {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      return c;
+    }
+
+    it('正常系: クロップ画像を run_ocr に渡して新規 BB が追加される', async () => {
+      usePecoStore.getState().setDocument(makeDoc(1));
+      usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+      h.invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd !== 'run_ocr') return '';
+        return JSON.stringify({
+          status: 'ok',
+          blocks: [
+            { text: '範囲テキスト', bbox: { x: 0, y: 0, width: 50, height: 20 }, writingMode: 'horizontal', confidence: 0.9 },
+          ],
+        });
+      });
+
+      const toasts: Array<{ msg: string; err?: boolean }> = [];
+      const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+      const canvas = makeOffscreenCanvas(400, 600);
+      await act(async () => {
+        await result.current.runOcrOnRegion(canvas, { x: 100, y: 200, width: 80, height: 40 }, 0, 100);
+      });
+
+      expect(h.invokeMock).toHaveBeenCalledWith('run_ocr', expect.objectContaining({ imagePath: expect.any(String) }));
+      expect(h.writeFileMock).toHaveBeenCalled();
+      expect(h.removeMock).toHaveBeenCalled();
+
+      const p0 = usePecoStore.getState().document!.pages.get(0)!;
+      expect(p0.textBlocks).toHaveLength(1);
+      expect(p0.textBlocks[0].text).toBe('範囲テキスト');
+      expect(p0.isDirty).toBe(true);
+
+      expect(toasts.some((t) => !t.err && t.msg.includes('範囲指定OCR'))).toBe(true);
+    });
+
+    it('座標オフセット: OCR 結果 bbox に rect の左上 offset が加算される', async () => {
+      usePecoStore.getState().setDocument(makeDoc(1));
+      usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+      h.invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd !== 'run_ocr') return '';
+        return JSON.stringify({
+          status: 'ok',
+          blocks: [
+            { text: 'O', bbox: { x: 10, y: 5, width: 20, height: 10 }, writingMode: 'horizontal', confidence: 1 },
+          ],
+        });
+      });
+
+      const { result } = renderHook(() => useOcrEngine(() => {}));
+      const canvas = makeOffscreenCanvas(400, 600);
+      // zoom=100, rect.x=50, rect.y=100 → offset = {x: 50, y: 100}
+      await act(async () => {
+        await result.current.runOcrOnRegion(canvas, { x: 50, y: 100, width: 60, height: 30 }, 0, 100);
+      });
+
+      const p0 = usePecoStore.getState().document!.pages.get(0)!;
+      expect(p0.textBlocks[0].bbox.x).toBeCloseTo(60); // 10 + 50
+      expect(p0.textBlocks[0].bbox.y).toBeCloseTo(105); // 5 + 100
+    });
+
+    it('ページデータなしの場合はエラー toast が出て invoke 呼ばれない', async () => {
+      const doc = makeDoc(1);
+      usePecoStore.getState().setDocument(doc);
+      // pages から page 0 を削除して未ロード状態をシミュレート
+      doc.pages.delete(0);
+      usePecoStore.setState({ document: doc, currentPageIndex: 0 } as any);
+
+      const toasts: Array<{ msg: string; err?: boolean }> = [];
+      const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+      const canvas = makeOffscreenCanvas(400, 600);
+
+      await act(async () => {
+        await result.current.runOcrOnRegion(canvas, { x: 10, y: 10, width: 40, height: 20 }, 0, 100);
+      });
+
+      expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+      expect(toasts.some((t) => t.err === true)).toBe(true);
+    });
+
+    it('OCR 結果が 0 件のとき「テキストが検出されなかった」toast が出る', async () => {
+      usePecoStore.getState().setDocument(makeDoc(1));
+      usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+      h.invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd !== 'run_ocr') return '';
+        return JSON.stringify({ status: 'ok', blocks: [] });
+      });
+
+      const toasts: Array<{ msg: string; err?: boolean }> = [];
+      const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+      const canvas = makeOffscreenCanvas(400, 600);
+
+      await act(async () => {
+        await result.current.runOcrOnRegion(canvas, { x: 10, y: 10, width: 40, height: 20 }, 0, 100);
+      });
+
+      const p0 = usePecoStore.getState().document!.pages.get(0)!;
+      expect(p0.textBlocks).toHaveLength(0);
+      expect(toasts.some((t) => !t.err && t.msg.includes('検出されませんでした'))).toBe(true);
+    });
+
+    it('既存 textBlocks に追記 (上書きしない)', async () => {
+      const existingBlock = {
+        id: 'existing-1', text: 'existing', originalText: 'existing',
+        bbox: { x: 0, y: 0, width: 100, height: 20 },
+        writingMode: 'horizontal' as const, order: 0, isNew: false, isDirty: false,
+      };
+      const doc = makeDoc(1);
+      doc.pages.get(0)!.textBlocks = [existingBlock];
+      usePecoStore.getState().setDocument(doc);
+      usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+      h.invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd !== 'run_ocr') return '';
+        return JSON.stringify({
+          status: 'ok',
+          blocks: [
+            { text: '新規', bbox: { x: 0, y: 0, width: 30, height: 10 }, writingMode: 'horizontal', confidence: 1 },
+          ],
+        });
+      });
+
+      const { result } = renderHook(() => useOcrEngine(() => {}));
+      const canvas = makeOffscreenCanvas(400, 600);
+
+      await act(async () => {
+        await result.current.runOcrOnRegion(canvas, { x: 0, y: 0, width: 60, height: 30 }, 0, 100);
+      });
+
+      const p0 = usePecoStore.getState().document!.pages.get(0)!;
+      expect(p0.textBlocks).toHaveLength(2);
+      expect(p0.textBlocks[0].text).toBe('existing');
+      expect(p0.textBlocks[1].text).toBe('新規');
+    });
+  });
+
   it('issue #102: runOcrCurrentPage 中に doc 参照が差し替わったら新 doc に書き込まれない', async () => {
     const initialDoc = makeDoc(1);
     usePecoStore.getState().setDocument(initialDoc);

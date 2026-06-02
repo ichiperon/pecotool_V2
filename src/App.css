@@ -554,6 +554,11 @@ body, #root {
   cursor: crosshair;
 }
 
+.canvas-wrapper.range-ocr-mode {
+  outline: 4px solid rgba(255, 140, 0, 0.4);
+  cursor: crosshair;
+}
+
 .ocr-opacity-label {
   display: flex;
   align-items: center;
