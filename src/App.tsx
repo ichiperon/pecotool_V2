@@ -46,6 +46,7 @@ import { useRecentFiles } from "./hooks/useRecentFiles";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { usePageExtraction } from "./hooks/usePageExtraction";
 import { useBatchJob } from "./hooks/useBatchJob";
+import { usePageManagement } from "./hooks/usePageManagement";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
@@ -258,14 +259,11 @@ function App() {
 
   // --- Handlers ---
 
-  // issue #193: ページ削除 / 並べ替えハンドラ (store action への安定参照)
-  const handleDeletePages = useCallback((displayIndices: number[]) => {
-    usePecoStore.getState().deletePages(displayIndices);
-  }, []);
-
-  const handleMovePage = useCallback((fromDisplayIndex: number, toDisplayIndex: number) => {
-    usePecoStore.getState().movePage(fromDisplayIndex, toDisplayIndex);
-  }, []);
+  // issue #193 / #254: ページ削除 / 並べ替え — IDB I/O は usePageManagement hook で担う
+  const {
+    handleDeletePages,
+    handleMovePage,
+  } = usePageManagement();
 
   // issue #207: ページ回転ハンドラ
   const handleRotatePages = useCallback((pageIndices: number[], delta: 90 | 180 | 270) => {

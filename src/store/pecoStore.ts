@@ -130,13 +130,26 @@ interface PecoState {
    * issue #193: 指定した pageOrder インデックス (displayIndices) のページを削除する。
    * displayIndices は pageOrder 配列上のインデックス (表示順序の位置)。
    * undoable=true (default) で undo スタックに積む。
+   *
+   * onIdbWork が指定された場合、IDB I/O は呼び出し元（hook 層）に委譲される。
+   * 省略時は action 内で IDB I/O を完結させる（後方互換）。
    */
-  deletePages: (displayIndices: number[]) => Promise<void>;
+  deletePages: (
+    displayIndices: number[],
+    onIdbWork?: (filePath: string, deletedOrigIndices: number[], renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }>) => void,
+  ) => Promise<void>;
   /**
    * issue #193: ドラッグ並べ替えでページ順序を変更する。
    * fromDisplayIndex / toDisplayIndex は pageOrder 配列上のインデックス。
+   *
+   * onIdbWork が指定された場合、IDB I/O は呼び出し元（hook 層）に委譲される。
+   * 省略時は action 内で IDB I/O を完結させる（後方互換）。
    */
-  movePage: (fromDisplayIndex: number, toDisplayIndex: number) => Promise<void>;
+  movePage: (
+    fromDisplayIndex: number,
+    toDisplayIndex: number,
+    onIdbWork?: (filePath: string, renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }>) => void,
+  ) => Promise<void>;
   /**
    * issue #207: 指定した pageIndex のページを時計回りに delta 度回転する。
    * delta は 90 | 180 | 270 のいずれか。
@@ -277,13 +290,13 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   isRangeOcrMode: false,
 
   // issue #193: ページ削除
-  // TODO(#219): ここでは IDB I/O を直接発火する設計。将来 `usePageManagement` hook に
-  // 切り出す候補。現状は action 内で副作用を完結させており、schedulePendingIdbWrite /
-  // deleteTemporaryPageKeys / renameTemporaryPageKeys を直接呼び出している。
-  deletePages: async (displayIndices) => {
+  // #254: onIdbWork が指定された場合は IDB I/O を hook 層に委譲する。
+  // 省略時は従来通り action 内で完結させる（後方互換）。
+  deletePages: async (displayIndices, onIdbWork) => {
     // #215: 進行中の IDB 書き込みが完了してから rename/delete を実行することで
     // renameTemporaryPageKeys とのキー競合レース条件を防ぐ。
-    await waitForPendingIdbSaves();
+    // onIdbWork を使う場合は呼び出し元（hook）が await を担う。
+    if (!onIdbWork) await waitForPendingIdbSaves();
 
     const state = get();
     if (!state.document || displayIndices.length === 0) return;
@@ -375,30 +388,35 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       }
     });
 
-    const idbWork = deleteTemporaryPageKeys(filePath, deletedOrigIndices)
-      .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
-      .then(() => {
-        if (get().lastIdbError) set({ lastIdbError: null });
-      })
-      .catch((e: unknown) => {
-        const err = e instanceof Error ? e : new Error(String(e));
-        console.error('[Store] deletePages IDB 同期失敗:', err);
-        set({ lastIdbError: err });
+    if (onIdbWork) {
+      // #254: IDB I/O を hook 層に委譲する
+      onIdbWork(filePath, deletedOrigIndices, renamedEntries);
+    } else {
+      const idbWork = deleteTemporaryPageKeys(filePath, deletedOrigIndices)
+        .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
+        .then(() => {
+          if (get().lastIdbError) set({ lastIdbError: null });
+        })
+        .catch((e: unknown) => {
+          const err = e instanceof Error ? e : new Error(String(e));
+          console.error('[Store] deletePages IDB 同期失敗:', err);
+          set({ lastIdbError: err });
+        });
+      const tracked: Promise<void> = idbWork.finally(() => {
+        pendingIdbSaves.delete(tracked);
       });
-    const tracked: Promise<void> = idbWork.finally(() => {
-      pendingIdbSaves.delete(tracked);
-    });
-    pendingIdbSaves.add(tracked);
+      pendingIdbSaves.add(tracked);
+    }
   },
 
   // issue #193: ページ並べ替え
-  // TODO(#219): ここでは IDB I/O を直接発火する設計。将来 `usePageManagement` hook に
-  // 切り出す候補。現状は action 内で副作用を完結させており、renameTemporaryPageKeys を
-  // 直接呼び出している。
-  movePage: async (fromDisplayIndex, toDisplayIndex) => {
+  // #254: onIdbWork が指定された場合は IDB I/O を hook 層に委譲する。
+  // 省略時は従来通り action 内で完結させる（後方互換）。
+  movePage: async (fromDisplayIndex, toDisplayIndex, onIdbWork) => {
     // #215: 進行中の IDB 書き込みが完了してから rename を実行することで
     // renameTemporaryPageKeys とのキー競合レース条件を防ぐ。
-    await waitForPendingIdbSaves();
+    // onIdbWork を使う場合は呼び出し元（hook）が await を担う。
+    if (!onIdbWork) await waitForPendingIdbSaves();
 
     const state = get();
     if (!state.document) return;
@@ -464,7 +482,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       }
     });
 
-    if (renamedEntries.length > 0) {
+    if (onIdbWork) {
+      // #254: IDB I/O を hook 層に委譲する
+      if (renamedEntries.length > 0) onIdbWork(filePath, renamedEntries);
+    } else if (renamedEntries.length > 0) {
       const idbWork = renameTemporaryPageKeys(filePath, renamedEntries)
         .then(() => {
           if (get().lastIdbError) set({ lastIdbError: null });
