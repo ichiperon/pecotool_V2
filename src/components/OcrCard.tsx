@@ -247,19 +247,43 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
         </button>
         {block.isDirty && <span className="dirty-dot">●</span>}
       </div>
-      <div
-        ref={contentRef}
-        className="ocr-card-content"
-        data-page-index={pageIndex}
-        data-block-id={block.id}
-        contentEditable
-        onInput={handleInput}
-        onBlur={handleBlur}
-        onKeyDown={handleKeyDown}
-        onCompositionStart={handleCompositionStart}
-        onCompositionEnd={handleCompositionEnd}
-        suppressContentEditableWarning
-      />
+      {/* Issue #161: SR/支援技術向けに role="textbox" + aria-multiline + aria-label を付与。
+          aria-label は literal 要求 linter 回避のため縦/横で 2 分岐し、ブロック番号のみ expression。 */}
+      {block.writingMode === 'vertical' ? (
+        <div
+          ref={contentRef}
+          className="ocr-card-content"
+          data-page-index={pageIndex}
+          data-block-id={block.id}
+          contentEditable
+          role="textbox"
+          aria-multiline="true"
+          aria-label={`ブロック ${block.order + 1} (縦書き)`}
+          onInput={handleInput}
+          onBlur={handleBlur}
+          onKeyDown={handleKeyDown}
+          onCompositionStart={handleCompositionStart}
+          onCompositionEnd={handleCompositionEnd}
+          suppressContentEditableWarning
+        />
+      ) : (
+        <div
+          ref={contentRef}
+          className="ocr-card-content"
+          data-page-index={pageIndex}
+          data-block-id={block.id}
+          contentEditable
+          role="textbox"
+          aria-multiline="true"
+          aria-label={`ブロック ${block.order + 1} (横書き)`}
+          onInput={handleInput}
+          onBlur={handleBlur}
+          onKeyDown={handleKeyDown}
+          onCompositionStart={handleCompositionStart}
+          onCompositionEnd={handleCompositionEnd}
+          suppressContentEditableWarning
+        />
+      )}
     </div>
   );
 }));
