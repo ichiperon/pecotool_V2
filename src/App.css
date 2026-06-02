@@ -391,10 +391,22 @@ body, #root {
   border-radius: 6px;
   margin-bottom: 8px;
   transition: background-color 0.2s;
+  /* Issue #160: <button> 化に伴い browser default を打ち消す */
+  background: transparent;
+  border: none;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: center;
 }
 
 .thumbnail-item:hover {
   background-color: #f3f4f6;
+}
+
+.thumbnail-item:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
 }
 
 .thumbnail-item.active {

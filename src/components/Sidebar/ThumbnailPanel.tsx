@@ -55,8 +55,11 @@ export const ThumbnailItemNode = React.memo(({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, thumbnailData, onRequest, loadEpoch]);
 
-  return (
-    <div className={`thumbnail-item ${isActive ? 'active' : ''}`} onClick={() => onSelect(index)}>
+  // Issue #160: button 化してキーボード操作・SR 対応
+  // aria-current="page" は active のみ、未 active は属性ごと付けない (literal 要求対応で 2 分岐)
+  const ariaLabel = `ページ ${index + 1}${isDirty ? ' (未保存)' : ''}`;
+  const body = (
+    <>
       <div className="thumbnail-box">
         {thumbnailData ? (
           <img src={thumbnailData} alt={`Page ${index + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
@@ -65,7 +68,30 @@ export const ThumbnailItemNode = React.memo(({
         )}
       </div>
       <div className="thumbnail-label">{index + 1} ページ {isDirty && "●"}</div>
-    </div>
+    </>
+  );
+  if (isActive) {
+    return (
+      <button
+        type="button"
+        className="thumbnail-item active"
+        onClick={() => onSelect(index)}
+        aria-current="page"
+        aria-label={ariaLabel}
+      >
+        {body}
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="thumbnail-item"
+      onClick={() => onSelect(index)}
+      aria-label={ariaLabel}
+    >
+      {body}
+    </button>
   );
 });
 
