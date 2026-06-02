@@ -301,10 +301,10 @@ export function OnboardingTour({ onClose }: OnboardingTourProps) {
 
           {/* Description */}
           <p className="onboarding-description">
-            {currentStep.description.split('\n').map((line, i) => (
+            {currentStep.description.split('\n').map((line, i, lines) => (
               <span key={i}>
                 {line}
-                {i < currentStep.description.split('\n').length - 1 && <br />}
+                {i < lines.length - 1 && <br />}
               </span>
             ))}
           </p>
