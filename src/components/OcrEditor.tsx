@@ -382,6 +382,7 @@ export function OcrEditor({
             ref={searchInputRef}
             type="text"
             placeholder="検索..."
+            aria-label="OCRテキストを検索"
             className="search-box"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
