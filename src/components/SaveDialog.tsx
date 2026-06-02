@@ -1,4 +1,4 @@
-import { X, Loader2 } from "lucide-react";
+import { X, Loader2, AlertTriangle } from "lucide-react";
 import { useState } from "react";
 import { Modal, useModalTitleId } from "./ui/Modal";
 
@@ -104,7 +104,10 @@ export function SaveDialog({
               onChange={() => setCompression('rasterized')}
             />
             <div className="option-details">
-              <span className="option-name" style={{ color: '#d97706' }}>高圧縮 (ラスタライズ)</span>
+              <span className="option-name" style={{ color: '#92400e', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <AlertTriangle size={12} aria-hidden="true" />
+                高圧縮 (ラスタライズ)
+              </span>
               <span className="option-size">
                 {isEstimating ? (
                   <Loader2 size={12} className="spin" />
@@ -137,6 +140,7 @@ export function SaveDialog({
         </div>
 
         <p className="save-dialog-note">
+          <AlertTriangle size={12} aria-hidden="true" style={{ verticalAlign: 'text-bottom', marginRight: 4 }} />
           ※標準以下の圧縮では画像データは再圧縮されません。画質を落としてもサイズを減らしたい場合のみ高圧縮を使用してください。
         </p>
       </div>

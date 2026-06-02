@@ -1331,7 +1331,9 @@ body, #root {
 
 .save-dialog-note {
   font-size: 11px;
-  color: #d97706;
+  /* issue #167: AA コントラスト確保のため濃いオレンジに変更 (#d97706 → #92400e) */
+  color: #92400e;
+  font-weight: bold;
   margin-top: 16px;
   margin-bottom: 0;
   line-height: 1.4;
