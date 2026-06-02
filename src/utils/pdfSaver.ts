@@ -1136,7 +1136,11 @@ export async function buildPdfDocument(
       `[buildPdfDocument] GC: dropped ${sweepResult.dropped} unreachable objects`,
     );
   }
-  compactIndirectObjectNumbers(pdfDoc);
+  // sweep が 1 件も dropped を出していなければ indirect 番号に gap は発生しないので
+  // compact (全 indirect object の再走査+再 assign) を丸ごとスキップできる。
+  if (sweepResult.dropped > 0) {
+    compactIndirectObjectNumbers(pdfDoc);
+  }
 
   let savedBytes = await pdfDoc.save(saveOptions);
   savedBytes = ensureDenseClassicXref(savedBytes);

@@ -194,6 +194,24 @@ export function compactIndirectObjectNumbers(pdfDoc: PDFDocument): CompactResult
   const entries = context.enumerateIndirectObjects();
   if (entries.length === 0) return { renumbered: 0 };
 
+  // 早期 return 強化: object 番号が既に dense (1..N かつ generation 0) で
+  // largestObjectNumber も entries.length と一致するなら refMap も rewrite も
+  // 不要。entries 走査を 1 周するだけで判定でき、その後の indirectObjects.clear()
+  // / 再 assign / rewriteRefsInObject の重い処理を全てスキップできる。
+  let alreadyDense = context.largestObjectNumber === entries.length;
+  if (alreadyDense) {
+    for (let i = 0; i < entries.length; i++) {
+      const ref = entries[i][0];
+      if (ref.objectNumber !== i + 1 || ref.generationNumber !== 0) {
+        alreadyDense = false;
+        break;
+      }
+    }
+  }
+  if (alreadyDense) {
+    return { renumbered: 0 };
+  }
+
   const refMap = new Map<string, PDFRef>();
   let renumbered = 0;
   entries.forEach(([oldRef], index) => {

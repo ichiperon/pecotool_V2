@@ -898,7 +898,11 @@ async function handleSavePdf(
       `[pdf.worker] GC: dropped ${sweepResult.dropped} unreachable objects`,
     );
   }
-  compactIndirectObjectNumbers(pdfDoc);
+  // sweep が 1 件も dropped を出していなければ indirect 番号に gap は発生しないので
+  // compact (全 indirect object の再走査+再 assign) を丸ごとスキップできる。
+  if (sweepResult.dropped > 0) {
+    compactIndirectObjectNumbers(pdfDoc);
+  }
 
   // pdf-lib save() が pdf-lib 内部で hang する edge case 対策として 90s timeout を設定。
   const savePromise = pdfDoc.save(saveOptions);
