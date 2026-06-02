@@ -12,6 +12,7 @@ import { sortOcrBlocks } from '../utils/ocrSort';
 import { logger } from '../utils/logger';
 import { perf } from '../utils/perfLogger';
 import { loadPage } from '../utils/pdfTextExtractor';
+import { parsePageRange } from '../utils/pageRangeParser';
 
 const RENDER_SCALE = 2.0;
 
@@ -231,6 +232,7 @@ export function useOcrEngine(
   const processAllPages = async (
     doc: PecoDocument,
     progressForPage?: (pageIndex: number, timing: { startedAt: number; avgMsPerPage: number; estimatedRemainingMs: number }) => OcrProgress,
+    pageIndices?: number[],
   ) => {
     // #102: 開始時点の epoch を captured epoch として保持。
     // ループ内で getState().documentEpoch と比較し、F5 / Ctrl+O 経由で document が
@@ -239,13 +241,18 @@ export function useOcrEngine(
     const capturedEpoch = usePecoStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
 
+    // #199: 対象ページインデックス一覧。指定がなければ全ページ。
+    const targets = pageIndices ?? Array.from({ length: doc.totalPages }, (_, i) => i);
+    const total = targets.length;
+
     // #200: EMA タイミング変数
     const startedAt = performance.now();
     let avgMsPerPage = 0;
     let pageStartTime = startedAt;
 
     try {
-      for (let i = 0; i < doc.totalPages; i++) {
+      for (let step = 0; step < targets.length; step++) {
+        const i = targets[step];
         if (cancelTokenRef.current) break;
         if (!isCurrentDocument(capturedEpoch)) {
           cancelTokenRef.current = true;
@@ -255,11 +262,11 @@ export function useOcrEngine(
 
         pageStartTime = performance.now();
 
-        const timing = { startedAt, avgMsPerPage, estimatedRemainingMs: avgMsPerPage * (doc.totalPages - i) };
+        const timing = { startedAt, avgMsPerPage, estimatedRemainingMs: avgMsPerPage * (total - step) };
         setOcrProgress(
           progressForPage
             ? progressForPage(i, timing)
-            : { current: i + 1, total: doc.totalPages, startedAt, avgMsPerPage, estimatedRemainingMs: timing.estimatedRemainingMs },
+            : { current: step + 1, total, startedAt, avgMsPerPage, estimatedRemainingMs: timing.estimatedRemainingMs },
         );
         logger.log(`[OCR] 処理中: ${i + 1} / ${doc.totalPages} ページ`);
 
@@ -312,7 +319,7 @@ export function useOcrEngine(
         } catch (e) {
           console.error(`[OCR] ページ ${i + 1} 失敗:`, e);
         }
-        if ((i + 1) % 25 === 0) {
+        if ((step + 1) % 25 === 0) {
           await ocrPdf.cleanup().catch(() => {});
         }
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -452,6 +459,60 @@ export function useOcrEngine(
 
   const cancelOcr = () => {
     cancelTokenRef.current = true;
+  };
+
+  // #199: ページ範囲指定 OCR
+  const runOcrRange = async (pageRangeString: string) => {
+    const doc = usePecoStore.getState().document;
+    if (!doc) return;
+
+    const parsed = parsePageRange(pageRangeString, doc.totalPages);
+    if ('error' in parsed) {
+      showToast(`ページ範囲エラー: ${parsed.error}`, true);
+      return;
+    }
+
+    const pageIndices = parsed;
+    if (pageIndices.length === 0) {
+      showToast('有効なページが範囲内に存在しません', true);
+      return;
+    }
+
+    const confirmed = await ask(
+      `ページ範囲 OCR を実行します (${pageIndices.length} ページ)。この操作はUndo できません。続行しますか？`,
+      { title: 'ページ範囲 OCR 確認', kind: 'warning' }
+    );
+    if (!confirmed) return;
+
+    const hasExisting = pageIndices.some((idx) => {
+      const page = doc.pages.get(idx);
+      return (page?.textBlocks?.length ?? 0) > 0;
+    });
+    if (hasExisting) {
+      const overwriteConfirmed = await ask(
+        '指定ページの一部に既存OCRデータがあります。上書きしますか？',
+        { title: '上書き確認', kind: 'warning' }
+      );
+      if (!overwriteConfirmed) return;
+    }
+
+    cancelTokenRef.current = false;
+    setOcrRunning(true);
+    setOcrProgress({ current: 0, total: pageIndices.length, startedAt: performance.now(), avgMsPerPage: 0, estimatedRemainingMs: 0 });
+    perf.mark('ui.ocrRunRange', { pageCount: pageIndices.length });
+
+    try {
+      await processAllPages(doc, undefined, pageIndices);
+    } finally {
+      setOcrRunning(false);
+      setOcrProgress(null);
+    }
+
+    if (cancelTokenRef.current) {
+      showToast('OCRをキャンセルしました');
+    } else {
+      showToast(`ページ範囲OCRが完了しました（${pageIndices.length} ページ）`);
+    }
   };
 
   const runOcrFolder = async () => {
@@ -663,6 +724,7 @@ export function useOcrEngine(
     ocrProgress,
     runOcrCurrentPage,
     runOcrAllPages,
+    runOcrRange,
     runOcrFolder,
     cancelOcr,
     checkAndPromptOcrZero,

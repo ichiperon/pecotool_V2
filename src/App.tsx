@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { shouldShowOnboarding, ONBOARDING_STORAGE_KEY } from "./components/OnboardingTour";
 import "./App.css";
 import {
   usePecoStore,
@@ -47,6 +48,11 @@ import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 import { Toolbar } from "./components/Toolbar/Toolbar";
 import { MenuBar } from "./components/MenuBar/MenuBar";
 import { HelpMenu } from "./components/HelpMenu";
+
+// Feature #203: onboarding tour (lazy)
+const OnboardingTour = lazy(() =>
+  import("./components/OnboardingTour").then(m => ({ default: m.OnboardingTour }))
+);
 
 // Lazy-loaded modal/dialog components: 初回描画に不要なため code-split
 const OcrSettingsModal = lazy(() =>
@@ -143,6 +149,9 @@ function App() {
 
   const [reorderThreshold, setReorderThreshold] = useState(() => readReorderThreshold());
 
+  // Feature #203: First-launch onboarding tour
+  const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
+
   // --- External Hooks ---
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
@@ -152,6 +161,7 @@ function App() {
     ocrProgress,
     runOcrCurrentPage,
     runOcrAllPages,
+    runOcrRange,
     runOcrFolder,
     cancelOcr,
     checkAndPromptOcrZero
@@ -713,6 +723,14 @@ function App() {
         onShowShortcuts={() => setHelpModal('shortcuts')}
         onShowUsage={() => setHelpModal('usage')}
         onShowVersion={() => setHelpModal('version')}
+        onShowTour={() => {
+          try {
+            localStorage.removeItem(ONBOARDING_STORAGE_KEY);
+          } catch {
+            /* ignore */
+          }
+          setShowOnboarding(true);
+        }}
         onReload={handleReload}
         onShowOcrSettings={() => setShowOcrSettings(true)}
         onOpenLogFolder={handleOpenLogFolder}
@@ -738,6 +756,10 @@ function App() {
         onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
         onRunOcrCurrentPage={runOcrCurrentPage}
         onRunOcrAllPages={runOcrAllPages}
+        onRunOcrRange={() => {
+          const input = window.prompt('ページ範囲 (例: 1-50, 100, 200-)');
+          if (input !== null) runOcrRange(input);
+        }}
         onRunOcrFolder={runOcrFolder}
         onCancelOcr={cancelOcr}
         onClearOcrCurrentPage={handleClearOcrCurrentPage}
@@ -955,6 +977,13 @@ function App() {
           </div>
         </div>
       )}
+      {/* Feature #203: First-launch onboarding tour */}
+      {showOnboarding && (
+        <Suspense fallback={null}>
+          <OnboardingTour onClose={() => setShowOnboarding(false)} />
+        </Suspense>
+      )}
+
       {notification && (notification.isError ? (
         <div className="toast toast-error" role="alert" aria-live="assertive">
           <span>{notification.message}</span>

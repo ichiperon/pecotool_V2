@@ -52,6 +52,7 @@ interface ToolbarProps {
   onToggleSettingsDropdown: (e: React.MouseEvent) => void;
   onRunOcrCurrentPage: () => void;
   onRunOcrAllPages: () => void;
+  onRunOcrRange: () => void;
   onRunOcrFolder: () => void;
   onCancelOcr: () => void;
   onClearOcrCurrentPage: () => void;
@@ -160,6 +161,7 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
             disabled={props.isOcrRunning}
             title="OCR実行"
             style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
+            data-tour="toolbar-ocr"
           >
             {props.isOcrRunning
               ? <Loader2 size={14} style={{ marginRight: '4px', animation: 'spin 1s linear infinite' }} />
@@ -191,6 +193,14 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
                 disabled={!props.isFileLoaded}
               >
                 全ページ
+              </button>
+              <button
+                type="button"
+                className="recent-item"
+                onClick={() => { setShowOcrDropdown(false); props.onRunOcrRange(); }}
+                disabled={!props.isFileLoaded}
+              >
+                ページ範囲指定...
               </button>
               <button
                 type="button"
