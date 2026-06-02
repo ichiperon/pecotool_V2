@@ -8,6 +8,9 @@
  * - マウスイベントハンドラの curve 分岐ロジック
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+
+// ダブルクリック直後のシングルクリックイベントを抑制するガード時間 (ms) (#260)
+const DOUBLE_CLICK_GUARD_MS = 300;
 import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
 import { isCurveDefinition } from "../utils/curveDefinition";
 import type { CurveDefinition, PageData, TextBlock } from "../types";
@@ -67,6 +70,8 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
   const polylineMousePosRef = useRef<{ x: number; y: number } | null>(null);
   // ダブルクリック直後のシングルクリックイベントを抑制するためのタイムスタンプ ref
   const lastDoubleClickTimeRef = useRef<number>(0);
+  // #265: cursor 更新を RAF スロットルに乗せるための ref
+  const cursorRafRef = useRef<number | null>(null);
 
   /**
    * canvas 座標 (zoom 適用済み) → viewport 座標 (zoom 等倍) に戻す。
@@ -156,7 +161,7 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     // ダブルクリック直後の synthetic click を無視するため 300ms ガード
     if (polylineDraftActive) {
       const now = Date.now();
-      if (now - lastDoubleClickTimeRef.current < 300) return true;
+      if (now - lastDoubleClickTimeRef.current < DOUBLE_CLICK_GUARD_MS) return true;
       const pdfPos = canvasToViewport(pos);
       setPolylineDraftPoints((prev) => [...prev, pdfPos]);
       return true;
@@ -250,12 +255,17 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
       return true;
     }
 
-    // cursor 更新 (isCurveMode のとき)
+    // cursor 更新 (isCurveMode のとき): RAF スロットルで毎 mousemove の hitTest を間引く (#265)
     if (isCurveMode) {
-      const hit = hitTestCurveHandle(pos);
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.style.cursor = hit ? "pointer" : "crosshair";
-      }
+      if (cursorRafRef.current) cancelAnimationFrame(cursorRafRef.current);
+      const capturedPos = pos;
+      cursorRafRef.current = requestAnimationFrame(() => {
+        cursorRafRef.current = null;
+        const hit = hitTestCurveHandle(capturedPos);
+        if (overlayCanvasRef.current) {
+          overlayCanvasRef.current.style.cursor = hit ? "pointer" : "crosshair";
+        }
+      });
       return true;
     }
 
@@ -273,10 +283,11 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
       curveHandleDragRef.current = null;
       // mouseMove 中は undoable=false で書き込んでいるため、mouseUp 時点の
       // 最新 curve を undoable=true で再書き込みして undo スタックに積む。
-      const page = getPageData();
-      if (page) {
-        const block = page.textBlocks.find((b) => b.id === blockId);
-        if (block) {
+      // #266: find (O(n)) → currentTextBlocksById.get (O(1)) に変更
+      const block = currentTextBlocksById.get(blockId);
+      if (block) {
+        const page = getPageData();
+        if (page) {
           const newBlocks = page.textBlocks.map((b) =>
             b.id === blockId ? { ...b, isDirty: true } : b,
           );
@@ -286,7 +297,7 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
       return true;
     }
     return false;
-  }, [getPageData, updatePageData, pageIndex]);
+  }, [currentTextBlocksById, getPageData, updatePageData, pageIndex]);
 
   /**
    * curve mode の doubleClick 処理 (#205: polyline 作成開始)。
