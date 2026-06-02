@@ -472,9 +472,10 @@ export function useFileOperations(
    * 保存の共通処理。originalBytes の待機 → IDB マージ → PDF 生成 → ファイル書き込みを行う。
    * 各 await は個別 timeout で囲み、詰まった段階をトースト/コンソールで特定できるようにする。
    * @param targetPath 書き込み先パス。省略時は document.filePath に上書き保存。
+   * @param saveOptions 圧縮プリセット等の保存オプション。省略時はデフォルト挙動。
    * @returns 保存結果。失敗時は null。
    */
-  const _executeSave = async (targetPath?: string): Promise<SaveResult | null> => {
+  const _executeSave = async (targetPath?: string, saveOptions?: SaveDialogOptions): Promise<SaveResult | null> => {
     const { document } = usePecoStore.getState();
     if (!document) return null;
     const sourceFilePath = document.filePath;
@@ -537,7 +538,7 @@ export function useFileOperations(
     const savePageOrder = usePecoStore.getState().pageOrder;
     let skippedChars: SkippedPdfTextChar[] = [];
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
-      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; }, savePageOrder);
+      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; }, savePageOrder, saveOptions);
     let savedBytes: Uint8Array;
     // issue #164: PDF生成フェーズに遷移
     setSaveStep?.('pdf-gen');
@@ -698,14 +699,17 @@ export function useFileOperations(
   };
 
   /**
-   * issue #197: SaveDialog から選んだ圧縮オプションを受け取れるよう signature 拡張。
+   * issue #197 / #206: SaveDialog から選んだ圧縮オプションを受け取り _executeSave に伝搬する。
    * options が undefined のときは従来通りデフォルト挙動 (後方互換)。
-   * actual compression/rasterization は TODO: 別 issue で実装。
+   * compressed プリセット: useObjectStreams=true で PDF 保存 (issue #206 実装済み)。
+   * rasterized プリセット: TODO (別 issue で対応予定)。現状は warning toast のみ。
    */
   const executeSaveAs = async (options?: SaveDialogOptions) => {
-    // TODO: options.compression / options.rasterizeQuality を _executeSave に伝搬する
-    // (actual compression/rasterization は別 issue で実装予定)
-    void options;
+    // issue #206: rasterized は未実装 — ユーザーに警告して none にフォールバック
+    if (options?.compression === 'rasterized') {
+      showToast('高圧縮 (ラスタライズ) は現在未実装です。通常形式で保存します。', true);
+      options = { ...options, compression: 'none' };
+    }
     flushActiveOcrCardText();
     const { document } = usePecoStore.getState();
     if (!document) return;
@@ -723,7 +727,7 @@ export function useFileOperations(
         isSavingRef.current = true;
         setIsSaving?.(true);
         try {
-          const result = await _executeSave(path);
+          const result = await _executeSave(path, options);
           if (result !== null) {
             const currentDoc = usePecoStore.getState().document;
             if (!currentDoc || currentDoc.filePath !== document.filePath) {

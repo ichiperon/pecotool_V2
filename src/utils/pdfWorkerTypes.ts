@@ -1,4 +1,5 @@
 import type { PageData, PecoDocument } from '../types';
+import type { SaveDialogOptions } from '../hooks/useFileOperations';
 
 // Worker に渡す PageData は thumbnail を除いた構造（blob URL は Worker 不要）
 export type SerializedPageData = Omit<PageData, 'thumbnail'>;
@@ -18,6 +19,7 @@ export type SavePdfRequestData = {
   documentState: Omit<PecoDocument, 'pages'> & { pages: Record<number, SerializedPageData> };
   fontBytes?: ArrayBuffer;
   fallbackFontBytes?: ArrayBuffer[];
+  options?: SaveDialogOptions;
 } & SavePdfSource;
 
 export type SkippedPdfTextReason = 'control-character' | 'unsupported-font';

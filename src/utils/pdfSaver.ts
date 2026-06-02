@@ -45,6 +45,7 @@ import type {
   SerializedPageData,
   SkippedPdfTextChar,
 } from './pdfWorkerTypes';
+import type { SaveDialogOptions } from '../hooks/useFileOperations';
 import {
   createSkippedTextCollector,
   getSkippedTextChars,
@@ -555,6 +556,7 @@ export async function buildPdfDocument(
   fallbackFontBytes: ArrayBuffer[] = [],
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
   pageOrder?: number[],
+  options?: SaveDialogOptions,
 ): Promise<Uint8Array> {
   const originalPdfBytes = await resolveBuildPdfSource(source);
   const originalVersion = extractPdfVersion(originalPdfBytes);
@@ -1016,11 +1018,13 @@ export async function buildPdfDocument(
   // /Version 1.7 が残っていると Acrobat 7 では開けない。save() 前に削除する。
   // #85: originalVersion を渡して header >= catalog の場合のみ削除させる。
   if (originalVersion) stripCatalogVersion(pdfDoc, originalVersion);
-  // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
-  // save() 全書き換え経路。pdf-lib は streaming serializer で、ベンチ実測では
-  // 100MB PDF でも 91ms で完了する (disk write は別段の writeFileChunked で処理)。
+  // Acrobat 7.0 互換性のため通常は useObjectStreams:false で旧形式 xref を維持する。
+  // issue #206: ユーザーが明示的に 'compressed' プリセットを選択した場合のみ
+  // useObjectStreams:true に切り替えてファイルサイズを削減する。
+  // (Acrobat 7 互換テストは preset='none' で従来挙動のまま通過する)
+  const useObjectStreams = options?.compression === 'compressed';
   const saveOptions: Parameters<typeof pdfDoc.save>[0] = {
-    useObjectStreams: false,
+    useObjectStreams,
     addDefaultPage: false,
   };
 
@@ -1120,6 +1124,7 @@ export async function savePDF(
   fallbackFontBytes: ArrayBuffer[] = [],
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
   pageOrder?: number[],
+  options?: SaveDialogOptions,
 ): Promise<Uint8Array> {
   const sourceBytes = extractBytes(source);
   const sourceUrl = extractUrl(source);
@@ -1168,7 +1173,7 @@ export async function savePDF(
       worker = createSaveWorker();
       if (!worker) {
         // Worker API 不在: main thread で直接実行
-        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder)
+        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options)
           .then(settleResolve)
           .catch(settleReject);
         return;
@@ -1265,6 +1270,7 @@ export async function savePDF(
           documentState: { ...documentState, pages: serializedPages },
           fontBytes: fontBytesClone,
           fallbackFontBytes: fallbackFontBytesClone,
+          options,
         },
       };
       activeWorker.postMessage(request, transferables);
@@ -1274,7 +1280,7 @@ export async function savePDF(
       }
       if (activeSaveWorker === worker) activeSaveWorker = null;
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
-      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder)
+      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options)
         .then(settleResolve)
         .catch(settleReject);
     }

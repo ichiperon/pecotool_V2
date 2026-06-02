@@ -31,6 +31,7 @@ import type {
   SavePdfWorkerResponse,
   SerializedPageData,
 } from './pdfWorkerTypes';
+import type { SaveDialogOptions } from '../hooks/useFileOperations';
 import {
   createSkippedTextCollector,
   getSkippedTextChars,
@@ -416,6 +417,7 @@ async function handleSavePdf(
   documentState: { pages: Record<number, SerializedPageData> },
   fontBytes: ArrayBuffer | undefined,
   fallbackFontBytes: ArrayBuffer[] = [],
+  options?: SaveDialogOptions,
 ): Promise<{ savedBytes: Uint8Array; skippedChars: ReturnType<typeof getSkippedTextChars> }> {
   const originalVersion = extractPdfVersion(originalPdfBytes);
   // Acrobat dirty-flag 回避: 入力 PDF の trailer /ID を保存後に書き戻す。
@@ -737,10 +739,12 @@ async function handleSavePdf(
   // 修正 (#30): Catalog の /Version を消す (詳細は pdfSaver.ts 側コメント参照)。
   // #85: originalVersion を渡して header >= catalog の場合のみ削除させる。
   if (originalVersion) stripCatalogVersion(pdfDoc, originalVersion);
-  // Acrobat 7.0 互換性のため useObjectStreams:false で旧形式 xref を維持する。
-  // save() 全書き換え経路 (incremental の fontkit subset 破損を回避)。
+  // Acrobat 7.0 互換性のため通常は useObjectStreams:false で旧形式 xref を維持する。
+  // issue #206: ユーザーが明示的に 'compressed' プリセットを選択した場合のみ
+  // useObjectStreams:true に切り替えてファイルサイズを削減する。
+  const useObjectStreams = options?.compression === 'compressed';
   const saveOptions: Parameters<typeof pdfDoc.save>[0] = {
-    useObjectStreams: false,
+    useObjectStreams,
     addDefaultPage: false,
   };
 
@@ -843,9 +847,9 @@ self.onmessage = async (e: MessageEvent<SavePdfWorkerRequest>) => {
   switch (msg.type) {
     case 'SAVE_PDF': {
       try {
-        const { documentState, fallbackFontBytes, fontBytes } = msg.data;
+        const { documentState, fallbackFontBytes, fontBytes, options } = msg.data;
         const originalPdfBytes = await resolvePdfBytes(msg.data);
-        const { savedBytes, skippedChars } = await handleSavePdf(originalPdfBytes, documentState, fontBytes, fallbackFontBytes);
+        const { savedBytes, skippedChars } = await handleSavePdf(originalPdfBytes, documentState, fontBytes, fallbackFontBytes, options);
         const response: SavePdfWorkerResponse = { type: 'SAVE_PDF_SUCCESS', data: savedBytes, skippedChars };
         self.postMessage(response, [savedBytes.buffer]);
       } catch (err) {
