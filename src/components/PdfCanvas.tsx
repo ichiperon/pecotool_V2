@@ -23,7 +23,6 @@ import { isCurveDefinition } from "../utils/curveDefinition";
 import { layoutTextOnCurveViewport } from "../utils/curveGlyphLayout";
 import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
 import type { TextBlock, BoundingBox, CurveDefinition } from "../types";
-import { useOcrSettingsStore } from "../store/ocrSettingsStore";
 
 // #236: resize/curve handle sizes
 const RESIZE_HANDLE_SIZE = 6;
@@ -39,6 +38,9 @@ interface PdfCanvasProps {
   onRenderComplete?: () => void;
   /** #191: 範囲指定 OCR: ドラッグ完了時に呼ばれる。pdfCanvas ref と canvas ピクセル矩形を渡す */
   onRangeOcr?: (canvas: HTMLCanvasElement, rect: { x: number; y: number; width: number; height: number }) => void;
+  /** #226: 低信頼ハイライト設定を親から受け取る (直接 store 購読を避ける) */
+  confidenceThreshold?: number;
+  showLowConfidenceHighlight?: boolean;
 }
 
 export function drawStaticBlock(
@@ -264,6 +266,8 @@ export function PdfCanvas({
   onFirstRender,
   onRenderComplete,
   onRangeOcr,
+  confidenceThreshold: ocrConfidenceThreshold,
+  showLowConfidenceHighlight,
 }: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   // 静的層: 全 BB の塗・枠・テキスト (非選択分のみ)
@@ -306,9 +310,6 @@ export function PdfCanvas({
   const isRangeOcrMode = usePecoStore(selectIsRangeOcrMode);
   const searchTerm = usePecoStore(selectSearchTerm);
   const searchHitIndex = usePecoStore(selectSearchHitIndex);
-  // #192: 低信頼ハイライト設定
-  const ocrConfidenceThreshold = useOcrSettingsStore((s) => s.ocrConfidenceThreshold);
-  const showLowConfidenceHighlight = useOcrSettingsStore((s) => s.showLowConfidenceHighlight);
   const updatePageData = usePecoStore((s) => s.updatePageData);
   const toggleDrawingMode = usePecoStore((s) => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore((s) => s.toggleSplitMode);

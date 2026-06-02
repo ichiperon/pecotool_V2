@@ -16,6 +16,7 @@ import {
   selectRedoStack,
   selectCurrentPage,
 } from "./store/pecoStore";
+import { useOcrSettingsStore } from "./store/ocrSettingsStore";
 import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
 import { ask, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
@@ -108,6 +109,9 @@ function App() {
   const selectedIds = usePecoStore(selectSelectedIds);
   const showOcr = usePecoStore(selectShowOcr);
   const ocrOpacity = usePecoStore(selectOcrOpacity);
+  // #226: 低信頼ハイライト設定 (PdfCanvas に props で渡す)
+  const ocrConfidenceThreshold = useOcrSettingsStore((s) => s.ocrConfidenceThreshold);
+  const showLowConfidenceHighlight = useOcrSettingsStore((s) => s.showLowConfidenceHighlight);
   const isDrawingMode = usePecoStore(selectIsDrawingMode);
   const isSplitMode = usePecoStore(selectIsSplitMode);
   const isCurveMode = usePecoStore(selectIsCurveMode);
@@ -880,7 +884,7 @@ function App() {
           onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={stopPanning} onMouseLeave={stopPanning}
         >
           <div className="pdf-canvas-container">
-            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} onRangeOcr={(canvas, rect) => { void runOcrOnRegion(canvas, rect, currentPageIndex, zoom); }} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
+            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} onRangeOcr={(canvas, rect) => { void runOcrOnRegion(canvas, rect, currentPageIndex, zoom); }} confidenceThreshold={ocrConfidenceThreshold} showLowConfidenceHighlight={showLowConfidenceHighlight} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
           {(isLoadingFile || isLoadingPageMeta) && (
             <div className="loading-overlay">
