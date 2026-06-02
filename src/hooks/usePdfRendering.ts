@@ -356,20 +356,47 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           onFirstRender?.();
         }
 
+        // issue #182: createImageBitmap の await が onRenderComplete を遅延させ
+        // BB overlay 表示が遅れていた。bitmap 作成は fire-and-forget にして
+        // 先に overlay と onRenderComplete を発火させる。bitmap 化失敗は
+        // 「キャッシュにヒットしないだけ」で画面表示には影響しないので握る。
+        // offscreen 解放は bitmap 完了/失敗の finally に任せる (二重解放しない)。
+        let bitmapStarted = false;
         try {
-          const bitmap = await createImageBitmap(offscreen);
-          setBitmapCache(liveCacheKey, { bitmap, zoom: curZoom, width: lw, height: lh });
+          const bitmapPromise = createImageBitmap(offscreen);
+          bitmapStarted = true;
+          bitmapPromise
+            .then((bitmap) => {
+              setBitmapCache(liveCacheKey, { bitmap, zoom: curZoom, width: lw, height: lh });
+            })
+            .catch(() => {
+              /* ビットマップ作成失敗は無視 */
+            })
+            .finally(() => {
+              offscreen.width = 0;
+              offscreen.height = 0;
+            });
         } catch {
-          /* ビットマップ作成失敗は無視 */
+          /* createImageBitmap が同期 throw した場合は無視 (offscreen は下の finally で解放) */
         }
 
         renderOverlaysRef.current?.();
         if (perf.enabled) perf.mark('render.complete', { page: curMeta.pageIndex, cacheHit: false });
         onRenderComplete?.();
         // prefetch は pdfjs worker のタスクキューを占有して現在ページ描画を遅延させるため廃止
+
+        if (!bitmapStarted) {
+          offscreen.width = 0;
+          offscreen.height = 0;
+        }
       } finally {
-        offscreen.width = 0;
-        offscreen.height = 0;
+        // bitmap promise が走った場合は promise 側 finally で解放されるので
+        // ここでは何もしない (二重解放しても無害だが避ける)。
+        // try 内 throw 等で bitmap 未起動だった場合のセーフティ:
+        if (offscreen.width !== 0 || offscreen.height !== 0) {
+          offscreen.width = 0;
+          offscreen.height = 0;
+        }
       }
     };
 
@@ -413,7 +440,11 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
 }
 
 function renderCacheKey(meta: RenderPageMeta, zoom: number): string {
-  return `${meta.filePath}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}`;
+  // issue #143: devicePixelRatio をキーに含める。DPR 変化 (HiDPI モニタ
+  // 差し替え / ブラウザズーム) 時に同一 zoom でも実 pixel が変わるため、
+  // 古い解像度の bitmap を再利用するとボケる。
+  const dpr = typeof window !== "undefined" ? Math.round(window.devicePixelRatio * 100) : 100;
+  return `${meta.filePath}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}:${dpr}`;
 }
 
 // 全 Canvas (pdfCanvas + overlay + 静的 overlay + wrapper) のサイズを
