@@ -8,6 +8,8 @@ import {
   selectIsDrawingMode,
   selectIsSplitMode,
   selectCurrentPageTextBlocks,
+  selectDocumentFilePath,
+  selectDocumentTotalPages,
 } from "../store/pecoStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
@@ -120,7 +122,12 @@ export function PdfCanvas({
   const wrapperRef = useRef<HTMLDivElement>(null);
   const renderOverlaysRef = useRef<(() => void) | null>(null);
 
-  const document = usePecoStore((s) => s.document);
+  // issue #134: 旧 `const document = usePecoStore(s => s.document)` は
+  // updatePageData (別ページ含む) で document 参照が変わるたびに PdfCanvas 全体が
+  // 再レンダされていた。ここで実際に使うのは filePath / totalPages のみなので
+  // primitive selector に分解する。
+  const documentFilePath = usePecoStore(selectDocumentFilePath);
+  const documentTotalPages = usePecoStore(selectDocumentTotalPages);
   const documentEpoch = usePecoStore((s) => s.documentEpoch);
   // overlay 再描画 effect は textBlocks のみを依存とし、PageData の他フィールド
   // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
@@ -169,8 +176,8 @@ export function PdfCanvas({
     overlayCanvasRef,
     staticOverlayCanvasRef,
     wrapperRef,
-    filePath: document?.filePath,
-    totalPages: document?.totalPages,
+    filePath: documentFilePath,
+    totalPages: documentTotalPages,
     pageIndex,
     documentEpoch,
     zoom,

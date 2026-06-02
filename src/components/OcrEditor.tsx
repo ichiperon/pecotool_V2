@@ -19,7 +19,7 @@ import {
 } from '@dnd-kit/sortable';
 import { useState } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
-import { usePecoStore } from '../store/pecoStore';
+import { usePecoStore, selectCurrentPage } from '../store/pecoStore';
 import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
 import { Search } from 'lucide-react';
@@ -34,14 +34,17 @@ export function OcrEditor({
   width,
   searchInputRef,
 }: OcrEditorProps) {
-  const document = usePecoStore(s => s.document);
+  // issue #134: 旧 `const document = usePecoStore(s => s.document)` は
+  // 別ページの updatePageData でも document 参照が変わって OcrEditor 全体が
+  // 再レンダされていた。currentPage selector に切り替えると textBlocks 配列が
+  // 同参照のままなら再レンダされない。
   const currentPageIndex = usePecoStore(s => s.currentPageIndex);
+  const currentPage = usePecoStore(selectCurrentPage);
   const selectedIds = usePecoStore(s => s.selectedIds);
   const lastSelectedId = usePecoStore(s => s.lastSelectedId);
   const updatePageData = usePecoStore(s => s.updatePageData);
   const toggleSelection = usePecoStore(s => s.toggleSelection);
   const setSelectedIds = usePecoStore(s => s.setSelectedIds);
-  const currentPage = document?.pages.get(currentPageIndex);
   const [searchTerm, setSearchTerm] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
 

@@ -790,6 +790,11 @@ export const selectLastIdbError = (s: PecoState) => s.lastIdbError;
 export const selectCurrentPageProxy = (s: PecoState) => s.currentPageProxy;
 export const selectCurrentPageProxyKey = (s: PecoState) => s.currentPageProxyKey;
 export const selectHasDocument = (s: PecoState) => s.document !== null;
+// issue #134: document 全体を購読すると updatePageData (別ページ含む) 毎に
+// 再レンダされてしまうため、PdfCanvas/OcrEditor では filePath / totalPages の
+// primitive のみを購読する。
+export const selectDocumentFilePath = (s: PecoState) => s.document?.filePath;
+export const selectDocumentTotalPages = (s: PecoState) => s.document?.totalPages;
 // issue #91: ドラッグ中の bbox プレビュー。overlay 描画でドラッグ中 BB の bbox を
 // 上書きするための入口。ドラッグ非実行中は null。
 export const selectDragPreviewBboxes = (s: PecoState) => s.dragPreviewBboxes;
