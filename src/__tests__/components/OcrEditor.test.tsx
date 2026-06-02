@@ -183,9 +183,6 @@ function setup(testBlocks = blocks, selectedIds: string[] = []) {
     <OcrEditor
       width={350}
       searchInputRef={searchInputRef as any}
-      activeTab="ocr"
-      onActiveTabChange={vi.fn()}
-      onRunInspection={vi.fn()}
     />,
   )
 }
@@ -218,44 +215,6 @@ beforeEach(() => {
 // ── テスト ────────────────────────────────────────────────────
 
 describe('OcrEditor', () => {
-  describe('C-OE-00: 検査結果タブ', () => {
-    it('OCRテキスト表示中は検査範囲コントロールを表示しない', () => {
-      setup()
-
-      expect(screen.getByText('OCRテキスト')).toBeTruthy()
-      expect(screen.getByText('検査結果')).toBeTruthy()
-      expect(screen.queryByText('範囲')).toBeNull()
-    })
-
-    it('検査結果表示中は件数バッジのみ表示する', () => {
-      const doc = makeDoc(blocks)
-      usePecoStore.setState({
-        document: doc,
-        currentPageIndex: 0,
-        selectedIds: new Set<string>(),
-        lastSelectedId: null,
-      } as any)
-      const searchInputRef = { current: null }
-
-      const { container } = render(
-        <OcrEditor
-          width={350}
-          searchInputRef={searchInputRef as any}
-          activeTab="inspection"
-          onActiveTabChange={vi.fn()}
-          onRunInspection={vi.fn()}
-        />,
-      )
-
-      expect(screen.getByText('エラー 0')).toBeTruthy()
-      expect(screen.getByText('警告 0')).toBeTruthy()
-      expect(screen.getByText('確認 0')).toBeTruthy()
-      expect(screen.queryByText('範囲')).toBeNull()
-      expect(screen.queryByRole('button', { name: '検査' })).toBeNull()
-      expect(container.querySelector('.inspection-run-button')).toBeNull()
-    })
-  })
-
   describe('C-OE-01: 検索フィルター', () => {
     it('"cherry" 入力 → "cherry" を含むカードのみ表示', async () => {
       const user = userEvent.setup()
@@ -322,7 +281,7 @@ describe('OcrEditor', () => {
     it('document=null → "データなし" が表示される', () => {
       usePecoStore.setState({ document: null, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
-      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByText('データなし')).toBeTruthy()
     })
@@ -334,7 +293,7 @@ describe('OcrEditor', () => {
       const doc = makeDoc([makeBlock('b1', 'text', 0)])
       usePecoStore.setState({ document: doc, currentPageIndex: 5, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
-      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByText('読み込み中...')).toBeTruthy()
     })
@@ -345,7 +304,7 @@ describe('OcrEditor', () => {
       const doc = makeDoc([])
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
-      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByText('OCRテキストなし')).toBeTruthy()
     })
@@ -356,7 +315,7 @@ describe('OcrEditor', () => {
       const doc = makeDoc([], { isTextExtracted: false })
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
-      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByText('テキスト抽出中...')).toBeTruthy()
       // プレースホルダ要素が存在する
@@ -371,7 +330,7 @@ describe('OcrEditor', () => {
       const doc = makeDoc(blocks, { isTextExtracted: false })
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
-      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByText('テキスト抽出中...')).toBeTruthy()
       expect(container.querySelectorAll('.ocr-card-content').length).toBe(0)
@@ -381,7 +340,7 @@ describe('OcrEditor', () => {
       const doc = makeDoc([], { isTextExtracted: true })
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
-      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByText('OCRテキストなし')).toBeTruthy()
       expect(screen.queryByText('テキスト抽出中...')).toBeNull()
@@ -391,7 +350,7 @@ describe('OcrEditor', () => {
       const doc = makeDoc([], { isTextExtracted: false })
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
-      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       expect(screen.getByPlaceholderText('検索...')).toBeTruthy()
     })
@@ -408,7 +367,7 @@ describe('OcrEditor', () => {
       const doc = makeDoc(fourBlocks)
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set(), lastSelectedId: null } as any)
       const searchInputRef = { current: null }
-      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} activeTab="ocr" onActiveTabChange={vi.fn()} onRunInspection={vi.fn()} />)
+      const { container } = render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
       const cards = container.querySelectorAll('.ocr-card')
       // 最初のカードをクリック
