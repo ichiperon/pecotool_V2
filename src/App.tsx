@@ -539,7 +539,7 @@ function App() {
         if (showSettingsDropdown) setShowSettingsDropdown(false);
       }}
     >
-      <HelpMenu helpMenu={helpMenu} />
+      <HelpMenu helpMenu={helpMenu} onClose={() => setHelpMenu({ ...helpMenu, visible: false })} />
 
       {/* バックアップ復元ダイアログ */}
       {pendingBackups.length > 0 && (

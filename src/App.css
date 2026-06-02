@@ -1037,6 +1037,27 @@ body, #root {
   padding-bottom: 8px;
 }
 
+/* Issue #156: HelpMenu の閉じるボタン (キーボード操作対応) */
+.help-close-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--accent-color);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+}
+.help-close-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+.help-close-btn:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
 .help-grid {
   display: flex;
   flex-direction: column;
