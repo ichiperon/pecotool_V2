@@ -1,9 +1,9 @@
 import { useCallback } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
-import { readFile } from '@tauri-apps/plugin-fs';
 import { usePecoStore } from '../store/pecoStore';
-import { extractPagesToNewPdf } from '../utils/pdfPageExtractor';
-import { writeFileAtomically } from '../utils/tauriFileIO';
+import { extractPagesToNewPdf, isPdfEncrypted } from '../utils/pdfPageExtractor';
+// issue #253: readFile access via tauriFileIO boundary (not direct plugin-fs import)
+import { writeFileAtomically, readFileSafe } from '../utils/tauriFileIO';
 
 /**
  * Returns a stable callback that extracts the given display-order page indices
@@ -47,7 +47,17 @@ export function usePageExtraction(
 
     try {
       showToast('ページを抽出中...');
-      const originalBytes = await readFile(doc.filePath);
+      const originalBytes = await readFileSafe(doc.filePath);
+
+      // issue #256: warn when the source PDF is encrypted (owner-password).
+      // Extraction still proceeds (ignoreEncryption:true) but content may be partial.
+      if (isPdfEncrypted(originalBytes)) {
+        showToast('このPDFは暗号化されています。抽出結果が不完全になる可能性があります。', true);
+      }
+
+      // issue #256: V1 limitation — PecoTool edits are not applied to extracted PDF.
+      showToast('注意: PecoToolの編集内容（テキスト修正・カーブ等）は抽出PDFに反映されません。');
+
       const newPdfBytes = await extractPagesToNewPdf(originalBytes, sourceIndices);
       await writeFileAtomically(outputPath, newPdfBytes);
       showToast(`${displayIndices.length} ページを書き出しました。`);

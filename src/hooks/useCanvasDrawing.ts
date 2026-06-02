@@ -22,6 +22,11 @@ interface UseCanvasDrawingResult {
   isDrawing: boolean;
   startPos: { x: number; y: number };
   currentPos: { x: number; y: number };
+  /** issue #269: primitive extracts for stable useEffect deps */
+  startPosX: number;
+  startPosY: number;
+  currentPosX: number;
+  currentPosY: number;
   startDrawing: (pos: { x: number; y: number }) => void;
   updateDrawing: (pos: { x: number; y: number }) => void;
   finishDrawing: () => void;
@@ -178,6 +183,10 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
     isDrawing,
     startPos,
     currentPos,
+    startPosX: startPos.x,
+    startPosY: startPos.y,
+    currentPosX: currentPos.x,
+    currentPosY: currentPos.y,
     startDrawing,
     updateDrawing,
     finishDrawing,

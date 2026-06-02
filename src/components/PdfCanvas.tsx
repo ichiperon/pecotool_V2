@@ -610,8 +610,11 @@ export function PdfCanvas({
     ocrOpacity,
     selectedIds,
     drawing.isDrawing,
-    drawing.startPos,
-    drawing.currentPos,
+    // issue #269: use primitive x/y instead of object refs to avoid unnecessary effect re-runs
+    drawing.startPosX,
+    drawing.startPosY,
+    drawing.currentPosX,
+    drawing.currentPosY,
     drag.draggedId,
     pdfPage,
     drag.isAltDragging,

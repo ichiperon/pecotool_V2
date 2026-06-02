@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { readFile } from '@tauri-apps/plugin-fs';
 
 /**
  * Rust 側 `write_pdf_chunk` コマンドを使って bytes を分割書き込みする。
@@ -38,6 +39,15 @@ export async function writeFileChunked(path: string, bytes: Uint8Array): Promise
       },
     });
   }
+}
+
+/**
+ * issue #253: single entry-point for reading files via Tauri fs plugin.
+ * Centralises the import so hooks/components do not directly depend on
+ * @tauri-apps/plugin-fs, making the boundary easy to mock in tests.
+ */
+export async function readFileSafe(path: string): Promise<Uint8Array> {
+  return readFile(path);
 }
 
 /**
