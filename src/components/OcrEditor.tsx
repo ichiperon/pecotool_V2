@@ -382,8 +382,15 @@ export function OcrEditor({
             className="search-box"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
+            title={searchTerm ? '検索フィルタ中は並び替え (DnD) できません' : undefined}
           />
         </div>
+        {/* Issue #168: 検索フィルタ適用中は DnD が無効化される旨をユーザーに伝える */}
+        {searchTerm && (
+          <div className="search-filter-hint" role="status">
+            検索フィルタ中は並び替えできません
+          </div>
+        )}
       </div>
       <div className="scroll-content">
         {!document ? (

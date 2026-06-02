@@ -381,6 +381,17 @@ body, #root {
   outline: none;
 }
 
+/* Issue #168: 検索フィルタ中の DnD 無効化ヒント */
+.search-filter-hint {
+  margin-top: 4px;
+  font-size: 10px;
+  color: #b45309;
+  background-color: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+
 /* Thumbnails */
 .thumbnail-item {
   display: flex;
