@@ -113,6 +113,8 @@ function toTextBlocks(
       order: i,
       isNew: true,
       isDirty: true,
+      // #192: OcrResultBlock.confidence を TextBlock に伝搬する
+      confidence: b.confidence,
     };
   });
 }

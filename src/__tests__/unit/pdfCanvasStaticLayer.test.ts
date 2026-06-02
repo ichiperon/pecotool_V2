@@ -283,6 +283,104 @@ describe('PdfCanvas static layer – curve block (Phase 4 #188)', () => {
   })
 })
 
+// ── issue #192: 低信頼ハイライト (赤系 fillRect) ──────────────────────────
+describe('PdfCanvas static layer – low-confidence highlight (#192)', () => {
+  it('confidence が閾値以下 + showLowConfidenceHighlight=true → 赤系 fillStyle が設定される', () => {
+    const ctx = makeMockContext()
+    const block = makeBlock({ text: '', confidence: 0.5 })
+
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      block,
+      1,
+      0.5,
+      undefined,
+      undefined,
+      0.7,   // threshold
+      true,  // showLowConfidenceHighlight
+    )
+
+    // fillStyle が赤系 rgba(220, 38, 38, ...) で設定されたことを確認
+    expect(ctx.fillStyle).toMatch(/rgba\(220,\s*38,\s*38/)
+  })
+
+  it('confidence が閾値より高い → 青系 fillStyle が設定される', () => {
+    const ctx = makeMockContext()
+    const block = makeBlock({ text: '', confidence: 0.9 })
+
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      block,
+      1,
+      0.5,
+      undefined,
+      undefined,
+      0.7,
+      true,
+    )
+
+    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+  })
+
+  it('showLowConfidenceHighlight=false のとき低信頼でも青系 fillStyle になる', () => {
+    const ctx = makeMockContext()
+    const block = makeBlock({ text: '', confidence: 0.3 })
+
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      block,
+      1,
+      0.5,
+      undefined,
+      undefined,
+      0.7,
+      false, // OFF
+    )
+
+    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+  })
+
+  it('confidence が undefined のとき低信頼でも青系 fillStyle になる (legacy)', () => {
+    const ctx = makeMockContext()
+    const block = makeBlock({ text: '', confidence: undefined })
+
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      block,
+      1,
+      0.5,
+      undefined,
+      undefined,
+      0.7,
+      true,
+    )
+
+    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+  })
+
+  it('renderStaticLayer 経由でも低信頼ブロックに赤系が設定される', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: '', confidence: 0.4 })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      undefined,
+      undefined,
+      0.7,
+      true,
+    )
+
+    expect(ctx.fillStyle).toMatch(/rgba\(220,\s*38,\s*38/)
+  })
+})
+
 // ── issue #196: 検索ヒットの黄色ハイライト ──────────────────────────
 describe('PdfCanvas static layer – search highlight (issue #196)', () => {
   it('searchTerm が空のとき黄色 fillRect は追加で呼ばれない (axis-aligned)', () => {

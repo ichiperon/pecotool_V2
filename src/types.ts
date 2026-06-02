@@ -45,6 +45,11 @@ export interface TextBlock {
    * 未定義時は従来通り bbox 単位の単一 drawText で配置 (後方互換)。
    */
   curve?: CurveDefinition;
+  /**
+   * OCR 信頼度 (0..1)。Windows OCR の OcrResultBlock.confidence に由来する。
+   * undefined の場合は legacy 扱いとして色付けしない (#192)。
+   */
+  confidence?: number;
 }
 
 export interface PageData {
@@ -64,6 +69,12 @@ export interface PageData {
   isTextExtracted?: boolean;
   /** ユーザー操作で OCR を明示的に空にしたページ。後続の抽出結果で上書きしない。 */
   ocrCleared?: boolean;
+  /**
+   * issue #207: ユーザー操作によるページ回転角度 (時計回り、度数)。
+   * 未設定は 0 (回転なし) として扱う。
+   * pdfSaver はこの値を使って pdf-lib の page.setRotation() を呼ぶ。
+   */
+  rotation?: 0 | 90 | 180 | 270;
 }
 
 export interface PDFMetadata {
@@ -138,7 +149,16 @@ export interface ReorderPagesAction {
   afterOrder: number[];
 }
 
-export type Action = UpdatePageAction | UpdatePagesAction | DeletePagesAction | ReorderPagesAction;
+/**
+ * ページ回転操作を表す Action (issue #207)。
+ * changes: 変更があったページの pageIndex と回転前後の角度。
+ */
+export interface RotatePagesAction {
+  type: 'rotate_pages';
+  changes: Array<{ pageIndex: number; before: 0 | 90 | 180 | 270; after: 0 | 90 | 180 | 270 }>;
+}
+
+export type Action = UpdatePageAction | UpdatePagesAction | DeletePagesAction | ReorderPagesAction | RotatePagesAction;
 
 export interface OcrResultBlock {
   text: string;

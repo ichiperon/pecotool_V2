@@ -4,6 +4,7 @@ import { GripVertical } from "lucide-react";
 import type { DraggableSyntheticListeners } from "@dnd-kit/core";
 import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
+import { useOcrSettingsStore } from "../store/ocrSettingsStore";
 import { perf } from "../utils/perfLogger";
 import { flushActiveOcrCardText } from "../utils/ocrEditFlush";
 
@@ -26,6 +27,9 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
   function OcrCard({ block, pageIndex, dragListeners, onNavigate, onExtendSelection, onSelect }, ref) {
   // selectedIds全体ではなく、このブロックのisSelectedのみ購読（200回の再レンダリングを防ぐ）
   const isSelected = usePecoStore(state => state.selectedIds.has(block.id));
+  // #192: 低信頼ハイライト設定
+  const ocrConfidenceThreshold = useOcrSettingsStore((s) => s.ocrConfidenceThreshold);
+  const showLowConfidenceHighlight = useOcrSettingsStore((s) => s.showLowConfidenceHighlight);
   // 細粒度selectorで購読: action参照は不変。
   // document 全体は購読せず handleBlur/toggleWritingMode 内で getState() から直接読むことで、
   // どのページのどの編集でも全 200 枚の OcrCard が再評価されるのを防ぐ。
@@ -246,6 +250,18 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
           {block.writingMode === 'vertical' ? '縦書き' : '横書き'}
         </button>
         {block.isDirty && <span className="dirty-dot">●</span>}
+        {/* #192: 低信頼バッジ */}
+        {showLowConfidenceHighlight &&
+          block.confidence !== undefined &&
+          block.confidence <= ocrConfidenceThreshold && (
+          <span
+            className="ocr-confidence-badge"
+            aria-label={`信頼度 ${Math.round(block.confidence * 100)}%`}
+            title={`OCR 信頼度: ${Math.round(block.confidence * 100)}% (閾値: ${Math.round(ocrConfidenceThreshold * 100)}%)`}
+          >
+            !
+          </span>
+        )}
       </div>
       {/* Issue #161: SR/支援技術向けに role="textbox" + aria-multiline + aria-label を付与。
           aria-label は literal 要求 linter 回避のため縦/横で 2 分岐し、ブロック番号のみ expression。 */}

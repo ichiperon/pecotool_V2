@@ -42,6 +42,10 @@ export interface OcrSortSettings {
 interface OcrSettingsState extends OcrSortSettings {
   ocrLanguage: string;
   availableLanguages: OcrLanguageInfo[];
+  /** OCR 低信頼ハイライト: 閾値以下のブロックを赤系色で表示する (#192) */
+  ocrConfidenceThreshold: number;
+  /** OCR 低信頼ハイライトの表示 ON/OFF (#192) */
+  showLowConfidenceHighlight: boolean;
   setHorizontalRowOrder: (order: RowOrder) => void;
   setHorizontalColumnOrder: (order: ColumnOrder) => void;
   setVerticalColumnOrder: (order: ColumnOrder) => void;
@@ -50,6 +54,8 @@ interface OcrSettingsState extends OcrSortSettings {
   setMixedOrder: (order: MixedOrder) => void;
   setOcrLanguage: (tag: string) => void;
   setAvailableLanguages: (langs: OcrLanguageInfo[]) => void;
+  setOcrConfidenceThreshold: (val: number) => void;
+  setShowLowConfidenceHighlight: (val: boolean) => void;
 }
 
 export const useOcrSettingsStore = create<OcrSettingsState>()(
@@ -67,6 +73,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       mixedOrder: 'vertical-first',
       ocrLanguage: 'ja',
       availableLanguages: [],
+      ocrConfidenceThreshold: 0.7,
+      showLowConfidenceHighlight: true,
       setHorizontalRowOrder: (order) =>
         set((s) => ({ horizontal: { ...s.horizontal, rowOrder: order } })),
       setHorizontalColumnOrder: (order) =>
@@ -79,6 +87,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       setMixedOrder: (order) => set({ mixedOrder: order }),
       setOcrLanguage: (tag) => set({ ocrLanguage: tag }),
       setAvailableLanguages: (langs) => set({ availableLanguages: langs }),
+      setOcrConfidenceThreshold: (val) => set({ ocrConfidenceThreshold: val }),
+      setShowLowConfidenceHighlight: (val) => set({ showLowConfidenceHighlight: val }),
     }),
     {
       name: 'peco-ocr-settings',
@@ -89,6 +99,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
         groupTolerance: s.groupTolerance,
         mixedOrder: s.mixedOrder,
         ocrLanguage: s.ocrLanguage,
+        ocrConfidenceThreshold: s.ocrConfidenceThreshold,
+        showLowConfidenceHighlight: s.showLowConfidenceHighlight,
       }),
     }
   )

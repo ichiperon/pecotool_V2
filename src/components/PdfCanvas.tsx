@@ -22,6 +22,7 @@ import { isCurveDefinition } from "../utils/curveDefinition";
 import { layoutTextOnCurveViewport } from "../utils/curveGlyphLayout";
 import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
 import type { TextBlock, BoundingBox, CurveDefinition } from "../types";
+import { useOcrSettingsStore } from "../store/ocrSettingsStore";
 
 interface PdfCanvasProps {
   pageIndex: number;
@@ -37,10 +38,12 @@ export function drawStaticBlock(
   opacity: number,
   searchTerm?: string,
   isActiveHit?: boolean,
+  confidenceThreshold?: number,
+  showLowConfidenceHighlight?: boolean,
 ): void {
   // curve 付き block は per-glyph の curve 描画パスへ
   if (block.curve && isCurveDefinition(block.curve)) {
-    drawStaticBlockCurve(context, block, scale, opacity, searchTerm, isActiveHit);
+    drawStaticBlockCurve(context, block, scale, opacity, searchTerm, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
     return;
   }
 
@@ -53,7 +56,16 @@ export function drawStaticBlock(
   const baseAlpha = opacity;
   const fillAlpha = opacity * 0.25;
 
-  context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
+  // #192: 低信頼ブロックは赤系塗り、通常は青系
+  const isLowConfidence =
+    showLowConfidenceHighlight === true &&
+    block.confidence !== undefined &&
+    confidenceThreshold !== undefined &&
+    block.confidence <= confidenceThreshold;
+
+  context.fillStyle = isLowConfidence
+    ? `rgba(220, 38, 38, ${fillAlpha})`
+    : `rgba(0, 150, 255, ${fillAlpha})`;
   context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
   context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
@@ -125,12 +137,24 @@ function drawStaticBlockCurve(
   opacity: number,
   searchTerm?: string,
   isActiveHit?: boolean,
+  confidenceThreshold?: number,
+  showLowConfidenceHighlight?: boolean,
 ): void {
   const h = block.bbox.height * scale;
   const fontSize = Math.max(10, h * 0.8);
   const inset = 1;
   const baseAlpha = opacity;
   const fillAlpha = opacity * 0.25;
+
+  // #192: 低信頼ブロックは赤系塗り、通常は青系
+  const isLowConfidence =
+    showLowConfidenceHighlight === true &&
+    block.confidence !== undefined &&
+    confidenceThreshold !== undefined &&
+    block.confidence <= confidenceThreshold;
+  const fillColor = isLowConfidence
+    ? `rgba(220, 38, 38, ${fillAlpha})`
+    : `rgba(0, 150, 255, ${fillAlpha})`;
 
   context.font = `bold ${fontSize}px sans-serif`;
   context.textBaseline = "top";
@@ -149,8 +173,8 @@ function drawStaticBlockCurve(
     context.translate(gx, gy);
     context.rotate(g.rotation);
 
-    // 文字背景: 青塗り
-    context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
+    // 文字背景: 低信頼は赤系、通常は青系
+    context.fillStyle = fillColor;
     context.fillRect(-gw / 2 + inset, -inset, gw - inset * 2, gh - inset * 2);
 
     // 文字本体: 赤テキスト
@@ -195,6 +219,8 @@ export function renderStaticLayer(
   opacity: number,
   searchTerm?: string,
   searchHitIndex?: number,
+  confidenceThreshold?: number,
+  showLowConfidenceHighlight?: boolean,
 ): void {
   // 注: 以前は block 単位の offscreen canvas キャッシュ + drawImage 経由で描画していたが、
   // drawImage の非整数 dst 座標でサブピクセル補間が発生し、OCR overlay が
@@ -216,7 +242,7 @@ export function renderStaticLayer(
       hitCounter++;
       isActiveHit = hitCounter === activeIndex;
     }
-    drawStaticBlock(context, block, scale, opacity, term, isActiveHit);
+    drawStaticBlock(context, block, scale, opacity, term, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
   }
 }
 
@@ -266,6 +292,9 @@ export function PdfCanvas({
   const isCurveMode = usePecoStore(selectIsCurveMode);
   const searchTerm = usePecoStore(selectSearchTerm);
   const searchHitIndex = usePecoStore(selectSearchHitIndex);
+  // #192: 低信頼ハイライト設定
+  const ocrConfidenceThreshold = useOcrSettingsStore((s) => s.ocrConfidenceThreshold);
+  const showLowConfidenceHighlight = useOcrSettingsStore((s) => s.showLowConfidenceHighlight);
   const updatePageData = usePecoStore((s) => s.updatePageData);
   const toggleDrawingMode = usePecoStore((s) => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore((s) => s.toggleSplitMode);
@@ -463,6 +492,8 @@ export function PdfCanvas({
         ocrOpacity,
         searchTerm || undefined,
         searchHitIndex,
+        ocrConfidenceThreshold,
+        showLowConfidenceHighlight,
       );
     };
 
@@ -800,6 +831,8 @@ export function PdfCanvas({
         ocrOpacity,
         searchTerm || undefined,
         searchHitIndex,
+        ocrConfidenceThreshold,
+        showLowConfidenceHighlight,
       );
     });
 

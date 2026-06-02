@@ -20,10 +20,12 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) =
   const {
     horizontal, vertical, groupTolerance, mixedOrder,
     ocrLanguage, availableLanguages,
+    ocrConfidenceThreshold, showLowConfidenceHighlight,
     setHorizontalRowOrder, setHorizontalColumnOrder,
     setVerticalColumnOrder, setVerticalRowOrder,
     setGroupTolerance, setMixedOrder,
     setOcrLanguage, setAvailableLanguages,
+    setOcrConfidenceThreshold, setShowLowConfidenceHighlight,
   } = useOcrSettingsStore();
 
   const [toleranceInput, setToleranceInput] = useState(String(groupTolerance));
@@ -204,6 +206,47 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) =
             </tbody>
           </table>
         )}
+
+        {/* 低信頼ハイライト設定 (#192) */}
+        <div className="modal-section-title ocr-settings-section-title">低信頼ハイライト</div>
+        <table className="ocr-settings-table">
+          <tbody>
+            <tr>
+              <td className="label">ハイライト表示</td>
+              <td className="value">
+                <label className="ocr-confidence-toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={showLowConfidenceHighlight}
+                    onChange={(e) => setShowLowConfidenceHighlight(e.target.checked)}
+                    aria-label="低信頼ハイライトの表示 ON/OFF"
+                  />
+                  {showLowConfidenceHighlight ? 'ON' : 'OFF'}
+                </label>
+              </td>
+            </tr>
+            <tr>
+              <td className="label">信頼度閾値</td>
+              <td className="value">
+                <div className="ocr-confidence-slider-row">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={ocrConfidenceThreshold}
+                    onChange={(e) => setOcrConfidenceThreshold(Number(e.target.value))}
+                    aria-label={`信頼度閾値 ${Math.round(ocrConfidenceThreshold * 100)}%`}
+                    disabled={!showLowConfidenceHighlight}
+                  />
+                  <span className="ocr-confidence-slider-value">
+                    {Math.round(ocrConfidenceThreshold * 100)}%
+                  </span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
 
         <div className="ocr-settings-note">
           設定はOCR実行時に適用されます。

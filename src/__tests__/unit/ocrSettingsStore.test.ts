@@ -8,6 +8,8 @@ beforeEach(() => {
     vertical: { columnOrder: 'right-to-left', rowOrder: 'top-to-bottom' },
     groupTolerance: 20,
     mixedOrder: 'vertical-first',
+    ocrConfidenceThreshold: 0.7,
+    showLowConfidenceHighlight: true,
   })
 })
 
@@ -131,6 +133,38 @@ describe('ocrSettingsStore', () => {
       expect(state.horizontal.rowOrder).toBe('bottom-to-top')
       expect(state.vertical.columnOrder).toBe('left-to-right')
       expect(state.mixedOrder).toBe('horizontal-first')
+    })
+  })
+
+  describe('U-OS-19~22: confidence threshold and highlight toggle (#192)', () => {
+    it('U-OS-19: ocrConfidenceThreshold defaults to 0.7', () => {
+      expect(useOcrSettingsStore.getState().ocrConfidenceThreshold).toBe(0.7)
+    })
+
+    it('U-OS-20: showLowConfidenceHighlight defaults to true', () => {
+      expect(useOcrSettingsStore.getState().showLowConfidenceHighlight).toBe(true)
+    })
+
+    it('U-OS-21: setOcrConfidenceThreshold updates ocrConfidenceThreshold only', () => {
+      const before = useOcrSettingsStore.getState()
+      useOcrSettingsStore.getState().setOcrConfidenceThreshold(0.5)
+      const after = useOcrSettingsStore.getState()
+
+      expect(after.ocrConfidenceThreshold).toBe(0.5)
+      expect(after.showLowConfidenceHighlight).toBe(before.showLowConfidenceHighlight)
+      expect(after.horizontal).toEqual(before.horizontal)
+      expect(after.vertical).toEqual(before.vertical)
+      expect(after.groupTolerance).toBe(before.groupTolerance)
+    })
+
+    it('U-OS-22: setShowLowConfidenceHighlight toggles to false', () => {
+      const before = useOcrSettingsStore.getState()
+      useOcrSettingsStore.getState().setShowLowConfidenceHighlight(false)
+      const after = useOcrSettingsStore.getState()
+
+      expect(after.showLowConfidenceHighlight).toBe(false)
+      expect(after.ocrConfidenceThreshold).toBe(before.ocrConfidenceThreshold)
+      expect(after.horizontal).toEqual(before.horizontal)
     })
   })
 
