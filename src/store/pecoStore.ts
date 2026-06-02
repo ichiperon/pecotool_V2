@@ -493,7 +493,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       const page = newPages.get(pageIndex);
       if (!page) continue;
       const before = (page.rotation ?? 0) as 0 | 90 | 180 | 270;
-      const after = ((before + delta) % 360) as 0 | 90 | 180 | 270;
+      // fix(#230): IDB から復元した rotation が NaN や 90 の倍数以外になり得る場合に備え
+      // Math.round で最近傍 90 度倍数に丸めてから % 360 する。結果を [0,90,180,270] に強制。
+      const raw = (Math.round(before / 90) * 90 + delta) % 360;
+      const after = (raw < 0 ? raw + 360 : raw) as 0 | 90 | 180 | 270;
       if (before === after) continue;
       newPages.set(pageIndex, { ...page, rotation: after, isDirty: true });
       changes.push({ pageIndex, before, after });
@@ -1084,16 +1087,19 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (!document) return;
     set((state) => {
       if (!state.document) return state;
+      // perf(#241): totalPages 件の空 PageData を生成する代わりに、
+      // in-memory に存在するページのみを走査して textBlocks を空にする。
+      // LRU で退避済みページ (Map に無いもの) は次回 loadPage 時に
+      // textBlocks=[] で生成される設計に依存するため、ここでは触れない。
       const newPages = new Map<number, PageData>();
-      for (let idx = 0; idx < state.document.totalPages; idx++) {
-        const page = state.document.pages.get(idx);
+      for (const [idx, page] of state.document.pages.entries()) {
         newPages.set(idx, {
           pageIndex: idx,
-          width: page?.width ?? 0,
-          height: page?.height ?? 0,
+          width: page.width,
+          height: page.height,
           textBlocks: [],
           isDirty: true,
-          thumbnail: page?.thumbnail ?? null,
+          thumbnail: page.thumbnail,
           isTextExtracted: true,
           ocrCleared: true,
         });
