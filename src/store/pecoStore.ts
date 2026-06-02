@@ -1172,6 +1172,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const selectedIds = state.selectedIds;
     const skip = skipBlockIds ?? new Set<string>();
 
+    // perf(#223): useRegex=true の後方参照解決用の non-global 版 RegExp を outer scope で
+    // 1 度だけ生成する。旧実装は replacer callback 内で毎マッチ new RegExp していた。
+    const oneShotRe = useRegex
+      ? new RegExp(re.source, re.flags.replace('g', ''))
+      : null;
+
     let totalHits = 0;
     let totalBlocks = 0;
     let skippedBlocks = 0;
@@ -1217,11 +1223,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
               // ただし replacer 内で動的に行うので、match 全体を素材に同じ正規表現
               // ではなく安全に safeReplacement を適用する手段が必要。ここでは
               // String.prototype.replace の "1回限り" 呼び出しで $-参照を解決する。
+              // perf(#223): oneShotRe は outer scope で 1 度だけ生成済み (毎マッチ new RegExp しない)
               const matchStr = args[0] as string;
-              // groups + offset + full string の余剰引数を捨てて再構築する必要は無く、
-              // matchStr に対して同じ re で 1 回 replace すれば $1...$n が解決される。
-              const oneShot = new RegExp(re.source, re.flags.replace('g', ''));
-              return matchStr.replace(oneShot, safeReplacement);
+              return matchStr.replace(oneShotRe!, safeReplacement);
             }
           : () => {
               hits++;
@@ -1288,6 +1292,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (rules.length === 0) return { totalHits: 0, perRuleHits: [] };
 
     // 各ルールの RegExp と置換文字列を事前にコンパイルする (1 度だけ生成して使い回す)
+    // perf(#223): isRegex=true の後方参照解決用 non-global 版も outer scope で 1 度だけ生成する
     const compiledRules = rules.map((rule) => {
       const flags = `g${rule.caseSensitive ? '' : 'i'}`;
       const re = rule.isRegex
@@ -1297,7 +1302,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       const safeReplacement = rule.isRegex
         ? rule.replacement
         : rule.replacement.replace(/\$/g, '$$$$');
-      return { re, safeReplacement, isRegex: rule.isRegex, literalReplacement: rule.replacement };
+      // isRegex=true のみ非 global 版を生成。false なら null で replacer 内では使わない
+      const oneShotRe = rule.isRegex
+        ? new RegExp(re.source, re.flags.replace('g', ''))
+        : null;
+      return { re, safeReplacement, isRegex: rule.isRegex, literalReplacement: rule.replacement, oneShotRe };
     });
 
     const filePath = document.filePath;
@@ -1347,16 +1356,16 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
         // 全ルールをインメモリで順次適用 (前ルールの出力が次ルールの入力)
         for (let ri = 0; ri < compiledRules.length; ri++) {
-          const { re, safeReplacement, isRegex, literalReplacement } = compiledRules[ri];
+          const { re, safeReplacement, isRegex, literalReplacement, oneShotRe } = compiledRules[ri];
           re.lastIndex = 0;
 
           let ruleHits = 0;
           const replaced = currentText.replace(re, isRegex
             ? (...args) => {
                 ruleHits++;
+                // perf(#223): oneShotRe は compiledRules 生成時に 1 度だけ作成済み (毎マッチ new RegExp しない)
                 const matchStr = args[0] as string;
-                const oneShot = new RegExp(re.source, re.flags.replace('g', ''));
-                return matchStr.replace(oneShot, safeReplacement);
+                return matchStr.replace(oneShotRe!, safeReplacement);
               }
             : () => {
                 ruleHits++;
