@@ -25,6 +25,13 @@ import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoi
 import type { TextBlock, BoundingBox, CurveDefinition } from "../types";
 import { useOcrSettingsStore } from "../store/ocrSettingsStore";
 
+// #236: resize/curve handle sizes
+const RESIZE_HANDLE_SIZE = 6;
+const CURVE_HANDLE_SIZE = 8;
+
+// #233: 選択層は枠内縮小なし (静的層 inset=1 とは異なる)
+const SELECTED_INSET = 0;
+
 interface PdfCanvasProps {
   pageIndex: number;
   disableDrawing?: boolean;
@@ -235,13 +242,15 @@ export function renderStaticLayer(
   const scale = zoom / 100;
   // issue #196: searchTerm が空でない場合、ヒットするブロックを収集して activeHit を決定する
   const term = searchTerm && searchTerm.length > 0 ? searchTerm : undefined;
+  // #220: toLowerCase を N 回呼ばずループ外で 1 度だけ計算してキャッシュ
+  const termLower = term ? term.toLowerCase() : undefined;
   let hitCounter = -1;
   const activeIndex = searchHitIndex ?? 0;
 
   for (const block of textBlocks) {
     if (selectedIds.has(block.id)) continue;
     let isActiveHit = false;
-    if (term && block.text.toLowerCase().includes(term.toLowerCase())) {
+    if (termLower && block.text.toLowerCase().includes(termLower)) {
       hitCounter++;
       isActiveHit = hitCounter === activeIndex;
     }
@@ -399,7 +408,7 @@ export function PdfCanvas({
    * canvas 座標 (zoom 適用済み) → viewport 座標 (zoom 等倍) に戻す。
    * curveDefinition / arcFromThreePoints は zoom 非適用の viewport 座標で扱う。
    */
-  const canvasToPdf = useCallback((pos: { x: number; y: number }) => {
+  const canvasToViewport = useCallback((pos: { x: number; y: number }) => {
     const scale = zoom / 100;
     return { x: pos.x / scale, y: pos.y / scale };
   }, [zoom]);
@@ -572,7 +581,7 @@ export function PdfCanvas({
           const w = bbox.width * scale;
           const h = bbox.height * scale;
 
-          const inset = 0;
+          const inset = SELECTED_INSET;
 
           context.fillStyle = `rgba(0, 100, 255, ${fillAlpha})`;
           context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
@@ -584,15 +593,14 @@ export function PdfCanvas({
           // 4 隅のリサイズハンドル
           context.fillStyle = "white";
           context.strokeStyle = "rgba(0, 100, 255, 1)";
-          const handleSize = 6;
           [
             [x, y],
             [x + w, y],
             [x, y + h],
             [x + w, y + h],
           ].forEach(([hx, hy]) => {
-            context.fillRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize);
-            context.strokeRect(hx - handleSize / 2, hy - handleSize / 2, handleSize, handleSize);
+            context.fillRect(hx - RESIZE_HANDLE_SIZE / 2, hy - RESIZE_HANDLE_SIZE / 2, RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE);
+            context.strokeRect(hx - RESIZE_HANDLE_SIZE / 2, hy - RESIZE_HANDLE_SIZE / 2, RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE);
           });
 
           if (block.text) {
@@ -672,7 +680,6 @@ export function PdfCanvas({
                   ? arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle)
                   : curve.points;
 
-              const handleSize = 8;
               handles.forEach((hp, hi) => {
                 const hx = hp.x * scale;
                 const hy = hp.y * scale;
@@ -681,7 +688,7 @@ export function PdfCanvas({
                 context.strokeStyle = "rgba(255, 140, 0, 1)";
                 context.lineWidth = 2;
                 context.beginPath();
-                context.arc(hx, hy, handleSize / 2, 0, Math.PI * 2);
+                context.arc(hx, hy, CURVE_HANDLE_SIZE / 2, 0, Math.PI * 2);
                 context.fill();
                 context.stroke();
                 context.restore();
@@ -963,7 +970,7 @@ export function PdfCanvas({
       if (polylineDraftActive) {
         const now = Date.now();
         if (now - lastDoubleClickTimeRef.current < 300) return;
-        const pdfPos = canvasToPdf(pos);
+        const pdfPos = canvasToViewport(pos);
         setPolylineDraftPoints((prev) => [...prev, pdfPos]);
         return;
       }
@@ -976,7 +983,7 @@ export function PdfCanvas({
       }
 
       // 3 点クリック収集 (arc 作成)
-      const pdfPos = canvasToPdf(pos);
+      const pdfPos = canvasToViewport(pos);
       const newPoints = [...curveClickPoints, pdfPos];
       if (newPoints.length < 3) {
         setCurveClickPoints(newPoints);
@@ -1056,7 +1063,7 @@ export function PdfCanvas({
       const { blockId, handleIndex } = curveHandleDragRef.current;
       const block = currentTextBlocksById.get(blockId);
       if (block?.curve && isCurveDefinition(block.curve)) {
-        const pdfPos = canvasToPdf(pos);
+        const pdfPos = canvasToViewport(pos);
         const curve = block.curve;
 
         let newCurve: CurveDefinition | null = null;
@@ -1133,7 +1140,7 @@ export function PdfCanvas({
       return;
     }
     const pos = getMousePos(e);
-    const pdfPos = canvasToPdf(pos);
+    const pdfPos = canvasToViewport(pos);
     lastDoubleClickTimeRef.current = Date.now();
     // arc 収集をリセットしてから polyline draft 開始
     setCurveClickPoints([]);
