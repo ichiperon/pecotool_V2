@@ -519,7 +519,11 @@ function splitTextBySupportedFont(
   pageIndex?: number,
 ): FontRun[] {
   const runs: FontRun[] = [];
-  for (const char of Array.from(text)) {
+  // issue #179: Array.from(text) は文字列全体を即時 array 化し、長文 page 単位で
+  // 短命オブジェクトを大量に生成して GC を誘発していた。string は ES2015 で
+  // 既に code-point iterator を持つので、直接 for...of で回せばサロゲートペアも
+  // 正しく扱える上、中間配列を生成しない。
+  for (const char of text) {
     const codePoint = char.codePointAt(0);
     let font = primaryFont;
     if (codePoint !== undefined && primarySupport !== null && !primarySupport.has(codePoint)) {

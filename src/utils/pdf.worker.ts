@@ -444,7 +444,9 @@ function splitTextBySupportedFont(
   pageIndex?: number,
 ): FontRun[] {
   const runs: FontRun[] = [];
-  for (const char of Array.from(text)) {
+  // issue #179: 中間配列を生成しないよう string iterator を直接 for...of で回す。
+  // pdfSaver.ts 側と同じ最適化。
+  for (const char of text) {
     const codePoint = char.codePointAt(0);
     let font = primaryFont;
     if (codePoint !== undefined && primarySupport !== null && !primarySupport.has(codePoint)) {
