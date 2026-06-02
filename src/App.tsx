@@ -42,6 +42,7 @@ import { useViewerPan } from "./hooks/useViewerPan";
 import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
 import { useRecentFiles } from "./hooks/useRecentFiles";
 import { useAppUpdater } from "./hooks/useAppUpdater";
+import { usePageExtraction } from "./hooks/usePageExtraction";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
@@ -226,6 +227,12 @@ function App() {
   const handleRotatePages = useCallback((pageIndices: number[], delta: 90 | 180 | 270) => {
     usePecoStore.getState().rotatePages(pageIndices, delta);
   }, []);
+
+  // issue #208: ページ抽出ハンドラ
+  const { extractPagesToFile } = usePageExtraction(showToast);
+  const handleExtractPages = useCallback((displayIndices: number[]) => {
+    void extractPagesToFile(displayIndices);
+  }, [extractPagesToFile]);
 
   const handleReload = useCallback(async () => {
     if (isSaving) {
@@ -793,6 +800,7 @@ function App() {
           onDeletePages={handleDeletePages}
           onMovePage={handleMovePage}
           onRotatePages={handleRotatePages}
+          onExtractPages={handleExtractPages}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
         <section

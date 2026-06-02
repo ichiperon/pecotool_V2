@@ -198,6 +198,8 @@ interface ThumbnailPanelProps {
   onMovePage: (fromDisplayIndex: number, toDisplayIndex: number) => void;
   // issue #207: ページ回転コールバック
   onRotatePages: (pageIndices: number[], delta: 90 | 180 | 270) => void;
+  // issue #208: 選択ページを別 PDF として書き出すコールバック
+  onExtractPages: (displayIndices: number[]) => void;
 }
 
 export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
@@ -205,7 +207,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail,
   onSubscribeActivePage, onGetIsActivePage,
   onSubscribeDirtyPage, onGetIsDirtyPage,
-  onDeletePages, onMovePage, onRotatePages,
+  onDeletePages, onMovePage, onRotatePages, onExtractPages,
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(CONTEXT_MENU_INITIAL);
@@ -256,6 +258,13 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
     const ok = window.confirm(`ページ ${contextMenu.targetDisplayIndex + 1} を削除しますか？`);
     if (ok) onDeletePages([contextMenu.targetDisplayIndex]);
   }, [contextMenu, document, onDeletePages]);
+
+  // issue #208: 抽出ハンドラ
+  const handleExtract = useCallback(() => {
+    if (contextMenu.targetDisplayIndex < 0) return;
+    setContextMenu(CONTEXT_MENU_INITIAL);
+    onExtractPages([contextMenu.targetDisplayIndex]);
+  }, [contextMenu.targetDisplayIndex, onExtractPages]);
 
   // issue #207: 回転ハンドラ
   const handleRotateRight = useCallback(() => {
@@ -422,6 +431,14 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
             onClick={handleRotate180}
           >
             180° 回転
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="thumbnail-context-menu-item"
+            onClick={handleExtract}
+          >
+            選択ページを別 PDF として書き出し
           </button>
           <button
             type="button"
