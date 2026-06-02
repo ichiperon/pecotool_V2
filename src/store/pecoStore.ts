@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type * as pdfjsLib from 'pdfjs-dist';
-import { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../types';
+import { PecoDocument, PageData, Action, TextBlock, BoundingBox, RotatePagesAction } from '../types';
 import {
   saveTemporaryPageDataBatch,
   clearTemporaryChanges,
@@ -122,6 +122,12 @@ interface PecoState {
    * fromDisplayIndex / toDisplayIndex は pageOrder 配列上のインデックス。
    */
   movePage: (fromDisplayIndex: number, toDisplayIndex: number) => void;
+  /**
+   * issue #207: 指定した pageIndex のページを時計回りに delta 度回転する。
+   * delta は 90 | 180 | 270 のいずれか。
+   * undoable=true で RotatePagesAction を undo スタックに積む。
+   */
+  rotatePages: (pageIndices: number[], delta: 90 | 180 | 270) => void;
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
@@ -410,6 +416,35 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
       pendingIdbSaves.add(tracked);
     }
+  },
+
+  // issue #207: ページ回転
+  rotatePages: (pageIndices, delta) => {
+    const state = get();
+    if (!state.document || pageIndices.length === 0) return;
+
+    const changes: RotatePagesAction['changes'] = [];
+    const newPages = new Map(state.document.pages);
+
+    for (const pageIndex of pageIndices) {
+      const page = newPages.get(pageIndex);
+      if (!page) continue;
+      const before = (page.rotation ?? 0) as 0 | 90 | 180 | 270;
+      const after = ((before + delta) % 360) as 0 | 90 | 180 | 270;
+      if (before === after) continue;
+      newPages.set(pageIndex, { ...page, rotation: after, isDirty: true });
+      changes.push({ pageIndex, before, after });
+    }
+
+    if (changes.length === 0) return;
+
+    const action: RotatePagesAction = { type: 'rotate_pages', changes };
+    set({
+      document: { ...state.document, pages: newPages },
+      isDirty: true,
+      undoStack: [...state.undoStack, action].slice(-100),
+      redoStack: [],
+    });
   },
 
   setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
@@ -823,6 +858,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         redoStack: newRedo,
         isDirty: true,
       });
+    } else if (action.type === 'rotate_pages') {
+      // issue #207: ページ回転を巻き戻す (before の角度に戻す)
+      const newPages = new Map(document.pages);
+      for (const change of action.changes) {
+        const page = newPages.get(change.pageIndex);
+        if (!page) continue;
+        newPages.set(change.pageIndex, { ...page, rotation: change.before, isDirty: true });
+      }
+      set({
+        document: { ...document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
     }
   },
 
@@ -897,6 +946,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       set({
         document: { ...document, pages: restoredPages },
         pageOrder: action.afterOrder,
+        undoStack: newUndo,
+        redoStack: newRedo,
+        isDirty: true,
+      });
+    } else if (action.type === 'rotate_pages') {
+      // issue #207: ページ回転をやり直す (after の角度に進める)
+      const newPages = new Map(document.pages);
+      for (const change of action.changes) {
+        const page = newPages.get(change.pageIndex);
+        if (!page) continue;
+        newPages.set(change.pageIndex, { ...page, rotation: change.after, isDirty: true });
+      }
+      set({
+        document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true,

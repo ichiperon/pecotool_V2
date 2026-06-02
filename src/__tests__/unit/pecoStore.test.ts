@@ -2064,4 +2064,124 @@ describe('pecoStore', () => {
       expect(state.redoStack).toHaveLength(1)
     })
   })
+
+  // ─── issue #207: ページ回転 ──────────────────────────────────────
+
+  describe('U-ST-#207: rotatePages', () => {
+    it('90 度回転で rotation が 0→90 になる', () => {
+      const page = makePage({ pageIndex: 0, rotation: 0 })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().rotatePages([0], 90)
+
+      const state = usePecoStore.getState()
+      expect(state.document!.pages.get(0)!.rotation).toBe(90)
+      expect(state.isDirty).toBe(true)
+    })
+
+    it('180 度回転で rotation が 0→180 になる', () => {
+      const page = makePage({ pageIndex: 0 })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().rotatePages([0], 180)
+
+      expect(usePecoStore.getState().document!.pages.get(0)!.rotation).toBe(180)
+    })
+
+    it('270 度回転で rotation が 0→270 になる', () => {
+      const page = makePage({ pageIndex: 0 })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().rotatePages([0], 270)
+
+      expect(usePecoStore.getState().document!.pages.get(0)!.rotation).toBe(270)
+    })
+
+    it('累積: 90 度を 3 回適用すると 270 になる', () => {
+      const page = makePage({ pageIndex: 0 })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().rotatePages([0], 90)
+      usePecoStore.getState().rotatePages([0], 90)
+      usePecoStore.getState().rotatePages([0], 90)
+
+      expect(usePecoStore.getState().document!.pages.get(0)!.rotation).toBe(270)
+    })
+
+    it('undoStack に rotate_pages action が積まれる', () => {
+      const page = makePage({ pageIndex: 0 })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().rotatePages([0], 90)
+
+      const state = usePecoStore.getState()
+      expect(state.undoStack).toHaveLength(1)
+      expect(state.undoStack[0].type).toBe('rotate_pages')
+      if (state.undoStack[0].type === 'rotate_pages') {
+        expect(state.undoStack[0].changes[0].before).toBe(0)
+        expect(state.undoStack[0].changes[0].after).toBe(90)
+      }
+    })
+
+    it('undo で rotation が元の値に戻る', () => {
+      const page = makePage({ pageIndex: 0 })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().rotatePages([0], 90)
+      expect(usePecoStore.getState().document!.pages.get(0)!.rotation).toBe(90)
+
+      usePecoStore.getState().undo()
+      const state = usePecoStore.getState()
+      expect(state.document!.pages.get(0)!.rotation).toBe(0)
+      expect(state.undoStack).toHaveLength(0)
+      expect(state.redoStack).toHaveLength(1)
+    })
+
+    it('redo で undo を取り消せる', () => {
+      const page = makePage({ pageIndex: 0 })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        undoStack: [],
+        redoStack: [],
+      })
+
+      usePecoStore.getState().rotatePages([0], 180)
+      usePecoStore.getState().undo()
+      usePecoStore.getState().redo()
+
+      expect(usePecoStore.getState().document!.pages.get(0)!.rotation).toBe(180)
+    })
+
+    it('document が null のとき rotatePages は何もしない', () => {
+      usePecoStore.setState({ document: null, undoStack: [] })
+      usePecoStore.getState().rotatePages([0], 90)
+
+      expect(usePecoStore.getState().document).toBeNull()
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
+  })
 })

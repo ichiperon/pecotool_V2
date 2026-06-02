@@ -50,6 +50,8 @@ function makeFakePanel() {
     // issue #173: dirty pub/sub も本テストの関心外なので no-op を返す。
     subscribeDirtyPage(_index: number, _cb: () => void) { return () => {}; },
     getIsDirtyPage(_index: number) { return false; },
+    // issue #207: rotation は本テストの関心外なので 0 を返す no-op。
+    getRotation(_index: number) { return 0; },
     onSelectPage: vi.fn(),
     onRequestThumbnail: vi.fn(),
   };
@@ -78,6 +80,7 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
           onGetIsActivePage={getIsActiveSpy}
           onSubscribeDirtyPage={fake.subscribeDirtyPage}
           onGetIsDirtyPage={fake.getIsDirtyPage}
+          onGetRotation={fake.getRotation}
         />
       );
       return <>{[0, 1, 2].map(renderItem)}</>;
@@ -140,6 +143,7 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
           onGetIsActivePage={fake.getIsActivePage}
           onSubscribeDirtyPage={fake.subscribeDirtyPage}
           onGetIsDirtyPage={fake.getIsDirtyPage}
+          onGetRotation={fake.getRotation}
         />
         <ThumbnailItemNode
           index={1}
@@ -152,6 +156,7 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
           onGetIsActivePage={fake.getIsActivePage}
           onSubscribeDirtyPage={fake.subscribeDirtyPage}
           onGetIsDirtyPage={fake.getIsDirtyPage}
+          onGetRotation={fake.getRotation}
         />
       </>,
     );
@@ -187,6 +192,7 @@ describe('Issue #68: ThumbnailItemNode pub/sub による active 通知', () => {
       onGetIsActivePage: () => false,
       onSubscribeDirtyPage: () => () => {},
       onGetIsDirtyPage: () => false,
+      onGetRotation: () => 0,
     };
     // currentPageIndex というキーが存在しないことを assertion (型 narrowing 用)
     expect('currentPageIndex' in probe).toBe(false);
@@ -220,6 +226,7 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
               onGetIsActivePage={getIsActiveSpy}
               onSubscribeDirtyPage={fake.subscribeDirtyPage}
               onGetIsDirtyPage={fake.getIsDirtyPage}
+              onGetRotation={fake.getRotation}
             />
           ))}
         </>

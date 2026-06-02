@@ -981,10 +981,20 @@ export async function buildPdfDocument(
 
     const page = pdfDoc.getPage(pageIndex);
     const { width: pageW, height: pageH } = page.getSize();
+
+    // issue #207: ユーザー指定の rotation があれば PDF ページの /Rotate を上書きする。
+    // documentState.pages には dirty ページが含まれるが、pageOrder 並べ替え後の新インデックスで
+    // 引けるように dirtyPages の元エントリ (pageData) を参照する。
+    const userRotation = documentState.pages.get(pageIndex)?.rotation;
+    if (userRotation !== undefined) {
+      page.setRotation(degrees(userRotation));
+    }
+
     // #71: bbox は OCR / 既存テキスト経由いずれも viewport 空間 (rotated screen, y-down)。
     // pdfSaver は元々 R=0 を仮定して translate(bbox.x, pageH - bbox.y) していたため、
     // R=90/180/270 では位置がページ外へ飛んでいた (#50 regression)。
     // 修正方針: viewport 寸法 (vw/vh) を使い、rotation に応じた cm を per-block push する。
+    // rotation は setRotation 後の値を取得する (user rotation 適用済み)。
     const rotation = normalizeRotation(page.getRotation?.().angle ?? 0);
     const { vh } = getViewportSize(rotation, pageW, pageH);
     const rotationCm = getRotationCm(rotation, pageW, pageH);

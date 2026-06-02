@@ -212,6 +212,11 @@ function App() {
     usePecoStore.getState().movePage(fromDisplayIndex, toDisplayIndex);
   }, []);
 
+  // issue #207: ページ回転ハンドラ
+  const handleRotatePages = useCallback((pageIndices: number[], delta: 90 | 180 | 270) => {
+    usePecoStore.getState().rotatePages(pageIndices, delta);
+  }, []);
+
   const handleReload = useCallback(async () => {
     if (isSaving) {
       showToast('保存中は再読み込みできません。');
@@ -765,6 +770,7 @@ function App() {
           onGetIsDirtyPage={getIsDirtyPage}
           onDeletePages={handleDeletePages}
           onMovePage={handleMovePage}
+          onRotatePages={handleRotatePages}
         />
         <div className="resizer" onMouseDown={startResizeLeft} />
         <section

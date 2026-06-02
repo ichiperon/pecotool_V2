@@ -84,6 +84,7 @@ interface ThumbnailItemProps {
   onGetIsActivePage: (index: number) => boolean;
   onSubscribeDirtyPage: (index: number, cb: () => void) => () => void;
   onGetIsDirtyPage: (index: number) => boolean;
+  onGetRotation: (index: number) => number;
   onContextMenu: (e: React.MouseEvent, displayIndex: number) => void;
 }
 
@@ -92,6 +93,7 @@ export const ThumbnailItemNode = React.memo(({
   onSelect, onRequest, onSubscribeThumbnail, onGetThumbnail,
   onSubscribeActivePage, onGetIsActivePage,
   onSubscribeDirtyPage, onGetIsDirtyPage,
+  onGetRotation,
   onContextMenu,
 }: ThumbnailItemProps) => {
   const [, forceUpdate] = useReducer(x => x + 1, 0);
@@ -111,6 +113,7 @@ export const ThumbnailItemNode = React.memo(({
   const thumbnailData = onGetThumbnail(index);
   const isActive = onGetIsActivePage(index);
   const isDirty = onGetIsDirtyPage(index);
+  const rotation = onGetRotation(index);
 
   useEffect(() => {
     if (!thumbnailData) onRequest(index);
@@ -126,11 +129,19 @@ export const ThumbnailItemNode = React.memo(({
     [index, onContextMenu],
   );
 
+  // issue #207: CSS variable で回転を表示。thumbnail-box の aspect ratio を
+  // 維持しつつ画像だけ回転させる (90/270 度では高さ/幅が入れ替わる視覚になる)。
+  // inline style は CSS variable の設定のみに限定し、具体的な transform は CSS クラスで定義。
+  const rotationVarStyle = rotation !== 0
+    ? { '--thumbnail-rotation': `${rotation}deg` } as React.CSSProperties
+    : undefined;
+  const imgClassName = rotation !== 0 ? 'thumbnail-img thumbnail-img--rotated' : 'thumbnail-img';
+
   const body = (
     <>
       <div className="thumbnail-box">
         {thumbnailData ? (
-          <img className="thumbnail-img" src={thumbnailData} alt={`Page ${index + 1}`} />
+          <img className={imgClassName} src={thumbnailData} alt={`Page ${index + 1}`} style={rotationVarStyle} />
         ) : (
           <span>{index + 1}</span>
         )}
@@ -185,6 +196,8 @@ interface ThumbnailPanelProps {
   // issue #193: ページ操作コールバック
   onDeletePages: (displayIndices: number[]) => void;
   onMovePage: (fromDisplayIndex: number, toDisplayIndex: number) => void;
+  // issue #207: ページ回転コールバック
+  onRotatePages: (pageIndices: number[], delta: 90 | 180 | 270) => void;
 }
 
 export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
@@ -192,11 +205,17 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail,
   onSubscribeActivePage, onGetIsActivePage,
   onSubscribeDirtyPage, onGetIsDirtyPage,
-  onDeletePages, onMovePage,
+  onDeletePages, onMovePage, onRotatePages,
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(CONTEXT_MENU_INITIAL);
   const [activeDragId, setActiveDragId] = useState<number | null>(null);
+
+  // issue #207: document への最新参照を ref で保持し、stale closure を避ける。
+  // itemContent の useCallback deps に document を入れると全アイテムが毎回再生成されるため、
+  // ref 経由でアクセスする。
+  const documentRef = useRef(document);
+  documentRef.current = document;
 
   // DnD センサー: マウスドラッグで 5px 動いたら開始 (クリックと区別)
   const sensors = useSensors(
@@ -238,6 +257,30 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
     if (ok) onDeletePages([contextMenu.targetDisplayIndex]);
   }, [contextMenu, document, onDeletePages]);
 
+  // issue #207: 回転ハンドラ
+  const handleRotateRight = useCallback(() => {
+    if (contextMenu.targetDisplayIndex < 0) return;
+    setContextMenu(CONTEXT_MENU_INITIAL);
+    onRotatePages([contextMenu.targetDisplayIndex], 90);
+  }, [contextMenu.targetDisplayIndex, onRotatePages]);
+
+  const handleRotateLeft = useCallback(() => {
+    if (contextMenu.targetDisplayIndex < 0) return;
+    setContextMenu(CONTEXT_MENU_INITIAL);
+    onRotatePages([contextMenu.targetDisplayIndex], 270);
+  }, [contextMenu.targetDisplayIndex, onRotatePages]);
+
+  const handleRotate180 = useCallback(() => {
+    if (contextMenu.targetDisplayIndex < 0) return;
+    setContextMenu(CONTEXT_MENU_INITIAL);
+    onRotatePages([contextMenu.targetDisplayIndex], 180);
+  }, [contextMenu.targetDisplayIndex, onRotatePages]);
+
+  // issue #207: document ref から rotation を取得する安定参照関数
+  const onGetRotation = useCallback((index: number): number => {
+    return documentRef.current?.pages.get(index)?.rotation ?? 0;
+  }, []);
+
   const handleDragStart = useCallback((event: DragStartEvent) => {
     setActiveDragId(event.active.id as number);
   }, []);
@@ -271,6 +314,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
           onGetIsActivePage={onGetIsActivePage}
           onSubscribeDirtyPage={onSubscribeDirtyPage}
           onGetIsDirtyPage={onGetIsDirtyPage}
+          onGetRotation={onGetRotation}
           onContextMenu={handleContextMenu}
         />
       </SortableThumbnailWrapper>
@@ -278,7 +322,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
     [
       loadEpoch, onSelectPage, onRequestThumbnail, onSubscribeThumbnail, onGetThumbnail,
       onSubscribeActivePage, onGetIsActivePage, onSubscribeDirtyPage, onGetIsDirtyPage,
-      handleContextMenu,
+      onGetRotation, handleContextMenu,
     ],
   );
 
@@ -355,6 +399,30 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
           aria-label="ページ操作メニュー"
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            role="menuitem"
+            className="thumbnail-context-menu-item"
+            onClick={handleRotateRight}
+          >
+            右に 90° 回転
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="thumbnail-context-menu-item"
+            onClick={handleRotateLeft}
+          >
+            左に 90° 回転
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="thumbnail-context-menu-item"
+            onClick={handleRotate180}
+          >
+            180° 回転
+          </button>
           <button
             type="button"
             role="menuitem"
