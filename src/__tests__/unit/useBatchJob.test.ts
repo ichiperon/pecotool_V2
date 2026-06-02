@@ -63,6 +63,7 @@ function makeCallbacks(overrides: Partial<UseBatchJobCallbacks> = {}): UseBatchJ
     openPdf: vi.fn().mockResolvedValue(true),
     runOcrAllPagesSilent: vi.fn().mockResolvedValue(true),
     savePdf: vi.fn().mockResolvedValue(true),
+    savePdfAs: vi.fn().mockResolvedValue(true),
     showToast: vi.fn(),
     ...overrides,
   };
@@ -329,15 +330,17 @@ describe('useBatchJob', () => {
     expect(callbacks.openPdf).toHaveBeenCalledWith('/f/pending.pdf');
   });
 
-  it('sidecar save mode: savePdf is NOT called; sidecar helper runs instead', async () => {
+  it('sidecar save mode: savePdfAs callback is called with sidecar path; savePdf is NOT called', async () => {
     const pdfFiles = ['/folder/a.pdf'];
     vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
 
+    const savePdfAs = vi.fn().mockResolvedValue(true);
     const callbacks = makeCallbacks({
       openPdf: vi.fn().mockImplementation(async (path: string) => {
         setStoreDoc(path);
         return true;
       }),
+      savePdfAs,
     });
 
     const { result } = renderHook(() => useBatchJob(callbacks));
@@ -354,8 +357,44 @@ describe('useBatchJob', () => {
       expect(result.current.currentJob?.finishedAt).toBeDefined();
     });
 
-    // In sidecar mode savePdf callback must NOT be called
+    // issue #243: sidecar mode must use savePdfAs (OCR-aware), not raw savePdf
     expect(callbacks.savePdf).not.toHaveBeenCalled();
+    expect(savePdfAs).toHaveBeenCalledTimes(1);
+    // sidecar path must be <outputDir>/<stem>.peco.pdf
+    expect(savePdfAs).toHaveBeenCalledWith('/out/a.peco.pdf');
+  });
+
+  it('sidecar save mode: shows toast and marks file error when savePdfAs is not provided', async () => {
+    const pdfFiles = ['/folder/a.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+      savePdfAs: undefined,
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'sidecar',
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentJob?.finishedAt).toBeDefined();
+    });
+
+    expect(callbacks.showToast).toHaveBeenCalledWith(
+      expect.stringContaining('savePdfAs'),
+      true,
+    );
+    expect(result.current.currentJob?.files[0].status).toBe('error');
   });
 
   it('clearJob after completed job removes localStorage entry', async () => {
@@ -434,5 +473,53 @@ describe('useBatchJob', () => {
     const files = result.current.currentJob?.files ?? [];
     expect(files.every((f) => f.status === 'done')).toBe(true);
     expect(callbacks.openPdf).toHaveBeenCalledTimes(2);
+  });
+
+  // ── issue #245: isRunning as React state ─────────────────────────────────
+
+  it('isRunning is true while executeLoop is running, false after it finishes', async () => {
+    const pdfFiles = ['/folder/a.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    // Block OCR so we can observe isRunning=true mid-run
+    let resolveOcr!: (v: boolean) => void;
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+      runOcrAllPagesSilent: vi.fn().mockImplementation(
+        () => new Promise<boolean>((res) => { resolveOcr = res; }),
+      ),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    // isRunning starts false
+    expect(result.current.isRunning).toBe(false);
+
+    let jobPromise: Promise<void>;
+    act(() => {
+      jobPromise = result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+
+    // Wait until OCR is blocked (loop is running)
+    await waitFor(() => expect(callbacks.runOcrAllPagesSilent).toHaveBeenCalled());
+
+    // isRunning must be true while loop is active
+    expect(result.current.isRunning).toBe(true);
+
+    // Unblock and finish
+    await act(async () => {
+      resolveOcr(true);
+      await jobPromise!;
+    });
+
+    // isRunning must be false after loop finishes
+    expect(result.current.isRunning).toBe(false);
   });
 });

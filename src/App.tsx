@@ -202,7 +202,7 @@ function App() {
   // setShowSaveDialog は useDialogState から取得済み。ref 化して常に最新を参照する。
   const setShowSaveDialogRef = useRef(setShowSaveDialog);
   setShowSaveDialogRef.current = setShowSaveDialog;
-  const { handleOpen, handleSave, executeSaveAs, isSavingRef: fileOpsIsSavingRef } = useFileOperations(
+  const { handleOpen, handleSave, executeSaveAs, handleSaveTo, isSavingRef: fileOpsIsSavingRef } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
     (doc) => { checkAndPromptOcrZero(doc); },
     isOcrRunningRef,
@@ -225,6 +225,8 @@ function App() {
     openPdf: (path) => handleOpen(path, { bypassOcrGuard: true }),
     runOcrAllPagesSilent,
     savePdf: handleSave,
+    // issue #243: sidecar save routes through handleSaveTo so OCR data is preserved
+    savePdfAs: handleSaveTo,
     showToast,
   });
 

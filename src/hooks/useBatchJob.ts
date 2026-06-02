@@ -15,7 +15,6 @@ import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 import { usePecoStore } from '../store/pecoStore';
 import { exportTextFromDocument } from '../utils/textExport';
-import { getSharedPdfProxy } from '../utils/pdfLoader';
 
 const STORAGE_KEY = 'peco-batch-job-v1';
 
@@ -112,8 +111,14 @@ export interface UseBatchJobCallbacks {
   openPdf: (filePath: string) => Promise<boolean>;
   /** Run OCR on all pages of the current document and return true on success. */
   runOcrAllPagesSilent: () => Promise<boolean>;
-  /** Save the current document and return true on success. */
+  /** Save the current document (overwrite) and return true on success. */
   savePdf: () => Promise<boolean>;
+  /**
+   * issue #243: Save the current document to the given path and return true on success.
+   * Used for sidecar mode to route through the full OCR-aware save pipeline
+   * instead of writing raw pdfjs bytes (which would silently drop textBlocks).
+   */
+  savePdfAs?: (targetPath: string) => Promise<boolean>;
   /** Show a toast notification. */
   showToast: (msg: string, isError?: boolean) => void;
 }
@@ -139,6 +144,9 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
 
   const cancelledRef = useRef(false);
   const isRunningRef = useRef(false);
+  // issue #245: isRunning as React state so UI re-renders on change.
+  // isRunningRef is kept for synchronous double-execution guard.
+  const [isRunning, setIsRunning] = useState(false);
 
   // ── Internal execution loop ─────────────────────────────────────────────
 
@@ -146,6 +154,7 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
     async (job: BatchJob): Promise<void> => {
       if (isRunningRef.current) return;
       isRunningRef.current = true;
+      setIsRunning(true);
       cancelledRef.current = false;
 
       const update = (updater: (j: BatchJob) => BatchJob) => {
@@ -218,16 +227,23 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
             }
 
             // 6. Save PDF
-            let savePath = filePath;
-            if (job.saveMode === 'sidecar') {
+            let saveOk: boolean;
+            if (job.saveMode === 'overwrite') {
+              saveOk = await callbacks.savePdf();
+            } else {
+              // issue #243: sidecar mode routes through savePdfAs callback so that
+              // OCR results (textBlocks) are included in the written PDF.
+              // The old saveSidecar helper wrote raw pdfjs bytes and silently
+              // dropped all OCR data.
               const stem = fileName.replace(/\.pdf$/i, '');
-              savePath = await join(job.outputDir, `${stem}.peco.pdf`);
+              const sidecarPath = await join(job.outputDir, `${stem}.peco.pdf`);
+              if (callbacks.savePdfAs) {
+                saveOk = await callbacks.savePdfAs(sidecarPath);
+              } else {
+                callbacks.showToast('sidecar 保存には savePdfAs callback が必要です。', true);
+                saveOk = false;
+              }
             }
-
-            const saveOk =
-              job.saveMode === 'overwrite'
-                ? await callbacks.savePdf()
-                : await saveSidecar(savePath, callbacks.showToast);
 
             if (!saveOk) {
               throw new Error('PDFの保存に失敗しました');
@@ -300,6 +316,7 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
         }
       } finally {
         isRunningRef.current = false;
+        setIsRunning(false);
       }
     },
     [callbacks],
@@ -371,7 +388,7 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
 
   return {
     currentJob,
-    isRunning: isRunningRef.current,
+    isRunning,
     startJob,
     cancelJob,
     resumeJob,
@@ -379,32 +396,3 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
   };
 }
 
-// ── Sidecar save helper ───────────────────────────────────────────────────────
-
-/**
- * Save the current document to a custom path (sidecar mode).
- * This is a simplified path that writes the PDF bytes to the given target.
- * Returns true on success.
- */
-async function saveSidecar(
-  targetPath: string,
-  showToast: (msg: string, isError?: boolean) => void,
-): Promise<boolean> {
-  try {
-    const doc = usePecoStore.getState().document;
-    if (!doc) return false;
-
-    // Get PDF bytes via pdfjs proxy
-    const pdf = await getSharedPdfProxy(doc.filePath);
-    // pdfjs PDFDocumentProxy.getData() returns the original bytes
-    const data = await (pdf as { getData(): Promise<Uint8Array> }).getData();
-
-    const { writeFile } = await import('@tauri-apps/plugin-fs');
-    await writeFile(targetPath, data);
-    return true;
-  } catch (e) {
-    console.error('[BatchJob] sidecar save failed:', e);
-    showToast(`サイドカー保存に失敗しました: ${e}`, true);
-    return false;
-  }
-}

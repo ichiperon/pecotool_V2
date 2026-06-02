@@ -788,9 +788,44 @@ export function useFileOperations(
   // ref へ最新参照を入れる (関数定義順の循環参照を回避する目的)。
   executeSaveAsRef.current = executeSaveAs;
 
+  /**
+   * issue #243: バッチジョブの sidecar 保存経路向け。
+   * UI ダイアログを開かず、指定パスへ現在の document を保存する。
+   * OCR 結果 (textBlocks) を含む完全な PDF を書き出すため、
+   * _executeSave を直接呼ぶ (saveSidecar のように pdfjs から raw bytes を
+   * 取り出す実装とは異なり、OCR レイヤが保持される)。
+   * 成功時 true / 失敗時 false を返す。
+   */
+  const handleSaveTo = async (targetPath: string): Promise<boolean> => {
+    if (isSavingRef.current) {
+      showToast('保存処理が進行中です。');
+      return false;
+    }
+    flushActiveOcrCardText();
+    isSavingRef.current = true;
+    setIsSaving?.(true);
+    try {
+      const result = await _executeSave(targetPath);
+      if (result !== null) {
+        resetDirty(result.savedPageSnapshots);
+        setLastSavedActionIndex(usePecoStore.getState().undoStack.length);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('[handleSaveTo] failed:', err);
+      showToast(`保存に失敗しました: ${err}`, true);
+      return false;
+    } finally {
+      isSavingRef.current = false;
+      setIsSaving?.(false);
+      setSaveStep?.(null);
+    }
+  };
+
   // issue #137: useAutoBackup から保存中ガードに使う共有 ref。
   // 旧実装は useAutoBackup 内で独自の isSavingRef を持っていたため、
   // useFileOperations の保存中に autoBackup の performBackup が並走しうる
   // (Rust 側の writeFileAtomically と save_backup が同一ファイルを取り合う) 状態だった。
-  return { handleOpen, handleSave, executeSaveAs, isSavingRef };
+  return { handleOpen, handleSave, executeSaveAs, handleSaveTo, isSavingRef };
 }
