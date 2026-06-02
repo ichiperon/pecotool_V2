@@ -76,6 +76,12 @@ interface PecoState {
   clipboard: TextBlock[];
   undoStack: Action[];
   redoStack: Action[];
+  /**
+   * issue #201: 最後の保存成功時点の undoStack.length。
+   * computeSaveDiff はこの値以降の undoStack エントリを「未保存の変更」として扱う。
+   * setDocument（ファイル切替）時は 0 にリセットする。
+   */
+  lastSavedActionIndex: number;
   /** 復元待ちのバックアップページデータ。setDocument 内で IDB への書き込みに使われる。 */
   pendingRestoration: Record<string, Partial<PageData>> | null;
   /** 直近の IDB 保存失敗エラー。UI から subscribe してユーザーに通知できる。 */
@@ -174,6 +180,8 @@ interface PecoState {
   clearOcrCurrentPage: () => void;
   clearOcrAllPages: () => void;
   clearLastIdbError: () => void;
+  /** issue #201: 保存成功時に呼ぶ。undoStack.length を lastSavedActionIndex にセットする。 */
+  setLastSavedActionIndex: (index: number) => void;
   /** ドラッグ中の bbox プレビュー Map をセットする。null でクリア。issue #91 */
   setDragPreviewBboxes: (bboxes: Map<string, BoundingBox> | null) => void;
 
@@ -257,6 +265,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   clipboard: [],
   undoStack: [],
   redoStack: [],
+  lastSavedActionIndex: 0,
   pendingRestoration: null,
   lastIdbError: null,
   currentPageProxy: null,
@@ -523,6 +532,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       clipboard: [],
       undoStack: [],
       redoStack: [],
+      lastSavedActionIndex: 0,
       pendingRestoration: null,
       // ファイル切替時は古い PDFPageProxy を保持しない (transport が破棄されるため)
       currentPageProxy: null,
@@ -1019,6 +1029,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   clearLastIdbError: () => set({ lastIdbError: null }),
 
+  setLastSavedActionIndex: (index) => set({ lastSavedActionIndex: index }),
+
   setDragPreviewBboxes: (bboxes) => {
     // issue #174: 同内容 (= bbox 値が全て一致) なら set をスキップして購読者の再 render を抑える。
     // computeDragPreviewBboxes は毎フレーム new Map を返すため、参照比較だけでは
@@ -1432,3 +1444,5 @@ export const selectSearchTerm = (s: PecoState) => s.searchTerm;
 export const selectSearchHitIndex = (s: PecoState) => s.searchHitIndex;
 // issue #191: 範囲指定 OCR モード
 export const selectIsRangeOcrMode = (s: PecoState) => s.isRangeOcrMode;
+// issue #201: 最後の保存以降の未保存変更を diff 計算する基準インデックス
+export const selectLastSavedActionIndex = (s: PecoState) => s.lastSavedActionIndex;

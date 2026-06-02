@@ -419,6 +419,56 @@ async fn write_operation_log(
     Ok(path.to_string_lossy().to_string())
 }
 
+/// 監査ログを `appLocalData/pecotool/audit/<YYYY-MM-DD>.ndjson` に **追記** する。
+/// body は NDJSON の 1 行（呼び出し元が JSON 文字列を渡す）。
+/// 返値は書き込み先の絶対パス文字列。
+#[tauri::command]
+async fn write_audit_log(
+    app: tauri::AppHandle,
+    body: String,
+) -> Result<String, String> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use tauri::Manager;
+
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    let audit_dir = dir.join("pecotool").join("audit");
+    fs::create_dir_all(&audit_dir).map_err(|e| format!("create_dir: {e}"))?;
+
+    // ファイル名は UTC の YYYY-MM-DD
+    let date_str = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let days = secs / 86400;
+        // ユリウス日から年月日を算出 (グレゴリオ暦、UTC)
+        let j = days as i64 + 2440588; // Unix epoch = JD 2440588
+        let f = j + 1401 + (((4 * j + 274277) / 146097) * 3) / 4 - 38;
+        let e = 4 * f + 3;
+        let g = (e % 1461) / 4;
+        let h = 5 * g + 2;
+        let day = (h % 153) / 5 + 1;
+        let month = (h / 153 + 2) % 12 + 1;
+        let year = e / 1461 - 4716 + (14 - month) / 12;
+        format!("{:04}-{:02}-{:02}", year, month, day)
+    };
+
+    let path = audit_dir.join(format!("{}.ndjson", date_str));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open audit log: {e}"))?;
+    writeln!(file, "{}", body).map_err(|e| format!("write audit log: {e}"))?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// `appLocalData/logs/` を OS 標準ファイラで開く。
 /// 未作成なら先に `fs::create_dir_all` で生成する。
 #[tauri::command]
@@ -1110,6 +1160,7 @@ pub fn run() {
             list_pdf_files_in_folder,
             write_perf_log,
             write_operation_log,
+            write_audit_log,
             open_log_folder,
             write_pdf_chunk,
             replace_pdf_file,

@@ -27,6 +27,8 @@ import {
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
 import { flushActiveOcrCardText } from '../utils/ocrEditFlush';
+import { computeSaveDiff } from '../utils/saveDiffSummary';
+import type { SaveDiffSummary } from '../utils/saveDiffSummary';
 
 /**
  * 1 ページ目 render 後 (アイドル時) に background で PDF 全体 bytes を取得して
@@ -269,10 +271,18 @@ export function useFileOperations(
    * undefined のときは従来通り executeSaveAs を直接呼ぶ (後方互換)。
    */
   onRequestSaveDialog?: () => void,
+  /**
+   * issue #201: 保存前 diff プレビューを表示するコールバック。
+   * summary を受け取り、ユーザーが「保存する」を選んだ場合 resolve(true)、
+   * 「キャンセル」を選んだ場合 resolve(false) を返す Promise を返す。
+   * undefined の場合はプレビューをスキップして直接保存する (後方互換)。
+   */
+  onRequestDiffPreview?: (summary: SaveDiffSummary) => Promise<boolean>,
 ) {
   const setDocument = usePecoStore((s) => s.setDocument);
   const setDocumentFilePath = usePecoStore((s) => s.setDocumentFilePath);
   const resetDirty = usePecoStore((s) => s.resetDirty);
+  const setLastSavedActionIndex = usePecoStore((s) => s.setLastSavedActionIndex);
   const isSavingRef = useRef(false);
   // executeSaveAs は下で定義されるため、_executeSave / handleSave から参照できるよう
   // ref で間接化する。issue #53: writeFileAtomically が EACCES/EBUSY で失敗したときに
@@ -616,6 +626,16 @@ export function useFileOperations(
       return false;
     }
 
+    // issue #201: diff プレビューが設定されている場合、保存前に変更内容を表示する
+    if (onRequestDiffPreview) {
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState();
+      const diffSummary = computeSaveDiff(undoStack, lastSavedActionIndex);
+      if (diffSummary.entries.length > 0) {
+        const confirmed = await onRequestDiffPreview(diffSummary);
+        if (!confirmed) return false;
+      }
+    }
+
     isSavingRef.current = true;
     setIsSaving?.(true);
     showToast("保存処理を開始しました...");
@@ -626,7 +646,13 @@ export function useFileOperations(
         // 下ろす。保存中に編集されたページは参照が変わり一致しないため isDirty が
         // 保持され、次回保存の dirty フィルタに正しく載る。
         resetDirty(result.savedPageSnapshots);
+        // issue #201: 保存成功時に lastSavedActionIndex を更新する
+        setLastSavedActionIndex(usePecoStore.getState().undoStack.length);
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
+        // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
+        void _writeAuditLog(document.filePath).catch((e) => {
+          console.warn('[save] audit log write failed (ignored):', e);
+        });
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
         invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
         return true;
@@ -708,7 +734,13 @@ export function useFileOperations(
             // issue #115 / #119: 別名保存でも保存スナップショットと同一参照の
             // ページだけ dirty を下ろす。
             resetDirty(result.savedPageSnapshots);
+            // issue #201: 保存成功時に lastSavedActionIndex を更新する
+            setLastSavedActionIndex(usePecoStore.getState().undoStack.length);
             showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
+            // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
+            void _writeAuditLog(path).catch((e) => {
+              console.warn('[save-as] audit log write failed (ignored):', e);
+            });
             addToRecent(path);
             // 元のパスのバックアップも新しいパスのバックアップも削除する
             if (prevPath) invoke('clear_backup', { filePath: prevPath }).catch(() => {});
@@ -724,6 +756,28 @@ export function useFileOperations(
       console.error("Failed to save as:", err);
       showToast("名前を付けて保存に失敗しました。", true);
     }
+  };
+
+  /**
+   * issue #201: 保存成功後に NDJSON 監査ログを appData/pecotool/audit/<YYYY-MM-DD>.ndjson に追記する。
+   * undoStack の直近変更エントリを集約して 1 行の JSON として書き出す。
+   */
+  const _writeAuditLog = async (filePath: string): Promise<void> => {
+    const { undoStack, lastSavedActionIndex } = usePecoStore.getState();
+    const diff = computeSaveDiff(undoStack, lastSavedActionIndex);
+    if (diff.entries.length === 0) return;
+    const record = {
+      timestamp: new Date().toISOString(),
+      filePath,
+      entries: diff.entries.map((e) => ({
+        pageIndex: e.pageIndex,
+        blockId: e.blockId,
+        before: e.before,
+        after: e.after,
+        changeType: e.changeType,
+      })),
+    };
+    await invoke('write_audit_log', { body: JSON.stringify(record) });
   };
 
   // handleSave 内のエラーフォールバックから executeSaveAs を呼び出せるように

@@ -15,10 +15,16 @@ export interface GlyphTransform {
  * 文字列を curve に沿って等弧長で配置し、各文字の Tm 行列を構成する transform を返す
  * (issue #187)。
  *
- * 座標変換:
+ * **座標系: PDF 座標 (Y-up flip 適用)**
  *   curve (TextBlock.bbox と同じく viewport 座標, y-down) から
  *   PDF 座標 (y-up) へは y_pdf = pageHeight - y_viewport で flip する。
  *   接線方向の角度も y 軸反転により符号が反転する: rotation_pdf = -rotation_viewport
+ *   → pdfSaver / Tm 行列生成で使う。UI overlay 描画には使わない。
+ *
+ *   UI overlay (canvas 描画) 用には `layoutTextOnCurveViewport` を使うこと。
+ *   両関数の違い:
+ *   - `layoutTextOnCurve`         : PDF 座標 (Y-up flip 済み)  — PDF 書き出し専用
+ *   - `layoutTextOnCurveViewport` : viewport 座標 (flip なし)   — UI overlay 専用
  *
  * 字幅処理:
  *   フォントメトリクス非依存の簡易等弧長配置。クラスタ単位 (UTF-16 surrogate pair 配慮)
@@ -69,23 +75,27 @@ function layoutOnArc(
     const yV = center.y + radius * Math.sin(theta);
     // viewport y-down 座標系で円周上の接線は theta + π/2 (反時計回り進行) / theta - π/2 (時計回り)
     const tangentV = theta + (dir > 0 ? Math.PI / 2 : -Math.PI / 2);
-    // PDF (y-up) へ変換: y 反転 → 角度の符号反転
-    const xPdf = xV;
+    // PDF (y-up) へ変換: y 反転 → 角度の符号反転 (x は変換不要)
     const yPdf = pageHeight - yV;
     const rotationPdf = -tangentV;
-    result.push({ char: chars[i], x: xPdf, y: yPdf, rotation: rotationPdf });
+    result.push({ char: chars[i], x: xV, y: yPdf, rotation: rotationPdf });
   }
   return result;
 }
 
 /**
- * viewport 座標系 (y-down) のまま各文字の transform を返す overlay 描画用ヘルパー
+ * 文字列を curve に沿って等弧長で配置し、各文字の transform を返す overlay 描画用ヘルパー
  * (issue #188 / Phase 4)。
  *
- * `layoutTextOnCurve` と異なり PDF y-up への flip を行わない。
- * PdfCanvas の canvas は viewport 座標系で描画するため pageHeight flip が不要。
- * 既存の `layoutTextOnCurve` は PDF saver 側で使い続け、このバリアントは
- * overlay 描画専用に使う。
+ * **座標系: viewport 座標 (flip なし、UI overlay 用)**
+ *   `layoutTextOnCurve` と異なり PDF y-up への flip を行わない。
+ *   PdfCanvas の canvas は viewport 座標系 (y-down) で描画するため pageHeight flip が不要。
+ *   → UI canvas overlay 描画専用。PDF 書き出しには使わない。
+ *
+ *   PDF 書き出し用には `layoutTextOnCurve` を使うこと。
+ *   両関数の違い:
+ *   - `layoutTextOnCurve`         : PDF 座標 (Y-up flip 済み)  — PDF 書き出し専用
+ *   - `layoutTextOnCurveViewport` : viewport 座標 (flip なし)   — UI overlay 専用
  *
  * 返り値の x/y は viewport 座標系 (y-down)、rotation は viewport 接線方向 (radian)。
  *
@@ -210,12 +220,11 @@ function layoutOnPolyline(
     const localT = (d - seg.cum) / seg.len; // 0..1
     const xV = seg.x0 + localT * (seg.x1 - seg.x0);
     const yV = seg.y0 + localT * (seg.y1 - seg.y0);
-    // viewport (y-down) での接線方向。
+    // viewport (y-down) での接線方向。PDF (y-up) へ変換: y 反転 → 角度の符号反転 (x は変換不要)
     const tangentV = Math.atan2(seg.y1 - seg.y0, seg.x1 - seg.x0);
-    const xPdf = xV;
     const yPdf = pageHeight - yV;
     const rotationPdf = -tangentV;
-    result.push({ char: chars[i], x: xPdf, y: yPdf, rotation: rotationPdf });
+    result.push({ char: chars[i], x: xV, y: yPdf, rotation: rotationPdf });
   }
   return result;
 }
