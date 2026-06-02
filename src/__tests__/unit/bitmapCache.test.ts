@@ -110,8 +110,10 @@ describe('bitmapCache', () => {
     const oldBitmap = makeBitmap();
     const newBitmap = makeBitmap();
 
-    setBitmapCache('old.pdf:0:100', makeEntry(oldBitmap, 1, 10_000, 5_000));
-    setBitmapCache('new.pdf:0:100', makeEntry(newBitmap, 1, 10_000, 5_000));
+    // Each entry: 6000 * 3000 * 4 = ~72MB. Two together = 144MB exceeds the
+    // 128MB cap, so inserting `new` should evict the older `old.pdf` page.
+    setBitmapCache('old.pdf:0:100', makeEntry(oldBitmap, 1, 6_000, 3_000));
+    setBitmapCache('new.pdf:0:100', makeEntry(newBitmap, 1, 6_000, 3_000));
 
     expect(getBitmapCache('old.pdf:0:100')).toBeUndefined();
     expect(getBitmapCache('new.pdf:0:100')).toBeDefined();
