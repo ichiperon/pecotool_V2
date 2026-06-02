@@ -96,7 +96,7 @@ function resolveTargetIndices(
 // ─── order 順ソート ──────────────────────────────────────────────────────────
 
 function sortedBlocks(pageData: PageData) {
-  return [...pageData.textBlocks].sort((a, b) => a.order - b.order);
+  return [...pageData.textBlocks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 }
 
 // ─── TXT シリアライザ ────────────────────────────────────────────────────────
