@@ -169,26 +169,29 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
           </button>
           {showOcrDropdown && !props.isOcrRunning && (
             <div className="recent-dropdown ocr-dropdown" onClick={(e) => e.stopPropagation()}>
-              <div
+              <button
+                type="button"
                 className="recent-item"
                 onClick={() => { setShowOcrDropdown(false); props.onRunOcrCurrentPage(); }}
-                style={!props.isFileLoaded ? { opacity: 0.5, pointerEvents: 'none' } : undefined}
+                disabled={!props.isFileLoaded}
               >
                 現在のページ
-              </div>
-              <div
+              </button>
+              <button
+                type="button"
                 className="recent-item"
                 onClick={() => { setShowOcrDropdown(false); props.onRunOcrAllPages(); }}
-                style={!props.isFileLoaded ? { opacity: 0.5, pointerEvents: 'none' } : undefined}
+                disabled={!props.isFileLoaded}
               >
                 全ページ
-              </div>
-              <div
+              </button>
+              <button
+                type="button"
                 className="recent-item"
                 onClick={() => { setShowOcrDropdown(false); props.onRunOcrFolder(); }}
               >
                 フォルダ内PDF
-              </div>
+              </button>
             </div>
           )}
         </div>
@@ -212,18 +215,20 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
           </button>
           {showClearOcrDropdown && (
             <div className="recent-dropdown ocr-dropdown" onClick={(e) => e.stopPropagation()}>
-              <div
+              <button
+                type="button"
                 className="recent-item"
                 onClick={() => { setShowClearOcrDropdown(false); props.onClearOcrCurrentPage(); }}
               >
                 現在のページ
-              </div>
-              <div
+              </button>
+              <button
+                type="button"
                 className="recent-item"
                 onClick={() => { setShowClearOcrDropdown(false); props.onClearOcrAllPages(); }}
               >
                 全ページ
-              </div>
+              </button>
             </div>
           )}
         </div>

@@ -236,6 +236,20 @@ body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
   border-bottom: 1px solid #f3f4f6;
+  /* button 要素として使われる場合のデフォルト styling を打ち消す */
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  display: block;
+}
+
+.recent-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .recent-item:last-child {
