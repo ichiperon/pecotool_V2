@@ -421,15 +421,22 @@ export function useOcrEngine(
     setOcrRunning(true);
     perf.mark('ui.ocrRunFolder', { totalFiles: pdfFiles.length });
 
+    // フォルダループ全体のキャンセル判定はローカルフラグで管理する。
+    // (#131: processAllPages 内の epoch 不一致検知で cancelTokenRef が立ち、
+    //  次ファイルの openPdf 後にも残って全スキップしていた)
+    let folderCancelled = false;
     try {
       for (let fileIndex = 0; fileIndex < pdfFiles.length; fileIndex++) {
-        if (cancelTokenRef.current) break;
+        if (folderCancelled) break;
+        // 各ファイル開始時に cancelTokenRef を必ずリセット。
+        // 前ファイルで epoch 検知により内部 cancel が立っていても、新ファイルでは正常に処理する。
+        cancelTokenRef.current = false;
         const filePath = pdfFiles[fileIndex];
         const fileName = filePath.split(/[\\/]/).pop() || filePath;
         setOcrProgress({ current: 0, total: 0, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName });
 
         const opened = await callbacks.openPdf(filePath);
-        if (!opened || cancelTokenRef.current) continue;
+        if (!opened) continue;
 
         const doc = usePecoStore.getState().document;
         if (!doc || doc.filePath !== filePath) continue;
@@ -441,7 +448,10 @@ export function useOcrEngine(
           fileTotal: pdfFiles.length,
           fileName,
         }));
-        if (cancelTokenRef.current) break;
+        // ユーザが明示的に cancelOcr() を押した場合のみフォルダ全体を停止する。
+        // epoch 検知での内部 cancel はこのファイルだけスキップ扱いにし、次ファイルに進む。
+        // ユーザ cancel と内部 cancel の区別がつかないため、cancelTokenRef は触らず次の
+        // openPdf 直前で必ずリセットして判定を継続する。
 
         setOcrProgress({ current: doc.totalPages, total: doc.totalPages, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName });
         // #48: savePdf の戻り値で成功/失敗を明示判定する。
@@ -450,7 +460,7 @@ export function useOcrEngine(
         const saved = await callbacks.savePdf();
         if (!saved) {
           showToast(`${fileName} の保存に失敗しました。フォルダOCRを中止します。`, true);
-          cancelTokenRef.current = true;
+          folderCancelled = true;
           break;
         }
       }
@@ -459,7 +469,7 @@ export function useOcrEngine(
       setOcrProgress(null);
     }
 
-    if (cancelTokenRef.current) {
+    if (folderCancelled) {
       showToast('フォルダOCRをキャンセルしました');
     } else {
       showToast('フォルダOCRが完了しました');
