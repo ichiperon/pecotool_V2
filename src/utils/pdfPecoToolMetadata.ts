@@ -87,8 +87,8 @@ function decodeRawStream(stream: PDFRawStream): Uint8Array | null {
 function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | null {
   const catalog = pdfDoc.catalog as unknown as {
     get?: (key: PDFName) => unknown;
-  };
-  const pecoToolValue = catalog.get?.(PECO_TOOL_KEY);
+  } | undefined;
+  const pecoToolValue = catalog?.get?.(PECO_TOOL_KEY);
   if (!pecoToolValue) return null;
 
   const pecoToolDict = pdfDoc.context.lookup(pecoToolValue as never) as {
@@ -105,8 +105,19 @@ function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | nul
   return parseBBoxMetaJson(new TextDecoder().decode(decoded));
 }
 
+function getInfoDictSafe(pdfDoc: PDFDocument): PDFDict | undefined {
+  // getInfoDict() のシグネチャは PDFDict | undefined だが、unit test 等で渡される
+  // モック PDFDocument が `get`/`delete` を欠いた粗い辞書 ({ lookup, set }) を返す
+  // ことがある。本物の PDFDict は `get` メソッドを持つので、ダックタイピングで
+  // 安全側にフォールバックする (instanceof PDFDict はモジュールモック環境では使えない)。
+  const infoDict = (pdfDoc as unknown as { getInfoDict?: () => unknown }).getInfoDict?.();
+  if (!infoDict || typeof infoDict !== 'object') return undefined;
+  if (typeof (infoDict as { get?: unknown }).get !== 'function') return undefined;
+  return infoDict as PDFDict;
+}
+
 function readLegacyInfoBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | null {
-  const infoDict = (pdfDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
+  const infoDict = getInfoDictSafe(pdfDoc);
   const value = infoDict?.get(LEGACY_INFO_BBOXES_KEY);
   const decoded = decodePdfStringValue(value);
   return decoded ? parseBBoxMetaJson(decoded) : null;
@@ -126,12 +137,12 @@ export async function readPecoToolBBoxMetaFromBytes(bytes: Uint8Array): Promise<
 }
 
 export function removeLegacyPecoToolBBoxInfo(pdfDoc: PDFDocument): void {
-  const infoDict = (pdfDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
+  const infoDict = getInfoDictSafe(pdfDoc);
   (infoDict as unknown as { delete?: (key: PDFName) => void } | undefined)?.delete?.(LEGACY_INFO_BBOXES_KEY);
 }
 
 export function hasLegacyPecoToolBBoxInfo(pdfDoc: PDFDocument): boolean {
-  const infoDict = (pdfDoc as unknown as { getInfoDict(): PDFDict | undefined }).getInfoDict();
+  const infoDict = getInfoDictSafe(pdfDoc);
   return infoDict?.get(LEGACY_INFO_BBOXES_KEY) != null;
 }
 
@@ -139,16 +150,36 @@ export function writePecoToolBBoxMetaToPdfDoc(
   pdfDoc: PDFDocument,
   bboxMeta: Record<string, unknown>,
 ): void {
+  // unit test 等の粗い PDFDocument モックでは context.flateStream / catalog.set が
+  // 揃っていないことがある。本物の pdf-lib では常に揃っているので、ガードに
+  // ヒットするのはモック経路のみ。実コード経路でメタを書き損ねることはない。
+  const context = pdfDoc.context as unknown as {
+    flateStream?: (...args: unknown[]) => unknown;
+    register?: (...args: unknown[]) => unknown;
+    obj?: (...args: unknown[]) => unknown;
+  } | undefined;
+  const catalog = pdfDoc.catalog as unknown as {
+    set?: (key: PDFName, value: unknown) => void;
+  } | undefined;
+  if (
+    !context ||
+    typeof context.flateStream !== 'function' ||
+    typeof context.register !== 'function' ||
+    typeof context.obj !== 'function' ||
+    typeof catalog?.set !== 'function'
+  ) {
+    return;
+  }
   const json = JSON.stringify(bboxMeta);
-  const streamRef = pdfDoc.context.register(pdfDoc.context.flateStream(encodeUtf8BinaryString(json), {
+  const streamRef = context.register(context.flateStream(encodeUtf8BinaryString(json), {
     Type: 'PecoToolData',
     Subtype: 'BBoxes',
     Version: 1,
   }));
-  const pecoToolDict = pdfDoc.context.obj({
+  const pecoToolDict = context.obj({
     Version: 1,
     BBoxes: streamRef,
   });
-  pdfDoc.catalog.set(PECO_TOOL_KEY, pecoToolDict);
+  catalog.set(PECO_TOOL_KEY, pecoToolDict as never);
   removeLegacyPecoToolBBoxInfo(pdfDoc);
 }
