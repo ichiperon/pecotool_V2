@@ -26,6 +26,7 @@ import {
 } from './pdfPecoToolMetadata';
 import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
 import { isCurveDefinition } from './curveDefinition';
+import { buildCurveBlockOperators } from './pdfCurveTextRender';
 import type {
   SavePdfWorkerRequest,
   SavePdfWorkerResponse,
@@ -764,6 +765,25 @@ async function handleSavePdf(
 
       try {
         const fontSize = Math.max(1, Math.min(96, (block.writingMode === 'vertical' ? block.bbox.width : block.bbox.height) * 0.8));
+
+        // issue #187: curve 定義があるブロックは per-glyph Tm/Tj 経路で描画する。
+        // 詳細は pdfSaver.ts 側コメント参照 (同一ロジック)。
+        if (block.curve) {
+          const ops = buildCurveBlockOperators(
+            block.text,
+            block.curve,
+            customFont,
+            pageFontKeys.get(customFont)!,
+            fontSize,
+            vh,
+            rotationCm as unknown as Parameters<typeof buildCurveBlockOperators>[6],
+          );
+          if (ops.length > 0) {
+            page.pushOperators(...ops);
+          }
+          continue;
+        }
+
         const runs = splitTextBySupportedFont(
           block.text,
           customFont,

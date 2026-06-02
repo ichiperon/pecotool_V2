@@ -27,6 +27,7 @@ import {
 } from './pdfPecoToolMetadata';
 import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
 import { isCurveDefinition } from './curveDefinition';
+import { buildCurveBlockOperators } from './pdfCurveTextRender';
 import type {
   SavePdfSource,
   SavePdfWorkerRequest,
@@ -980,6 +981,31 @@ export async function buildPdfDocument(
 
       try {
         const fontSize = Math.max(1, Math.min(96, (block.writingMode === 'vertical' ? block.bbox.width : block.bbox.height) * 0.8));
+
+        // issue #187: curve 定義があるブロックは per-glyph Tm/Tj 経路で描画する。
+        // axis-aligned 経路 (pushGraphicsState + translate/scale + drawText) と完全に
+        // 分岐するため、curve branch 内で描画完了したら continue で次ブロックへ。
+        // フォントは primary customFont のみ使用 (fallback 切り替えは Phase 3.5 へ繰越)。
+        // primary でサポートされない char は recordSkippedTextChar で記録して drop。
+        if (block.curve) {
+          const ops = buildCurveBlockOperators(
+            block.text,
+            block.curve,
+            customFont,
+            // primary font は pageFontKeys に setPageFontWithStableKey 済み (loop 上方)。
+            // 必ず key が解決済みのため non-null assertion (key が無いと axis-aligned 経路でも
+            // drawText が誤キー出力するため、両経路で同じ前提)。
+            pageFontKeys.get(customFont)!,
+            fontSize,
+            vh,
+            rotationCm as unknown as Parameters<typeof buildCurveBlockOperators>[6],
+          );
+          if (ops.length > 0) {
+            page.pushOperators(...ops);
+          }
+          continue;
+        }
+
         const runs = splitTextBySupportedFont(
           block.text,
           customFont,
