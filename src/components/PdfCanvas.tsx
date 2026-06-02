@@ -290,7 +290,7 @@ export function PdfCanvas({
         staticOverlayRafRef.current = null;
       }
     };
-  }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage, searchTerm, searchHitIndex]);
+  }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage, searchTerm, searchHitIndex, ocrConfidenceThreshold, showLowConfidenceHighlight]);
 
   // 動的層: 選択 BB ハイライト + drawing/altDrag プレビュー
   useEffect(() => {
@@ -680,10 +680,10 @@ export function PdfCanvas({
         staticOverlayRafRef.current = null;
       }
     };
-    // 注: 依存は selectedIds のみ。他フィールドのときは上の "メイン" 静的層
-    // effect が責任を持つ。
+    // 注: 主な依存は selectedIds。ocrConfidenceThreshold / showLowConfidenceHighlight は
+    // renderStaticLayer に渡しているため依存配列に含める (#244)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedIds]);
+  }, [selectedIds, ocrConfidenceThreshold, showLowConfidenceHighlight]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (disableDrawing) return;

@@ -509,3 +509,68 @@ describe('PdfCanvas static layer – search highlight (issue #196)', () => {
     expect(ctx.fillRect).toHaveBeenCalledTimes(2)
   })
 })
+
+// ── issue #244: ocrConfidenceThreshold / showLowConfidenceHighlight が
+//   renderStaticLayer に正しく渡されることを確認するリグレッションテスト ──
+describe('PdfCanvas static layer – confidence args passthrough regression (#244)', () => {
+  it('ocrConfidenceThreshold が変化すると renderStaticLayer の引数に反映される', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: '', confidence: 0.4 })
+
+    // threshold=0.3 → confidence(0.4) > threshold なので青系
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      undefined,
+      undefined,
+      0.3,
+      true,
+    )
+    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+
+    // threshold=0.7 → confidence(0.4) <= threshold なので赤系
+    const ctx2 = makeMockContext()
+    renderStaticLayer(
+      ctx2 as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      undefined,
+      undefined,
+      0.7,
+      true,
+    )
+    expect(ctx2.fillStyle).toMatch(/rgba\(220,\s*38,\s*38/)
+  })
+
+  it('showLowConfidenceHighlight=false に切り替えると低信頼でも青系になる', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: '', confidence: 0.2 })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      undefined,
+      undefined,
+      0.7,
+      false, // showLowConfidenceHighlight OFF
+    )
+
+    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+  })
+})
