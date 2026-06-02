@@ -11,7 +11,7 @@
  *  ここに切り出して、ReplaceDialog から薄く呼べるようにしている。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { usePecoStore } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
 import type { PageData, WritingMode } from '../types';
@@ -353,20 +353,6 @@ export function useFindReplace(
 
   const replaceText = usePecoStore(s => s.replaceText);
 
-  const execute = useCallback(
-    (opts?: { skipBlockIds?: ReadonlySet<string> }) => {
-      return replaceText({
-        scope,
-        pattern: query.pattern,
-        replacement: '',
-        caseSensitive: query.caseSensitive,
-        useRegex: query.useRegex,
-        skipBlockIds: opts?.skipBlockIds,
-      });
-    },
-    [replaceText, scope, query.pattern, query.caseSensitive, query.useRegex],
-  );
-
   return {
     counts,
     /** issue #98: before/after プレビュー (最初の previewMaxItems ブロック) */
@@ -382,7 +368,5 @@ export function useFindReplace(
         useRegex: query.useRegex,
         skipBlockIds: opts?.skipBlockIds,
       }),
-    // execute は内部利用 (replacement 空) 用に残しておく
-    _executeEmpty: execute,
   };
 }
