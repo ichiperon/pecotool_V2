@@ -8,15 +8,8 @@
  *   - pecoStore.setSearchTerm / nextSearchHit / prevSearchHit
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-import { vi } from 'vitest'
-import { usePecoStore } from '../../store/pecoStore'
+import { useSearchStore } from '../../store/searchStore'
 import type { TextBlock } from '../../types'
-
-vi.mock('../../utils/pdfLoader', () => ({
-  saveTemporaryPageDataBatch: vi.fn().mockResolvedValue(undefined),
-  clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
-  getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
-}))
 
 // ── ヘルパー ──────────────────────────────────────────────────
 
@@ -157,64 +150,64 @@ describe('searchHitNavigation – 次/前ナビゲーション index 計算', ()
   })
 })
 
-// ── pecoStore の searchTerm / nextSearchHit / prevSearchHit のテスト ──
+// ── searchStore の searchTerm / nextSearchHit / prevSearchHit のテスト ──
 
-describe('searchHitNavigation – pecoStore actions', () => {
+describe('searchHitNavigation – searchStore actions', () => {
   beforeEach(() => {
-    usePecoStore.setState({ searchTerm: '', searchHitIndex: 0 })
+    useSearchStore.setState({ searchTerm: '', searchHitIndex: 0 })
   })
 
   it('setSearchTerm で searchTerm が更新される', () => {
-    usePecoStore.getState().setSearchTerm('hello')
-    expect(usePecoStore.getState().searchTerm).toBe('hello')
+    useSearchStore.getState().setSearchTerm('hello')
+    expect(useSearchStore.getState().searchTerm).toBe('hello')
   })
 
   it('setSearchTerm で searchHitIndex が 0 にリセットされる', () => {
-    usePecoStore.setState({ searchHitIndex: 5 })
-    usePecoStore.getState().setSearchTerm('new term')
-    expect(usePecoStore.getState().searchHitIndex).toBe(0)
+    useSearchStore.setState({ searchHitIndex: 5 })
+    useSearchStore.getState().setSearchTerm('new term')
+    expect(useSearchStore.getState().searchHitIndex).toBe(0)
   })
 
   it('setSearchTerm で空文字を設定すると searchTerm が空になる', () => {
-    usePecoStore.getState().setSearchTerm('hello')
-    usePecoStore.getState().setSearchTerm('')
-    expect(usePecoStore.getState().searchTerm).toBe('')
-    expect(usePecoStore.getState().searchHitIndex).toBe(0)
+    useSearchStore.getState().setSearchTerm('hello')
+    useSearchStore.getState().setSearchTerm('')
+    expect(useSearchStore.getState().searchTerm).toBe('')
+    expect(useSearchStore.getState().searchHitIndex).toBe(0)
   })
 
   it('nextSearchHit で searchHitIndex が次に進む', () => {
-    usePecoStore.setState({ searchHitIndex: 0 })
-    usePecoStore.getState().nextSearchHit(3)
-    expect(usePecoStore.getState().searchHitIndex).toBe(1)
+    useSearchStore.setState({ searchHitIndex: 0 })
+    useSearchStore.getState().nextSearchHit(3)
+    expect(useSearchStore.getState().searchHitIndex).toBe(1)
   })
 
   it('nextSearchHit: 末尾から先頭に循環する', () => {
-    usePecoStore.setState({ searchHitIndex: 2 })
-    usePecoStore.getState().nextSearchHit(3)
-    expect(usePecoStore.getState().searchHitIndex).toBe(0)
+    useSearchStore.setState({ searchHitIndex: 2 })
+    useSearchStore.getState().nextSearchHit(3)
+    expect(useSearchStore.getState().searchHitIndex).toBe(0)
   })
 
   it('prevSearchHit で searchHitIndex が前に戻る', () => {
-    usePecoStore.setState({ searchHitIndex: 2 })
-    usePecoStore.getState().prevSearchHit(3)
-    expect(usePecoStore.getState().searchHitIndex).toBe(1)
+    useSearchStore.setState({ searchHitIndex: 2 })
+    useSearchStore.getState().prevSearchHit(3)
+    expect(useSearchStore.getState().searchHitIndex).toBe(1)
   })
 
   it('prevSearchHit: 先頭から末尾に循環する', () => {
-    usePecoStore.setState({ searchHitIndex: 0 })
-    usePecoStore.getState().prevSearchHit(3)
-    expect(usePecoStore.getState().searchHitIndex).toBe(2)
+    useSearchStore.setState({ searchHitIndex: 0 })
+    useSearchStore.getState().prevSearchHit(3)
+    expect(useSearchStore.getState().searchHitIndex).toBe(2)
   })
 
   it('nextSearchHit: totalHits=0 のとき state を変更しない', () => {
-    usePecoStore.setState({ searchHitIndex: 0 })
-    usePecoStore.getState().nextSearchHit(0)
-    expect(usePecoStore.getState().searchHitIndex).toBe(0)
+    useSearchStore.setState({ searchHitIndex: 0 })
+    useSearchStore.getState().nextSearchHit(0)
+    expect(useSearchStore.getState().searchHitIndex).toBe(0)
   })
 
   it('prevSearchHit: totalHits=0 のとき state を変更しない', () => {
-    usePecoStore.setState({ searchHitIndex: 0 })
-    usePecoStore.getState().prevSearchHit(0)
-    expect(usePecoStore.getState().searchHitIndex).toBe(0)
+    useSearchStore.setState({ searchHitIndex: 0 })
+    useSearchStore.getState().prevSearchHit(0)
+    expect(useSearchStore.getState().searchHitIndex).toBe(0)
   })
 })
