@@ -4,18 +4,21 @@ import "./App.css";
 import {
   usePecoStore,
   selectCurrentPageIndex,
-  selectShowOcr,
-  selectOcrOpacity,
   selectSelectedIds,
-  selectIsDrawingMode,
-  selectIsSplitMode,
-  selectIsCurveMode,
-  selectIsRangeOcrMode,
   selectIsDirty,
   selectUndoStack,
   selectRedoStack,
   selectCurrentPage,
 } from "./store/pecoStore";
+import {
+  useViewerStore,
+  selectShowOcr,
+  selectOcrOpacity,
+  selectIsDrawingMode,
+  selectIsSplitMode,
+  selectIsCurveMode,
+  selectIsRangeOcrMode,
+} from "./store/viewerStore";
 import { useOcrSettingsStore } from "./store/ocrSettingsStore";
 import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
 import { ask, save } from '@tauri-apps/plugin-dialog';
@@ -107,28 +110,28 @@ function App() {
   const currentPageIndex = usePecoStore(selectCurrentPageIndex);
   const currentPage = usePecoStore(selectCurrentPage);
   const selectedIds = usePecoStore(selectSelectedIds);
-  const showOcr = usePecoStore(selectShowOcr);
-  const ocrOpacity = usePecoStore(selectOcrOpacity);
+  const showOcr = useViewerStore(selectShowOcr);
+  const ocrOpacity = useViewerStore(selectOcrOpacity);
   // #226: 低信頼ハイライト設定 (PdfCanvas に props で渡す)
   const ocrConfidenceThreshold = useOcrSettingsStore((s) => s.ocrConfidenceThreshold);
   const showLowConfidenceHighlight = useOcrSettingsStore((s) => s.showLowConfidenceHighlight);
-  const isDrawingMode = usePecoStore(selectIsDrawingMode);
-  const isSplitMode = usePecoStore(selectIsSplitMode);
-  const isCurveMode = usePecoStore(selectIsCurveMode);
-  const isRangeOcrMode = usePecoStore(selectIsRangeOcrMode);
+  const isDrawingMode = useViewerStore(selectIsDrawingMode);
+  const isSplitMode = useViewerStore(selectIsSplitMode);
+  const isCurveMode = useViewerStore(selectIsCurveMode);
+  const isRangeOcrMode = useViewerStore(selectIsRangeOcrMode);
   const isDirty = usePecoStore(selectIsDirty);
   const undoStack = usePecoStore(selectUndoStack);
   const redoStack = usePecoStore(selectRedoStack);
   // Actions
   const updatePageData = usePecoStore(s => s.updatePageData);
-  const toggleShowOcr = usePecoStore(s => s.toggleShowOcr);
-  const setOcrOpacity = usePecoStore(s => s.setOcrOpacity);
+  const toggleShowOcr = useViewerStore(s => s.toggleShowOcr);
+  const setOcrOpacity = useViewerStore(s => s.setOcrOpacity);
   const undo = usePecoStore(s => s.undo);
   const redo = usePecoStore(s => s.redo);
-  const toggleDrawingMode = usePecoStore(s => s.toggleDrawingMode);
-  const toggleSplitMode = usePecoStore(s => s.toggleSplitMode);
-  const toggleCurveMode = usePecoStore(s => s.toggleCurveMode);
-  const toggleRangeOcrMode = usePecoStore(s => s.toggleRangeOcrMode);
+  const toggleDrawingMode = useViewerStore(s => s.toggleDrawingMode);
+  const toggleSplitMode = useViewerStore(s => s.toggleSplitMode);
+  const toggleCurveMode = useViewerStore(s => s.toggleCurveMode);
+  const toggleRangeOcrMode = useViewerStore(s => s.toggleRangeOcrMode);
   const copySelected = usePecoStore(s => s.copySelected);
   const pasteClipboard = usePecoStore(s => s.pasteClipboard);
   const clearOcrCurrentPage = usePecoStore(s => s.clearOcrCurrentPage);

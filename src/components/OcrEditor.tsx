@@ -20,6 +20,7 @@ import {
 import { useState } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import { usePecoStore, selectCurrentPage } from '../store/pecoStore';
+import { useViewerStore } from '../store/viewerStore';
 import { useSearchStore, selectSearchTerm, selectSearchHitIndex } from '../store/searchStore';
 import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
@@ -184,8 +185,8 @@ export function OcrEditor({
     if (!block) return;
     const container = window.document.querySelector('.pdf-viewer-panel');
     if (!container) return;
-    // zoom は store から直接読む
-    const zoom = usePecoStore.getState().zoom;
+    // zoom は viewerStore から直接読む
+    const zoom = useViewerStore.getState().zoom;
     const scale = zoom / 100;
     const x = block.bbox.x * scale;
     const y = block.bbox.y * scale;

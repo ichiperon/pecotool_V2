@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type * as pdfjsLib from 'pdfjs-dist';
-import { PecoDocument, PageData, Action, TextBlock, BoundingBox, RotatePagesAction } from '../types';
+import { PecoDocument, PageData, Action, TextBlock, RotatePagesAction } from '../types';
+import { useViewerStore } from './viewerStore';
 import {
   saveTemporaryPageDataBatch,
   clearTemporaryChanges,
@@ -63,14 +64,7 @@ interface PecoState {
    */
   pageOrder: number[];
   currentPageIndex: number;
-  zoom: number;
   isDirty: boolean;
-  showOcr: boolean;
-  ocrOpacity: number;
-  showTextPreview: boolean;
-  isDrawingMode: boolean;
-  isSplitMode: boolean;
-  isCurveMode: boolean;
   selectedIds: Set<string>;
   lastSelectedId: string | null;
   clipboard: TextBlock[];
@@ -96,24 +90,6 @@ interface PecoState {
   currentPageProxy: pdfjsLib.PDFPageProxy | null;
   currentPageProxyKey: string | null;
 
-  // ─── #191: 範囲指定 OCR (末尾に集約) ───────────────────────────────────────
-  /**
-   * issue #191: PDF ビュー上で矩形ドラッグして部分領域を OCR するモード。
-   * isDrawingMode / isSplitMode / isCurveMode と排他。
-   */
-  isRangeOcrMode: boolean;
-  /** issue #191: 範囲指定 OCR モードをトグルする。他モードは OFF になる。 */
-  toggleRangeOcrMode(): void;
-
-  /**
-   * ドラッグ中のみ非 null。ドラッグ対象 BB の id -> 現在の bbox の Map。
-   * issue #91: textBlocks 配列を毎フレーム map() で複製すると BB 1000+ ページで
-   * GC 圧 / オブジェクト割り当てが増えてカクつく。ドラッグ中は textBlocks を
-   * 一切触らずこのフィールドのみ更新し、overlay 描画でこの bbox を優先表示する。
-   * finishDragResize で 1 度だけ textBlocks に確定書き込み + dragPreviewBboxes=null。
-   */
-  dragPreviewBboxes: Map<string, BoundingBox> | null;
-
   // Actions
   /**
    * issue #193: 指定した pageOrder インデックス (displayIndices) のページを削除する。
@@ -135,7 +111,7 @@ interface PecoState {
   setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
-  setDocument: (doc: PecoDocument | null) => void;
+  setDocument: (doc: PecoDocument | null, skipViewerReset?: boolean) => void;
   /**
    * issue #118: documentEpoch だけを +1 する。document / pages / currentPageIndex /
    * zoom / undo・redo / isDirty には一切触れない。
@@ -147,13 +123,6 @@ interface PecoState {
   bumpDocumentEpoch: () => void;
   setDocumentFilePath: (filePath: string) => void;
   setCurrentPage: (index: number) => void;
-  setZoom: (zoom: number) => void;
-  toggleShowOcr: () => void;
-  setOcrOpacity: (opacity: number) => void;
-  toggleTextPreview: () => void;
-  toggleDrawingMode: () => void;
-  toggleSplitMode: () => void;
-  toggleCurveMode: () => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
   resetDirty: (savedPageSnapshots?: Map<number, PageData>) => void;
 
@@ -171,8 +140,6 @@ interface PecoState {
   clearLastIdbError: () => void;
   /** issue #201: 保存成功時に呼ぶ。undoStack.length を lastSavedActionIndex にセットする。 */
   setLastSavedActionIndex: (index: number) => void;
-  /** ドラッグ中の bbox プレビュー Map をセットする。null でクリア。issue #91 */
-  setDragPreviewBboxes: (bboxes: Map<string, BoundingBox> | null) => void;
 
   /**
    * issue #93 (Find & Replace): 一括置換を実行する。
@@ -234,14 +201,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   pageAccessOrder: [],
   pageOrder: [],
   currentPageIndex: 0,
-  zoom: 100,
   isDirty: false,
-  showOcr: true,
-  ocrOpacity: 0.4,
-  showTextPreview: false,
-  isDrawingMode: false,
-  isSplitMode: false,
-  isCurveMode: false,
   selectedIds: new Set(),
   lastSelectedId: null,
   clipboard: [],
@@ -252,9 +212,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   lastIdbError: null,
   currentPageProxy: null,
   currentPageProxyKey: null,
-  dragPreviewBboxes: null,
-  // #191: 範囲指定 OCR モード (末尾に集約)
-  isRangeOcrMode: false,
 
   // issue #193: ページ削除
   // TODO(#219): ここでは IDB I/O を直接発火する設計。将来 `usePageManagement` hook に
@@ -505,7 +462,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     return { document: { ...state.document, filePath, fileName } };
   }),
 
-  setDocument: (doc) => {
+  setDocument: (doc, skipViewerReset = false) => {
     // pendingRestoration を取り出してから state をリセットする
     const restoration = get().pendingRestoration;
 
@@ -520,12 +477,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく
       isDirty: restoration !== null && doc !== null,
-      showOcr: true,
-      showTextPreview: false,
-      isDrawingMode: false,
-      isSplitMode: false,
-      isCurveMode: false,
-      isRangeOcrMode: false,
       selectedIds: new Set(),
       lastSelectedId: null,
       clipboard: [],
@@ -536,9 +487,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // ファイル切替時は古い PDFPageProxy を保持しない (transport が破棄されるため)
       currentPageProxy: null,
       currentPageProxyKey: null,
-      // ファイル切替時にドラッグ状態を持ち越さない
-      dragPreviewBboxes: null,
     });
+
+    // viewer UI state のリセット (skipViewerReset=true はテスト等で使う)
+    if (!skipViewerReset) {
+      useViewerStore.getState().resetViewerState();
+    }
 
     // IDB一時データのクリアをset()外でawaitして確実に完了させる。
     // 復元データがある場合はクリア完了後に IDB へ書き込む（順序保証）。
@@ -594,24 +548,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       return { currentPageIndex: index, selectedIds: new Set(), lastSelectedId: null, pageAccessOrder: newOrder };
     });
   },
-
-  // issue #138: ツールバーボタン連打で zoom が暴走しないよう 25%-500% にクランプ
-  setZoom: (zoom) => set({ zoom: Math.min(500, Math.max(25, zoom)) }),
-
-  toggleShowOcr: () => set((state) => ({ showOcr: !state.showOcr })),
-
-  setOcrOpacity: (opacity) => set({ ocrOpacity: opacity }),
-
-  toggleTextPreview: () => set((state) => ({ showTextPreview: !state.showTextPreview })),
-
-  toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode, isSplitMode: false, isCurveMode: false, isRangeOcrMode: false })),
-
-  toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false, isCurveMode: false, isRangeOcrMode: false })),
-
-  toggleCurveMode: () => set((state) => ({ isCurveMode: !state.isCurveMode, isDrawingMode: false, isSplitMode: false, isRangeOcrMode: false })),
-
-  // #191: 範囲指定 OCR モード toggle (drawing/split/curve と排他)
-  toggleRangeOcrMode: () => set((state) => ({ isRangeOcrMode: !state.isRangeOcrMode, isDrawingMode: false, isSplitMode: false, isCurveMode: false })),
 
   updatePageData: (pageIndex, data, undoable = true) => {
     if (perf.enabled) perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
@@ -1030,26 +966,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   setLastSavedActionIndex: (index) => set({ lastSavedActionIndex: index }),
 
-  setDragPreviewBboxes: (bboxes) => {
-    // issue #174: 同内容 (= bbox 値が全て一致) なら set をスキップして購読者の再 render を抑える。
-    // computeDragPreviewBboxes は毎フレーム new Map を返すため、参照比較だけでは
-    // 「移動量 dx/dy が変わっていない (mousemove 静止)」状態でも常に変更扱いになる。
-    const prev = get().dragPreviewBboxes;
-    if (prev === bboxes) return;
-    if (prev && bboxes && prev.size === bboxes.size) {
-      let identical = true;
-      for (const [id, b] of bboxes) {
-        const p = prev.get(id);
-        if (!p || p.x !== b.x || p.y !== b.y || p.width !== b.width || p.height !== b.height) {
-          identical = false;
-          break;
-        }
-      }
-      if (identical) return;
-    }
-    set({ dragPreviewBboxes: bboxes });
-  },
-
   clearOcrAllPages: () => {
     const { document } = get();
     if (!document) return;
@@ -1407,13 +1323,7 @@ export const selectDocument = (s: PecoState) => s.document;
 // issue #193: ページ表示順序
 export const selectPageOrder = (s: PecoState) => s.pageOrder;
 export const selectCurrentPageIndex = (s: PecoState) => s.currentPageIndex;
-export const selectZoom = (s: PecoState) => s.zoom;
-export const selectShowOcr = (s: PecoState) => s.showOcr;
-export const selectOcrOpacity = (s: PecoState) => s.ocrOpacity;
 export const selectSelectedIds = (s: PecoState) => s.selectedIds;
-export const selectIsDrawingMode = (s: PecoState) => s.isDrawingMode;
-export const selectIsSplitMode = (s: PecoState) => s.isSplitMode;
-export const selectIsCurveMode = (s: PecoState) => s.isCurveMode;
 export const selectIsDirty = (s: PecoState) => s.isDirty;
 export const selectUndoStack = (s: PecoState) => s.undoStack;
 export const selectRedoStack = (s: PecoState) => s.redoStack;
@@ -1435,10 +1345,5 @@ export const selectHasDocument = (s: PecoState) => s.document !== null;
 // primitive のみを購読する。
 export const selectDocumentFilePath = (s: PecoState) => s.document?.filePath;
 export const selectDocumentTotalPages = (s: PecoState) => s.document?.totalPages;
-// issue #91: ドラッグ中の bbox プレビュー。overlay 描画でドラッグ中 BB の bbox を
-// 上書きするための入口。ドラッグ非実行中は null。
-export const selectDragPreviewBboxes = (s: PecoState) => s.dragPreviewBboxes;
-// issue #191: 範囲指定 OCR モード
-export const selectIsRangeOcrMode = (s: PecoState) => s.isRangeOcrMode;
 // issue #201: 最後の保存以降の未保存変更を diff 計算する基準インデックス
 export const selectLastSavedActionIndex = (s: PecoState) => s.lastSavedActionIndex;
