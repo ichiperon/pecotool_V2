@@ -20,6 +20,7 @@ interface MenuBarProps {
   onShowOcrSettings: () => void;
   onOpenLogFolder: () => void;
   onExport: (scope: 'current' | 'all', format: TextExportFormat) => void;
+  onCheckUpdate: () => void;
 }
 
 export const MenuBar: React.FC<MenuBarProps> = (props) => {
@@ -244,6 +245,9 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
             <div className="menu-separator" />
             <button type="button" className="menu-dropdown-item" onClick={() => run(props.onOpenLogFolder)}>
               ログフォルダを開く
+            </button>
+            <button type="button" className="menu-dropdown-item" onClick={() => run(props.onCheckUpdate)}>
+              アップデート確認
             </button>
             <div className="menu-separator" />
             <button type="button" className="menu-dropdown-item" onClick={() => run(props.onShowVersion)}>

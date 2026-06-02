@@ -60,6 +60,12 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockResolvedValue([]),
 }))
 
+// Feature #202: @tauri-apps/plugin-updater is not installed in node_modules yet.
+// Provide a no-op stub so tests that indirectly import useAppUpdater do not fail.
+vi.mock('@tauri-apps/plugin-updater', () => ({
+  check: vi.fn().mockResolvedValue(null),
+}))
+
 vi.mock('@tauri-apps/plugin-fs', () => ({
   stat: vi.fn().mockResolvedValue({ mtime: new Date('2024-01-01') }),
 }))

@@ -33,6 +33,18 @@
       }
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/ichiperon/pecotool_V2/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "TODO: replace with actual Tauri updater public key (see docs/UPDATER.md)",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

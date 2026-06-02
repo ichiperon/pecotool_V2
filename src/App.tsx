@@ -40,6 +40,7 @@ import { useLayoutPanels } from "./hooks/useLayoutPanels";
 import { useViewerPan } from "./hooks/useViewerPan";
 import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
 import { useRecentFiles } from "./hooks/useRecentFiles";
+import { useAppUpdater } from "./hooks/useAppUpdater";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
@@ -121,6 +122,8 @@ function App() {
   const [saveStep, setSaveStep] = useState<SaveStep>(null);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
   const { recentFiles } = useRecentFiles();
+
+  const { state: updateState, checkForUpdate, downloadAndInstall } = useAppUpdater();
 
   const consoleEndRef = useRef<HTMLDivElement>(null);
   const folderOpenPdfRef = useRef<(filePath: string) => Promise<boolean>>(async () => false);
@@ -497,6 +500,26 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [isOcrRunning, cancelOcr]);
 
+  // Feature #202: 起動時アップデートチェック (1回のみ)
+  useEffect(() => {
+    checkForUpdate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Feature #202: アップデート利用可能になったら toast で通知
+  useEffect(() => {
+    if (!updateState.available) return;
+    const { version } = updateState.available;
+    showToast(
+      `v${version} が利用可能です`,
+      false,
+      {
+        label: '更新する',
+        onClick: () => { void downloadAndInstall(); },
+      },
+    );
+  }, [updateState.available, downloadAndInstall, showToast]);
+
   // issue #74 / CloseGuard: isSaving の最新値を ref に同期。
   // useTauriCloseGuard と F5 ガードに渡す前に宣言する必要がある (TDZ 回避)。
   const isSavingRef = useRef(isSaving);
@@ -671,6 +694,7 @@ function App() {
         onShowOcrSettings={() => setShowOcrSettings(true)}
         onOpenLogFolder={handleOpenLogFolder}
         onExport={handleExport}
+        onCheckUpdate={checkForUpdate}
       />
 
       <Toolbar

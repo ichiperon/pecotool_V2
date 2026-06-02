@@ -25,6 +25,12 @@ export default defineConfig(async () => ({
     // vitest 4.1.2 + Windows の既定 pool 'forks' には "Cannot read properties of undefined (reading 'config')"
     // が発生する既知の問題 (getRunner() 未初期化) があるため、安定する vmThreads を明示指定する。
     pool: 'vmThreads',
+    // Feature #202: @tauri-apps/plugin-updater は npm install 前は node_modules に存在しない。
+    // Vite の import-analysis transform が解決できず test スイートが落ちるため、
+    // テスト環境ではスタブファイルに alias で向ける。
+    alias: {
+      '@tauri-apps/plugin-updater': new URL('./src/__tests__/__stubs__/tauri-plugin-updater.ts', import.meta.url).pathname,
+    },
   },
 
   build: {
