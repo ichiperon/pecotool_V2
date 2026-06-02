@@ -767,12 +767,20 @@ export async function buildPdfDocument(
   // pdf-lib roundtrip を完全にスキップして入力 bytes をそのまま返す。
   // pdf-lib の save() は (たとえ no-op でも) trailer /ID 再生成・xref 再配置で
   // 微妙な byte 差分を生み、Acrobat が dirty 判定する原因になる。
+  //
+  // ただし issue #96 要件2 (#130): 過去保存の累積で /Root から到達不能な
+  // 孤児オブジェクトが大量に残った PDF を再保存しただけで縮める要件があるため、
+  // 短絡前に reachability sweep を実行し、孤児が見つかった場合は通常パスに
+  // 進んで全書き換え (= 孤児消去) する。孤児ゼロなら短絡してバイト同一性を維持。
   if (
     dirtyPages.length === 0 &&
     !hadLegacyBBoxMeta &&
     Object.keys(existingBBoxMeta).length === 0
   ) {
-    return originalPdfBytes;
+    const earlySweep = sweepUnreachableObjects(pdfDoc);
+    if (earlySweep.dropped === 0) {
+      return originalPdfBytes;
+    }
   }
 
   const bboxMeta = { ...existingBBoxMeta };
