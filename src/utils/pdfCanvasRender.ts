@@ -1,8 +1,13 @@
 /**
  * PdfCanvas overlay 描画ユーティリティ (issue #218)
  *
- * drawStaticBlock / drawStaticBlockCurve / renderStaticLayer を
- * PdfCanvas.tsx から分離して再利用可能な形で export する。
+ * Public exports:
+ *   - `drawStaticBlock`   — axis-aligned または curve 付きブロックを 1 件描画
+ *   - `renderStaticLayer` — TextBlock[] 全体をキャンバスに一括描画
+ *
+ * Internal helper (not exported):
+ *   - `drawStaticBlockCurve` — curve 付きブロック専用の per-glyph 描画。
+ *     `drawStaticBlock` から内部的に呼び出されるのみ。
  */
 import { isCurveDefinition } from "./curveDefinition";
 import { layoutTextOnCurveViewport } from "./curveGlyphLayout";
@@ -13,14 +18,14 @@ export function drawStaticBlock(
   block: TextBlock,
   scale: number,
   opacity: number,
-  searchTerm?: string,
+  searchTermLower?: string,
   isActiveHit?: boolean,
   confidenceThreshold?: number,
   showLowConfidenceHighlight?: boolean,
 ): void {
   // curve 付き block は per-glyph の curve 描画パスへ
   if (block.curve && isCurveDefinition(block.curve)) {
-    drawStaticBlockCurve(context, block, scale, opacity, searchTerm, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
+    drawStaticBlockCurve(context, block, scale, opacity, searchTermLower, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
     return;
   }
 
@@ -50,7 +55,7 @@ export function drawStaticBlock(
   context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
   // issue #196: 検索ヒットの黄色ハイライト
-  if (searchTerm && block.text.toLowerCase().includes(searchTerm.toLowerCase())) {
+  if (searchTermLower && block.text.toLowerCase().includes(searchTermLower)) {
     context.fillStyle = isActiveHit
       ? 'rgba(255, 180, 0, 0.7)'
       : 'rgba(255, 230, 0, 0.4)';
@@ -112,7 +117,7 @@ function drawStaticBlockCurve(
   block: TextBlock,
   scale: number,
   opacity: number,
-  searchTerm?: string,
+  searchTermLower?: string,
   isActiveHit?: boolean,
   confidenceThreshold?: number,
   showLowConfidenceHighlight?: boolean,
@@ -176,7 +181,7 @@ function drawStaticBlockCurve(
   context.restore();
 
   // issue #196: curve block の検索ヒット黄色ハイライトは bbox 全体に重ねる
-  if (searchTerm && block.text.toLowerCase().includes(searchTerm.toLowerCase())) {
+  if (searchTermLower && block.text.toLowerCase().includes(searchTermLower)) {
     const bx = block.bbox.x * scale;
     const by = block.bbox.y * scale;
     const bw = block.bbox.width * scale;
@@ -230,6 +235,6 @@ export function renderStaticLayer(
       hitCounter++;
       isActiveHit = hitCounter === activeIndex;
     }
-    drawStaticBlock(context, block, scale, opacity, term, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
+    drawStaticBlock(context, block, scale, opacity, termLower, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
   }
 }

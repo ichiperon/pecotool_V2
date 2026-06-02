@@ -26,7 +26,10 @@ export async function checkForUpdateAdapter(): Promise<UpdaterUpdate | null> {
   // Dynamic import so the module is only resolved inside the Tauri runtime.
   // In non-Tauri environments (tests, browser) the import throws — callers handle that.
   const { check } = await (import('@tauri-apps/plugin-updater') as Promise<typeof import('@tauri-apps/plugin-updater')>);
-  return check() as Promise<UpdaterUpdate | null>;
+  // #263: The plugin's check() return type is not identical to UpdaterUpdate | null
+  // at the TypeScript level, so we use a double-cast to narrow safely without
+  // suppressing the actual runtime value.
+  return check() as unknown as Promise<UpdaterUpdate | null>;
 }
 
 const INITIAL_STATE: AppUpdateState = {
