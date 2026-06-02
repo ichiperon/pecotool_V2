@@ -588,7 +588,25 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   clearLastIdbError: () => set({ lastIdbError: null }),
 
-  setDragPreviewBboxes: (bboxes) => set({ dragPreviewBboxes: bboxes }),
+  setDragPreviewBboxes: (bboxes) => {
+    // issue #174: 同内容 (= bbox 値が全て一致) なら set をスキップして購読者の再 render を抑える。
+    // computeDragPreviewBboxes は毎フレーム new Map を返すため、参照比較だけでは
+    // 「移動量 dx/dy が変わっていない (mousemove 静止)」状態でも常に変更扱いになる。
+    const prev = get().dragPreviewBboxes;
+    if (prev === bboxes) return;
+    if (prev && bboxes && prev.size === bboxes.size) {
+      let identical = true;
+      for (const [id, b] of bboxes) {
+        const p = prev.get(id);
+        if (!p || p.x !== b.x || p.y !== b.y || p.width !== b.width || p.height !== b.height) {
+          identical = false;
+          break;
+        }
+      }
+      if (identical) return;
+    }
+    set({ dragPreviewBboxes: bboxes });
+  },
 
   clearOcrAllPages: () => {
     const { document } = get();
