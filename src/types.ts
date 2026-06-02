@@ -7,6 +7,29 @@ export interface BoundingBox {
 
 export type WritingMode = "horizontal" | "vertical";
 
+/**
+ * 湾曲ベースラインの定義 (issue #186)。
+ * 存在しない場合は従来通り axis-aligned bbox に沿って描画する。
+ *
+ * - arc: 円弧。中心 + 半径 + 開始/終了角度で表現。ハンコの円周文字など
+ * - polyline: 折れ線。複数の頂点を直線で繋ぐ。表表紙のタイトル等の段付きレイアウト
+ *
+ * angle は radian、Y 軸は PDF 座標系 (上向き正) ではなく viewport 座標系 (下向き正) で
+ * 統一する (TextBlock.bbox と同じ)。
+ */
+export type CurveDefinition =
+  | {
+      type: "arc";
+      center: { x: number; y: number };
+      radius: number;
+      startAngle: number;
+      endAngle: number;
+    }
+  | {
+      type: "polyline";
+      points: Array<{ x: number; y: number }>;
+    };
+
 export interface TextBlock {
   id: string;
   text: string;
@@ -17,6 +40,11 @@ export interface TextBlock {
   isNew: boolean;
   isDirty: boolean;
   children?: string[]; // IDs of merged blocks
+  /**
+   * 湾曲ベースラインが定義されている場合、保存時に字ごとの Tm 行列で配置される。
+   * 未定義時は従来通り bbox 単位の単一 drawText で配置 (後方互換)。
+   */
+  curve?: CurveDefinition;
 }
 
 export interface PageData {

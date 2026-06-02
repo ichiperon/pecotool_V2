@@ -26,6 +26,7 @@ import {
   writePecoToolBBoxMetaToPdfDoc,
 } from './pdfPecoToolMetadata';
 import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
+import { isCurveDefinition } from './curveDefinition';
 import type {
   SavePdfSource,
   SavePdfWorkerRequest,
@@ -464,6 +465,8 @@ interface RepairTextBlock {
   bbox: { x: number; y: number; width: number; height: number };
   writingMode: 'horizontal' | 'vertical';
   order: number;
+  /** issue #186: 湾曲ベースライン定義。未定義時は従来の axis-aligned 描画 */
+  curve?: import('../types').CurveDefinition;
 }
 
 interface RepairPageData {
@@ -503,6 +506,9 @@ function isRepairTextBlock(value: unknown): value is RepairTextBlock {
     typeof bbox.width === 'number' &&
     typeof bbox.height === 'number'
   );
+  // 注: curve フィールドの妥当性は callers (#187 PDF saver path) で個別に
+  // isCurveDefinition() で検査する。ここで弾くと「curve が壊れているが
+  // bbox/text は有効」なエントリ全体が drop されてしまう。
 }
 
 function makeFontSupportSet(font: PDFFont): Set<number> | null {
@@ -874,12 +880,19 @@ export async function buildPdfDocument(
       // (テキストは existingBBoxMeta から復元)。
       const repairBlocks = entries
         .filter(isRepairTextBlock)
-        .map((block) => ({
-          text: block.text,
-          bbox: block.bbox,
-          writingMode: block.writingMode,
-          order: block.order,
-        }));
+        .map((block) => {
+          const out: RepairTextBlock = {
+            text: block.text,
+            bbox: block.bbox,
+            writingMode: block.writingMode,
+            order: block.order,
+          };
+          // issue #186: curve は再描画でも維持
+          if (isCurveDefinition((block as { curve?: unknown }).curve)) {
+            out.curve = (block as { curve: import('../types').CurveDefinition }).curve;
+          }
+          return out;
+        });
       if (repairBlocks.length === 0) continue;
       pagesToWrite.set(pi, { textBlocks: repairBlocks });
     }
@@ -921,12 +934,17 @@ export async function buildPdfDocument(
       .map((block) => ({ ...block, text: sanitizeTextForPdfCopy(block.text, skippedChars, pageIndex) }))
       .sort((a, b) => a.order - b.order);
     const hasDrawableBlocks = sortedBlocks.some((block) => stripUnsafePdfCopyChars(block.text).trim() !== '');
-    bboxMeta[String(pageIndex)] = sortedBlocks.map(b => ({
-      bbox: b.bbox,
-      writingMode: b.writingMode,
-      order: b.order,
-      text: b.text
-    }));
+    bboxMeta[String(pageIndex)] = sortedBlocks.map(b => {
+      const entry: Record<string, unknown> = {
+        bbox: b.bbox,
+        writingMode: b.writingMode,
+        order: b.order,
+        text: b.text,
+      };
+      // issue #186: 湾曲ベースラインが定義されていれば JSON に同梱
+      if (b.curve) entry.curve = b.curve;
+      return entry;
+    });
     metaChanged = true;
 
     const page = pdfDoc.getPage(pageIndex);
