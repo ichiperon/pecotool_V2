@@ -270,7 +270,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
   },
 
-  setZoom: (zoom) => set({ zoom }),
+  // issue #138: ツールバーボタン連打で zoom が暴走しないよう 25%-500% にクランプ
+  setZoom: (zoom) => set({ zoom: Math.min(500, Math.max(25, zoom)) }),
 
   toggleShowOcr: () => set((state) => ({ showOcr: !state.showOcr })),
 
