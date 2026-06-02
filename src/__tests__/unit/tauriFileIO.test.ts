@@ -6,6 +6,7 @@
  * - 空 bytes (byteLength === 0) でも offset=0 で 1 回 invoke されること
  * - isWriteAccessError が EACCES / EPERM 系メッセージを検出すること
  * - isWriteAccessError が他のエラーで false を返すこと
+ * - readFileSafe が @tauri-apps/plugin-fs readFile を委譲すること (wave 8)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -13,8 +14,15 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(() => Promise.resolve(undefined)),
 }));
 
+vi.mock('@tauri-apps/plugin-fs', () => ({
+  readFile: vi.fn(),
+}));
+
 import { invoke } from '@tauri-apps/api/core';
-import { writeFileChunked, writeFileAtomically, isWriteAccessError } from '../../utils/tauriFileIO';
+import { readFile } from '@tauri-apps/plugin-fs';
+import { writeFileChunked, writeFileAtomically, isWriteAccessError, readFileSafe } from '../../utils/tauriFileIO';
+
+const readFileMock = readFile as unknown as ReturnType<typeof vi.fn>;
 
 const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
 
@@ -155,5 +163,57 @@ describe('isWriteAccessError', () => {
   it('大文字小文字を区別しない', () => {
     expect(isWriteAccessError('PERMISSION DENIED')).toBe(true);
     expect(isWriteAccessError('Sharing Violation')).toBe(true);
+  });
+});
+
+// ── readFileSafe (wave 8 / issue #253) ────────────────────────────────────
+
+describe('readFileSafe', () => {
+  beforeEach(() => {
+    readFileMock.mockReset();
+  });
+
+  it('readFile の結果をそのまま返す (happy path)', async () => {
+    const expected = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF
+    readFileMock.mockResolvedValue(expected);
+
+    const result = await readFileSafe('/docs/sample.pdf');
+
+    expect(readFileMock).toHaveBeenCalledTimes(1);
+    expect(readFileMock).toHaveBeenCalledWith('/docs/sample.pdf');
+    expect(result).toBe(expected);
+  });
+
+  it('空 Uint8Array でも返す (空ファイル)', async () => {
+    const empty = new Uint8Array(0);
+    readFileMock.mockResolvedValue(empty);
+
+    const result = await readFileSafe('/empty.bin');
+
+    expect(result.byteLength).toBe(0);
+  });
+
+  it('readFile が reject した場合は例外を再スローする', async () => {
+    readFileMock.mockRejectedValue(new Error('ENOENT: no such file or directory'));
+
+    await expect(readFileSafe('/missing.pdf')).rejects.toThrow('ENOENT');
+  });
+
+  it('パスがそのまま readFile に渡される (encoding なし)', async () => {
+    readFileMock.mockResolvedValue(new Uint8Array([1]));
+
+    await readFileSafe('/path/with spaces/file.pdf');
+
+    expect(readFileMock).toHaveBeenCalledWith('/path/with spaces/file.pdf');
+  });
+
+  it('大きなファイル (1MB) でも返す', async () => {
+    const large = new Uint8Array(1024 * 1024).fill(0xab);
+    readFileMock.mockResolvedValue(large);
+
+    const result = await readFileSafe('/large.pdf');
+
+    expect(result.byteLength).toBe(1024 * 1024);
+    expect(result[0]).toBe(0xab);
   });
 });
