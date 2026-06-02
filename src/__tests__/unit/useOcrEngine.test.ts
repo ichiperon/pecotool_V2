@@ -1,11 +1,139 @@
 /**
  * useOcrEngine: EMA 計算 + estimatedRemainingMs ロジックのユニットテスト (#200)
+ * + detectTextLayerSamples の 3 点サンプリング検証 (#204)
  *
  * useOcrEngine 本体は Tauri/pdfjs への依存が重いためフックごとテストしない。
  * 代わりに「EMA 更新式」「estimatedRemainingMs 計算式」「formatMmSs」を
  * 純粋関数として抽出し、仕様どおりに動くことを確認する。
+ * detectTextLayerSamples はモジュールレベルの export 関数なので直接インポートしてテストする。
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// ─── detectTextLayerSamples 用モック ──────────────────────────
+// Tauri / pdfLoader / pdfTextExtractor への依存をスタブする
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), open: vi.fn() }));
+vi.mock('@tauri-apps/plugin-fs', () => ({ writeFile: vi.fn(), remove: vi.fn() }));
+vi.mock('@tauri-apps/api/path', () => ({
+  tempDir: vi.fn(async () => '/tmp'),
+  join: vi.fn(async (a: string, b: string) => `${a}/${b}`),
+}));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('../../utils/pdfLoader', () => ({
+  getSharedPdfProxy: vi.fn(),
+  getCachedPageProxy: vi.fn(),
+  openFreshPdfDoc: vi.fn(),
+  getTemporaryPageData: vi.fn(async () => null),
+}));
+vi.mock('../../utils/pdfTextExtractor', () => ({ loadPage: vi.fn() }));
+vi.mock('../../store/pecoStore', () => ({
+  usePecoStore: Object.assign(
+    vi.fn((sel: any) => sel({ document: null, currentPageIndex: 0, documentEpoch: 0 })),
+    { getState: vi.fn(() => ({ document: null, documentEpoch: 0, updatePageData: vi.fn() })) },
+  ),
+  selectHasDocument: (s: any) => !!s.document,
+  selectCurrentPageIndex: (s: any) => s.currentPageIndex ?? 0,
+}));
+vi.mock('../../store/ocrSettingsStore', () => ({
+  useOcrSettingsStore: Object.assign(vi.fn(() => ({})), {
+    getState: vi.fn(() => ({ ocrLanguage: 'jpn' })),
+  }),
+}));
+vi.mock('../../utils/ocrSort', () => ({ sortOcrBlocks: vi.fn((b: any) => b) }));
+vi.mock('../../utils/logger', () => ({ logger: { log: vi.fn(), warn: vi.fn() } }));
+vi.mock('../../utils/perfLogger', () => ({ perf: { mark: vi.fn() } }));
+vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
+
+import { detectTextLayerSamples } from '../../hooks/useOcrEngine';
+
+// ─── テスト用ヘルパ ───────────────────────────────────────────
+
+/**
+ * pdfjs PDFDocumentProxy 風モックを生成。
+ * pageTextMap: { [1-based page number]: string[] }
+ */
+function makeMockPdf(pageTextMap: Record<number, string[]>): any {
+  return {
+    getPage: vi.fn(async (pageNum: number) => {
+      const strs = pageTextMap[pageNum] ?? [];
+      return {
+        getTextContent: vi.fn(async () => ({ items: strs.map((str) => ({ str })) })),
+        cleanup: vi.fn(),
+      };
+    }),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// detectTextLayerSamples (#204)
+// ─────────────────────────────────────────────────────────────
+
+describe('detectTextLayerSamples (#204) — 3 点サンプリング', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('全サンプルページの items が空のとき all_empty を返す', async () => {
+    const pdf = makeMockPdf({ 1: [], 2: [], 3: [] });
+    expect(await detectTextLayerSamples(pdf, 3)).toBe('all_empty');
+    expect(pdf.getPage).toHaveBeenCalledWith(1);
+    expect(pdf.getPage).toHaveBeenCalledWith(2);
+    expect(pdf.getPage).toHaveBeenCalledWith(3);
+  });
+
+  it('先頭ページにテキストがある場合は has_text を返す', async () => {
+    const pdf = makeMockPdf({ 1: ['Hello'], 5: [], 10: [] });
+    expect(await detectTextLayerSamples(pdf, 10)).toBe('has_text');
+  });
+
+  it('中央ページにテキストがある場合は has_text を返す', async () => {
+    // totalPages=5 → samples: 1, 3, 5
+    const pdf = makeMockPdf({ 1: [], 3: ['中央'], 5: [] });
+    expect(await detectTextLayerSamples(pdf, 5)).toBe('has_text');
+  });
+
+  it('末尾ページにテキストがある場合は has_text を返す', async () => {
+    const pdf = makeMockPdf({ 1: [], 5: [], 10: ['End'] });
+    expect(await detectTextLayerSamples(pdf, 10)).toBe('has_text');
+  });
+
+  it('1 ページ PDF では getPage が 1 回だけ呼ばれる (Set で重複排除)', async () => {
+    const pdf = makeMockPdf({ 1: ['text'] });
+    expect(await detectTextLayerSamples(pdf, 1)).toBe('has_text');
+    expect(pdf.getPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('空白文字のみの str は has_text と判定しない', async () => {
+    const pdf = {
+      getPage: vi.fn(async () => ({
+        getTextContent: vi.fn(async () => ({ items: [{ str: '   ' }, { str: '\t\n' }] })),
+        cleanup: vi.fn(),
+      })),
+    };
+    expect(await detectTextLayerSamples(pdf as any, 1)).toBe('all_empty');
+  });
+
+  it('str プロパティを持たない TextMarkedContent は除外して判定する', async () => {
+    const pdf = {
+      getPage: vi.fn(async () => ({
+        getTextContent: vi.fn(async () => ({
+          items: [
+            { type: 'beginMarkedContent', tag: 'Span' }, // str なし
+            { str: '' },                                  // str はあるが空
+          ],
+        })),
+        cleanup: vi.fn(),
+      })),
+    };
+    expect(await detectTextLayerSamples(pdf as any, 1)).toBe('all_empty');
+  });
+
+  it('2 ページ PDF のサンプル点は重複排除後 [1, 2] の 2 点になる', async () => {
+    // [1, ceil(2/2)=1, 2] → Set → [1, 2]
+    const pdf = makeMockPdf({ 1: [], 2: ['text'] });
+    expect(await detectTextLayerSamples(pdf, 2)).toBe('has_text');
+    expect(pdf.getPage).toHaveBeenCalledTimes(2);
+  });
+});
 
 // ---- EMA ヘルパー (useOcrEngine.ts の実装と同一ロジック) ----
 
