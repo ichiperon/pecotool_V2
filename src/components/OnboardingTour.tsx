@@ -138,11 +138,9 @@ interface OnboardingTourProps {
 export function OnboardingTour({ onClose }: OnboardingTourProps) {
   const [stepIndex, setStepIndex] = useState(0);
   const [spotRect, setSpotRect] = useState<SpotlightRect | null>(null);
-  const [tooltipPos, setTooltipPos] = useState<TooltipPosition>({
-    top: 0,
-    left: 0,
-    placement: 'center',
-  });
+  // #247: Use null as initial value so the tooltip stays hidden (visibility:hidden)
+  // until the first effect run computes the real position and avoids a (0,0) flash.
+  const [tooltipPos, setTooltipPos] = useState<TooltipPosition | null>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
 
   const currentStep = TOUR_STEPS[stepIndex];
@@ -190,10 +188,6 @@ export function OnboardingTour({ onClose }: OnboardingTourProps) {
     onClose();
   };
 
-  const handleSkip = () => {
-    handleFinish();
-  };
-
   return (
     <div
       className="onboarding-tour-root"
@@ -210,7 +204,7 @@ export function OnboardingTour({ onClose }: OnboardingTourProps) {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
-          onClick={handleSkip}
+          onClick={handleFinish}
           aria-hidden="true"
         >
           {spotRect ? (
@@ -280,8 +274,9 @@ export function OnboardingTour({ onClose }: OnboardingTourProps) {
           transition={{ duration: 0.2 }}
           style={{
             position: 'fixed',
-            top: tooltipPos.top,
-            left: tooltipPos.left,
+            top: tooltipPos?.top ?? 0,
+            left: tooltipPos?.left ?? 0,
+            visibility: tooltipPos ? 'visible' : 'hidden',
           }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -319,7 +314,7 @@ export function OnboardingTour({ onClose }: OnboardingTourProps) {
             <button
               type="button"
               className="onboarding-btn onboarding-btn-skip"
-              onClick={handleSkip}
+              onClick={handleFinish}
             >
               スキップ
             </button>
