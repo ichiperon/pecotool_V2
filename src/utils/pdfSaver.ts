@@ -835,10 +835,9 @@ export async function buildPdfDocument(
       if (!Array.isArray(entries) || entries.length === 0) continue; // (b)
 
       const page = pdfDoc.getPage(pi);
-      const hasTextOperatorDamage = pageHasTextOperatorDamage(
-        page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
-        pdfDoc.context,
-      );
+      // issue #171: フォント数カウントは O(N) で軽量、pageHasTextOperatorDamage は
+      // 全 content stream の pako.inflate を伴う。1000+ ページ no-op save では
+      // この inflate が数百ms〜数秒掛かるため、軽い font 検査で先に絞り込む。
       const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
       const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
 
@@ -852,7 +851,12 @@ export async function buildPdfDocument(
         }
       }
       const hasLegacyBloat = pecoCount > BLOAT_DETECTION_FONT_THRESHOLD;
-      if (!hasLegacyBloat && !hasTextOperatorDamage) continue; // (c)
+      if (!hasLegacyBloat) continue; // (c) フォント累積が主たる bloat 指標
+      const hasTextOperatorDamage = pageHasTextOperatorDamage(
+        page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
+        pdfDoc.context,
+      );
+      if (!hasTextOperatorDamage) continue;
 
       // Bloated と判定。dirty 相当として pagesToWrite に追加
       // (テキストは existingBBoxMeta から復元)。

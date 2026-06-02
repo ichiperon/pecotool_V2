@@ -643,10 +643,8 @@ async function handleSavePdf(
       if (!Array.isArray(entries) || entries.length === 0) continue;
 
       const page = pdfDoc.getPage(pi);
-      const hasTextOperatorDamage = pageHasTextOperatorDamage(
-        page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
-        pdfDoc.context,
-      );
+      // issue #171: 軽量な font エントリ数チェックで先に絞り込み、
+      // 該当する場合のみ重い pageHasTextOperatorDamage (pako.inflate 伴う) を走らせる。
       const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
       const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
 
@@ -660,7 +658,12 @@ async function handleSavePdf(
         }
       }
       const hasLegacyBloat = pecoCount > BLOAT_DETECTION_FONT_THRESHOLD;
-      if (!hasLegacyBloat && !hasTextOperatorDamage) continue;
+      if (!hasLegacyBloat) continue;
+      const hasTextOperatorDamage = pageHasTextOperatorDamage(
+        page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
+        pdfDoc.context,
+      );
+      if (!hasTextOperatorDamage) continue;
 
       const repairBlocks = entries
         .filter(isRepairTextBlock)
