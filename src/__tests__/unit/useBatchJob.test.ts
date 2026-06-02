@@ -280,4 +280,159 @@ describe('useBatchJob', () => {
     expect(result2.current.currentJob).toBeNull();
     expect(localStorage.getItem('peco-batch-job-v1')).toBeNull();
   });
+
+  // ── wave 5 additions ──────────────────────────────────────────────────────
+
+  it('resumeJob only processes pending entries, not already-done ones', async () => {
+    // Seed localStorage with a job that has 1 done + 1 pending entry
+    const seedJob = {
+      id: 'resume-test',
+      folderPath: '/f',
+      files: [
+        { path: '/f/done.pdf', status: 'done' },
+        { path: '/f/pending.pdf', status: 'pending' },
+      ],
+      outputDir: '/out',
+      exportFormat: 'none',
+      saveMode: 'overwrite',
+      startedAt: Date.now(),
+    };
+    localStorage.setItem('peco-batch-job-v1', JSON.stringify(seedJob));
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    // Mount should restore the pending job
+    expect(result.current.currentJob?.id).toBe('resume-test');
+
+    await act(async () => {
+      await result.current.resumeJob();
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentJob?.finishedAt).toBeDefined();
+    });
+
+    const files = result.current.currentJob?.files ?? [];
+    // done.pdf must remain done (openPdf not called for it)
+    expect(files[0].status).toBe('done');
+    // pending.pdf must be processed
+    expect(files[1].status).toBe('done');
+    // openPdf must only have been called once (for pending.pdf)
+    expect(callbacks.openPdf).toHaveBeenCalledTimes(1);
+    expect(callbacks.openPdf).toHaveBeenCalledWith('/f/pending.pdf');
+  });
+
+  it('sidecar save mode: savePdf is NOT called; sidecar helper runs instead', async () => {
+    const pdfFiles = ['/folder/a.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'sidecar',
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentJob?.finishedAt).toBeDefined();
+    });
+
+    // In sidecar mode savePdf callback must NOT be called
+    expect(callbacks.savePdf).not.toHaveBeenCalled();
+  });
+
+  it('clearJob after completed job removes localStorage entry', async () => {
+    const pdfFiles = ['/f/a.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/f', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+
+    await waitFor(() => expect(result.current.currentJob?.finishedAt).toBeDefined());
+
+    // localStorage should have the completed job
+    expect(localStorage.getItem('peco-batch-job-v1')).not.toBeNull();
+
+    // clearJob removes it
+    act(() => {
+      result.current.clearJob();
+    });
+
+    expect(result.current.currentJob).toBeNull();
+    expect(localStorage.getItem('peco-batch-job-v1')).toBeNull();
+  });
+
+  it('processing-status entries are reset to pending on resume (interrupted job)', async () => {
+    // Simulate a job that was interrupted mid-processing
+    const seedJob = {
+      id: 'interrupted',
+      folderPath: '/f',
+      files: [
+        { path: '/f/a.pdf', status: 'processing' }, // was in-flight when app crashed
+        { path: '/f/b.pdf', status: 'pending' },
+      ],
+      outputDir: '/out',
+      exportFormat: 'none',
+      saveMode: 'overwrite',
+      startedAt: Date.now(),
+    };
+    localStorage.setItem('peco-batch-job-v1', JSON.stringify(seedJob));
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    // On mount, processing → pending reset should happen
+    const restored = result.current.currentJob;
+    expect(restored).not.toBeNull();
+    expect(restored?.files[0].status).toBe('pending');
+    expect(restored?.files[1].status).toBe('pending');
+
+    // Both files should be processed after resume
+    await act(async () => {
+      await result.current.resumeJob();
+    });
+
+    await waitFor(() => expect(result.current.currentJob?.finishedAt).toBeDefined());
+
+    const files = result.current.currentJob?.files ?? [];
+    expect(files.every((f) => f.status === 'done')).toBe(true);
+    expect(callbacks.openPdf).toHaveBeenCalledTimes(2);
+  });
 });
