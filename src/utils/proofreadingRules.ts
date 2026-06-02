@@ -6,7 +6,11 @@
  *
  * ストレージキー: `pecotool.proofreadingRules`
  * スキーマバージョン: 1 (将来バージョンは後方互換を維持すること)
+ *
+ * localStorage アクセスは jsonStorage アダプター経由で統一 (#255)
  */
+
+import { getJson, setJson } from './jsonStorage';
 
 export interface ProofreadingRule {
   id: string;
@@ -30,20 +34,15 @@ function emptyRuleSet(): ProofreadingRuleSet {
 }
 
 export function loadRuleSet(): ProofreadingRuleSet {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return emptyRuleSet();
-    const parsed: unknown = JSON.parse(raw);
-    const validated = validateRuleSet(parsed);
-    if ('error' in validated) return emptyRuleSet();
-    return validated;
-  } catch {
-    return emptyRuleSet();
-  }
+  const parsed = getJson<unknown>(STORAGE_KEY);
+  if (parsed === null) return emptyRuleSet();
+  const validated = validateRuleSet(parsed);
+  if ('error' in validated) return emptyRuleSet();
+  return validated;
 }
 
 export function saveRuleSet(set: ProofreadingRuleSet): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(set));
+  setJson(STORAGE_KEY, set);
 }
 
 export function exportRuleSetToJson(set: ProofreadingRuleSet): string {

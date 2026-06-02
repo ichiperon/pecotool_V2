@@ -14,6 +14,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 import { exportTextFromDocument } from '../utils/textExport';
+import { getJson, setJson, removeJson } from '../utils/jsonStorage';
 
 const STORAGE_KEY = 'peco-batch-job-v1';
 
@@ -58,29 +59,19 @@ export interface JobOptions {
 // ── Persistence helpers ───────────────────────────────────────────────────────
 
 function persistJob(job: BatchJob | null): void {
-  try {
-    if (job === null) {
-      localStorage.removeItem(STORAGE_KEY);
-    } else {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(job));
-    }
-  } catch {
-    // localStorage quota errors are non-fatal
+  if (job === null) {
+    removeJson(STORAGE_KEY);
+  } else {
+    setJson(STORAGE_KEY, job);
   }
 }
 
 function loadPersistedJob(): BatchJob | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === 'object' && 'id' in parsed) {
-      return parsed as BatchJob;
-    }
-    return null;
-  } catch {
-    return null;
+  const parsed = getJson<unknown>(STORAGE_KEY);
+  if (parsed && typeof parsed === 'object' && 'id' in parsed) {
+    return parsed as BatchJob;
   }
+  return null;
 }
 
 // ── Summary CSV ───────────────────────────────────────────────────────────────
