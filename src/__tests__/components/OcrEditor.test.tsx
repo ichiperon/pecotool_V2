@@ -1022,6 +1022,110 @@ describe('OcrEditor', () => {
     })
   })
 
+  // ── C-OE-06: issue #214 searchHitIndex stale 修正 ─────────────────────────────
+  describe('C-OE-06 (issue #214): Enter キー連打で scrollToHitBlock が正しいインデックスで呼ばれる', () => {
+    const hitBlocks = [
+      makeBlock('h1', 'foo bar', 0),
+      makeBlock('h2', 'foo baz', 1),
+      makeBlock('h3', 'foo qux', 2),
+    ]
+
+    let scrollToSpy: ReturnType<typeof vi.fn>
+    let fakeContainer: HTMLElement
+
+    beforeEach(() => {
+      // scrollToHitBlock 内の querySelector('.pdf-viewer-panel') をモック
+      fakeContainer = document.createElement('div')
+      fakeContainer.className = 'pdf-viewer-panel'
+      fakeContainer.getBoundingClientRect = () => ({
+        top: 0, left: 0, bottom: 600, right: 800, width: 800, height: 600, x: 0, y: 0, toJSON: () => ({}),
+      })
+      scrollToSpy = vi.fn()
+      fakeContainer.scrollTo = scrollToSpy as any
+      document.body.appendChild(fakeContainer)
+    })
+
+    afterEach(() => {
+      fakeContainer.remove()
+    })
+
+    it('C-OE-06-01: Enter 連打で 0→1→2→0 の順に scrollToHitBlock が呼ばれる', async () => {
+      const user = userEvent.setup()
+      usePecoStore.setState({ searchTerm: '', searchHitIndex: -1 } as any)
+      setup(hitBlocks)
+
+      const searchBox = screen.getByPlaceholderText('検索...')
+      await user.type(searchBox, 'foo')
+      // searchTerm='foo' で 3 ヒット、hitIndex=-1→0 (setSearchTerm でリセット)
+
+      // beforeEach で -1 にセットしてるので setSearchTerm 後は 0 になる
+      // scrollTo 呼び出し数を確認する前にリセット
+      scrollToSpy.mockClear()
+
+      // Enter 1 回目: 0→1
+      await user.keyboard('{Enter}')
+      expect(usePecoStore.getState().searchHitIndex).toBe(1)
+
+      // Enter 2 回目: 1→2
+      await user.keyboard('{Enter}')
+      expect(usePecoStore.getState().searchHitIndex).toBe(2)
+
+      // Enter 3 回目: 2→0 (循環)
+      await user.keyboard('{Enter}')
+      expect(usePecoStore.getState().searchHitIndex).toBe(0)
+
+      // scrollTo が 3 回呼ばれている
+      expect(scrollToSpy).toHaveBeenCalledTimes(3)
+    })
+
+    it('C-OE-06-02: Shift+Enter 連打で 2→1→0→2 の順にインデックスが戻る', async () => {
+      const user = userEvent.setup()
+      usePecoStore.setState({ searchTerm: 'foo', searchHitIndex: 2 } as any)
+      setup(hitBlocks)
+
+      scrollToSpy.mockClear()
+
+      const searchBox = screen.getByPlaceholderText('検索...')
+      // フォーカスを当てる
+      searchBox.focus()
+
+      // Shift+Enter 1 回目: 2→1
+      await user.keyboard('{Shift>}{Enter}{/Shift}')
+      expect(usePecoStore.getState().searchHitIndex).toBe(1)
+
+      // Shift+Enter 2 回目: 1→0
+      await user.keyboard('{Shift>}{Enter}{/Shift}')
+      expect(usePecoStore.getState().searchHitIndex).toBe(0)
+
+      // Shift+Enter 3 回目: 0→2 (循環)
+      await user.keyboard('{Shift>}{Enter}{/Shift}')
+      expect(usePecoStore.getState().searchHitIndex).toBe(2)
+
+      expect(scrollToSpy).toHaveBeenCalledTimes(3)
+    })
+
+    it('C-OE-06-03: 検索ヒット 0 件で Enter キー → scrollToHitBlock は呼ばれない', async () => {
+      const user = userEvent.setup()
+      usePecoStore.setState({ searchTerm: '', searchHitIndex: -1 } as any)
+      setup(hitBlocks)
+
+      scrollToSpy.mockClear()
+
+      const searchBox = screen.getByPlaceholderText('検索...')
+      // ヒットしない検索語を入力
+      await user.type(searchBox, 'NOMATCH_XYZ')
+
+      scrollToSpy.mockClear()
+
+      await user.keyboard('{Enter}')
+
+      // ヒット 0 件なので scrollTo は呼ばれない
+      expect(scrollToSpy).not.toHaveBeenCalled()
+      // searchHitIndex も変化なし
+      expect(usePecoStore.getState().searchHitIndex).toBe(0)
+    })
+  })
+
   // ── C-OE-05: 仮想化された(未マウントの)カードへの BB クリックスクロール (issue #116 本シナリオ) ──
   describe('C-OE-05: 画面外でアンマウントされたカードへ BB クリックでスクロールする', () => {
     // C-OE-04 のモック Virtuoso は totalCount を全件描画するため、

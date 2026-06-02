@@ -204,20 +204,23 @@ export function OcrEditor({
   const searchHitBlocksRef = useRef(searchHitBlocks);
   searchHitBlocksRef.current = searchHitBlocks;
 
+  // issue #214: searchHitIndex 変化を useEffect で購読してスクロール発火。
+  // handleSearchKeyDown 内で即時 scrollToHitBlock を呼ぶと zustand set() 後の
+  // コンポーネント側 searchHitIndex が次 render まで前回値のまま (stale) になるため、
+  // store 更新 → effect → scroll の順序で React の render cycle と整合させる。
+  useEffect(() => {
+    if (searchHitIndex < 0) return;
+    if (searchHitBlocksRef.current.length === 0) return;
+    scrollToHitBlock(searchHitIndex, searchHitBlocksRef.current);
+  }, [searchHitIndex, scrollToHitBlock]);
+
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== 'Enter') return;
     if (totalHits === 0) return;
     e.preventDefault();
-    if (e.shiftKey) {
-      prevSearchHit(totalHits);
-      const nextIdx = (searchHitIndex - 1 + totalHits) % totalHits;
-      scrollToHitBlock(nextIdx, searchHitBlocksRef.current);
-    } else {
-      nextSearchHit(totalHits);
-      const nextIdx = (searchHitIndex + 1) % totalHits;
-      scrollToHitBlock(nextIdx, searchHitBlocksRef.current);
-    }
-  }, [totalHits, searchHitIndex, nextSearchHit, prevSearchHit, scrollToHitBlock]);
+    if (e.shiftKey) prevSearchHit(totalHits);
+    else nextSearchHit(totalHits);
+  }, [totalHits, nextSearchHit, prevSearchHit]);
 
   // SortableContext には全ての id を渡す必要があるため、フィルタ後 id 配列を memo 化。
   const filteredBlockIds = useMemo(
