@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { RefObject } from 'react';
-import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
+import { waitForPendingIdbSaves } from '../store/pecoStore';
+import { useInfraStore } from '../store/infraStore';
 import { useAutoBackup, PendingBackup } from './useAutoBackup';
 
 interface UseBackupManagementOptions {
@@ -34,10 +35,10 @@ export function useBackupManagement({ showToast, handleOpen, externalIsSavingRef
     }
     setProcessingBackupPath(backup.file_path);
     try {
-      usePecoStore.getState().setPendingRestoration(data.pages);
+      useInfraStore.getState().setPendingRestoration(data.pages);
       const success = await handleOpen(backup.file_path);
       if (!success) {
-        usePecoStore.getState().setPendingRestoration(null);
+        useInfraStore.getState().setPendingRestoration(null);
         return;
       }
       // IDB への復元書き込みが完了してからバックアップファイルを削除する

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { usePecoStore } from '../store/pecoStore';
+import { useInfraStore } from '../store/infraStore';
 import {
   loadPecoToolBBoxMeta,
   loadPage,
@@ -36,14 +37,14 @@ export function usePageNavigation({
 }: UsePageNavigationOptions) {
   const setCurrentPage = usePecoStore((s) => s.setCurrentPage);
   const updatePageData = usePecoStore((s) => s.updatePageData);
-  const setCurrentPageProxy = usePecoStore((s) => s.setCurrentPageProxy);
+  const setCurrentPageProxy = useInfraStore((s) => s.setCurrentPageProxy);
   // document 全体ではなく primitives のみ購読
   // (updatePageData 毎の document 参照差し替えで再レンダが起きないようにするため)
   const filePath = usePecoStore((s) => s.document?.filePath);
   // #102: setDocument のたびに +1 される単調増加カウンタ。同一 filePath の再読込
   // (F5 / Ctrl+O で同じファイルを開き直す等) でも document identity が変わったことを
   // 検出するために購読する。updatePageData による document 再生成では変化しない。
-  const documentEpoch = usePecoStore((s) => s.documentEpoch);
+  const documentEpoch = useInfraStore((s) => s.documentEpoch);
   const documentMtime = usePecoStore((s) => s.document?.mtime);
   const totalPages = usePecoStore((s) => s.document?.totalPages);
   // 現在ページの width のみ購読 (未ロード判定用。textBlocks 等には反応しない)
@@ -72,7 +73,7 @@ export function usePageNavigation({
 
     const stateAtStart = usePecoStore.getState();
     const doc = stateAtStart.document;
-    const capturedDocumentEpoch = stateAtStart.documentEpoch;
+    const capturedDocumentEpoch = useInfraStore.getState().documentEpoch;
     if (!doc) return;
     setIsLoadingPageMeta(true);
     // 新ページの render がまだ開始していない状態。後段で usePdfRendering が
@@ -114,10 +115,11 @@ export function usePageNavigation({
           nextBBoxMeta = null;
         }
         const liveState = usePecoStore.getState();
+        const liveInfra = useInfraStore.getState();
         const liveDoc = liveState.document;
         if (
           signal.aborted ||
-          liveState.documentEpoch !== capturedDocumentEpoch ||
+          liveInfra.documentEpoch !== capturedDocumentEpoch ||
           !liveDoc ||
           liveDoc.filePath !== doc.filePath ||
           liveDoc.mtime !== doc.mtime
@@ -136,8 +138,9 @@ export function usePageNavigation({
       perf.mark('nav.viewport', { page: pageIdx, w: Math.round(qv.width), h: Math.round(qv.height) });
 
       // currentPageIndex がまだ pageIdx のうちに proxy を共有
-      const liveState = usePecoStore.getState();
-      if (liveState.document?.filePath === doc.filePath && liveState.documentEpoch === capturedDocumentEpoch && liveState.currentPageIndex === pageIdx) {
+      const liveState2 = usePecoStore.getState();
+      const liveInfra2 = useInfraStore.getState();
+      if (liveState2.document?.filePath === doc.filePath && liveInfra2.documentEpoch === capturedDocumentEpoch && liveState2.currentPageIndex === pageIdx) {
         setCurrentPageProxy(doc.filePath, pageIdx, qp);
       }
 
@@ -178,7 +181,7 @@ export function usePageNavigation({
           // ファイル切替チェック（ページ切替は許容: テキストデータは常に保存する）
           const currentState = usePecoStore.getState();
           const currentDoc = currentState.document;
-          if (currentState.documentEpoch !== capturedDocumentEpoch) return;
+          if (useInfraStore.getState().documentEpoch !== capturedDocumentEpoch) return;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
           const existing = currentDoc.pages.get(pageIdx);
           // isDirty だけで保持すると、clearOcrAllPages の stub や width===0 の未ロード
@@ -246,7 +249,8 @@ export function usePageNavigation({
           if (cancelled) return;
           // レースチェック: 現在もこのページが選択されているか
           const live = usePecoStore.getState();
-          if (live.document?.filePath === filePath && live.documentEpoch === documentEpoch && live.currentPageIndex === currentPageIndex) {
+          const liveInfra = useInfraStore.getState();
+          if (live.document?.filePath === filePath && liveInfra.documentEpoch === documentEpoch && live.currentPageIndex === currentPageIndex) {
             setCurrentPageProxy(filePath, currentPageIndex, qp);
           }
         } catch {

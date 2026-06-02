@@ -5,6 +5,7 @@ import { ask, open } from '@tauri-apps/plugin-dialog';
 import { writeFile, remove } from '@tauri-apps/plugin-fs';
 import { tempDir, join } from '@tauri-apps/api/path';
 import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
+import { useInfraStore } from '../store/infraStore';
 import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
@@ -207,7 +208,7 @@ export function useOcrEngine(
   // 解決策: setDocument 時のみ +1 される documentEpoch を比較する。
   // OCR ループ開始時点の epoch を保持し、毎ステップで getState().documentEpoch と一致するか判定。
   const isCurrentDocument = (capturedEpoch: number) =>
-    usePecoStore.getState().documentEpoch === capturedEpoch;
+    useInfraStore.getState().documentEpoch === capturedEpoch;
 
   const setOcrRunning = (running: boolean) => {
     isOcrRunningRef.current = running;
@@ -245,7 +246,7 @@ export function useOcrEngine(
     // ループ内で getState().documentEpoch と比較し、F5 / Ctrl+O 経由で document が
     // 差し替えられた瞬間に検知して停止する (filePath 一致でも doc 自体は別物のため)。
     // updatePageData による document 差し替えは epoch を増やさないので、書き込みは正常に続く。
-    const capturedEpoch = usePecoStore.getState().documentEpoch;
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
 
     // #199: 対象ページインデックス一覧。指定がなければ全ページ。
@@ -381,7 +382,7 @@ export function useOcrEngine(
     perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
     // #102: 開始時点の documentEpoch を保持。F5 等で同パスの別 doc に置き換わった際は
     // epoch がインクリメントされるため、古い結果を書き込む前に検知できる。
-    const capturedEpoch = usePecoStore.getState().documentEpoch;
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       if (!isCurrentDocument(capturedEpoch)) return;
@@ -716,7 +717,7 @@ export function useOcrEngine(
     // #102: doc を渡された瞬間の epoch を保持。ask() の待機中に別 PDF へ切り替わったら
     // runOcrAllPages を起動しない (旧実装は filePath 一致のみ確認していたため、
     // 同 filePath で再ロードされた別 doc に対しても OCR を実行していた)。
-    const capturedEpoch = usePecoStore.getState().documentEpoch;
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
     try {
       // #204: 3 点サンプリングでテキスト層の有無を判定する。
       const layerResult = await detectTextLayerSamplesForDoc(doc);

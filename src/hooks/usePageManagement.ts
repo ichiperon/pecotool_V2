@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
+import { useInfraStore } from '../store/infraStore';
 import {
   deleteTemporaryPageKeys,
   renameTemporaryPageKeys,
@@ -13,10 +14,6 @@ import {
 export function usePageManagement() {
   const deletePages = usePecoStore((s) => s.deletePages);
   const movePage = usePecoStore((s) => s.movePage);
-  const setLastIdbError = useCallback(
-    (err: Error | null) => usePecoStore.setState({ lastIdbError: err }),
-    [],
-  );
 
   const handleDeletePages = useCallback(
     async (displayIndices: number[]) => {
@@ -26,16 +23,16 @@ export function usePageManagement() {
         void deleteTemporaryPageKeys(filePath, deletedOrigIndices)
           .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
           .then(() => {
-            if (usePecoStore.getState().lastIdbError) setLastIdbError(null);
+            useInfraStore.getState().clearLastIdbErrorIfSet();
           })
           .catch((e: unknown) => {
             const err = e instanceof Error ? e : new Error(String(e));
             console.error('[usePageManagement] deletePages IDB 同期失敗:', err);
-            setLastIdbError(err);
+            useInfraStore.getState().setLastIdbError(err);
           });
       });
     },
-    [deletePages, setLastIdbError],
+    [deletePages],
   );
 
   const handleMovePage = useCallback(
@@ -45,16 +42,16 @@ export function usePageManagement() {
       await movePage(fromDisplayIndex, toDisplayIndex, (filePath, renamedEntries) => {
         void renameTemporaryPageKeys(filePath, renamedEntries)
           .then(() => {
-            if (usePecoStore.getState().lastIdbError) setLastIdbError(null);
+            useInfraStore.getState().clearLastIdbErrorIfSet();
           })
           .catch((e: unknown) => {
             const err = e instanceof Error ? e : new Error(String(e));
             console.error('[usePageManagement] movePage IDB 同期失敗:', err);
-            setLastIdbError(err);
+            useInfraStore.getState().setLastIdbError(err);
           });
       });
     },
-    [movePage, setLastIdbError],
+    [movePage],
   );
 
   return { handleDeletePages, handleMovePage };

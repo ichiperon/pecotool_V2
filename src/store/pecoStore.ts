@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import type * as pdfjsLib from 'pdfjs-dist';
 import { PecoDocument, PageData, Action, TextBlock, RotatePagesAction } from '../types';
 import { useViewerStore } from './viewerStore';
+import { useInfraStore } from './infraStore';
 import {
   saveTemporaryPageDataBatch,
   clearTemporaryChanges,
@@ -25,22 +25,23 @@ export function waitForPendingIdbSaves(): Promise<void> {
  * IDB 一時データへの書き込みを pendingIdbSaves に登録した上で発火する。
  * undo/redo など、メモリ Map を変更したあと LRU 退避済み IDB エントリと
  * 同期する用途で使う共通ヘルパ。
+ * lastIdbError は infraStore に委譲する。
  */
 function schedulePendingIdbWrite(
   entries: Array<{ filePath: string; pageIndex: number; data: Partial<PageData> }>,
-  set: (partial: Partial<PecoState>) => void,
-  get: () => PecoState,
 ): void {
   if (entries.length === 0) return;
+  const infra = useInfraStore.getState();
   const work = saveTemporaryPageDataBatch(entries)
     .then(() => {
-      if (get().lastIdbError) set({ lastIdbError: null });
+      useInfraStore.getState().clearLastIdbErrorIfSet();
     })
     .catch((e: unknown) => {
       const err = e instanceof Error ? e : new Error(String(e));
       console.error('[Store] schedulePendingIdbWrite 失敗:', err);
-      set({ lastIdbError: err });
+      useInfraStore.getState().setLastIdbError(err);
     });
+  void infra; // suppress unused variable warning
   const tracked: Promise<void> = work.finally(() => {
     pendingIdbSaves.delete(tracked);
   });
@@ -49,14 +50,6 @@ function schedulePendingIdbWrite(
 
 interface PecoState {
   document: PecoDocument | null;
-  /**
-   * #102: ドキュメント差し替え (setDocument) のたびに +1 される単調増加カウンタ。
-   * updatePageData による document 再生成では変化しない。
-   * OCR ループのような長時間 async 処理が「処理開始時点と同じドキュメントか」を
-   * 安全に判定するのに使う (reference identity は updatePageData で壊れるため不可)。
-   */
-  documentEpoch: number;
-  pageAccessOrder: number[]; // For page data LRU (1000ページ対応)
   /**
    * issue #193: ページの表示順序。元の pageIndex (PDF 内での 0-based インデックス) の配列。
    * deletePages / movePage で更新される。初期状態は [0, 1, 2, ..., n-1]。
@@ -76,19 +69,6 @@ interface PecoState {
    * setDocument（ファイル切替）時は 0 にリセットする。
    */
   lastSavedActionIndex: number;
-  /** 復元待ちのバックアップページデータ。setDocument 内で IDB への書き込みに使われる。 */
-  pendingRestoration: Record<string, Partial<PageData>> | null;
-  /** 直近の IDB 保存失敗エラー。UI から subscribe してユーザーに通知できる。 */
-  lastIdbError: Error | null;
-
-  /**
-   * 現在表示中 (もしくは表示開始中) ページの PDFPageProxy。
-   * usePageNavigation が viewport 取得時に set し、usePdfRendering が subscribe して
-   * 二重 getCachedPageProxy を避けるための共有チャネル。
-   * ファイル/ページ切替時の race 防止のため expectedKey (filePath:pageIndex) も持つ。
-   */
-  currentPageProxy: pdfjsLib.PDFPageProxy | null;
-  currentPageProxyKey: string | null;
 
   // Actions
   /**
@@ -121,9 +101,6 @@ interface PecoState {
    * undoable=true で RotatePagesAction を undo スタックに積む。
    */
   rotatePages: (pageIndices: number[], delta: 90 | 180 | 270) => void;
-  setPendingRestoration: (pages: Record<string, Partial<PageData>> | null) => void;
-  setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
-  clearCurrentPageProxy: () => void;
   setDocument: (doc: PecoDocument | null, skipViewerReset?: boolean) => void;
   /**
    * issue #118: documentEpoch だけを +1 する。document / pages / currentPageIndex /
@@ -150,7 +127,6 @@ interface PecoState {
   redo: () => void;
   clearOcrCurrentPage: () => void;
   clearOcrAllPages: () => void;
-  clearLastIdbError: () => void;
   /** issue #201: 保存成功時に呼ぶ。undoStack.length を lastSavedActionIndex にセットする。 */
   setLastSavedActionIndex: (index: number) => void;
 
@@ -210,8 +186,6 @@ const MAX_CACHED_PAGES = 50;
 
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,
-  documentEpoch: 0,
-  pageAccessOrder: [],
   pageOrder: [],
   currentPageIndex: 0,
   isDirty: false,
@@ -221,10 +195,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   undoStack: [],
   redoStack: [],
   lastSavedActionIndex: 0,
-  pendingRestoration: null,
-  lastIdbError: null,
-  currentPageProxy: null,
-  currentPageProxyKey: null,
 
   // issue #193: ページ削除
   // #254: onIdbWork が指定された場合は IDB I/O を hook 層に委譲する。
@@ -332,12 +302,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       const idbWork = deleteTemporaryPageKeys(filePath, deletedOrigIndices)
         .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
         .then(() => {
-          if (get().lastIdbError) set({ lastIdbError: null });
+          useInfraStore.getState().clearLastIdbErrorIfSet();
         })
         .catch((e: unknown) => {
           const err = e instanceof Error ? e : new Error(String(e));
           console.error('[Store] deletePages IDB 同期失敗:', err);
-          set({ lastIdbError: err });
+          useInfraStore.getState().setLastIdbError(err);
         });
       const tracked: Promise<void> = idbWork.finally(() => {
         pendingIdbSaves.delete(tracked);
@@ -425,12 +395,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     } else if (renamedEntries.length > 0) {
       const idbWork = renameTemporaryPageKeys(filePath, renamedEntries)
         .then(() => {
-          if (get().lastIdbError) set({ lastIdbError: null });
+          useInfraStore.getState().clearLastIdbErrorIfSet();
         })
         .catch((e: unknown) => {
           const err = e instanceof Error ? e : new Error(String(e));
           console.error('[Store] movePage IDB 同期失敗:', err);
-          set({ lastIdbError: err });
+          useInfraStore.getState().setLastIdbError(err);
         });
       const tracked: Promise<void> = idbWork.finally(() => {
         pendingIdbSaves.delete(tracked);
@@ -471,12 +441,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
   },
 
-  setPendingRestoration: (pages) => set({ pendingRestoration: pages }),
-  setCurrentPageProxy: (filePath, pageIndex, proxy) => {
-    const key = `${filePath}:${pageIndex}`;
-    set({ currentPageProxy: proxy, currentPageProxyKey: proxy ? key : null });
-  },
-  clearCurrentPageProxy: () => set({ currentPageProxy: null, currentPageProxyKey: null }),
   setDocumentFilePath: (filePath) => set((state) => {
     if (!state.document) return state;
     const fileName = filePath.split(/[\\/]/).pop() || state.document.fileName;
@@ -484,16 +448,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   }),
 
   setDocument: (doc, skipViewerReset = false) => {
-    // pendingRestoration を取り出してから state をリセットする
-    const restoration = get().pendingRestoration;
+    // infraStore から pendingRestoration を取り出してから state をリセットする
+    const restoration = useInfraStore.getState().pendingRestoration;
 
     set({
       document: doc,
-      // #102: ドキュメント差し替えを epoch で示す。OCR ループは開始時点の epoch を
-      // 保持し、ループ内で getState().documentEpoch と比較する。
-      documentEpoch: get().documentEpoch + 1,
-      pageAccessOrder: [],
-      // issue #193: 新規ドキュメント開放時は pageOrder を 0..n-1 で初期化する
       pageOrder: doc ? Array.from({ length: doc.totalPages }, (_, i) => i) : [],
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく
@@ -504,11 +463,13 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       undoStack: [],
       redoStack: [],
       lastSavedActionIndex: 0,
-      pendingRestoration: null,
-      // ファイル切替時は古い PDFPageProxy を保持しない (transport が破棄されるため)
-      currentPageProxy: null,
-      currentPageProxyKey: null,
     });
+
+    // infra 側のリセット
+    useInfraStore.getState().bumpDocumentEpoch();
+    useInfraStore.getState().resetPageAccessOrder();
+    useInfraStore.getState().clearPendingRestoration();
+    useInfraStore.getState().clearCurrentPageProxy();
 
     // viewer UI state のリセット (skipViewerReset=true はテスト等で使う)
     if (!skipViewerReset) {
@@ -529,13 +490,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
           await saveTemporaryPageDataBatch(entries);
         })
         .then(() => {
-          // 成功時のみ過去のエラーをクリア（他タスクのエラーを潰さないため既存がある時だけtouchしない方針も検討したが、保存成功=回復とみなす）
-          if (get().lastIdbError) set({ lastIdbError: null });
+          useInfraStore.getState().clearLastIdbErrorIfSet();
         })
         .catch((e: unknown) => {
           const err = e instanceof Error ? e : new Error(String(e));
           console.error('[Store] clearTemporaryChanges/復元書き込み失敗:', err);
-          set({ lastIdbError: err });
+          useInfraStore.getState().setLastIdbError(err);
         });
 
       // finally で自身を Set から除去するため、tracked 変数を先に宣言してから add する
@@ -556,18 +516,15 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   // を実行し、ディスク上の PDF が IDB の最新 state と一致してから epoch を
   // bump する責務を持つ。さもなくば pdfjs が古い IDB blob を再読込して
   // 直前の編集が消えて見える race が発生する。
-  bumpDocumentEpoch: () => set((state) => ({
-    documentEpoch: state.documentEpoch + 1,
-    currentPageProxy: null,
-    currentPageProxyKey: null,
-  })),
+  bumpDocumentEpoch: () => {
+    useInfraStore.getState().bumpDocumentEpochAndClearProxy();
+  },
 
   setCurrentPage: (index) => {
     perf.mark('nav.click', { to: index });
-    set((state) => {
-      const newOrder = [index, ...state.pageAccessOrder.filter(i => i !== index)];
-      return { currentPageIndex: index, selectedIds: new Set(), lastSelectedId: null, pageAccessOrder: newOrder };
-    });
+    const newOrder = useInfraStore.getState().updatePageAccessOrder(index);
+    void newOrder; // used via side-effect in infraStore
+    set({ currentPageIndex: index, selectedIds: new Set(), lastSelectedId: null });
   },
 
   updatePageData: (pageIndex, data, undoable = true) => {
@@ -582,8 +539,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       const newPages = new Map(state.document.pages);
       newPages.set(pageIndex, newPage);
 
-      // Update access order
-      const newOrder = [pageIndex, ...state.pageAccessOrder.filter(i => i !== pageIndex)];
+      // Update access order via infraStore
+      const newOrder = useInfraStore.getState().updatePageAccessOrder(pageIndex);
 
       // LRU Purge: If we exceed MAX_CACHED_PAGES, remove the oldest non-dirty page
       // OR save dirty page to IDB and then remove from memory.
@@ -598,7 +555,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
               pendingSaves.push({ filePath: state.document!.filePath, idx: idxToRemove, page: pageToRemove });
             }
             newPages.delete(idxToRemove);
-            newOrder.splice(i, 1);
+            // LRU order も同期して更新
+            useInfraStore.getState().updatePageAccessOrder(idxToRemove);
             if (newPages.size <= MAX_CACHED_PAGES) break;
           }
         }
@@ -606,7 +564,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
       const newState: Partial<PecoState> = {
         document: { ...state.document, pages: newPages },
-        pageAccessOrder: newOrder,
       };
 
       if (data.isDirty !== false) {
@@ -636,24 +593,27 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         pendingSaves.map(({ filePath, idx, page }) => ({ filePath, pageIndex: idx, data: page }))
       )
         .then(() => {
-          if (get().lastIdbError) set({ lastIdbError: null });
+          useInfraStore.getState().clearLastIdbErrorIfSet();
         })
         .catch((e: unknown) => {
           const err = e instanceof Error ? e : new Error(String(e));
           console.error('[Store] IndexedDB バッチ保存失敗:', err);
           // 保存失敗時は退避していたページをメモリに戻してデータロストを防ぐ（ロールバック）
           set((state) => {
-            if (!state.document) return { lastIdbError: err };
+            if (!state.document) return { ...state };
             const currentFilePath = state.document.filePath;
             const pendingSavesForCurrentDocument = pendingSaves.filter(({ filePath }) => filePath === currentFilePath);
-            if (pendingSavesForCurrentDocument.length === 0) return { lastIdbError: err };
+            if (pendingSavesForCurrentDocument.length === 0) {
+              useInfraStore.getState().setLastIdbError(err);
+              return state;
+            }
             const restored = new Map(state.document.pages);
             for (const { idx, page } of pendingSavesForCurrentDocument) {
               if (!restored.has(idx)) restored.set(idx, page);
             }
+            useInfraStore.getState().setLastIdbError(err);
             return {
               document: { ...state.document, pages: restored },
-              lastIdbError: err,
             };
           });
         });
@@ -806,7 +766,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // LRU 退避済みページが IDB に残っている可能性があるため、
       // 巻き戻し後の状態を IDB へも書き込んでメモリと完全同期させる。
       // (issue #3: undo が LRU 退避ページの IDB と非整合になる)
-      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }], set, get);
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }]);
     } else if (action.type === 'update_pages') {
       // issue #93: 全ページスコープの置換等で複数ページを atomic に巻き戻す。
       const newPages = new Map(document.pages);
@@ -823,8 +783,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // 全 entry を IDB へまとめて同期 (LRU 退避ページがあっても整合性を担保)
       schedulePendingIdbWrite(
         action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.before })),
-        set,
-        get,
       );
     } else if (action.type === 'delete_pages') {
       // issue #193: ページ削除を巻き戻す (削除前の状態に戻す)
@@ -848,8 +806,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
           pageIndex: pi,
           data: page,
         })),
-        set,
-        get,
       );
     } else if (action.type === 'reorder_pages') {
       // issue #193: ページ並べ替えを巻き戻す
@@ -902,7 +858,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         isDirty: true
       });
       // undo と対称: redo 後の状態を IDB へも書き込んで整合性を担保
-      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }], set, get);
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }]);
     } else if (action.type === 'update_pages') {
       // issue #93: 全ページスコープの置換等で複数ページを atomic にやり直す。
       const newPages = new Map(document.pages);
@@ -918,8 +874,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
       schedulePendingIdbWrite(
         action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
-        set,
-        get,
       );
     } else if (action.type === 'delete_pages') {
       // issue #193: ページ削除をやり直す
@@ -941,8 +895,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
           pageIndex: pi,
           data: page,
         })),
-        set,
-        get,
       );
     } else if (action.type === 'reorder_pages') {
       // issue #193: ページ並べ替えをやり直す
@@ -982,8 +934,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (!page) return;
     updatePageData(currentPageIndex, { textBlocks: [], isDirty: true, isTextExtracted: true, ocrCleared: true });
   },
-
-  clearLastIdbError: () => set({ lastIdbError: null }),
 
   setLastSavedActionIndex: (index) => set({ lastSavedActionIndex: index }),
 
@@ -1188,8 +1138,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // LRU 退避済みページの IDB と整合させるため、変更ページ全部を IDB にも書き込む
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
-      set,
-      get,
     );
 
     return { hits: totalHits, blocks: totalBlocks, pages: entries.length, skippedBlocks };
@@ -1331,8 +1279,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // IDB 書き込みは変更ページのみ 1 度ずつ
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
-      set,
-      get,
     );
 
     return { totalHits, perRuleHits };
@@ -1357,9 +1303,6 @@ export const selectCurrentPage = (s: PecoState) =>
 // (issue #22)
 export const selectCurrentPageTextBlocks = (s: PecoState) =>
   s.document?.pages.get(s.currentPageIndex)?.textBlocks ?? null;
-export const selectLastIdbError = (s: PecoState) => s.lastIdbError;
-export const selectCurrentPageProxy = (s: PecoState) => s.currentPageProxy;
-export const selectCurrentPageProxyKey = (s: PecoState) => s.currentPageProxyKey;
 export const selectHasDocument = (s: PecoState) => s.document !== null;
 // issue #134: document 全体を購読すると updatePageData (別ページ含む) 毎に
 // 再レンダされてしまうため、PdfCanvas/OcrEditor では filePath / totalPages の
@@ -1368,3 +1311,12 @@ export const selectDocumentFilePath = (s: PecoState) => s.document?.filePath;
 export const selectDocumentTotalPages = (s: PecoState) => s.document?.totalPages;
 // issue #201: 最後の保存以降の未保存変更を diff 計算する基準インデックス
 export const selectLastSavedActionIndex = (s: PecoState) => s.lastSavedActionIndex;
+
+// ─── Legacy selectors (infraStore に移動したが後方互換エイリアスとして残す) ───
+// 消費側は直接 useInfraStore / selectLastIdbError 等に移行すること。
+export const selectLastIdbError = (s: PecoState & { lastIdbError?: Error | null }) =>
+  s.lastIdbError ?? useInfraStore.getState().lastIdbError;
+export const selectCurrentPageProxy = (s: PecoState & { currentPageProxy?: unknown }) =>
+  s.currentPageProxy ?? useInfraStore.getState().currentPageProxy;
+export const selectCurrentPageProxyKey = (s: PecoState & { currentPageProxyKey?: unknown }) =>
+  s.currentPageProxyKey ?? useInfraStore.getState().currentPageProxyKey;

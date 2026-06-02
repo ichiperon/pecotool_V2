@@ -38,6 +38,7 @@ vi.mock('../../utils/bitmapCache', () => ({
 
 import { usePdfRendering } from '../../hooks/usePdfRendering'
 import { usePecoStore } from '../../store/pecoStore'
+import { useInfraStore } from '../../store/infraStore'
 
 // ── Test helpers ───────────────────────────────────────────────
 type FakePage = {
@@ -83,8 +84,8 @@ interface HookProps {
 
 beforeEach(() => {
   getCachedPageProxyMock.mockReset()
-  // store の currentPageProxy をリセット（前テストの残留を防ぐ）
-  usePecoStore.setState({ currentPageProxy: null, currentPageProxyKey: null, documentEpoch: 0 } as any)
+  // infraStore の currentPageProxy をリセット（前テストの残留を防ぐ）
+  useInfraStore.setState({ currentPageProxy: null, currentPageProxyKey: null, documentEpoch: 0 })
 })
 
 describe('S-01-01: ページ切替時、新 proxy 解決まで旧 pdfPage を維持 (チラつき抑止)', () => {
@@ -362,7 +363,7 @@ describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getC
     })
     expect(getCachedPageProxyMock).not.toHaveBeenCalled()
 
-    usePecoStore.setState({ documentEpoch: 2 } as any)
+    useInfraStore.setState({ documentEpoch: 2 })
     rerender({ filePath: 'file-A.pdf', pageIndex: 0, documentEpoch: 2, zoom: 100 })
 
     await waitFor(() => {

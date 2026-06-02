@@ -6,6 +6,7 @@ import {
   selectDocumentFilePath,
   selectDocumentTotalPages,
 } from "../store/pecoStore";
+import { useInfraStore, selectDocumentEpoch } from "../store/infraStore";
 import {
   useViewerStore,
   selectZoom,
@@ -69,7 +70,7 @@ export function PdfCanvas({
   // primitive selector に分解する。
   const documentFilePath = usePecoStore(selectDocumentFilePath);
   const documentTotalPages = usePecoStore(selectDocumentTotalPages);
-  const documentEpoch = usePecoStore((s) => s.documentEpoch);
+  const documentEpoch = useInfraStore(selectDocumentEpoch);
   // overlay 再描画 effect は textBlocks のみを依存とし、PageData の他フィールド
   // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
   // 再描画 effect が走らないようにする (issue #22)。

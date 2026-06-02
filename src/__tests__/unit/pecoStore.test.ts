@@ -8,6 +8,7 @@ import {
   useViewerStore,
   selectDragPreviewBboxes,
 } from '../../store/viewerStore'
+import { useInfraStore } from '../../store/infraStore'
 import * as pdfLoader from '../../utils/pdfLoader'
 import type { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../../types'
 
@@ -60,10 +61,7 @@ function makeDoc(pages: Map<number, PageData> = new Map([[0, makePage()]])): Pec
 
 const INITIAL_STATE = {
   document:            null,
-  documentEpoch:       0,
-  thumbnails:          new Map(),
   pageOrder:           [] as number[],
-  pageAccessOrder:     [] as number[],
   currentPageIndex:    0,
   isDirty:             false,
   lastSavedActionIndex: 0,
@@ -72,6 +70,11 @@ const INITIAL_STATE = {
   clipboard:           [] as any[],
   undoStack:           [] as Action[],
   redoStack:           [] as Action[],
+} as const
+
+const INFRA_INITIAL_STATE = {
+  documentEpoch:       0,
+  pageAccessOrder:     [] as number[],
   pendingRestoration:  null,
   lastIdbError:        null,
   currentPageProxy:    null,
@@ -93,6 +96,7 @@ const VIEWER_INITIAL_STATE = {
 
 beforeEach(() => {
   usePecoStore.setState({ ...INITIAL_STATE })
+  useInfraStore.setState({ ...INFRA_INITIAL_STATE })
   useViewerStore.setState({ ...VIEWER_INITIAL_STATE })
 })
 
@@ -121,7 +125,7 @@ describe('pecoStore', () => {
   describe('documentEpoch', () => {
     it('bumpDocumentEpoch は古い currentPageProxy も破棄する', () => {
       const proxy = { id: 'old-proxy' } as any;
-      usePecoStore.setState({
+      useInfraStore.setState({
         documentEpoch: 10,
         currentPageProxy: proxy,
         currentPageProxyKey: 'test.pdf:0',
@@ -129,10 +133,10 @@ describe('pecoStore', () => {
 
       usePecoStore.getState().bumpDocumentEpoch();
 
-      const state = usePecoStore.getState();
-      expect(state.documentEpoch).toBe(11);
-      expect(state.currentPageProxy).toBeNull();
-      expect(state.currentPageProxyKey).toBeNull();
+      const infra = useInfraStore.getState();
+      expect(infra.documentEpoch).toBe(11);
+      expect(infra.currentPageProxy).toBeNull();
+      expect(infra.currentPageProxyKey).toBeNull();
     });
   });
 
@@ -389,11 +393,12 @@ describe('pecoStore', () => {
 
     it('U-PS-26: pageAccessOrder が更新される', () => {
       const pages = new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]])
-      usePecoStore.setState({ document: makeDoc(pages), pageAccessOrder: [1, 0] })
+      usePecoStore.setState({ document: makeDoc(pages) })
+      useInfraStore.setState({ pageAccessOrder: [1, 0] })
 
       usePecoStore.getState().updatePageData(0, { isDirty: true })
 
-      const order = usePecoStore.getState().pageAccessOrder
+      const order = useInfraStore.getState().pageAccessOrder
       expect(order[0]).toBe(0) // updated page moves to front
     })
   })
@@ -772,17 +777,17 @@ describe('pecoStore', () => {
     })
 
     it('U-PS-54: ページが pageAccessOrder の先頭に移動する', () => {
-      usePecoStore.setState({ pageAccessOrder: [1, 2, 3] })
+      useInfraStore.setState({ pageAccessOrder: [1, 2, 3] })
       usePecoStore.getState().setCurrentPage(3)
 
-      expect(usePecoStore.getState().pageAccessOrder[0]).toBe(3)
+      expect(useInfraStore.getState().pageAccessOrder[0]).toBe(3)
     })
 
     it('U-PS-55: pageAccessOrder 内で重複が除去される', () => {
-      usePecoStore.setState({ pageAccessOrder: [1, 2, 3] })
+      useInfraStore.setState({ pageAccessOrder: [1, 2, 3] })
       usePecoStore.getState().setCurrentPage(2)
 
-      const order = usePecoStore.getState().pageAccessOrder
+      const order = useInfraStore.getState().pageAccessOrder
       expect(order).toEqual([2, 1, 3])
       expect(order.filter(i => i === 2)).toHaveLength(1)
     })
@@ -807,8 +812,8 @@ describe('pecoStore', () => {
         clipboard: [makeBlock()],
         undoStack: [action],
         redoStack: [action],
-        pageAccessOrder: [0, 1],
       })
+      useInfraStore.setState({ pageAccessOrder: [0, 1] })
       useViewerStore.setState({
         isDrawingMode: true,
         isSplitMode: true,
@@ -818,6 +823,7 @@ describe('pecoStore', () => {
       usePecoStore.getState().setDocument(makeDoc())
 
       const s = usePecoStore.getState()
+      const infra = useInfraStore.getState()
       const vs = useViewerStore.getState()
       expect(s.selectedIds.size).toBe(0)
       expect(s.lastSelectedId).toBeNull()
@@ -827,13 +833,13 @@ describe('pecoStore', () => {
       expect(vs.isDrawingMode).toBe(false)
       expect(vs.isSplitMode).toBe(false)
       expect(vs.showTextPreview).toBe(false)
-      expect(s.pageAccessOrder).toHaveLength(0)
+      expect(infra.pageAccessOrder).toHaveLength(0)
       expect(s.currentPageIndex).toBe(0)
       expect(vs.showOcr).toBe(true)
     })
 
     it('U-PS-58: pendingRestoration がある場合 isDirty=true', () => {
-      usePecoStore.setState({ pendingRestoration: { '0': { isDirty: true } } })
+      useInfraStore.setState({ pendingRestoration: { '0': { isDirty: true } } })
 
       usePecoStore.getState().setDocument(makeDoc())
 
@@ -841,7 +847,8 @@ describe('pecoStore', () => {
     })
 
     it('U-PS-59: pendingRestoration がない場合 isDirty=false', () => {
-      usePecoStore.setState({ pendingRestoration: null, isDirty: true })
+      useInfraStore.setState({ pendingRestoration: null })
+      usePecoStore.setState({ isDirty: true })
 
       usePecoStore.getState().setDocument(makeDoc())
 
@@ -866,11 +873,11 @@ describe('pecoStore', () => {
     })
 
     it('U-PS-62: pendingRestoration がクリアされる', () => {
-      usePecoStore.setState({ pendingRestoration: { '0': { isDirty: true } } })
+      useInfraStore.setState({ pendingRestoration: { '0': { isDirty: true } } })
 
       usePecoStore.getState().setDocument(makeDoc())
 
-      expect(usePecoStore.getState().pendingRestoration).toBeNull()
+      expect(useInfraStore.getState().pendingRestoration).toBeNull()
     })
   })
 
@@ -901,7 +908,7 @@ describe('pecoStore', () => {
       }
 
       // A 用の restoration をセット → setDocument(A) で IDB 書き込みがスケジュールされる
-      usePecoStore.setState({ pendingRestoration: { '0': { isDirty: true, textBlocks: [] } } })
+      useInfraStore.setState({ pendingRestoration: { '0': { isDirty: true, textBlocks: [] } } })
       usePecoStore.getState().setDocument(docA)
 
       // 直後に B にスイッチ
@@ -929,7 +936,7 @@ describe('pecoStore', () => {
       vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockImplementationOnce(() => hangPromise)
 
       // setDocument 経由で hang する書き込みをスケジュール
-      usePecoStore.setState({ pendingRestoration: { '0': { isDirty: true, textBlocks: [] } } })
+      useInfraStore.setState({ pendingRestoration: { '0': { isDirty: true, textBlocks: [] } } })
       usePecoStore.getState().setDocument(makeDoc())
 
       // wait は未解決
@@ -974,8 +981,8 @@ describe('pecoStore', () => {
         usePecoStore.setState({
           document: doc,
           currentPageIndex: 50, // 50 を current に
-          pageAccessOrder: Array.from({ length: 51 }, (_, i) => i),
         })
+        useInfraStore.setState({ pageAccessOrder: Array.from({ length: 51 }, (_, i) => i) })
 
         // updatePageData(50, ...) で 51→52 へ。LRU 退避が発生 (idx=0 など末尾) → reject 経路へ
         // ただし 51 件あれば既に閾値超過なので、追加で 1 件入れる
@@ -989,7 +996,7 @@ describe('pecoStore', () => {
         const cur = usePecoStore.getState().document!.pages.get(50)
         expect(cur?.textBlocks[0]?.text).toBe('fresh')
         // lastIdbError が設定されている (reject 経由)
-        expect(usePecoStore.getState().lastIdbError).toBeInstanceOf(Error)
+        expect(useInfraStore.getState().lastIdbError).toBeInstanceOf(Error)
         // ↑ oldPage / newPage の参照は使わなかったが、テスト名の意図 (上書きしない) は検証済み
         expect(oldPage.textBlocks[0].text).toBe('old')
         expect(newPage.textBlocks[0].text).toBe('new')
@@ -1012,8 +1019,8 @@ describe('pecoStore', () => {
         usePecoStore.setState({
           document: makeDoc(pages),
           currentPageIndex: 50,
-          pageAccessOrder: Array.from({ length: 50 }, (_, i) => i),
         })
+        useInfraStore.setState({ pageAccessOrder: Array.from({ length: 50 }, (_, i) => i) })
 
         usePecoStore.getState().updatePageData(50, makePage({ pageIndex: 50, isDirty: true }), false)
         expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
@@ -1032,7 +1039,7 @@ describe('pecoStore', () => {
         expect(current.filePath).toBe('next.pdf')
         expect(current.pages.has(49)).toBe(false)
         expect(current.pages.get(0)?.textBlocks[0]?.text).toBe('new-doc')
-        expect(usePecoStore.getState().lastIdbError).toBeInstanceOf(Error)
+        expect(useInfraStore.getState().lastIdbError).toBeInstanceOf(Error)
       } finally {
         errorSpy.mockRestore()
       }
@@ -1122,7 +1129,7 @@ describe('pecoStore', () => {
       const hang = new Promise<void>((r) => { resolveSave = r })
       vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockImplementationOnce(() => hang)
 
-      usePecoStore.setState({ pendingRestoration: { '0': { isDirty: true, textBlocks: [] } } })
+      useInfraStore.setState({ pendingRestoration: { '0': { isDirty: true, textBlocks: [] } } })
       usePecoStore.getState().setDocument(makeDoc())
 
       // すぐには resolve しない

@@ -2,7 +2,7 @@ import { RefObject, useEffect, useRef, useState, MutableRefObject } from "react"
 import * as pdfjsLib from "pdfjs-dist";
 import { getCachedPageProxy } from "../utils/pdfLoader";
 import { getBitmapCache, setBitmapCache } from "../utils/bitmapCache";
-import { usePecoStore } from "../store/pecoStore";
+import { useInfraStore } from "../store/infraStore";
 import { perf } from "../utils/perfLogger";
 
 interface UsePdfRenderingParams {
@@ -121,13 +121,13 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
 
     (async () => {
       try {
-        // 共有チャネル (store.currentPageProxy) が同じ filePath/pageIndex を
+        // 共有チャネル (infraStore.currentPageProxy) が同じ filePath/pageIndex を
         // 指していれば二重 fetch を回避して即座に使う。
-        const state = usePecoStore.getState();
+        const infraState = useInfraStore.getState();
         const expectedKey = `${filePath}:${pageIndex}`;
         let page: pdfjsLib.PDFPageProxy | null = null;
-        if (!shouldBypassSharedProxy && state.currentPageProxyKey === expectedKey && state.currentPageProxy) {
-          page = state.currentPageProxy;
+        if (!shouldBypassSharedProxy && infraState.currentPageProxyKey === expectedKey && infraState.currentPageProxy) {
+          page = infraState.currentPageProxy;
         } else {
           page = await getCachedPageProxy(filePath, pageIndex);
         }
@@ -150,12 +150,12 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     };
   }, [filePath, pageIndex, documentEpoch, retryCount]);
 
-  // store.currentPageProxy の更新を subscribe: usePageNavigation が later に
+  // infraStore.currentPageProxy の更新を subscribe: usePageNavigation が later に
   // proxy を publish したケース (未ロードページで effect 側が先行した場合など) に対応。
   useEffect(() => {
     if (!filePath) return;
     const expectedKey = `${filePath}:${pageIndex}`;
-    const unsubscribe = usePecoStore.subscribe((state, prev) => {
+    const unsubscribe = useInfraStore.subscribe((state, prev) => {
       if (state.documentEpoch !== documentEpoch) return;
       if (state.currentPageProxy === prev.currentPageProxy) return;
       if (state.currentPageProxyKey !== expectedKey) return;

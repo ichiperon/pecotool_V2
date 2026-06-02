@@ -62,6 +62,7 @@ import { useFileOperations, __originalBytesCacheForTest, isWriteAccessError } fr
 import { getAllTemporaryPageData, loadPDF, loadPage, clearTemporaryChanges } from '../../utils/pdfLoader';
 import { savePDF } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
+import { useInfraStore } from '../../store/infraStore';
 import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { readFile, stat } from '@tauri-apps/plugin-fs';
@@ -1200,7 +1201,7 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
   it('#118: 上書き保存が成功すると destroySharedPdfProxy が呼ばれ documentEpoch が +1 される', async () => {
     setupSavableDoc('/reload/save.pdf');
     // documentEpoch を既知値にしておき、保存後に +1 されたことを確認する。
-    usePecoStore.setState({ documentEpoch: 7 });
+    useInfraStore.setState({ documentEpoch: 7 });
     const { destroySharedPdfProxy } = await import('../../utils/pdfLoader');
     (destroySharedPdfProxy as unknown as ReturnType<typeof vi.fn>).mockClear();
 
@@ -1217,13 +1218,14 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
     expect(destroySharedPdfProxy).toHaveBeenCalled();
     // documentEpoch が +1 され、usePageNavigation / usePdfRendering が
     // proxy を取り直して現在ページ画像を再 render するトリガーになる。
-    expect(usePecoStore.getState().documentEpoch).toBe(8);
+    expect(useInfraStore.getState().documentEpoch).toBe(8);
   });
 
   it('#118: 保存が成功しても textBlocks / currentPageIndex / zoom は変化しない (画像のみ再 render)', async () => {
     const doc = setupSavableDoc('/reload/preserve.pdf');
     // ユーザーが page index / zoom を変えている状態を再現。
-    usePecoStore.setState({ documentEpoch: 3, currentPageIndex: 0, zoom: 175 });
+    useInfraStore.setState({ documentEpoch: 3 });
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
     const originalBlocks = doc.pages.get(0)!.textBlocks;
 
     const showToast = vi.fn();
@@ -1233,14 +1235,14 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
     });
 
     const after = usePecoStore.getState();
+    const afterInfra = useInfraStore.getState();
     // epoch だけ進む。
-    expect(after.documentEpoch).toBe(4);
+    expect(afterInfra.documentEpoch).toBe(4);
     // 編集の source-of-truth (textBlocks) は同一参照のまま保持される。
     expect(after.document!.pages.get(0)!.textBlocks).toBe(originalBlocks);
     expect(after.document!.pages.get(0)!.textBlocks[0].text).toBe('HELLO');
-    // ページ index / zoom は保存で巻き戻らない。
+    // ページ index は保存で巻き戻らない。
     expect(after.currentPageIndex).toBe(0);
-    expect(after.zoom).toBe(175);
     // undo/redo 履歴も保存では消えない。
     expect(after.undoStack).toEqual([]);
     expect(after.redoStack).toEqual([]);
@@ -1248,7 +1250,7 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
 
   it('#118: 保存が失敗 (writeFileAtomically が reject) した場合は documentEpoch を進めない', async () => {
     setupSavableDoc('/reload/fail.pdf');
-    usePecoStore.setState({ documentEpoch: 5 });
+    useInfraStore.setState({ documentEpoch: 5 });
 
     // replace_pdf_file が reject されて保存が失敗する。
     const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
@@ -1268,12 +1270,12 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
 
     expect(ok).toBe(false);
     // 書き込みに失敗したので再 render トリガーは出さない。
-    expect(usePecoStore.getState().documentEpoch).toBe(5);
+    expect(useInfraStore.getState().documentEpoch).toBe(5);
   });
 
   it('#118: 別名保存 (Save As) が成功すると documentEpoch が +1 される', async () => {
     setupSavableDoc('/reload/src.pdf');
-    usePecoStore.setState({ documentEpoch: 2 });
+    useInfraStore.setState({ documentEpoch: 2 });
 
     // save ダイアログが新しいパスを返す。
     const { save } = await import('@tauri-apps/plugin-dialog');
@@ -1287,15 +1289,14 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
 
     // 別名保存も _executeSave 経由なので epoch bump が走る。
     // (filePath 変更でも reload は走るが、epoch bump が抜けていないことを担保する)
-    expect(usePecoStore.getState().documentEpoch).toBe(3);
+    expect(useInfraStore.getState().documentEpoch).toBe(3);
   });
 
   it('#118: bumpDocumentEpoch ストアアクションは documentEpoch だけを進め他の状態を変えない', () => {
     const doc = setupSavableDoc('/reload/action.pdf');
+    useInfraStore.setState({ documentEpoch: 10 });
     usePecoStore.setState({
-      documentEpoch: 10,
       currentPageIndex: 0,
-      zoom: 220,
       isDirty: true,
     });
     const blocksBefore = doc.pages.get(0)!.textBlocks;
@@ -1303,13 +1304,13 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
     usePecoStore.getState().bumpDocumentEpoch();
 
     const s = usePecoStore.getState();
-    expect(s.documentEpoch).toBe(11);
+    const sInfra = useInfraStore.getState();
+    expect(sInfra.documentEpoch).toBe(11);
     // document 本体・pages・textBlocks 参照は不変。
     expect(s.document).toBe(doc);
     expect(s.document!.pages.get(0)!.textBlocks).toBe(blocksBefore);
-    // currentPageIndex / zoom / isDirty も不変。
+    // currentPageIndex / isDirty も不変。
     expect(s.currentPageIndex).toBe(0);
-    expect(s.zoom).toBe(220);
     expect(s.isDirty).toBe(true);
   });
 });
