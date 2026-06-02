@@ -289,3 +289,115 @@ describe('layoutTextOnCurveViewport / polyline', () => {
     expect(layoutTextOnCurveViewport('', polyline, 12)).toEqual([]);
   });
 });
+
+// ── wave 5 additions ─────────────────────────────────────────────────────────
+
+describe('layoutTextOnCurve / pageHeight edge cases (wave 5)', () => {
+  it('pageHeight=0: arc y_pdf = 0 - y_viewport = -y_viewport (correct flip at origin)', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 0, y: 0 },
+      radius: 10,
+      startAngle: 0,
+      endAngle: Math.PI / 2,
+    };
+    const glyphs = layoutTextOnCurve('A', arc, 12, 0);
+    expect(glyphs).toHaveLength(1);
+    // y_pdf = 0 - y_viewport  →  y_pdf = -sin(theta) * 10
+    const theta = (0.5 / 1) * (Math.PI / 2);
+    expect(glyphs[0].y).toBeCloseTo(-10 * Math.sin(theta), 5);
+  });
+
+  it('pageHeight=Infinity: arc calculates finite x but Infinity y (expected behavior)', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 0, y: 0 },
+      radius: 10,
+      startAngle: 0,
+      endAngle: Math.PI / 2,
+    };
+    const glyphs = layoutTextOnCurve('A', arc, 12, Infinity);
+    // x should be finite (cos-based)
+    expect(Number.isFinite(glyphs[0].x)).toBe(true);
+    // y = Infinity - finite = Infinity (implementation does pageHeight - y_viewport)
+    expect(glyphs[0].y).toBe(Infinity);
+    // rotation should be finite
+    expect(Number.isFinite(glyphs[0].rotation)).toBe(true);
+  });
+
+  it('pageHeight=Infinity: polyline produces Infinity y values', () => {
+    const polyline: CurveDefinition = {
+      type: 'polyline',
+      points: [
+        { x: 0, y: 20 },
+        { x: 100, y: 20 },
+      ],
+    };
+    const glyphs = layoutTextOnCurve('AB', polyline, 12, Infinity);
+    expect(glyphs).toHaveLength(2);
+    expect(glyphs[0].y).toBe(Infinity);
+  });
+});
+
+describe('layoutTextOnCurveViewport / arc rotation monotonic (wave 5)', () => {
+  it('forward arc (startAngle < endAngle): rotation is monotonically increasing (viewport tangent)', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 100, y: 100 },
+      radius: 50,
+      startAngle: 0,
+      endAngle: Math.PI / 2,
+    };
+    // dir > 0 → tangent = theta + π/2  → rotation increases as theta increases
+    const glyphs = layoutTextOnCurveViewport('12345', arc, 12);
+    expect(glyphs).toHaveLength(5);
+    for (let i = 1; i < glyphs.length; i++) {
+      expect(glyphs[i].rotation).toBeGreaterThan(glyphs[i - 1].rotation);
+    }
+  });
+
+  it('reverse arc (startAngle > endAngle): rotation is monotonically decreasing (viewport tangent)', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 0, y: 0 },
+      radius: 10,
+      startAngle: Math.PI / 2,
+      endAngle: 0,
+    };
+    // dir < 0 → tangent = theta - π/2 → theta decreases → rotation decreases
+    const glyphs = layoutTextOnCurveViewport('123', arc, 12);
+    expect(glyphs).toHaveLength(3);
+    for (let i = 1; i < glyphs.length; i++) {
+      expect(glyphs[i].rotation).toBeLessThan(glyphs[i - 1].rotation);
+    }
+  });
+
+  it('char order preserved in viewport variant (forward arc)', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 0, y: 0 },
+      radius: 10,
+      startAngle: 0,
+      endAngle: Math.PI,
+    };
+    const glyphs = layoutTextOnCurveViewport('XYZ', arc, 12);
+    expect(glyphs.map((g) => g.char)).toEqual(['X', 'Y', 'Z']);
+  });
+
+  it('polyline viewport: rotation is monotonic (single segment direction unchanged)', () => {
+    // Diagonal segment going down-right: atan2(dy, dx) is constant
+    const polyline: CurveDefinition = {
+      type: 'polyline',
+      points: [
+        { x: 0, y: 0 },
+        { x: 100, y: 100 },
+      ],
+    };
+    const glyphs = layoutTextOnCurveViewport('ABC', polyline, 12);
+    expect(glyphs).toHaveLength(3);
+    const expectedRotation = Math.atan2(100, 100);
+    for (const g of glyphs) {
+      expect(g.rotation).toBeCloseTo(expectedRotation, 6);
+    }
+  });
+});
