@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight } from 'lucide-react';
+import type { TextExportFormat } from '../../utils/textExport';
 
 type ActiveMenu = 'file' | 'settings' | 'help' | null;
 
@@ -18,11 +19,13 @@ interface MenuBarProps {
   onReload: () => void;
   onShowOcrSettings: () => void;
   onOpenLogFolder: () => void;
+  onExport: (scope: 'current' | 'all', format: TextExportFormat) => void;
 }
 
 export const MenuBar: React.FC<MenuBarProps> = (props) => {
   const [activeMenu, setActiveMenu] = useState<ActiveMenu>(null);
   const [showRecent, setShowRecent] = useState(false);
+  const [showExport, setShowExport] = useState<'current' | 'all' | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -39,11 +42,13 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
   const toggle = (menu: ActiveMenu) => {
     setActiveMenu(prev => prev === menu ? null : menu);
     setShowRecent(false);
+    setShowExport(null);
   };
 
   const close = () => {
     setActiveMenu(null);
     setShowRecent(false);
+    setShowExport(null);
   };
 
   const run = (fn: () => void) => {
@@ -133,6 +138,72 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
             >
               別名で保存<span className="menu-shortcut">Ctrl+Shift+S</span>
             </button>
+            <div className="menu-separator" />
+
+            {/* エクスポート */}
+            <div
+              className={`menu-dropdown-item menu-has-sub ${!props.isFileLoaded ? 'disabled' : ''} ${showExport !== null ? 'active' : ''}`}
+              onMouseEnter={() => props.isFileLoaded && setShowExport(null)}
+              onMouseLeave={() => setShowExport(null)}
+              aria-disabled={!props.isFileLoaded ? 'true' : 'false'}
+            >
+              エクスポート
+              <ChevronRight size={12} className="menu-sub-arrow" />
+              {props.isFileLoaded && (
+                <div className="menu-submenu">
+                  {/* 現在のページ */}
+                  <div
+                    className={`menu-dropdown-item menu-has-sub ${showExport === 'current' ? 'active' : ''}`}
+                    onMouseEnter={() => setShowExport('current')}
+                    onMouseLeave={() => setShowExport(null)}
+                  >
+                    現在のページ
+                    <ChevronRight size={12} className="menu-sub-arrow" />
+                    {showExport === 'current' && (
+                      <div className="menu-submenu">
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('current', 'txt'))}>
+                          テキスト (.txt)
+                        </button>
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('current', 'md'))}>
+                          Markdown (.md)
+                        </button>
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('current', 'csv'))}>
+                          CSV (.csv)
+                        </button>
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('current', 'json'))}>
+                          JSON (.json)
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  {/* 全ページ */}
+                  <div
+                    className={`menu-dropdown-item menu-has-sub ${showExport === 'all' ? 'active' : ''}`}
+                    onMouseEnter={() => setShowExport('all')}
+                    onMouseLeave={() => setShowExport(null)}
+                  >
+                    全ページ
+                    <ChevronRight size={12} className="menu-sub-arrow" />
+                    {showExport === 'all' && (
+                      <div className="menu-submenu">
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('all', 'txt'))}>
+                          テキスト (.txt)
+                        </button>
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('all', 'md'))}>
+                          Markdown (.md)
+                        </button>
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('all', 'csv'))}>
+                          CSV (.csv)
+                        </button>
+                        <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onExport('all', 'json'))}>
+                          JSON (.json)
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
