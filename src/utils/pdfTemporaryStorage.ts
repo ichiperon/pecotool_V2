@@ -148,6 +148,25 @@ function openDB(): Promise<IDBDatabase> {
       };
       request.onsuccess = () => {
         const db = request.result;
+        // issue #147: session 中に DB がクローズ/version change された場合
+        // dbPromise が古い (close 済) connection を握り続けてしまい、以後の
+        // すべての tx が InvalidStateError で落ちる。close / versionchange を
+        // 検知して dbPromise を null に戻すことで、次回 openDB() で再接続する。
+        db.onclose = () => {
+          if (dbPromise && dbPromise.then) {
+            // 自分が現在の dbPromise を握っているならクリア
+            void dbPromise.then((cur) => {
+              if (cur === db) dbPromise = null;
+            }).catch(() => { dbPromise = null; });
+          } else {
+            dbPromise = null;
+          }
+        };
+        db.onversionchange = () => {
+          // 他タブが upgrade を要求してきたら自分を閉じて promise を捨てる
+          db.close();
+          dbPromise = null;
+        };
         if (!openingPruneStarted) {
           openingPruneStarted = true;
           void pruneCachedPages(db);
