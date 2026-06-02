@@ -31,6 +31,31 @@ const DEFAULT_QUIET_PERIOD_MS = 60 * 1000;
 // プロトタイプ汚染攻撃を防ぐため、キー名として危険なものを拒否する
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+/**
+ * issue #144: textBlocks 配列内の任意 object も含めて再帰的に own-key を検査する。
+ * 浅いチェック (page own-key のみ) だと、textBlock の任意プロパティ (bbox や
+ * 将来追加される object) に __proto__: {...} を埋め込まれて
+ * JSON.parse 経由でプロトタイプ汚染される余地が残るため、深さ制限付きで
+ * 全 nested object/array を辿って危険キーを reject する。
+ */
+const MAX_RECURSION_DEPTH = 16;
+function hasDangerousKeyDeep(value: unknown, depth = 0): boolean {
+  if (depth > MAX_RECURSION_DEPTH) return true; // 深すぎる入力は安全側で reject
+  if (value === null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (hasDangerousKeyDeep(item, depth + 1)) return true;
+    }
+    return false;
+  }
+  // own enumerable key のみを検査 (Object.keys は own enumerable string key)
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    if (DANGEROUS_KEYS.has(key)) return true;
+    if (hasDangerousKeyDeep((value as Record<string, unknown>)[key], depth + 1)) return true;
+  }
+  return false;
+}
+
 function isValidBBox(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false;
   const b = value as Record<string, unknown>;
@@ -52,17 +77,12 @@ function isValidBackupData(data: unknown): data is BackupData {
   if (typeof d.originalFilePath !== 'string') return false;
   if (typeof d.pages !== 'object' || d.pages === null) return false;
   const pages = d.pages as Record<string, unknown>;
-  // プロトタイプ汚染を防止: __proto__ / constructor / prototype のキーを拒否
-  for (const key of Object.keys(pages)) {
-    if (DANGEROUS_KEYS.has(key)) return false;
-  }
+  // issue #18 / #144: プロトタイプ汚染を防止。pages 配下の textBlocks や
+  // 任意 nested object まで再帰で危険キーを reject する。
+  if (hasDangerousKeyDeep(pages)) return false;
   for (const page of Object.values(pages)) {
     if (typeof page !== 'object' || page === null) return false;
     const p = page as Record<string, unknown>;
-    // ネスト深部でのプロトタイプ汚染を防止: 各 page オブジェクトの own key も検証する (#18)
-    for (const key of Object.keys(p)) {
-      if (DANGEROUS_KEYS.has(key)) return false;
-    }
     // pages は Partial<PageData> のため全フィールドは必須ではない
     if (p.textBlocks !== undefined) {
       if (!Array.isArray(p.textBlocks)) return false;
