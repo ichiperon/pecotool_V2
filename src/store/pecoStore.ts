@@ -198,6 +198,33 @@ interface PecoState {
     useRegex: boolean;
     skipBlockIds?: ReadonlySet<string>;
   }) => Promise<{ hits: number; blocks: number; pages: number; skippedBlocks: number }>;
+
+  /**
+   * issue #213: 複数の置換ルールを 1-pass で適用する高速バッチ版。
+   *
+   * 旧来の handleBatchApply はルール数 R 回 replaceText を逐次呼び出し、
+   * 各呼び出しで IDB フルスキャンを行っていたため O(R×P×B) だった。
+   * この action は IDB を 1 度だけ読み込み、各 BB に全ルールをインメモリで
+   * 順次適用してから 1 つの UpdatePagesAction として undoStack に積む。
+   *
+   * @param rules 適用するルール配列 (enabled=false は呼び出し元で除外済み前提)
+   * @param scope 'current' = 現在ページのみ, 'all' = 全ページ (IDB 退避ページ含む)
+   * @returns totalHits: 全ルール合計ヒット数, perRuleHits: ルールごとのヒット数配列
+   *
+   * - isRegex=true の場合は RegExp を 1 度だけ生成して使い回す
+   * - 各ルールの出力テキストが次ルールの入力になる (連鎖適用)
+   * - undoStack には 1 entry のみ追加 (Ctrl+Z 1 回で全部巻き戻し)
+   * - IDB 書き込みは変更があったページのみ 1 度ずつ
+   */
+  replaceTextBatch: (
+    rules: Array<{
+      pattern: string;
+      replacement: string;
+      isRegex: boolean;
+      caseSensitive: boolean;
+    }>,
+    scope: 'current' | 'all',
+  ) => Promise<{ totalHits: number; perRuleHits: number[] }>;
 }
 
 const MAX_CACHED_PAGES = 50;
@@ -1208,6 +1235,144 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     );
 
     return { hits: totalHits, blocks: totalBlocks, pages: entries.length, skippedBlocks };
+  },
+
+  // issue #213: 1-pass batch replace
+  replaceTextBatch: async (rules, scope) => {
+    const state = get();
+    const document = state.document;
+    if (!document) return { totalHits: 0, perRuleHits: rules.map(() => 0) };
+    if (rules.length === 0) return { totalHits: 0, perRuleHits: [] };
+
+    // 各ルールの RegExp と置換文字列を事前にコンパイルする (1 度だけ生成して使い回す)
+    const compiledRules = rules.map((rule) => {
+      const flags = `g${rule.caseSensitive ? '' : 'i'}`;
+      const re = rule.isRegex
+        ? new RegExp(rule.pattern, flags)
+        : new RegExp(rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+      // useRegex=false のとき '$' → '$$' エスケープ (issue #105 と同じロジック)
+      const safeReplacement = rule.isRegex
+        ? rule.replacement
+        : rule.replacement.replace(/\$/g, '$$$$');
+      return { re, safeReplacement, isRegex: rule.isRegex, literalReplacement: rule.replacement };
+    });
+
+    const filePath = document.filePath;
+
+    // IDB を 1 度だけ読み込む (scope='all' のみ; current は in-memory のみ)
+    const basePages = new Map<number, PageData>();
+    if (scope === 'current') {
+      const page = document.pages.get(state.currentPageIndex);
+      if (page) basePages.set(state.currentPageIndex, page);
+    } else {
+      for (const [idx, page] of document.pages.entries()) {
+        basePages.set(idx, page);
+      }
+      const idbAll = await getAllTemporaryPageData(filePath);
+      for (const [idx, partial] of idbAll.entries()) {
+        if (basePages.has(idx)) continue;
+        if (!partial.textBlocks) continue;
+        const restored: PageData = {
+          pageIndex: idx,
+          width: partial.width ?? 0,
+          height: partial.height ?? 0,
+          textBlocks: partial.textBlocks,
+          isDirty: partial.isDirty ?? false,
+          thumbnail: partial.thumbnail ?? null,
+          isTextExtracted: partial.isTextExtracted,
+          ocrCleared: partial.ocrCleared,
+        };
+        basePages.set(idx, restored);
+      }
+    }
+
+    const perRuleHits: number[] = rules.map(() => 0);
+    const entries: Array<{ pageIndex: number; before: PageData; after: PageData }> = [];
+
+    const targetIndices = Array.from(basePages.keys()).sort((a, b) => a - b);
+
+    for (const pageIdx of targetIndices) {
+      const page = basePages.get(pageIdx);
+      if (!page) continue;
+
+      let pageChanged = false;
+      const newTextBlocks: TextBlock[] = [];
+
+      for (const b of page.textBlocks) {
+        let currentText = b.text;
+        let blockChanged = false;
+
+        // 全ルールをインメモリで順次適用 (前ルールの出力が次ルールの入力)
+        for (let ri = 0; ri < compiledRules.length; ri++) {
+          const { re, safeReplacement, isRegex, literalReplacement } = compiledRules[ri];
+          re.lastIndex = 0;
+
+          let ruleHits = 0;
+          const replaced = currentText.replace(re, isRegex
+            ? (...args) => {
+                ruleHits++;
+                const matchStr = args[0] as string;
+                const oneShot = new RegExp(re.source, re.flags.replace('g', ''));
+                return matchStr.replace(oneShot, safeReplacement);
+              }
+            : () => {
+                ruleHits++;
+                return literalReplacement;
+              });
+
+          if (ruleHits > 0) {
+            perRuleHits[ri] += ruleHits;
+            currentText = replaced;
+            blockChanged = true;
+          }
+        }
+
+        if (blockChanged) {
+          pageChanged = true;
+          newTextBlocks.push({ ...b, text: currentText, isDirty: true });
+        } else {
+          newTextBlocks.push(b);
+        }
+      }
+
+      if (pageChanged) {
+        const newPage: PageData = { ...page, textBlocks: newTextBlocks, isDirty: true };
+        entries.push({ pageIndex: pageIdx, before: page, after: newPage });
+      }
+    }
+
+    const totalHits = perRuleHits.reduce((sum, h) => sum + h, 0);
+
+    if (entries.length === 0) {
+      return { totalHits: 0, perRuleHits };
+    }
+
+    // store に反映し、undoStack に 1 entry だけ積む
+    set((s) => {
+      if (!s.document) return s;
+      const newPages = new Map(s.document.pages);
+      for (const e of entries) {
+        newPages.set(e.pageIndex, e.after);
+      }
+      const newAction: Action = { type: 'update_pages', entries };
+      const newUndo = [...s.undoStack, newAction];
+      if (newUndo.length > 100) newUndo.shift();
+      return {
+        document: { ...s.document, pages: newPages },
+        undoStack: newUndo,
+        redoStack: [],
+        isDirty: true,
+      };
+    });
+
+    // IDB 書き込みは変更ページのみ 1 度ずつ
+    schedulePendingIdbWrite(
+      entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+      set,
+      get,
+    );
+
+    return { totalHits, perRuleHits };
   },
 }));
 

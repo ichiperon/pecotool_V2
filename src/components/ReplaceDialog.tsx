@@ -311,7 +311,7 @@ interface ApplyProgress {
 }
 
 function RuleSetTab({ id }: { id: string }) {
-  const replaceText = usePecoStore((s) => s.replaceText);
+  const replaceTextBatch = usePecoStore((s) => s.replaceTextBatch);
 
   const [ruleSet, setRuleSet] = useState<ProofreadingRuleSet>(() => loadRuleSet());
   const [progress, setProgress] = useState<ApplyProgress | null>(null);
@@ -396,25 +396,25 @@ function RuleSetTab({ id }: { id: string }) {
     if (enabledRules.length === 0) return;
     setProgress({ total: enabledRules.length, done: 0, results: [] });
 
-    const results: ApplyProgress['results'] = [];
-    for (let i = 0; i < enabledRules.length; i++) {
-      const rule = enabledRules[i];
-      const result = await replaceText({
-        scope: 'all',
-        pattern: rule.pattern,
-        replacement: rule.replacement,
-        caseSensitive: rule.caseSensitive,
-        useRegex: rule.isRegex,
-      });
-      results.push({
-        pattern: rule.pattern,
-        hits: result.hits,
-        blocks: result.blocks,
-        pages: result.pages,
-      });
-      setProgress({ total: enabledRules.length, done: i + 1, results: [...results] });
-    }
-  }, [enabledRules, replaceText]);
+    // issue #213: replaceTextBatch で 1-pass 適用 (IDB 読み込み 1 回 / undoStack 1 entry)
+    const { perRuleHits } = await replaceTextBatch(
+      enabledRules.map((r) => ({
+        pattern: r.pattern,
+        replacement: r.replacement,
+        isRegex: r.isRegex,
+        caseSensitive: r.caseSensitive,
+      })),
+      'all',
+    );
+
+    const results: ApplyProgress['results'] = enabledRules.map((rule, i) => ({
+      pattern: rule.pattern,
+      hits: perRuleHits[i] ?? 0,
+      blocks: 0,
+      pages: 0,
+    }));
+    setProgress({ total: enabledRules.length, done: enabledRules.length, results });
+  }, [enabledRules, replaceTextBatch]);
 
   const totalApplied = progress
     ? progress.results.reduce((sum, r) => sum + r.hits, 0)

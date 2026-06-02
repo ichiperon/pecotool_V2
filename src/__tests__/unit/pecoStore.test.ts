@@ -1725,6 +1725,195 @@ describe('pecoStore', () => {
     })
   })
 
+  // ── issue #213: replaceTextBatch (1-pass batch replace) ──────
+  describe('issue #213: replaceTextBatch', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
+    })
+
+    it('U-RB-01: 3 ルールを 5 ページに適用 — IDB read は 1 回、各ルール hit 数が正しい', async () => {
+      // 5 ページを用意。各ページに 1 BB ずつ
+      const pages = new Map<number, PageData>()
+      for (let i = 0; i < 5; i++) {
+        pages.set(i, makePage({
+          pageIndex: i,
+          textBlocks: [makeBlock({ id: `p${i}b0`, text: 'hello world foo' })],
+        }))
+      }
+      usePecoStore.setState({
+        document: { filePath: 'test.pdf', fileName: 'test.pdf', totalPages: 5, metadata: {}, pages },
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: 'hello', replacement: 'HI',   isRegex: false, caseSensitive: false },
+          { pattern: 'world', replacement: 'EARTH', isRegex: false, caseSensitive: false },
+          { pattern: 'foo',   replacement: 'bar',   isRegex: false, caseSensitive: false },
+        ],
+        'all',
+      )
+
+      // 各ルールが 5 ページ × 1 BB = 5 hit
+      expect(result.perRuleHits).toEqual([5, 5, 5])
+      expect(result.totalHits).toBe(15)
+
+      // IDB は 1 回だけ読み込まれる
+      expect(vi.mocked(pdfLoader.getAllTemporaryPageData)).toHaveBeenCalledTimes(1)
+
+      // テキストが正しく変換されている
+      const p0blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(p0blocks[0].text).toBe('HI EARTH bar')
+    })
+
+    it('U-RB-02: isRegex=true で複数ルール (キャプチャグループ含む)', async () => {
+      const b = makeBlock({ id: 'b0', text: 'abc 123 xyz' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: '(\\d+)', replacement: '[$1]', isRegex: true, caseSensitive: false },
+          { pattern: 'xyz',    replacement: 'ZZZ',  isRegex: false, caseSensitive: false },
+        ],
+        'all',
+      )
+
+      expect(result.perRuleHits).toEqual([1, 1])
+      expect(result.totalHits).toBe(2)
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      // ルール1: '123' → '[123]', ルール2: 'xyz' → 'ZZZ'
+      expect(blocks[0].text).toBe('abc [123] ZZZ')
+    })
+
+    it('U-RB-03: 連鎖適用 — ルール A の出力がルール B のパターンにマッチする', async () => {
+      // ルール A: 'cat' → 'dog', ルール B: 'dog' → 'bird'
+      // 連鎖で 'cat' → 'dog' → 'bird' になるはず
+      const b = makeBlock({ id: 'b0', text: 'cat and cat' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: 'cat', replacement: 'dog',  isRegex: false, caseSensitive: false },
+          { pattern: 'dog', replacement: 'bird', isRegex: false, caseSensitive: false },
+        ],
+        'all',
+      )
+
+      // ルール A: 2 hit ('cat' が 2 つ), ルール B: 2 hit ('dog' が 2 つ)
+      expect(result.perRuleHits).toEqual([2, 2])
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('bird and bird')
+    })
+
+    it('U-RB-04: undoStack に 1 entry のみ追加される', async () => {
+      const pages = new Map<number, PageData>()
+      for (let i = 0; i < 3; i++) {
+        pages.set(i, makePage({
+          pageIndex: i,
+          textBlocks: [makeBlock({ id: `p${i}b0`, text: 'foo' })],
+        }))
+      }
+      usePecoStore.setState({
+        document: { filePath: 'test.pdf', fileName: 'test.pdf', totalPages: 3, metadata: {}, pages },
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: 'foo', replacement: 'bar', isRegex: false, caseSensitive: false },
+          { pattern: 'bar', replacement: 'baz', isRegex: false, caseSensitive: false },
+        ],
+        'all',
+      )
+
+      // 2 ルール適用しても undoStack は 1 entry だけ
+      const { undoStack } = usePecoStore.getState()
+      expect(undoStack).toHaveLength(1)
+      expect(undoStack[0].type).toBe('update_pages')
+    })
+
+    it('U-RB-05: Ctrl+Z (undo) で全部巻き戻される', async () => {
+      const originalText = 'foo'
+      const b = makeBlock({ id: 'b0', text: originalText })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: 'foo', replacement: 'bar', isRegex: false, caseSensitive: false },
+          { pattern: 'bar', replacement: 'baz', isRegex: false, caseSensitive: false },
+        ],
+        'all',
+      )
+
+      // 適用後は 'baz'
+      expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe('baz')
+
+      // Ctrl+Z で 1 回 undo → 元の 'foo' に戻る
+      usePecoStore.getState().undo()
+      expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe(originalText)
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
+
+    it('U-RB-06: scope=current では IDB を読まない', async () => {
+      const b = makeBlock({ id: 'b0', text: 'hello' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      await usePecoStore.getState().replaceTextBatch(
+        [{ pattern: 'hello', replacement: 'world', isRegex: false, caseSensitive: false }],
+        'current',
+      )
+
+      expect(vi.mocked(pdfLoader.getAllTemporaryPageData)).not.toHaveBeenCalled()
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('world')
+    })
+
+    it('U-RB-07: ルール配列が空のとき totalHits=0 で何も変化しない', async () => {
+      const b = makeBlock({ id: 'b0', text: 'hello' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch([], 'all')
+      expect(result.totalHits).toBe(0)
+      expect(result.perRuleHits).toEqual([])
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
+  })
+
   // ── issue #189: toggleCurveMode ───────────────────────────────
   describe('issue #189: toggleCurveMode', () => {
     it('U-CM-01: 初期状態では isCurveMode=false', () => {
