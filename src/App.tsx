@@ -291,7 +291,7 @@ function App() {
   };
 
   const handleClearOcrCurrentPage = async () => {
-    const confirmed = await ask('現在のページのOCRテキストをすべて削除しますか？', {
+    const confirmed = await ask('現在のページのOCRテキストをすべて削除しますか？\nCtrl+Z で元に戻せます。', {
       title: 'OCR消去', kind: 'warning'
     });
     if (!confirmed) return;
