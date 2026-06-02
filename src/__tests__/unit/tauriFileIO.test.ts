@@ -1,0 +1,159 @@
+/**
+ * tauriFileIO utility のユニットテスト。
+ *
+ * - writeFileChunked が chunk size 上限で分割呼び出しされること
+ * - 小さな bytes (chunk size 以下) は 1 回の invoke で完了すること
+ * - 空 bytes (byteLength === 0) でも offset=0 で 1 回 invoke されること
+ * - isWriteAccessError が EACCES / EPERM 系メッセージを検出すること
+ * - isWriteAccessError が他のエラーで false を返すこと
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(() => Promise.resolve(undefined)),
+}));
+
+import { invoke } from '@tauri-apps/api/core';
+import { writeFileChunked, writeFileAtomically, isWriteAccessError } from '../../utils/tauriFileIO';
+
+const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  invokeMock.mockReset();
+  invokeMock.mockImplementation(() => Promise.resolve(undefined));
+});
+
+describe('writeFileChunked', () => {
+  it('空 bytes (byteLength === 0) でも write_pdf_chunk を offset=0 で 1 回呼ぶ', async () => {
+    const bytes = new Uint8Array(0);
+    await writeFileChunked('/test/empty.pdf', bytes);
+
+    const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_pdf_chunk');
+    expect(calls.length).toBe(1);
+    const [, body, opts] = calls[0] as [string, ArrayBuffer, { headers: Record<string, string> }];
+    expect(opts.headers['x-offset']).toBe('0');
+    expect(body.byteLength).toBe(0);
+  });
+
+  it('chunk size 以下の bytes は 1 回の invoke で完了する', async () => {
+    const bytes = new Uint8Array(100).fill(0xab);
+    await writeFileChunked('/test/small.pdf', bytes);
+
+    const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_pdf_chunk');
+    expect(calls.length).toBe(1);
+    const [, , opts] = calls[0] as [string, ArrayBuffer, { headers: Record<string, string> }];
+    expect(opts.headers['x-offset']).toBe('0');
+  });
+
+  it('chunk size (4MB) を超える bytes は複数回に分割して invoke される', async () => {
+    const CHUNK = 4 * 1024 * 1024; // 4MB
+    const size = CHUNK + 1; // 4MB + 1 byte -> 2 回
+    const bytes = new Uint8Array(size).fill(0x01);
+    await writeFileChunked('/test/large.pdf', bytes);
+
+    const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_pdf_chunk');
+    expect(calls.length).toBe(2);
+
+    // 1 回目: offset=0
+    const [, , opts0] = calls[0] as [string, ArrayBuffer, { headers: Record<string, string> }];
+    expect(opts0.headers['x-offset']).toBe('0');
+
+    // 2 回目: offset=CHUNK
+    const [, , opts1] = calls[1] as [string, ArrayBuffer, { headers: Record<string, string> }];
+    expect(opts1.headers['x-offset']).toBe(String(CHUNK));
+  });
+
+  it('パスが encodeURIComponent されて x-path ヘッダに渡される', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    await writeFileChunked('/path/with spaces/file.pdf', bytes);
+
+    const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_pdf_chunk');
+    expect(calls.length).toBe(1);
+    const [, , opts] = calls[0] as [string, ArrayBuffer, { headers: Record<string, string> }];
+    expect(opts.headers['x-path']).toBe(encodeURIComponent('/path/with spaces/file.pdf'));
+  });
+});
+
+describe('writeFileAtomically', () => {
+  it('一時ファイルへの writeFileChunked の後に replace_pdf_file を呼ぶ', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    await writeFileAtomically('/out/final.pdf', bytes);
+
+    const chunkCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_pdf_chunk');
+    const replaceCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'replace_pdf_file');
+
+    // write_pdf_chunk が先に呼ばれる
+    expect(chunkCalls.length).toBeGreaterThanOrEqual(1);
+    // replace_pdf_file が 1 回呼ばれる
+    expect(replaceCalls.length).toBe(1);
+
+    // 呼び出し順を確認: write_pdf_chunk の最後のインデックス < replace_pdf_file のインデックス
+    const lastChunkIdx = invokeMock.mock.calls.findLastIndex(([cmd]) => cmd === 'write_pdf_chunk');
+    const replaceIdx = invokeMock.mock.calls.findIndex(([cmd]) => cmd === 'replace_pdf_file');
+    expect(lastChunkIdx).toBeLessThan(replaceIdx);
+
+    // replace_pdf_file の args に targetPath が含まれる
+    const [, replaceArgs] = replaceCalls[0] as [string, { tempPath: string; targetPath: string }];
+    expect(replaceArgs.targetPath).toBe('/out/final.pdf');
+
+    // tempPath は '.pecotool-' を含む一時パス
+    expect(replaceArgs.tempPath).toContain('.pecotool-');
+    expect(replaceArgs.tempPath).toContain('.tmp');
+  });
+});
+
+describe('isWriteAccessError', () => {
+  it('EACCES を検出する', () => {
+    expect(isWriteAccessError('EACCES: permission denied')).toBe(true);
+    expect(isWriteAccessError('eacces')).toBe(true);
+  });
+
+  it('EBUSY を検出する', () => {
+    expect(isWriteAccessError('EBUSY: resource busy or locked')).toBe(true);
+    expect(isWriteAccessError('ebusy')).toBe(true);
+  });
+
+  it('access is denied を検出する', () => {
+    expect(isWriteAccessError('Access is denied.')).toBe(true);
+    expect(isWriteAccessError('access is denied')).toBe(true);
+  });
+
+  it('permission denied を検出する', () => {
+    expect(isWriteAccessError('permission denied')).toBe(true);
+  });
+
+  it('being used by another process を検出する', () => {
+    expect(isWriteAccessError('The process cannot access the file because it is being used by another process')).toBe(true);
+  });
+
+  it('sharing violation を検出する', () => {
+    expect(isWriteAccessError('sharing violation')).toBe(true);
+  });
+
+  it('lock violation を検出する', () => {
+    expect(isWriteAccessError('lock violation')).toBe(true);
+  });
+
+  it('os error 32 (Windows sharing violation) を検出する', () => {
+    expect(isWriteAccessError('os error 32')).toBe(true);
+  });
+
+  it('os error 33 (Windows lock violation) を検出する', () => {
+    expect(isWriteAccessError('os error 33')).toBe(true);
+  });
+
+  it('os error 32 でも単語境界で正しく検出する (os error 320 は検出しない)', () => {
+    expect(isWriteAccessError('os error 320')).toBe(false);
+  });
+
+  it('無関係なエラーメッセージは false を返す', () => {
+    expect(isWriteAccessError('ENOENT: no such file or directory')).toBe(false);
+    expect(isWriteAccessError('network error')).toBe(false);
+    expect(isWriteAccessError('')).toBe(false);
+  });
+
+  it('大文字小文字を区別しない', () => {
+    expect(isWriteAccessError('PERMISSION DENIED')).toBe(true);
+    expect(isWriteAccessError('Sharing Violation')).toBe(true);
+  });
+});
