@@ -56,6 +56,7 @@ interface ToolbarProps {
   onRunOcrAllPages: () => void;
   onRunOcrRange: () => void;
   onRunOcrFolder: () => void;
+  onOpenBatchJob: () => void;
   onCancelOcr: () => void;
   onClearOcrCurrentPage: () => void;
   onClearOcrAllPages: () => void;
@@ -215,6 +216,13 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
                 onClick={() => { setShowOcrDropdown(false); props.onRunOcrFolder(); }}
               >
                 フォルダ内PDF
+              </button>
+              <button
+                type="button"
+                className="recent-item"
+                onClick={() => { setShowOcrDropdown(false); props.onOpenBatchJob(); }}
+              >
+                フォルダ一括処理 (高度)
               </button>
             </div>
           )}

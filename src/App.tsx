@@ -44,6 +44,7 @@ import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
 import { useRecentFiles } from "./hooks/useRecentFiles";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { usePageExtraction } from "./hooks/usePageExtraction";
+import { useBatchJob } from "./hooks/useBatchJob";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
@@ -75,6 +76,16 @@ const ConsolePanel = lazy(() =>
 // issue #197: 別名で保存ダイアログ
 const SaveDialog = lazy(() =>
   import("./components/SaveDialog").then(m => ({ default: m.SaveDialog }))
+);
+
+// #195: バッチジョブダイアログ
+const BatchJobDialog = lazy(() =>
+  import("./components/BatchJobDialog").then(m => ({ default: m.BatchJobDialog }))
+);
+
+// issue #201: 保存前 diff プレビューモーダル
+const DiffPreviewModal = lazy(() =>
+  import("./components/DiffPreviewModal").then(m => ({ default: m.DiffPreviewModal }))
 );
 
 // #200: OCR 進捗の残り時間推定表示
@@ -156,6 +167,12 @@ function App() {
   // Feature #203: First-launch onboarding tour
   const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
 
+  // issue #201: diff プレビューモーダルの状態
+  // diffPreviewSummary が非 null のときモーダルを表示し、
+  // diffPreviewResolveRef.current に格納したコールバックで確認/キャンセルを伝達する。
+  const [diffPreviewSummary, setDiffPreviewSummary] = useState<import('./utils/saveDiffSummary').SaveDiffSummary | null>(null);
+  const diffPreviewResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
+
   // --- External Hooks ---
   const { logs, showConsole, setShowConsole, clearLogs } = useConsoleLogs();
   const { isPreviewOpen, togglePreviewWindow } = usePreviewWindow();
@@ -165,6 +182,7 @@ function App() {
     ocrProgress,
     runOcrCurrentPage,
     runOcrAllPages,
+    runOcrAllPagesSilent,
     runOcrRange,
     runOcrFolder,
     cancelOcr,
@@ -186,11 +204,25 @@ function App() {
     isOcrRunningRef,
     setSaveStep,
     () => { setShowSaveDialogRef.current(true); },
+    // issue #201: diff プレビュー要求コールバック
+    (summary) => new Promise<boolean>((resolve) => {
+      diffPreviewResolveRef.current = resolve;
+      setDiffPreviewSummary(summary);
+    }),
   );
   // #102: フォルダ OCR ループ内では openPdf に bypassOcrGuard=true を立てて呼ぶ。
   // これがないと OCR 中の handleOpen ガードに引っかかってループが進まない。
   folderOpenPdfRef.current = (path: string) => handleOpen(path, { bypassOcrGuard: true });
   folderSavePdfRef.current = handleSave;
+
+  // #195: バッチジョブ
+  const [showBatchJob, setShowBatchJob] = useState(false);
+  const { currentJob: batchCurrentJob, isRunning: batchIsRunning, startJob: batchStartJob, cancelJob: batchCancelJob, resumeJob: batchResumeJob, clearJob: batchClearJob } = useBatchJob({
+    openPdf: (path) => handleOpen(path, { bypassOcrGuard: true }),
+    runOcrAllPagesSilent,
+    savePdf: handleSave,
+    showToast,
+  });
 
   const {
     pendingBackups,
@@ -709,6 +741,40 @@ function App() {
         </Suspense>
       )}
 
+      {/* #195: バッチジョブダイアログ */}
+      {showBatchJob && (
+        <Suspense fallback={null}>
+          <BatchJobDialog
+            onClose={() => setShowBatchJob(false)}
+            currentJob={batchCurrentJob}
+            isRunning={batchIsRunning}
+            onStart={batchStartJob}
+            onCancel={batchCancelJob}
+            onResume={batchResumeJob}
+            onClear={batchClearJob}
+          />
+        </Suspense>
+      )}
+
+      {/* issue #201: 保存前 diff プレビューモーダル */}
+      {diffPreviewSummary && (
+        <Suspense fallback={null}>
+          <DiffPreviewModal
+            summary={diffPreviewSummary}
+            onConfirm={() => {
+              setDiffPreviewSummary(null);
+              diffPreviewResolveRef.current?.(true);
+              diffPreviewResolveRef.current = null;
+            }}
+            onCancel={() => {
+              setDiffPreviewSummary(null);
+              diffPreviewResolveRef.current?.(false);
+              diffPreviewResolveRef.current = null;
+            }}
+          />
+        </Suspense>
+      )}
+
       {/* issue #197: 別名で保存ダイアログ */}
       {showSaveDialog && (
         <Suspense fallback={null}>
@@ -772,6 +838,7 @@ function App() {
           if (input !== null) runOcrRange(input);
         }}
         onRunOcrFolder={runOcrFolder}
+        onOpenBatchJob={() => setShowBatchJob(true)}
         onCancelOcr={cancelOcr}
         onClearOcrCurrentPage={handleClearOcrCurrentPage}
         onClearOcrAllPages={handleClearOcrAllPages}

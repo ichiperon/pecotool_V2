@@ -461,6 +461,34 @@ export function useOcrEngine(
     cancelTokenRef.current = true;
   };
 
+  /**
+   * #195: Batch job helper — run OCR on all pages without confirmation dialogs.
+   * Returns true if OCR completed without cancellation, false otherwise.
+   */
+  const runOcrAllPagesSilent = async (): Promise<boolean> => {
+    const doc = usePecoStore.getState().document;
+    if (!doc) return false;
+
+    cancelTokenRef.current = false;
+    setOcrRunning(true);
+    setOcrProgress({
+      current: 0,
+      total: doc.totalPages,
+      startedAt: performance.now(),
+      avgMsPerPage: 0,
+      estimatedRemainingMs: 0,
+    });
+
+    try {
+      await processAllPages(doc);
+    } finally {
+      setOcrRunning(false);
+      setOcrProgress(null);
+    }
+
+    return !cancelTokenRef.current;
+  };
+
   // #199: ページ範囲指定 OCR
   const runOcrRange = async (pageRangeString: string) => {
     const doc = usePecoStore.getState().document;
@@ -857,6 +885,7 @@ export function useOcrEngine(
     ocrProgress,
     runOcrCurrentPage,
     runOcrAllPages,
+    runOcrAllPagesSilent,
     runOcrRange,
     runOcrFolder,
     cancelOcr,
