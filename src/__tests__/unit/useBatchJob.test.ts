@@ -525,4 +525,140 @@ describe('useBatchJob', () => {
     // isRunning must be false after loop finishes
     expect(result.current.isRunning).toBe(false);
   });
+
+  // ── wave 6 additions ──────────────────────────────────────────────────────
+
+  it('openPdf returning false marks file as error without calling OCR', async () => {
+    const pdfFiles = ['/folder/bad.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockResolvedValue(false),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+
+    await waitFor(() => expect(result.current.currentJob?.finishedAt).toBeDefined());
+
+    const files = result.current.currentJob?.files ?? [];
+    expect(files[0].status).toBe('error');
+    expect(callbacks.runOcrAllPagesSilent).not.toHaveBeenCalled();
+  });
+
+  it('runOcrAllPagesSilent returning false marks file as error without calling save', async () => {
+    const pdfFiles = ['/folder/a.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+      runOcrAllPagesSilent: vi.fn().mockResolvedValue(false),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+
+    await waitFor(() => expect(result.current.currentJob?.finishedAt).toBeDefined());
+
+    const files = result.current.currentJob?.files ?? [];
+    expect(files[0].status).toBe('error');
+    expect(callbacks.savePdf).not.toHaveBeenCalled();
+  });
+
+  it('exportFormat=txt writes text file and records exportPath in file entry', async () => {
+    const pdfFiles = ['/folder/doc.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+    });
+
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'txt',
+        saveMode: 'overwrite',
+      });
+    });
+
+    await waitFor(() => expect(result.current.currentJob?.finishedAt).toBeDefined());
+
+    const files = result.current.currentJob?.files ?? [];
+    expect(files[0].status).toBe('done');
+    // writeTextFile should be called at least twice: once for the text export, once for the summary CSV
+    expect(vi.mocked(writeTextFile)).toHaveBeenCalled();
+    // exportPath must be set on the file entry
+    expect(files[0].exportPath).toMatch(/doc\.ocr\.txt/);
+  });
+
+  it('double startJob call while running is a no-op (isRunning guard)', async () => {
+    const pdfFiles = ['/folder/a.pdf'];
+    vi.mocked(invoke).mockResolvedValue(pdfFiles);
+
+    let resolveOcr!: (v: boolean) => void;
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+      runOcrAllPagesSilent: vi.fn().mockImplementation(
+        () => new Promise<boolean>((res) => { resolveOcr = res; }),
+      ),
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    let firstJobPromise: Promise<void>;
+    act(() => {
+      firstJobPromise = result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+
+    await waitFor(() => expect(callbacks.runOcrAllPagesSilent).toHaveBeenCalled());
+
+    // While first job is running, try to start a second job
+    const invokeCallsBefore = vi.mocked(invoke).mock.calls.length;
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+    // Second startJob must NOT have called invoke (it returned early)
+    expect(vi.mocked(invoke).mock.calls.length).toBe(invokeCallsBefore);
+
+    // Finish first job
+    await act(async () => {
+      resolveOcr(true);
+      await firstJobPromise!;
+    });
+  });
 });
