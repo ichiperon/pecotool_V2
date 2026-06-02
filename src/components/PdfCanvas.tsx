@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   usePecoStore,
   selectZoom,
@@ -7,6 +7,7 @@ import {
   selectSelectedIds,
   selectIsDrawingMode,
   selectIsSplitMode,
+  selectIsCurveMode,
   selectCurrentPageTextBlocks,
   selectDocumentFilePath,
   selectDocumentTotalPages,
@@ -17,7 +18,8 @@ import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
 import { useBlockDragResize } from "../hooks/useBlockDragResize";
 import { isCurveDefinition } from "../utils/curveDefinition";
 import { layoutTextOnCurveViewport } from "../utils/curveGlyphLayout";
-import type { TextBlock, BoundingBox } from "../types";
+import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
+import type { TextBlock, BoundingBox, CurveDefinition } from "../types";
 
 interface PdfCanvasProps {
   pageIndex: number;
@@ -211,6 +213,7 @@ export function PdfCanvas({
   const selectedIds = usePecoStore(selectSelectedIds);
   const isDrawingMode = usePecoStore(selectIsDrawingMode);
   const isSplitMode = usePecoStore(selectIsSplitMode);
+  const isCurveMode = usePecoStore(selectIsCurveMode);
   const updatePageData = usePecoStore((s) => s.updatePageData);
   const toggleDrawingMode = usePecoStore((s) => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore((s) => s.toggleSplitMode);
@@ -235,6 +238,12 @@ export function PdfCanvas({
   // 常に最新 state を store から直接読み出すことで、書き込み直後の after を
   // 正しく取得できるようにする。
   const getPageData = () => usePecoStore.getState().document?.pages.get(pageIndex);
+
+  // ── Curve mode state (issue #189) ─────────────────────────────
+  // 3 点クリックで arc を作成する際に収集する中間点（viewport 座標 / zoom 適用前）
+  const [curveClickPoints, setCurveClickPoints] = useState<Array<{ x: number; y: number }>>([]);
+  // handle drag: どの handle を掴んでいるか (0=始点 1=中点 2=終点)、null=非ドラッグ
+  const curveHandleDragRef = useRef<{ handleIndex: number; blockId: string } | null>(null);
 
   const { pdfPage, loadError, setLoadError, retry } = usePdfRendering({
     pdfCanvasRef,
@@ -281,6 +290,48 @@ export function PdfCanvas({
       y: e.clientY - rect.top,
     };
   };
+
+  // ── Curve mode helpers (issue #189) ────────────────────────────
+
+  /**
+   * canvas 座標 (zoom 適用済み) → viewport 座標 (zoom 等倍) に戻す。
+   * curveDefinition / arcFromThreePoints は zoom 非適用の viewport 座標で扱う。
+   */
+  const canvasToPdf = useCallback((pos: { x: number; y: number }) => {
+    const scale = zoom / 100;
+    return { x: pos.x / scale, y: pos.y / scale };
+  }, [zoom]);
+
+  /**
+   * 選択中 BB の arc handle に pos が当たっているか確認し、
+   * hit した handle index を返す。hit なし → -1。
+   */
+  const hitTestCurveHandle = useCallback((pos: { x: number; y: number }): { blockId: string; handleIndex: number } | null => {
+    if (!isCurveMode) return null;
+    const scale = zoom / 100;
+    const HIT_RADIUS = 10; // px
+
+    for (const id of selectedIds) {
+      const block = currentTextBlocksById.get(id);
+      if (!block?.curve || !isCurveDefinition(block.curve)) continue;
+      const curve = block.curve;
+
+      const handles: Array<{ x: number; y: number }> =
+        curve.type === "arc"
+          ? arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle)
+          : curve.points;
+
+      for (let hi = 0; hi < handles.length; hi++) {
+        const hx = handles[hi].x * scale;
+        const hy = handles[hi].y * scale;
+        const dist = Math.sqrt((pos.x - hx) ** 2 + (pos.y - hy) ** 2);
+        if (dist <= HIT_RADIUS) {
+          return { blockId: id, handleIndex: hi };
+        }
+      }
+    }
+    return null;
+  }, [isCurveMode, zoom, selectedIds, currentTextBlocksById]);
 
   // 選択されたブロックへの自動スクロール。
   // 依存に `currentPage` (PageData 全体) を入れると updatePageData による
@@ -478,8 +529,7 @@ export function PdfCanvas({
             }
           }
 
-          // curve 付き block: baseline path を黄色 stroke で可視化 (Phase 4)
-          // handle drag は Phase 5 担当のため本 phase では stroke のみ
+          // curve 付き block: baseline path を黄色 stroke で可視化
           if (block.curve && isCurveDefinition(block.curve)) {
             const curve = block.curve;
             context.save();
@@ -507,6 +557,55 @@ export function PdfCanvas({
             }
             context.stroke();
             context.setLineDash([]);
+            context.restore();
+
+            // curve mode ON: arc/polyline の handle を表示 (issue #189)
+            if (isCurveMode) {
+              const handles: Array<{ x: number; y: number }> =
+                curve.type === "arc"
+                  ? arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle)
+                  : curve.points;
+
+              const handleSize = 8;
+              handles.forEach((hp, hi) => {
+                const hx = hp.x * scale;
+                const hy = hp.y * scale;
+                context.save();
+                context.fillStyle = hi === 1 ? "rgba(255, 180, 0, 1)" : "rgba(255, 255, 255, 1)";
+                context.strokeStyle = "rgba(255, 140, 0, 1)";
+                context.lineWidth = 2;
+                context.beginPath();
+                context.arc(hx, hy, handleSize / 2, 0, Math.PI * 2);
+                context.fill();
+                context.stroke();
+                context.restore();
+              });
+            }
+          }
+
+          // curve mode ON でまだ curve がない block: クリック収集中の preview 点を描画
+          if (isCurveMode && !block.curve && curveClickPoints.length > 0) {
+            context.save();
+            context.fillStyle = "rgba(255, 140, 0, 0.9)";
+            context.strokeStyle = "rgba(200, 100, 0, 1)";
+            context.lineWidth = 1;
+            for (const cp of curveClickPoints) {
+              context.beginPath();
+              context.arc(cp.x * scale, cp.y * scale, 5, 0, Math.PI * 2);
+              context.fill();
+              context.stroke();
+            }
+            // 収集済み点を線で繋いで進捗を可視化
+            if (curveClickPoints.length >= 2) {
+              context.beginPath();
+              context.setLineDash([3, 3]);
+              context.moveTo(curveClickPoints[0].x * scale, curveClickPoints[0].y * scale);
+              for (let ci = 1; ci < curveClickPoints.length; ci++) {
+                context.lineTo(curveClickPoints[ci].x * scale, curveClickPoints[ci].y * scale);
+              }
+              context.stroke();
+              context.setLineDash([]);
+            }
             context.restore();
           }
         }
@@ -598,6 +697,8 @@ export function PdfCanvas({
     drag.isAltDragging,
     drag.altDragStart,
     drag.altDragEnd,
+    isCurveMode,
+    curveClickPoints,
     // issue #172: dragPreviewBboxes は ref 経由で読み、購読 effect で
     // RAF redraw を直接スケジュールする。ここでは依存に含めないことで
     // BB 500+ 環境での毎フレーム再 render を回避する。
@@ -661,7 +762,7 @@ export function PdfCanvas({
     if (disableDrawing) return;
     const pos = getMousePos(e);
 
-    if (e.altKey && !isDrawingMode && !isSplitMode) {
+    if (e.altKey && !isDrawingMode && !isSplitMode && !isCurveMode) {
       drag.beginAltDrag(pos);
       return;
     }
@@ -673,6 +774,46 @@ export function PdfCanvas({
 
     if (isSplitMode) {
       drawing.trySplit(pos);
+      return;
+    }
+
+    // curve mode: handle drag 開始 or 3 点クリック収集
+    if (isCurveMode && selectedIds.size === 1) {
+      const selectedId = Array.from(selectedIds)[0];
+
+      // handle hit-test (既存 curve がある場合)
+      const hit = hitTestCurveHandle(pos);
+      if (hit) {
+        curveHandleDragRef.current = { handleIndex: hit.handleIndex, blockId: hit.blockId };
+        return;
+      }
+
+      // 3 点クリック収集 (arc 作成)
+      const pdfPos = canvasToPdf(pos);
+      const newPoints = [...curveClickPoints, pdfPos];
+      if (newPoints.length < 3) {
+        setCurveClickPoints(newPoints);
+        return;
+      }
+
+      // 3 点目: arc を算出して TextBlock に set
+      const [p1, p2, p3] = newPoints;
+      const arc = arcFromThreePoints(p1, p2, p3);
+      if (!arc) {
+        // 3 点が直線上 → 収集をリセットしてトースト (後で追加可能)
+        setCurveClickPoints([]);
+        return;
+      }
+
+      // undoable で curve を書き込む
+      const page = getPageData();
+      if (page) {
+        const newBlocks = page.textBlocks.map((b) =>
+          b.id === selectedId ? { ...b, curve: arc as CurveDefinition, isDirty: true } : b,
+        );
+        updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
+      }
+      setCurveClickPoints([]);
       return;
     }
 
@@ -703,6 +844,39 @@ export function PdfCanvas({
       return;
     }
 
+    // curve handle drag 中: handle 位置を更新して curve を再算出
+    if (curveHandleDragRef.current) {
+      const { blockId, handleIndex } = curveHandleDragRef.current;
+      const block = currentTextBlocksById.get(blockId);
+      if (block?.curve && isCurveDefinition(block.curve)) {
+        const pdfPos = canvasToPdf(pos);
+        const curve = block.curve;
+
+        let newCurve: CurveDefinition | null = null;
+        if (curve.type === "arc") {
+          // 3 ハンドル位置を取得して移動先を反映
+          const handles = arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle);
+          handles[handleIndex] = pdfPos;
+          newCurve = arcFromThreePoints(handles[0], handles[1], handles[2]);
+        } else if (curve.type === "polyline") {
+          const newPoints = curve.points.map((p, i) => (i === handleIndex ? pdfPos : p));
+          newCurve = { type: "polyline", points: newPoints };
+        }
+
+        if (newCurve) {
+          const page = getPageData();
+          if (page) {
+            const newBlocks = page.textBlocks.map((b) =>
+              b.id === blockId ? { ...b, curve: newCurve as CurveDefinition, isDirty: true } : b,
+            );
+            // drag 中は undoable=false で頻度を抑える。mouseUp で確定
+            updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
+          }
+        }
+      }
+      return;
+    }
+
     if (drag.updateDragResize(pos)) {
       return;
     }
@@ -711,6 +885,14 @@ export function PdfCanvas({
     if (mouseMoveRafRef.current) return;
     mouseMoveRafRef.current = requestAnimationFrame(() => {
       mouseMoveRafRef.current = null;
+      // curve mode 中に handle の上ではポインターカーソルを出す
+      if (isCurveMode) {
+        const hit = hitTestCurveHandle(pos);
+        if (overlayCanvasRef.current) {
+          overlayCanvasRef.current.style.cursor = hit ? "pointer" : "crosshair";
+        }
+        return;
+      }
       const hoverCursor = drag.getHoverCursor(pos, { isDrawingMode, isSplitMode });
       if (overlayCanvasRef.current) overlayCanvasRef.current.style.cursor = hoverCursor;
     });
@@ -718,6 +900,25 @@ export function PdfCanvas({
 
   const handleMouseUp = () => {
     if (disableDrawing) return;
+
+    // curve handle drag 確定: 最終位置を undoable で書き込む
+    if (curveHandleDragRef.current) {
+      const { blockId } = curveHandleDragRef.current;
+      curveHandleDragRef.current = null;
+      // mouseMove 中は undoable=false で書き込んでいるため、mouseUp 時点の
+      // 最新 curve を undoable=true で再書き込みして undo スタックに積む。
+      const page = getPageData();
+      if (page) {
+        const block = page.textBlocks.find((b) => b.id === blockId);
+        if (block) {
+          const newBlocks = page.textBlocks.map((b) =>
+            b.id === blockId ? { ...b, isDirty: true } : b,
+          );
+          updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
+        }
+      }
+      return;
+    }
 
     if (drag.isAltDragging) {
       drag.finishAltDrag();
@@ -735,7 +936,7 @@ export function PdfCanvas({
   return (
     <div
       ref={wrapperRef}
-      className={`canvas-wrapper ${isDrawingMode ? "drawing-mode" : ""}`}
+      className={`canvas-wrapper ${isDrawingMode ? "drawing-mode" : ""} ${isCurveMode ? "curve-mode" : ""}`}
       style={{
         position: "relative",
         display: "inline-block",
@@ -764,7 +965,9 @@ export function PdfCanvas({
           left: 0,
           zIndex: 2,
           cursor:
-            isDrawingMode || isSplitMode
+            isCurveMode
+              ? "crosshair"
+              : isDrawingMode || isSplitMode
               ? "crosshair"
               : drag.draggedId
               ? drag.dragMode === "move"

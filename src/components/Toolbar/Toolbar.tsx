@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   RotateCcw, RotateCw, ZoomIn, ZoomOut, Maximize,
   Plus, Group, Trash2, Eye, Scissors, ClipboardList, Eraser,
-  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace, SquareCheckBig
+  ChevronDown, Settings, RemoveFormatting, ScanText, X, Loader2, FileX, Replace, SquareCheckBig, Spline
 } from "lucide-react";
 import { PageData } from '../../types';
 
@@ -16,6 +16,7 @@ interface ToolbarProps {
   isAutoFit: boolean;
   isDrawingMode: boolean;
   isSplitMode: boolean;
+  isCurveMode: boolean;
   selectedIdsCount: number;
   showOcr: boolean;
   ocrOpacity: number;
@@ -38,6 +39,7 @@ interface ToolbarProps {
   onFit: () => void;
   onToggleDrawing: () => void;
   onToggleSplit: () => void;
+  onToggleCurve: () => void;
   onGroup: () => void;
   onDeduplicate: () => void;
   onSelectAllText: () => void;
@@ -96,6 +98,11 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
       <div className="toolbar-group">
         <button onClick={props.onToggleDrawing} title="BB追加" className={props.isDrawingMode ? "active" : ""} disabled={!props.isFileLoaded}><Plus size={18} /><span>追加</span></button>
         <button onClick={props.onToggleSplit} title="BB分割" className={props.isSplitMode ? "active" : ""} disabled={!props.isFileLoaded}><Scissors size={18} /><span>分割</span></button>
+        {props.isCurveMode ? (
+          <button type="button" onClick={props.onToggleCurve} title="湾曲モード" className="active" aria-pressed="true" disabled={!props.isFileLoaded}><Spline size={18} /><span>湾曲</span></button>
+        ) : (
+          <button type="button" onClick={props.onToggleCurve} title="湾曲モード" aria-pressed="false" disabled={!props.isFileLoaded}><Spline size={18} /><span>湾曲</span></button>
+        )}
         <button onClick={props.onGroup} title="グループ化" disabled={props.selectedIdsCount < 2}><Group size={18} /><span>グループ化</span></button>
         <button onClick={props.onDeduplicate} title="重複削除"><Eraser size={18} /><span>重複削除</span></button>
         <button onClick={props.onSelectAllText} title="テキスト全選択" disabled={!props.currentPage || props.currentPage.textBlocks.length === 0}><SquareCheckBig size={18} /><span>全選択</span></button>

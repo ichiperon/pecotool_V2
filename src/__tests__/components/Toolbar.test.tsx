@@ -27,6 +27,7 @@ vi.mock('lucide-react', () => {
     FileX: s('FileX'),
     SquareCheckBig: s('SquareCheckBig'),
     Replace: s('Replace'),
+    Spline: s('Spline'),
   }
 })
 
@@ -52,6 +53,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> =
     isAutoFit: false,
     isDrawingMode: false,
     isSplitMode: false,
+    isCurveMode: false,
     selectedIdsCount: 0,
     showOcr: false,
     ocrOpacity: 0.5,
@@ -67,6 +69,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Toolbar>> =
     onFit: vi.fn(),
     onToggleDrawing: vi.fn(),
     onToggleSplit: vi.fn(),
+    onToggleCurve: vi.fn(),
     onGroup: vi.fn(),
     onDeduplicate: vi.fn(),
     onSelectAllText: vi.fn(),
@@ -214,6 +217,34 @@ describe('Toolbar', () => {
   it('C-TB-20 (#103): isFileLoaded=false でも (OCR 実行中) Replace は disabled (既存仕様維持)', () => {
     renderToolbar({ isFileLoaded: false, isOcrRunning: true, ocrProgress: { current: 1, total: 5 } })
     expect(getButton('検索と置換 (OCR実行中は無効)').disabled).toBe(true)
+  })
+
+  // ── issue #189: 湾曲モードボタン ─────────────────────────────
+  it('C-TB-22 (#189): 湾曲モードボタンが存在し isCurveMode=false で aria-pressed="false"', () => {
+    renderToolbar({ isCurveMode: false })
+    const btn = getButton('湾曲モード')
+    expect(btn).toBeTruthy()
+    expect(btn.getAttribute('aria-pressed')).toBe('false')
+    expect(btn.className).not.toContain('active')
+  })
+
+  it('C-TB-23 (#189): isCurveMode=true のとき湾曲ボタンが active + aria-pressed="true"', () => {
+    renderToolbar({ isCurveMode: true })
+    const btn = getButton('湾曲モード')
+    expect(btn.getAttribute('aria-pressed')).toBe('true')
+    expect(btn.className).toContain('active')
+  })
+
+  it('C-TB-24 (#189): 湾曲ボタンクリックで onToggleCurve が呼ばれる', () => {
+    const onToggleCurve = vi.fn()
+    renderToolbar({ onToggleCurve })
+    fireEvent.click(getButton('湾曲モード'))
+    expect(onToggleCurve).toHaveBeenCalledTimes(1)
+  })
+
+  it('C-TB-25 (#189): isFileLoaded=false のとき湾曲ボタンは disabled', () => {
+    renderToolbar({ isFileLoaded: false })
+    expect(getButton('湾曲モード').disabled).toBe(true)
   })
 
   it('C-TB-21: text select all button calls handler when page has text', () => {

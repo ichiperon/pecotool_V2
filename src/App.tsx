@@ -8,6 +8,7 @@ import {
   selectSelectedIds,
   selectIsDrawingMode,
   selectIsSplitMode,
+  selectIsCurveMode,
   selectIsDirty,
   selectUndoStack,
   selectRedoStack,
@@ -75,6 +76,7 @@ function App() {
   const ocrOpacity = usePecoStore(selectOcrOpacity);
   const isDrawingMode = usePecoStore(selectIsDrawingMode);
   const isSplitMode = usePecoStore(selectIsSplitMode);
+  const isCurveMode = usePecoStore(selectIsCurveMode);
   const isDirty = usePecoStore(selectIsDirty);
   const undoStack = usePecoStore(selectUndoStack);
   const redoStack = usePecoStore(selectRedoStack);
@@ -86,6 +88,7 @@ function App() {
   const redo = usePecoStore(s => s.redo);
   const toggleDrawingMode = usePecoStore(s => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore(s => s.toggleSplitMode);
+  const toggleCurveMode = usePecoStore(s => s.toggleCurveMode);
   const copySelected = usePecoStore(s => s.copySelected);
   const pasteClipboard = usePecoStore(s => s.pasteClipboard);
   const clearOcrCurrentPage = usePecoStore(s => s.clearOcrCurrentPage);
@@ -428,6 +431,8 @@ function App() {
       }
       setShowReplace(true);
     },
+    isCurveMode,
+    toggleCurveMode,
   });
 
   // issue #163: OCR 実行中の Esc キーで cancelOcr。
@@ -611,14 +616,14 @@ function App() {
       <Toolbar
         isFileLoaded={isFileLoaded} currentPage={currentPage ?? undefined} isDirty={isDirty}
         undoStackLength={undoStack.length} redoStackLength={redoStack.length}
-        zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode}
+        zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode} isCurveMode={isCurveMode}
         selectedIdsCount={selectedIds.size} showOcr={showOcr} ocrOpacity={ocrOpacity}
         reorderThreshold={reorderThreshold} isPreviewOpen={isPreviewOpen}
         showSettingsDropdown={showSettingsDropdown}
         isOcrRunning={isOcrRunning} ocrProgress={ocrProgress}
         onUndo={undo} onRedo={redo} onZoomIn={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }}
         onZoomOut={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom - 10)); }}
-        onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode}
+        onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode} onToggleCurve={toggleCurveMode}
         onGroup={handleGroup} onDeduplicate={handleDeduplicate} onSelectAllText={handleSelectAllText} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
         onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity}
         onSetReorderThreshold={(val) => { setReorderThreshold(writeReorderThreshold(val)); }}

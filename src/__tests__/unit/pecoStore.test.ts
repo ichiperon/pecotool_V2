@@ -1721,4 +1721,54 @@ describe('pecoStore', () => {
       expect(blocks[0].text).toBe('[abc]')
     })
   })
+
+  // ── issue #189: toggleCurveMode ───────────────────────────────
+  describe('issue #189: toggleCurveMode', () => {
+    it('U-CM-01: 初期状態では isCurveMode=false', () => {
+      expect(usePecoStore.getState().isCurveMode).toBe(false)
+    })
+
+    it('U-CM-02: toggleCurveMode で ON/OFF が反転する', () => {
+      usePecoStore.getState().toggleCurveMode()
+      expect(usePecoStore.getState().isCurveMode).toBe(true)
+
+      usePecoStore.getState().toggleCurveMode()
+      expect(usePecoStore.getState().isCurveMode).toBe(false)
+    })
+
+    it('U-CM-03: curveMode ON 時は isDrawingMode / isSplitMode が OFF になる', () => {
+      usePecoStore.setState({ isDrawingMode: true, isSplitMode: true })
+      usePecoStore.getState().toggleCurveMode()
+
+      const s = usePecoStore.getState()
+      expect(s.isCurveMode).toBe(true)
+      expect(s.isDrawingMode).toBe(false)
+      expect(s.isSplitMode).toBe(false)
+    })
+
+    it('U-CM-04: toggleDrawingMode ON 時は isCurveMode が OFF になる', () => {
+      usePecoStore.setState({ isCurveMode: true })
+      usePecoStore.getState().toggleDrawingMode()
+
+      const s = usePecoStore.getState()
+      expect(s.isDrawingMode).toBe(true)
+      expect(s.isCurveMode).toBe(false)
+    })
+
+    it('U-CM-05: toggleSplitMode ON 時は isCurveMode が OFF になる', () => {
+      usePecoStore.setState({ isCurveMode: true })
+      usePecoStore.getState().toggleSplitMode()
+
+      const s = usePecoStore.getState()
+      expect(s.isSplitMode).toBe(true)
+      expect(s.isCurveMode).toBe(false)
+    })
+
+    it('U-CM-06: setDocument で isCurveMode がリセットされる', () => {
+      usePecoStore.setState({ isCurveMode: true })
+      usePecoStore.getState().setDocument(makeDoc())
+
+      expect(usePecoStore.getState().isCurveMode).toBe(false)
+    })
+  })
 })

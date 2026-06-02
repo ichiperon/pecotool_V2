@@ -62,6 +62,7 @@ interface PecoState {
   showTextPreview: boolean;
   isDrawingMode: boolean;
   isSplitMode: boolean;
+  isCurveMode: boolean;
   selectedIds: Set<string>;
   lastSelectedId: string | null;
   clipboard: TextBlock[];
@@ -112,6 +113,7 @@ interface PecoState {
   toggleTextPreview: () => void;
   toggleDrawingMode: () => void;
   toggleSplitMode: () => void;
+  toggleCurveMode: () => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
   resetDirty: (savedPageSnapshots?: Map<number, PageData>) => void;
 
@@ -169,6 +171,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   showTextPreview: false,
   isDrawingMode: false,
   isSplitMode: false,
+  isCurveMode: false,
   selectedIds: new Set(),
   lastSelectedId: null,
   clipboard: [],
@@ -209,6 +212,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       showTextPreview: false,
       isDrawingMode: false,
       isSplitMode: false,
+      isCurveMode: false,
       selectedIds: new Set(),
       lastSelectedId: null,
       clipboard: [],
@@ -286,9 +290,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
   toggleTextPreview: () => set((state) => ({ showTextPreview: !state.showTextPreview })),
 
-  toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode, isSplitMode: false })),
-  
-  toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false })),
+  toggleDrawingMode: () => set((state) => ({ isDrawingMode: !state.isDrawingMode, isSplitMode: false, isCurveMode: false })),
+
+  toggleSplitMode: () => set((state) => ({ isSplitMode: !state.isSplitMode, isDrawingMode: false, isCurveMode: false })),
+
+  toggleCurveMode: () => set((state) => ({ isCurveMode: !state.isCurveMode, isDrawingMode: false, isSplitMode: false })),
 
   updatePageData: (pageIndex, data, undoable = true) => {
     if (perf.enabled) perf.mark('edit.storeEnter', { page: pageIndex, undoable, keys: Object.keys(data).join('|') });
@@ -831,6 +837,7 @@ export const selectOcrOpacity = (s: PecoState) => s.ocrOpacity;
 export const selectSelectedIds = (s: PecoState) => s.selectedIds;
 export const selectIsDrawingMode = (s: PecoState) => s.isDrawingMode;
 export const selectIsSplitMode = (s: PecoState) => s.isSplitMode;
+export const selectIsCurveMode = (s: PecoState) => s.isCurveMode;
 export const selectIsDirty = (s: PecoState) => s.isDirty;
 export const selectUndoStack = (s: PecoState) => s.undoStack;
 export const selectRedoStack = (s: PecoState) => s.redoStack;

@@ -28,6 +28,9 @@ interface ShortcutActions {
    * 編集領域へのキー伝播を確実に防げる)。
    */
   isOcrRunning?: boolean;
+  /** issue #189: curve モード ON のとき Esc で解除する */
+  isCurveMode?: boolean;
+  toggleCurveMode?: () => void;
 }
 
 export function useKeyboardShortcuts(actions: ShortcutActions) {
@@ -131,6 +134,9 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'g' && !isFormEditing && (!isContentEditing || isOcrCardContent)) {
         e.preventDefault();
         ac.handleGroup();
+      } else if (e.key === 'Escape' && ac.isCurveMode && !isEditing) {
+        e.preventDefault();
+        ac.toggleCurveMode?.();
       }
     };
     window.addEventListener('keydown', handler);
