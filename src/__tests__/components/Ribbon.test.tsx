@@ -273,4 +273,70 @@ describe('Ribbon', () => {
     expect(editTab.getAttribute('aria-selected')).toBe('false')
   })
 
+  // ── Phase 4: #277 Alt accelerator - title tooltips ───────────
+  it('C-RB-21: ファイルタブに title="ファイル (Alt+F)" が付いている', () => {
+    renderRibbon()
+    const fileTab = screen.getByText('ファイル').closest('button')!
+    expect(fileTab.getAttribute('title')).toBe('ファイル (Alt+F)')
+  })
+
+  it('C-RB-22: 各タブに Alt+key ヒントの title が付いている', () => {
+    renderRibbon()
+    expect(screen.getByText('編集').closest('button')!.getAttribute('title')).toBe('編集 (Alt+E)')
+    expect(screen.getByText('OCR').closest('button')!.getAttribute('title')).toBe('OCR (Alt+O)')
+    expect(screen.getByText('表示').closest('button')!.getAttribute('title')).toBe('表示 (Alt+V)')
+    expect(screen.getByText('設定').closest('button')!.getAttribute('title')).toBe('設定 (Alt+S)')
+    expect(screen.getByText('ヘルプ').closest('button')!.getAttribute('title')).toBe('ヘルプ (Alt+H)')
+  })
+
+  // ── Phase 4: #277 Alt accelerator keyboard shortcuts ─────────
+  it('C-RB-23: Alt+E でEditタブに切り替わる', () => {
+    renderRibbon()
+    fireEvent.keyDown(window, { key: 'e', altKey: true })
+    const editTab = screen.getByText('編集').closest('button')!
+    expect(editTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
+
+  it('C-RB-24: Alt+O でOCRタブに切り替わる', () => {
+    renderRibbon()
+    fireEvent.keyDown(window, { key: 'o', altKey: true })
+    const ocrTab = screen.getByText('OCR').closest('button')!
+    expect(ocrTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
+
+  it('C-RB-25: Alt+V でViewタブに切り替わる', () => {
+    renderRibbon()
+    fireEvent.keyDown(window, { key: 'v', altKey: true })
+    const viewTab = screen.getByText('表示').closest('button')!
+    expect(viewTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
+
+  it('C-RB-26: Alt+S でSettingsタブに切り替わる', () => {
+    renderRibbon()
+    fireEvent.keyDown(window, { key: 's', altKey: true })
+    const settingsTab = screen.getByText('設定').closest('button')!
+    expect(settingsTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
+
+  it('C-RB-27: Alt+H でHelpタブに切り替わる', () => {
+    renderRibbon()
+    fireEvent.keyDown(window, { key: 'h', altKey: true })
+    const helpTab = screen.getByText('ヘルプ').closest('button')!
+    expect(helpTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
+
+  it('C-RB-28: Alt+F でFileタブに切り替わる (別タブからの戻り)', () => {
+    renderRibbon()
+    fireEvent.keyDown(window, { key: 'e', altKey: true })
+    fireEvent.keyDown(window, { key: 'f', altKey: true })
+    const fileTab = screen.getByText('ファイル').closest('button')!
+    expect(fileTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
+
+  it('C-RB-29: Alt なしの単独キーはタブ切り替えに影響しない', () => {
+    renderRibbon()
+    fireEvent.keyDown(window, { key: 'e', altKey: false })
+    const fileTab = screen.getByText('ファイル').closest('button')!
+    expect(fileTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
 })

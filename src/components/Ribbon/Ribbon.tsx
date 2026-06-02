@@ -114,6 +114,28 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!e.altKey) return;
+      const keyMap: Record<string, TabKey> = {
+        f: 'file',
+        e: 'edit',
+        o: 'ocr',
+        v: 'view',
+        s: 'settings',
+        h: 'help',
+      };
+      const tab = keyMap[e.key.toLowerCase()];
+      if (tab) {
+        e.preventDefault();
+        setActiveTab(tab);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   return (
     <div
       ref={ribbonRef}
@@ -126,6 +148,7 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           id="file"
           active={activeTab === 'file'}
           onClick={() => setActiveTab('file')}
+          title="ファイル (Alt+F)"
           data-tour="menubar-file"
         >
           ファイル
@@ -134,6 +157,7 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           id="edit"
           active={activeTab === 'edit'}
           onClick={() => setActiveTab('edit')}
+          title="編集 (Alt+E)"
         >
           編集
         </RibbonTab>
@@ -141,6 +165,7 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           id="ocr"
           active={activeTab === 'ocr'}
           onClick={() => setActiveTab('ocr')}
+          title="OCR (Alt+O)"
         >
           OCR
         </RibbonTab>
@@ -148,6 +173,7 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           id="view"
           active={activeTab === 'view'}
           onClick={() => setActiveTab('view')}
+          title="表示 (Alt+V)"
         >
           表示
         </RibbonTab>
@@ -155,6 +181,7 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           id="settings"
           active={activeTab === 'settings'}
           onClick={() => setActiveTab('settings')}
+          title="設定 (Alt+S)"
         >
           設定
         </RibbonTab>
@@ -162,6 +189,7 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           id="help"
           active={activeTab === 'help'}
           onClick={() => setActiveTab('help')}
+          title="ヘルプ (Alt+H)"
           data-tour="menubar-help"
         >
           ヘルプ
