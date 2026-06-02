@@ -36,15 +36,16 @@ export const FileTab: React.FC<FileTabProps> = (props) => {
   return (
     <>
       <RibbonGroup title="開く/保存">
-        <RibbonButton onClick={() => props.onOpen()} title="開く (Ctrl+O)">
-          開く
+        <RibbonButton onClick={() => props.onOpen()} title="開く (Ctrl+O)" size="large">
+          <span>開く</span>
         </RibbonButton>
         <RibbonButton
           onClick={props.onSave}
           disabled={!canSave}
           title="保存 (Ctrl+S)"
+          size="large"
         >
-          保存
+          <span>保存</span>
         </RibbonButton>
         <RibbonButton
           onClick={props.onSaveAs}

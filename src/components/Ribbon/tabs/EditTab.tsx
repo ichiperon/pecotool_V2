@@ -38,15 +38,17 @@ export const EditTab: React.FC<EditTabProps> = (props) => {
           onClick={props.onUndo}
           disabled={props.undoStackLength === 0}
           title="元に戻す (Ctrl+Z)"
+          size="large"
         >
-          <RotateCcw size={14} /><span>Undo</span>
+          <RotateCcw /><span>Undo</span>
         </RibbonButton>
         <RibbonButton
           onClick={props.onRedo}
           disabled={props.redoStackLength === 0}
           title="やり直し (Ctrl+Y)"
+          size="large"
         >
-          <RotateCw size={14} /><span>Redo</span>
+          <RotateCw /><span>Redo</span>
         </RibbonButton>
       </RibbonGroup>
 

@@ -25,8 +25,8 @@ export const HelpTab: React.FC<HelpTabProps> = (props) => {
       </RibbonGroup>
 
       <RibbonGroup title="情報">
-        <RibbonButton onClick={props.onShowVersion} title="バージョン情報">
-          バージョン情報
+        <RibbonButton onClick={props.onShowVersion} title="バージョン情報" size="large">
+          <span>バージョン情報</span>
         </RibbonButton>
       </RibbonGroup>
     </>

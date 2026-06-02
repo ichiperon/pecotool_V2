@@ -14,8 +14,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = (props) => {
         <RibbonButton onClick={props.onOpenLogFolder} title="ログフォルダを開く">
           ログフォルダ
         </RibbonButton>
-        <RibbonButton onClick={props.onCheckUpdate} title="アップデート確認">
-          アップデート確認
+        <RibbonButton onClick={props.onCheckUpdate} title="アップデート確認" size="large">
+          <span>アップデート確認</span>
         </RibbonButton>
       </RibbonGroup>
     </>

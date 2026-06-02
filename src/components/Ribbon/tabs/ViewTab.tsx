@@ -26,18 +26,19 @@ export const ViewTab: React.FC<ViewTabProps> = (props) => {
   return (
     <>
       <RibbonGroup title="ズーム">
-        <RibbonButton onClick={props.onZoomIn} title="拡大">
-          <ZoomIn size={14} /><span>拡大</span>
+        <RibbonButton onClick={props.onZoomIn} title="拡大" size="large">
+          <ZoomIn /><span>拡大</span>
         </RibbonButton>
-        <RibbonButton onClick={props.onZoomOut} title="縮小">
-          <ZoomOut size={14} /><span>縮小</span>
+        <RibbonButton onClick={props.onZoomOut} title="縮小" size="large">
+          <ZoomOut /><span>縮小</span>
         </RibbonButton>
         <RibbonButton
           onClick={props.onFit}
           className={props.isAutoFit ? 'active' : ''}
           title="フィット (Ctrl+0)"
+          size="large"
         >
-          <Maximize size={14} /><span>フィット</span>
+          <Maximize /><span>フィット</span>
         </RibbonButton>
       </RibbonGroup>
 

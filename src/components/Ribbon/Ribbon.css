@@ -90,6 +90,45 @@
   transition: background 0.1s, border-color 0.1s;
 }
 
+/* Large button: icon 24px top + label below, height 56px */
+.ribbon-btn.ribbon-button--large {
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0;
+  padding: 4px 8px;
+  height: 56px;
+  font-size: 10px;
+}
+
+.ribbon-btn.ribbon-button--large > svg {
+  width: 24px;
+  height: 24px;
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+
+.ribbon-btn.ribbon-button--large > span {
+  line-height: 1.2;
+  text-align: center;
+}
+
+/* Small button: icon 16px left + label right, height 28px */
+.ribbon-btn.ribbon-button--small {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  height: 28px;
+  font-size: 12px;
+}
+
+.ribbon-btn.ribbon-button--small > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 .ribbon-btn:hover:not(:disabled) {
   background: var(--color-surface-hover, #2d3139);
   border-color: var(--color-border-subtle, #374151);
@@ -182,4 +221,32 @@
   color: var(--color-text, #e2e8f0);
   min-width: 32px;
   text-align: right;
+}
+
+/* ── Responsive collapse: compact (< 900px) ─────────────────────────── */
+/* Hide button text labels, keep icons; tooltips via title attribute */
+.ribbon--compact .ribbon-btn-label {
+  display: none;
+}
+
+.ribbon--compact .ribbon-btn {
+  padding: 3px 5px;
+}
+
+/* ── Responsive collapse: icon-only (< 700px) ───────────────────────── */
+/* Also hide group titles; only group separator borders remain */
+.ribbon--icon-only .ribbon-btn-label {
+  display: none;
+}
+
+.ribbon--icon-only .ribbon-btn {
+  padding: 3px 5px;
+}
+
+.ribbon--icon-only .ribbon-group-title {
+  display: none;
+}
+
+.ribbon--icon-only .ribbon-group {
+  padding-bottom: 2px;
 }

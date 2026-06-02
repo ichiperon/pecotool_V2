@@ -59,13 +59,13 @@ export const OcrTab: React.FC<OcrTabProps> = (props) => {
             disabled={props.isOcrRunning}
             title="OCR実行"
             data-tour="toolbar-ocr"
+            size="large"
           >
             {props.isOcrRunning
-              ? <Loader2 size={14} style={{ marginRight: 4, animation: 'spin 1s linear infinite' }} />
-              : <ScanText size={14} style={{ marginRight: 4 }} />
+              ? <Loader2 style={{ animation: 'spin 1s linear infinite' }} />
+              : <ScanText />
             }
             <span>{progressLabel}</span>
-            {!props.isOcrRunning && <ChevronDown size={12} style={{ marginLeft: 2 }} />}
           </RibbonButton>
           {showOcrDropdown && !props.isOcrRunning && (
             <div className="ribbon-dropdown" onClick={(e) => e.stopPropagation()}>
