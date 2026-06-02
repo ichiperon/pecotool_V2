@@ -741,7 +741,11 @@ function App() {
         <div className="status-center">
           <div className="status-item">
             <input
-              type="text"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={isFileLoaded ? totalPages : 0}
+              aria-label={isFileLoaded ? `ページ番号 (1 〜 ${totalPages})` : 'ページ番号'}
               className="page-input"
               value={pageInputValue !== null ? pageInputValue : String(isFileLoaded ? currentPageIndex + 1 : 0)}
               onFocus={() => setPageInputValue(String(isFileLoaded ? currentPageIndex + 1 : 0))}
@@ -750,7 +754,7 @@ function App() {
               onKeyDown={handlePageInputKeyDown}
               disabled={!isFileLoaded}
             />
-            <span>/ {isFileLoaded ? totalPages : 0}</span>
+            <span aria-hidden="true">/ {isFileLoaded ? totalPages : 0}</span>
           </div>
         </div>
         <div className="status-right">
