@@ -5,7 +5,7 @@ import {
   PDFDict, PDFHexString
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import { deflate, inflate } from 'pako';
+import { deflate } from 'pako';
 import {
   stripTextBlocks,
   stripEmptyGraphicsStateBlocksOnly,
@@ -15,7 +15,6 @@ import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdf
 import {
   PECO_FONT_KEY_TAG,
   isPecoToolFontKey,
-  isPecoToolGraphicsStateKey,
 } from './pdfPecoToolMarkers';
 import { ensureDenseClassicXref } from './pdfClassicXref';
 import { compactIndirectObjectNumbers, sweepUnreachableObjects } from './pdfReachabilityGc';
@@ -41,182 +40,17 @@ import {
   type SkippedTextCollector,
 } from './pdfSkippedTextChars';
 import type { PDFObject, PDFRef, PDFFont } from '@cantoo/pdf-lib';
-
-/**
- * Decompress a PDFRawStream's contents.
- * Handles FlateDecode (the overwhelmingly common case in modern PDFs).
- * Falls back to returning the raw bytes for unrecognized or absent filters.
- */
-function decodeStreamContents(stream: PDFRawStream): Uint8Array | null {
-  const filter = stream.dict.lookup(PDFName.of('Filter'));
-  const raw = stream.getContents();
-
-  // Resolve filter names — Filter can be a single PDFName or a PDFArray of names.
-  let filterNames: string[];
-  if (filter instanceof PDFName) {
-    filterNames = [filter.asString()];
-  } else if (filter instanceof PDFArray) {
-    // Use .asArray() — PDFArray does NOT expose a .array property
-    filterNames = filter.asArray().map((f) => (f as PDFName).asString());
-  } else if (!filter) {
-    // No filter — bytes are already plain content operators
-    return raw;
-  } else {
-    // Unknown filter type — skip modification to avoid corrupting the stream
-    return null;
-  }
-
-  if (filterNames.length === 0) return raw;
-
-  // Only handle a single /FlateDecode; multi-filter chains are left untouched.
-  if (filterNames.length === 1 && filterNames[0] === '/FlateDecode') {
-    try {
-      return inflate(raw);
-    } catch {
-      return null;
-    }
-  }
-
-  // Unsupported filter (LZW, ASCII85, multi-filter chain, etc.) — skip modification
-  return null;
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
-
-function concatWithNewlines(chunks: Uint8Array[]): Uint8Array {
-  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length + 1, 0);
-  const out = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-    out[offset++] = 0x0a;
-  }
-  return out;
-}
-
-function isPdfRef(value: unknown): value is PDFRef {
-  return typeof value === 'object' && value !== null && value.constructor?.name === 'PDFRef';
-}
-
-function addRefCount(counts: Map<string, number>, value: unknown): void {
-  if (!isPdfRef(value)) return;
-  const key = value.toString();
-  counts.set(key, (counts.get(key) ?? 0) + 1);
-}
-
-function collectPageContentRefCounts(pdfDoc: PDFDocument): Map<string, number> {
-  const counts = new Map<string, number>();
-  const contentsKey = PDFName.of('Contents');
-
-  for (const page of pdfDoc.getPages()) {
-    const rawContents = page.node.get(contentsKey) ?? page.node.Contents?.();
-    if (!rawContents) continue;
-
-    addRefCount(counts, rawContents);
-    const resolved = pdfDoc.context.lookup(rawContents);
-    if (!(resolved instanceof PDFArray)) continue;
-
-    for (const streamRef of resolved.asArray()) {
-      addRefCount(counts, streamRef);
-    }
-  }
-
-  return counts;
-}
-
-function deleteIfUniqueRef(
-  context: typeof PDFDocument.prototype.context,
-  value: unknown,
-  contentRefCounts: Map<string, number>,
-): void {
-  if (!isPdfRef(value)) return;
-  if (contentRefCounts.get(value.toString()) !== 1) return;
-  context.delete(value);
-}
-
-function cleanContentStream(stream: PDFRawStream): boolean {
-  const decoded = decodeStreamContents(stream);
-  if (decoded === null) return false;
-
-  const cleaned = stripTextBlocks(decoded);
-  if (bytesEqual(cleaned, decoded)) return false;
-
-  stream.updateContents(deflate(cleaned));
-  stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
-  stream.dict.delete(PDFName.of('DecodeParms'));
-  return true;
-}
-
-function isFormXObject(stream: PDFRawStream): boolean {
-  const subtype = stream.dict.lookup(PDFName.of('Subtype'));
-  return subtype instanceof PDFName && subtype.asString() === '/Form';
-}
-
-/**
- * Form XObject (Subtype=/Form) を再帰的に走査し、BT...ET ブロックを strip する。
- * #82: visited Set の不変条件詳細は pdfSaver.ts 側コメント参照。
- *
- * 不変条件サマリ:
- *   1. stripTextBlocks は冪等 (純粋な状態機械)
- *   2. cleanContentStream は bytesEqual なら no-op return
- *   3. visited.add() は recurse する手前で行う → mark 済 ref は本体+子 Resources 含
- *      完全処理済みが保証される
- * これにより sharedVisitedFormRefs を全ページで共有しても二重処理は発生しない。
- */
-function cleanFormXObjectsInResources(
-  resources: PDFDict | undefined,
-  context: typeof PDFDocument.prototype.context,
-  visitedRefs: Set<string> = new Set(),
-): void {
-  const xObjectDict = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
-  if (!xObjectDict) return;
-
-  for (const [, value] of xObjectDict.entries()) {
-    const refKey = isPdfRef(value) ? value.toString() : null;
-    if (refKey !== null) {
-      // 上の不変条件 (3) を満たすため recurse 手前で先 mark する。
-      // 既存マークありなら本体+子 Resources は前回処理で完結している。
-      if (visitedRefs.has(refKey)) continue;
-      visitedRefs.add(refKey);
-    }
-
-    const xObject = context.lookup(value);
-    if (!(xObject instanceof PDFRawStream) || !isFormXObject(xObject)) continue;
-
-    cleanContentStream(xObject);
-    const childResources = xObject.dict.lookupMaybe(PDFName.of('Resources'), PDFDict);
-    cleanFormXObjectsInResources(childResources, context, visitedRefs);
-  }
-}
-
-function pruneStalePecoToolResources(
-  pageNode: { Resources?: () => PDFDict | undefined },
-): void {
-  const resources = pageNode.Resources?.();
-  const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
-
-  if (fontDict) {
-    for (const [key] of fontDict.entries()) {
-      if (!isPecoToolFontKey(key)) continue;
-      fontDict.delete(key);
-    }
-  }
-
-  const extGStateDict = resources?.lookupMaybe(PDFName.of('ExtGState'), PDFDict);
-  if (extGStateDict) {
-    for (const [key] of extGStateDict.entries()) {
-      if (!isPecoToolGraphicsStateKey(key)) continue;
-      extGStateDict.delete(key);
-    }
-  }
-}
+import {
+  decodeStreamContents,
+  bytesEqual,
+  concatWithNewlines,
+  isPdfRef,
+  collectPageContentRefCounts,
+  deleteIfUniqueRef,
+  cleanContentStream,
+  cleanFormXObjectsInResources,
+  pruneStalePecoToolResources,
+} from './pdfSaverCore';
 
 function replacePageTextContentStreams(
   pageNode: {
