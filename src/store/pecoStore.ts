@@ -96,17 +96,6 @@ interface PecoState {
   currentPageProxy: pdfjsLib.PDFPageProxy | null;
   currentPageProxyKey: string | null;
 
-  /**
-   * issue #196: OcrEditor の検索ボックスと PdfCanvas ハイライトで共有する検索語。
-   * 空文字ならハイライトなし。
-   */
-  searchTerm: string;
-  /**
-   * issue #196: 現在アクティブなヒット番号 (0-based)。
-   * searchTerm が空または全ブロック走査後の先頭に戻る cyclic インデックス。
-   */
-  searchHitIndex: number;
-
   // ─── #191: 範囲指定 OCR (末尾に集約) ───────────────────────────────────────
   /**
    * issue #191: PDF ビュー上で矩形ドラッグして部分領域を OCR するモード。
@@ -198,13 +187,6 @@ interface PecoState {
   /** ドラッグ中の bbox プレビュー Map をセットする。null でクリア。issue #91 */
   setDragPreviewBboxes: (bboxes: Map<string, BoundingBox> | null) => void;
 
-  /** issue #196: 検索語を更新し、searchHitIndex を 0 にリセットする */
-  setSearchTerm: (term: string) => void;
-  /** issue #196: ヒットインデックスを次に進める (cyclic) */
-  nextSearchHit: (totalHits: number) => void;
-  /** issue #196: ヒットインデックスを前に戻す (cyclic) */
-  prevSearchHit: (totalHits: number) => void;
-
   /**
    * issue #93 (Find & Replace): 一括置換を実行する。
    * @returns 影響を受けた件数 (置換ヒット数), ブロック数, ページ数
@@ -284,8 +266,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   currentPageProxy: null,
   currentPageProxyKey: null,
   dragPreviewBboxes: null,
-  searchTerm: '',
-  searchHitIndex: 0,
   // #191: 範囲指定 OCR モード (末尾に集約)
   isRangeOcrMode: false,
 
@@ -1091,18 +1071,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     set({ dragPreviewBboxes: bboxes });
   },
 
-  setSearchTerm: (term) => set({ searchTerm: term, searchHitIndex: 0 }),
-
-  nextSearchHit: (totalHits) => set((state) => {
-    if (totalHits === 0) return state;
-    return { searchHitIndex: (state.searchHitIndex + 1) % totalHits };
-  }),
-
-  prevSearchHit: (totalHits) => set((state) => {
-    if (totalHits === 0) return state;
-    return { searchHitIndex: (state.searchHitIndex - 1 + totalHits) % totalHits };
-  }),
-
   clearOcrAllPages: () => {
     const { document } = get();
     if (!document) return;
@@ -1491,9 +1459,6 @@ export const selectDocumentTotalPages = (s: PecoState) => s.document?.totalPages
 // issue #91: ドラッグ中の bbox プレビュー。overlay 描画でドラッグ中 BB の bbox を
 // 上書きするための入口。ドラッグ非実行中は null。
 export const selectDragPreviewBboxes = (s: PecoState) => s.dragPreviewBboxes;
-// issue #196: 検索ハイライト共有
-export const selectSearchTerm = (s: PecoState) => s.searchTerm;
-export const selectSearchHitIndex = (s: PecoState) => s.searchHitIndex;
 // issue #191: 範囲指定 OCR モード
 export const selectIsRangeOcrMode = (s: PecoState) => s.isRangeOcrMode;
 // issue #201: 最後の保存以降の未保存変更を diff 計算する基準インデックス

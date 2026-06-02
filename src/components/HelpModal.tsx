@@ -98,7 +98,7 @@ export function HelpModal({ helpModal, onClose }: Props) {
         )}
         {helpModal === 'version' && (
           <div className="version-info">
-            <div className="version-logo">PecoTool V2</div>
+            <div className="version-logo">Peco</div>
             <div className="version-number">バージョン {__APP_VERSION__}</div>
             <div className="version-desc">PDF OCR 手動編集ツール</div>
           </div>

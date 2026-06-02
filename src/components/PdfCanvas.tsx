@@ -12,9 +12,8 @@ import {
   selectCurrentPageTextBlocks,
   selectDocumentFilePath,
   selectDocumentTotalPages,
-  selectSearchTerm,
-  selectSearchHitIndex,
 } from "../store/pecoStore";
+import { useSearchStore, selectSearchTerm, selectSearchHitIndex } from "../store/searchStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
 import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
@@ -92,8 +91,8 @@ export function PdfCanvas({
   const isSplitMode = usePecoStore(selectIsSplitMode);
   const isCurveMode = usePecoStore(selectIsCurveMode);
   const isRangeOcrMode = usePecoStore(selectIsRangeOcrMode);
-  const searchTerm = usePecoStore(selectSearchTerm);
-  const searchHitIndex = usePecoStore(selectSearchHitIndex);
+  const searchTerm = useSearchStore(selectSearchTerm);
+  const searchHitIndex = useSearchStore(selectSearchHitIndex);
   const updatePageData = usePecoStore((s) => s.updatePageData);
   const toggleDrawingMode = usePecoStore((s) => s.toggleDrawingMode);
   const toggleSplitMode = usePecoStore((s) => s.toggleSplitMode);

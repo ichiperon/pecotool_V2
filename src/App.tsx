@@ -50,8 +50,7 @@ import { usePageManagement } from "./hooks/usePageManagement";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 
 // Components
-import { Toolbar } from "./components/Toolbar/Toolbar";
-import { MenuBar } from "./components/MenuBar/MenuBar";
+import { Ribbon } from "./components/Ribbon/Ribbon";
 import { HelpMenu } from "./components/HelpMenu";
 
 // Feature #203: onboarding tour (lazy)
@@ -794,46 +793,44 @@ function App() {
         </Suspense>
       )}
 
-      <MenuBar
+      <Ribbon
         isFileLoaded={isFileLoaded}
+        currentPage={currentPage ?? undefined}
         isDirty={isDirty}
         currentPageIsDirty={currentPage?.isDirty ?? false}
-        recentFiles={recentFiles}
-        onOpen={handleOpen}
-        onClose={handleClose}
-        onSave={handleSave}
-        onSaveAs={handleSaveAs}
-        onShowShortcuts={() => setHelpModal('shortcuts')}
-        onShowUsage={() => setHelpModal('usage')}
-        onShowVersion={() => setHelpModal('version')}
-        onShowTour={() => {
-          try {
-            localStorage.removeItem(ONBOARDING_STORAGE_KEY);
-          } catch {
-            /* ignore */
-          }
-          setShowOnboarding(true);
-        }}
-        onReload={handleReload}
-        onShowOcrSettings={() => setShowOcrSettings(true)}
-        onOpenLogFolder={handleOpenLogFolder}
-        onExport={handleExport}
-        onCheckUpdate={checkForUpdate}
-      />
-
-      <Toolbar
-        isFileLoaded={isFileLoaded} currentPage={currentPage ?? undefined} isDirty={isDirty}
-        undoStackLength={undoStack.length} redoStackLength={redoStack.length}
-        zoom={zoom} isAutoFit={isAutoFit} isDrawingMode={isDrawingMode} isSplitMode={isSplitMode} isCurveMode={isCurveMode} isRangeOcrMode={isRangeOcrMode}
-        selectedIdsCount={selectedIds.size} showOcr={showOcr} ocrOpacity={ocrOpacity}
-        reorderThreshold={reorderThreshold} isPreviewOpen={isPreviewOpen}
+        undoStackLength={undoStack.length}
+        redoStackLength={redoStack.length}
+        zoom={zoom}
+        isAutoFit={isAutoFit}
+        isDrawingMode={isDrawingMode}
+        isSplitMode={isSplitMode}
+        isCurveMode={isCurveMode}
+        isRangeOcrMode={isRangeOcrMode}
+        selectedIdsCount={selectedIds.size}
+        showOcr={showOcr}
+        ocrOpacity={ocrOpacity}
+        reorderThreshold={reorderThreshold}
+        isPreviewOpen={isPreviewOpen}
         showSettingsDropdown={showSettingsDropdown}
-        isOcrRunning={isOcrRunning} ocrProgress={ocrProgress}
-        onUndo={undo} onRedo={redo} onZoomIn={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }}
+        isOcrRunning={isOcrRunning}
+        ocrProgress={ocrProgress}
+        recentFiles={recentFiles}
+        onUndo={undo}
+        onRedo={redo}
+        onZoomIn={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom + 10)); }}
         onZoomOut={() => { setIsAutoFit(false); setZoom(Math.max(25, zoom - 10)); }}
-        onFit={() => fitToScreen(false)} onToggleDrawing={toggleDrawingMode} onToggleSplit={toggleSplitMode} onToggleCurve={toggleCurveMode} onToggleRangeOcr={toggleRangeOcrMode}
-        onGroup={handleGroup} onDeduplicate={handleDeduplicate} onSelectAllText={handleSelectAllText} onRemoveSpaces={handleRemoveSpaces} onDelete={handleDelete}
-        onToggleOcr={toggleShowOcr} onSetOcrOpacity={setOcrOpacity}
+        onFit={() => fitToScreen(false)}
+        onToggleDrawing={toggleDrawingMode}
+        onToggleSplit={toggleSplitMode}
+        onToggleCurve={toggleCurveMode}
+        onToggleRangeOcr={toggleRangeOcrMode}
+        onGroup={handleGroup}
+        onDeduplicate={handleDeduplicate}
+        onSelectAllText={handleSelectAllText}
+        onRemoveSpaces={handleRemoveSpaces}
+        onDelete={handleDelete}
+        onToggleOcr={toggleShowOcr}
+        onSetOcrOpacity={setOcrOpacity}
         onSetReorderThreshold={(val) => { setReorderThreshold(writeReorderThreshold(val)); }}
         onTogglePreview={togglePreviewWindow}
         onToggleSettingsDropdown={(e) => { e.stopPropagation(); setShowSettingsDropdown(!showSettingsDropdown); }}
@@ -849,14 +846,32 @@ function App() {
         onClearOcrCurrentPage={handleClearOcrCurrentPage}
         onClearOcrAllPages={handleClearOcrAllPages}
         onOpenReplace={() => {
-          // #103: OCR 実行中の Replace は disabled prop で UI レベルでも防いでいるが、
-          // 念のためハンドラ側でも二重ガードする (将来 UI 経路追加時の事故防止)。
           if (isOcrRunning) {
             showToast('OCR実行中は検索と置換を実行できません。OCRを中止してから再度お試しください。');
             return;
           }
           setShowReplace(true);
         }}
+        onOpen={handleOpen}
+        onClose={handleClose}
+        onSave={handleSave}
+        onSaveAs={handleSaveAs}
+        onReload={handleReload}
+        onExport={handleExport}
+        onShowShortcuts={() => setHelpModal('shortcuts')}
+        onShowUsage={() => setHelpModal('usage')}
+        onShowVersion={() => setHelpModal('version')}
+        onShowTour={() => {
+          try {
+            localStorage.removeItem(ONBOARDING_STORAGE_KEY);
+          } catch {
+            /* ignore */
+          }
+          setShowOnboarding(true);
+        }}
+        onShowOcrSettings={() => setShowOcrSettings(true)}
+        onOpenLogFolder={handleOpenLogFolder}
+        onCheckUpdate={checkForUpdate}
       />
 
       <main className="main-content">

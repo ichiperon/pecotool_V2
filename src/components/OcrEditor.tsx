@@ -19,7 +19,8 @@ import {
 } from '@dnd-kit/sortable';
 import { useState } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
-import { usePecoStore, selectCurrentPage, selectSearchTerm, selectSearchHitIndex } from '../store/pecoStore';
+import { usePecoStore, selectCurrentPage } from '../store/pecoStore';
+import { useSearchStore, selectSearchTerm, selectSearchHitIndex } from '../store/searchStore';
 import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
 import { Search } from 'lucide-react';
@@ -46,11 +47,11 @@ export function OcrEditor({
   const toggleSelection = usePecoStore(s => s.toggleSelection);
   const setSelectedIds = usePecoStore(s => s.setSelectedIds);
   // issue #196: searchTerm を store で共有 (PdfCanvas もハイライトに使う)
-  const searchTerm = usePecoStore(selectSearchTerm);
-  const searchHitIndex = usePecoStore(selectSearchHitIndex);
-  const setSearchTerm = usePecoStore(s => s.setSearchTerm);
-  const nextSearchHit = usePecoStore(s => s.nextSearchHit);
-  const prevSearchHit = usePecoStore(s => s.prevSearchHit);
+  const searchTerm = useSearchStore(selectSearchTerm);
+  const searchHitIndex = useSearchStore(selectSearchHitIndex);
+  const setSearchTerm = useSearchStore(s => s.setSearchTerm);
+  const nextSearchHit = useSearchStore(s => s.nextSearchHit);
+  const prevSearchHit = useSearchStore(s => s.prevSearchHit);
   const [activeId, setActiveId] = useState<string | null>(null);
 
   // 仮想化対応: マウント/アンマウントされる各カードへの ref を id でひける Map に保持。

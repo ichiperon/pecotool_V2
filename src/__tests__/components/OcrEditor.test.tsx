@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { OcrEditor } from '../../components/OcrEditor'
 import { usePecoStore } from '../../store/pecoStore'
+import { useSearchStore } from '../../store/searchStore'
 import type { TextBlock, PageData, PecoDocument } from '../../types'
 
 vi.mock('../../utils/pdfLoader', () => ({
@@ -209,10 +210,9 @@ beforeEach(() => {
     undoStack: [],
     redoStack: [],
     isDirty: false,
-    // issue #196: searchTerm を store 化したのでテスト間でリセット必須
-    searchTerm: '',
-    searchHitIndex: -1,
-  } as any)
+  })
+  // issue #196: searchTerm を store 化したのでテスト間でリセット必須
+  useSearchStore.setState({ searchTerm: '', searchHitIndex: -1 } as any)
 })
 
 // ── テスト ────────────────────────────────────────────────────
@@ -1051,7 +1051,7 @@ describe('OcrEditor', () => {
 
     it('C-OE-06-01: Enter 連打で 0→1→2→0 の順に scrollToHitBlock が呼ばれる', async () => {
       const user = userEvent.setup()
-      usePecoStore.setState({ searchTerm: '', searchHitIndex: -1 } as any)
+      useSearchStore.setState({ searchTerm: '', searchHitIndex: -1 } as any)
       setup(hitBlocks)
 
       const searchBox = screen.getByPlaceholderText('検索...')
@@ -1064,15 +1064,15 @@ describe('OcrEditor', () => {
 
       // Enter 1 回目: 0→1
       await user.keyboard('{Enter}')
-      expect(usePecoStore.getState().searchHitIndex).toBe(1)
+      expect(useSearchStore.getState().searchHitIndex).toBe(1)
 
       // Enter 2 回目: 1→2
       await user.keyboard('{Enter}')
-      expect(usePecoStore.getState().searchHitIndex).toBe(2)
+      expect(useSearchStore.getState().searchHitIndex).toBe(2)
 
       // Enter 3 回目: 2→0 (循環)
       await user.keyboard('{Enter}')
-      expect(usePecoStore.getState().searchHitIndex).toBe(0)
+      expect(useSearchStore.getState().searchHitIndex).toBe(0)
 
       // scrollTo が 3 回呼ばれている
       expect(scrollToSpy).toHaveBeenCalledTimes(3)
@@ -1080,7 +1080,7 @@ describe('OcrEditor', () => {
 
     it('C-OE-06-02: Shift+Enter 連打で 2→1→0→2 の順にインデックスが戻る', async () => {
       const user = userEvent.setup()
-      usePecoStore.setState({ searchTerm: 'foo', searchHitIndex: 2 } as any)
+      useSearchStore.setState({ searchTerm: 'foo', searchHitIndex: 2 } as any)
       setup(hitBlocks)
 
       scrollToSpy.mockClear()
@@ -1091,22 +1091,22 @@ describe('OcrEditor', () => {
 
       // Shift+Enter 1 回目: 2→1
       await user.keyboard('{Shift>}{Enter}{/Shift}')
-      expect(usePecoStore.getState().searchHitIndex).toBe(1)
+      expect(useSearchStore.getState().searchHitIndex).toBe(1)
 
       // Shift+Enter 2 回目: 1→0
       await user.keyboard('{Shift>}{Enter}{/Shift}')
-      expect(usePecoStore.getState().searchHitIndex).toBe(0)
+      expect(useSearchStore.getState().searchHitIndex).toBe(0)
 
       // Shift+Enter 3 回目: 0→2 (循環)
       await user.keyboard('{Shift>}{Enter}{/Shift}')
-      expect(usePecoStore.getState().searchHitIndex).toBe(2)
+      expect(useSearchStore.getState().searchHitIndex).toBe(2)
 
       expect(scrollToSpy).toHaveBeenCalledTimes(3)
     })
 
     it('C-OE-06-03: 検索ヒット 0 件で Enter キー → scrollToHitBlock は呼ばれない', async () => {
       const user = userEvent.setup()
-      usePecoStore.setState({ searchTerm: '', searchHitIndex: -1 } as any)
+      useSearchStore.setState({ searchTerm: '', searchHitIndex: -1 } as any)
       setup(hitBlocks)
 
       scrollToSpy.mockClear()
@@ -1122,7 +1122,7 @@ describe('OcrEditor', () => {
       // ヒット 0 件なので scrollTo は呼ばれない
       expect(scrollToSpy).not.toHaveBeenCalled()
       // searchHitIndex も変化なし
-      expect(usePecoStore.getState().searchHitIndex).toBe(0)
+      expect(useSearchStore.getState().searchHitIndex).toBe(0)
     })
   })
 
