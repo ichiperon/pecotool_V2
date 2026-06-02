@@ -73,14 +73,17 @@ function post(msg: ThumbnailWorkerResponse, transfer?: Transferable[]): void {
 // OffscreenCanvas 同時レンダリング数を制限するセマフォ
 let activeRenders = 0;
 const MAX_CONCURRENT_RENDERS = 4;
-const renderWaitQueue: Array<() => void> = [];
+// issue #140: cancelled=true で resolve すると待機中の handleGenerateThumbnail は
+// 旧 pdfDoc 参照で render() に進まずに早期 return する。LOAD_PDF 経路で旧 doc
+// destroy が走った後にゴーストで render() が走るのを防ぐ。
+const renderWaitQueue: Array<(cancelled: boolean) => void> = [];
 
 async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
   // 新しいPDFロード時にセマフォをリセット
-  // ただし待機中の resolver は先に起こして「抜けさせる」必要がある（さもないと
-  // handleGenerateThumbnail の Promise が永久に resolve されず忘れられる）
+  // 待機中の resolver は cancelled=true で起こして、対応する handleGenerateThumbnail
+  // が旧 pdfDoc で render を継続しないようにする (issue #140)。
   activeRenders = 0;
-  renderWaitQueue.forEach(r => r());
+  renderWaitQueue.forEach(r => r(true));
   renderWaitQueue.length = 0;
 
   // 進行中の getDocument タスクがあれば先に destroy() して未解決 promise を確実に
@@ -143,8 +146,11 @@ async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
 
 async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
   // セマフォ: 同時レンダリング数が上限に達していたら待機
+  // cancelled=true で起こされた場合は LOAD_PDF が走って旧 pdfDoc が destroy 済の
+  // 可能性が高いため、activeRenders を増やさずに無音で抜ける (issue #140)。
   if (activeRenders >= MAX_CONCURRENT_RENDERS) {
-    await new Promise<void>(resolve => renderWaitQueue.push(resolve));
+    const cancelled = await new Promise<boolean>(resolve => renderWaitQueue.push(resolve));
+    if (cancelled) return;
   }
   activeRenders++;
   const workerGenStart = performance.now();
@@ -203,7 +209,8 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     post({ type: 'THUMBNAIL_ERROR', pageIndex, error: errMsg });
   } finally {
     activeRenders--;
-    renderWaitQueue.shift()?.();
+    // 通常のスロット解放は cancelled=false で次の待機者を起こす
+    renderWaitQueue.shift()?.(false);
   }
 }
 
