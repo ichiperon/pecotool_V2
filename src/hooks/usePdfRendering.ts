@@ -302,9 +302,18 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         if (renderTaskRef.current) {
           renderTaskRef.current.cancel();
         }
-        if ((curPage as any)._transport?.destroyed) return;
         if (perf.enabled) perf.mark('render.start', { page: curMeta.pageIndex, zoom: curZoom, w: lw, h: lh });
-        renderTaskRef.current = curPage.render(renderContext);
+        try {
+          renderTaskRef.current = curPage.render(renderContext);
+        } catch (err: any) {
+          // pdfDoc が destroy 済の場合 render() 同期 throw する可能性がある (worker 内部 API 変更耐性)
+          if (err?.name === "RenderingCancelledException") return;
+          if (err instanceof TypeError && err.message.includes("sendWithPromise")) return;
+          if (typeof err?.message === "string" && err.message.toLowerCase().includes("destroyed")) return;
+          console.error("PDF render error:", err);
+          setLoadError(true);
+          return;
+        }
 
         try {
           await renderTaskRef.current.promise;
@@ -312,6 +321,8 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         } catch (err: any) {
           if (err.name === "RenderingCancelledException") return;
           if (err instanceof TypeError && err.message.includes("sendWithPromise")) return;
+          // destroy 済 transport 由来のエラーも吸収 (pdfjs private API 依存を回避)
+          if (typeof err?.message === "string" && err.message.toLowerCase().includes("destroyed")) return;
           console.error("PDF render error:", err);
           setLoadError(true);
           return;
