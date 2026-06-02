@@ -37,15 +37,16 @@ export function disableSystemFontForSession(): void {
   primaryFontKind = null;
 }
 
+// issue #142: pure fetch ヘルパ。成功時のみ ArrayBuffer を返し、cache や
+// primaryFontKind には一切触らない。失敗を null で返してリトライ可能にしつつ、
+// caller (loadFontLazy) 側で「成功した時だけ」cache を更新する責務に統一する。
 export async function loadBundledIpAmjFontLazy(): Promise<ArrayBuffer | null> {
   const res = await fetch('/fonts/IPAmjMincho.ttf');
   if (!res.ok) {
     console.error('[loadFontLazy] Failed to fetch bundled font: status', res.status);
     return null;
   }
-  fontBytesCache = await res.arrayBuffer();
-  primaryFontKind = 'ipamj';
-  return fontBytesCache;
+  return await res.arrayBuffer();
 }
 
 /**
@@ -70,9 +71,15 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
         }
       }
 
-      fontBytesCache = await loadBundledIpAmjFontLazy();
+      // issue #142: loadBundledIpAmjFontLazy が null を返した場合は cache を
+      // 上書きせず、primaryFontKind も触らない (次回呼び出しでリトライ可能にする)。
+      const bundled = await loadBundledIpAmjFontLazy();
       fontLoadPromise = null;
-      if (fontBytesCache) logger.log('[loadFontLazy] Bundled IPAmjMincho loaded successfully');
+      if (bundled) {
+        fontBytesCache = bundled;
+        primaryFontKind = 'ipamj';
+        logger.log('[loadFontLazy] Bundled IPAmjMincho loaded successfully');
+      }
       return fontBytesCache;
     } catch (err) {
       console.error('[loadFontLazy] Error loading font:', err);
