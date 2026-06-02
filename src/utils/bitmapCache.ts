@@ -1,7 +1,7 @@
 // ページ切替時の再レンダリングを回避するビットマップキャッシュ (2層LRU)
 const MAX_PAGES = 20;
 const MAX_ZOOMS_PER_PAGE = 5;
-const MAX_BITMAP_CACHE_BYTES = 256 * 1024 * 1024;
+const MAX_BITMAP_CACHE_BYTES = 128 * 1024 * 1024;
 
 function safeClose(bitmap: ImageBitmap) {
   try {
@@ -101,9 +101,25 @@ export function setBitmapCache(key: string, entry: Entry) {
     evictPage(oldestPage);
   }
 
+  // bytes 超過時は最古ページの 1 zoom 変種を 1 つずつ落とす (page 全 evict は避け、
+  // 同じページの他 zoom が残っていれば再レンダリング不要にする)。
+  // 1 zoom 落としても閾値を下回らない場合は次の最古ページへ進む。
   while (totalBytes > MAX_BITMAP_CACHE_BYTES && pageMap.size > 0) {
-    const oldestPage = pageMap.keys().next().value as string;
-    evictPage(oldestPage);
+    let evicted = false;
+    for (const [pageKey, zoomMap] of pageMap) {
+      if (zoomMap.size === 0) {
+        pageMap.delete(pageKey);
+        continue;
+      }
+      const oldestZoom = zoomMap.keys().next().value as number;
+      const entry = zoomMap.get(oldestZoom);
+      zoomMap.delete(oldestZoom);
+      if (entry) evictEntry(entry);
+      if (zoomMap.size === 0) pageMap.delete(pageKey);
+      evicted = true;
+      break;
+    }
+    if (!evicted) break;
   }
 }
 
