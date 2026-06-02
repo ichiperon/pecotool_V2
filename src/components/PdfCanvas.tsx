@@ -174,6 +174,13 @@ function drawStaticBlockCurve(
   // curve! が valid である前提 (呼び出し元で guard 済み)
   const glyphs = layoutTextOnCurveViewport(block.text, block.curve!, fontSize);
 
+  // #240: save/restore をループ外で 1 回に削減。
+  // ループ内では setTransform で translate+rotate を直接設定し、
+  // glyph ごとの save/restore オーバーヘッドを排除する。
+  context.save();
+  // ループ外で変わらない描画状態を先に設定
+  context.lineWidth = 3;
+
   for (const g of glyphs) {
     const gx = g.x * scale;
     const gy = g.y * scale;
@@ -181,9 +188,10 @@ function drawStaticBlockCurve(
     const gw = fontSize;
     const gh = fontSize;
 
-    context.save();
-    context.translate(gx, gy);
-    context.rotate(g.rotation);
+    const cos = Math.cos(g.rotation);
+    const sin = Math.sin(g.rotation);
+    // setTransform(a, b, c, d, e, f) = 2D affine: translate(gx,gy) * rotate(rotation)
+    context.setTransform(cos, sin, -sin, cos, gx, gy);
 
     // 文字背景: 低信頼は赤系、通常は青系
     context.fillStyle = fillColor;
@@ -192,14 +200,15 @@ function drawStaticBlockCurve(
     // 文字本体: 赤テキスト
     if (block.text) {
       context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
-      context.lineWidth = 3;
       context.strokeText(g.char, -gw / 2, -gh * 0.1);
       context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
       context.fillText(g.char, -gw / 2, -gh * 0.1);
     }
-
-    context.restore();
   }
+
+  // transform を恒等行列に戻してから restore (後続の描画を保護)
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.restore();
 
   // issue #196: curve block の検索ヒット黄色ハイライトは bbox 全体に重ねる
   if (searchTerm && block.text.toLowerCase().includes(searchTerm.toLowerCase())) {
