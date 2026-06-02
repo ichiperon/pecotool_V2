@@ -307,6 +307,9 @@ function formatSaveToast(prefix: string, size: number, skippedChars: SkippedPdfT
   return `${base} ${formatSkippedCharWarning(skippedChars)}`;
 }
 
+/** issue #164: 保存ロック画面に現在進行中のステップを表示するためのフェーズ識別子。 */
+export type SaveStep = 'changes' | 'pdf-gen' | 'safe-replace' | null;
+
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean, action?: { label: string; onClick: () => void }) => void,
   setIsSaving?: (v: boolean) => void,
@@ -318,6 +321,11 @@ export function useFileOperations(
    * folder OCR ループは内部で handleOpen を呼ぶため、bypassOcrGuard option で除外する。
    */
   isOcrRunningRef?: React.RefObject<boolean>,
+  /**
+   * issue #164: 保存中ロック画面に現在ステップを表示するためのコールバック。
+   * _executeSave のフェーズ遷移ごとに呼ばれる。null は「保存していない / 終了」を意味する。
+   */
+  setSaveStep?: (step: SaveStep) => void,
 ) {
   const setDocument = usePecoStore((s) => s.setDocument);
   const setDocumentFilePath = usePecoStore((s) => s.setDocumentFilePath);
@@ -517,6 +525,8 @@ export function useFileOperations(
     if (!document) return null;
     const sourceFilePath = document.filePath;
 
+    // issue #164: 保存ロック画面の進捗ステップ通知。
+    setSaveStep?.('changes');
     let cachedBytes = await withStep('statOriginalBytes', 10_000, () => getFreshOriginalBytesCache(sourceFilePath));
     if (!cachedBytes) {
       showToast("保存用にファイルを読み込み中...");
@@ -573,6 +583,8 @@ export function useFileOperations(
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
       savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; });
     let savedBytes: Uint8Array;
+    // issue #164: PDF生成フェーズに遷移
+    setSaveStep?.('pdf-gen');
     try {
       savedBytes = await withStep('savePDF', 150_000, () => runSavePdf(fontBytes, fallbackFontBytes));
     } catch (err) {
@@ -593,6 +605,8 @@ export function useFileOperations(
     }
     const writePath = targetPath ?? document.filePath;
 
+    // issue #164: 安全置換フェーズに遷移
+    setSaveStep?.('safe-replace');
     await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
     await withStep('clearPageCache', 10_000, () => clearCachedPages(writePath))
       .catch((e) => { console.warn('[save] clearPageCache failed (ignored):', e); });
@@ -701,6 +715,7 @@ export function useFileOperations(
     } finally {
       isSavingRef.current = false;
       setIsSaving?.(false);
+      setSaveStep?.(null);
     }
   };
 
@@ -742,6 +757,7 @@ export function useFileOperations(
         } finally {
           isSavingRef.current = false;
           setIsSaving?.(false);
+          setSaveStep?.(null);
         }
       }
     } catch (err) {

@@ -23,7 +23,7 @@ import { TextBlock } from "./types";
 import { perf } from "./utils/perfLogger";
 
 // Hooks
-import { useFileOperations } from "./hooks/useFileOperations";
+import { useFileOperations, type SaveStep } from "./hooks/useFileOperations";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useConsoleLogs } from "./hooks/useConsoleLogs";
 import { usePreviewWindow } from "./hooks/usePreviewWindow";
@@ -107,6 +107,8 @@ function App() {
     useViewerPan(viewerRef);
 
   const [isSaving, setIsSaving] = useState(false);
+  // issue #164: 保存中ロック画面の進捗ステップ表示。
+  const [saveStep, setSaveStep] = useState<SaveStep>(null);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
   const { recentFiles } = useRecentFiles();
 
@@ -142,6 +144,7 @@ function App() {
     showToast, setIsSaving, setIsLoadingFile,
     (doc) => { checkAndPromptOcrZero(doc); },
     isOcrRunningRef,
+    setSaveStep,
   );
   // #102: フォルダ OCR ループ内では openPdf に bypassOcrGuard=true を立てて呼ぶ。
   // これがないと OCR 中の handleOpen ガードに引っかかってループが進まない。
@@ -793,9 +796,26 @@ function App() {
               <div className="save-lock-rail-fill" />
             </div>
             <div className="save-lock-steps">
-              <div className="save-lock-step active"><Database size={14} /> 変更回収</div>
-              <div className="save-lock-step active"><FileCheck2 size={14} /> PDF生成</div>
-              <div className="save-lock-step active"><ShieldCheck size={14} /> 安全置換</div>
+              {/* issue #164: 現在ステップ以下を active、それ以降は inactive。 */}
+              {(() => {
+                const order: Exclude<SaveStep, null>[] = ['changes', 'pdf-gen', 'safe-replace'];
+                const currentIdx = saveStep ? order.indexOf(saveStep) : -1;
+                const isActive = (s: Exclude<SaveStep, null>) =>
+                  currentIdx >= 0 && order.indexOf(s) <= currentIdx;
+                return (
+                  <>
+                    <div className={`save-lock-step${isActive('changes') ? ' active' : ''}`}>
+                      <Database size={14} /> 変更回収
+                    </div>
+                    <div className={`save-lock-step${isActive('pdf-gen') ? ' active' : ''}`}>
+                      <FileCheck2 size={14} /> PDF生成
+                    </div>
+                    <div className={`save-lock-step${isActive('safe-replace') ? ' active' : ''}`}>
+                      <ShieldCheck size={14} /> 安全置換
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
         </div>
