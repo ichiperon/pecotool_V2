@@ -93,12 +93,9 @@ export interface PecoDocument {
   metadata: PDFMetadata;
   pages: Map<number, PageData>;
   mtime?: number;
-  /**
-   * issue #193: ページの表示順序 (元 pageIndex の配列)。
-   * 未設定時は [0, 1, ..., totalPages-1] として扱う。
-   * pdfSaver はこの配列を使って PDF を再構築する。
-   */
-  pageOrder?: number[];
+  // pageOrder is intentionally removed from PecoDocument (#209).
+  // The canonical page order is stored in pecoStore.pageOrder.
+  // Callers that need pageOrder must read from usePecoStore.getState().pageOrder.
 }
 
 export interface UpdatePageAction {

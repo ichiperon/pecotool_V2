@@ -554,6 +554,7 @@ export async function buildPdfDocument(
   fontBytes?: ArrayBuffer,
   fallbackFontBytes: ArrayBuffer[] = [],
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
+  pageOrder?: number[],
 ): Promise<Uint8Array> {
   const originalPdfBytes = await resolveBuildPdfSource(source);
   const originalVersion = extractPdfVersion(originalPdfBytes);
@@ -575,9 +576,9 @@ export async function buildPdfDocument(
     ? pdfDoc.getPageCount()
     : documentState.totalPages;
 
-  // issue #193: pageOrder に基づきページを削除/並べ替えする。
-  // documentState.pageOrder が未設定または [0,1,...,n-1] の場合はスキップ。
-  const pageOrder = documentState.pageOrder;
+  // issue #193 / #209: pageOrder に基づきページを削除/並べ替えする。
+  // pageOrder は caller (useFileOperations) が store から取得して渡す canonical な値。
+  // 未設定または [0,1,...,n-1] の場合はスキップ。
   const isDefaultOrder =
     !pageOrder ||
     (pageOrder.length === originalPdfPageCount &&
@@ -1118,6 +1119,7 @@ export async function savePDF(
   fontBytes?: ArrayBuffer,
   fallbackFontBytes: ArrayBuffer[] = [],
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
+  pageOrder?: number[],
 ): Promise<Uint8Array> {
   const sourceBytes = extractBytes(source);
   const sourceUrl = extractUrl(source);
@@ -1166,7 +1168,7 @@ export async function savePDF(
       worker = createSaveWorker();
       if (!worker) {
         // Worker API 不在: main thread で直接実行
-        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars)
+        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder)
           .then(settleResolve)
           .catch(settleReject);
         return;
@@ -1272,7 +1274,7 @@ export async function savePDF(
       }
       if (activeSaveWorker === worker) activeSaveWorker = null;
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
-      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars)
+      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder)
         .then(settleResolve)
         .catch(settleReject);
     }

@@ -595,9 +595,11 @@ export function useFileOperations(
       if (snapshotPage) savedPageSnapshots.set(idx, snapshotPage);
     }
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
+    // issue #209: pageOrder の canonical source は store。保存時点のスナップショットを取得。
+    const savePageOrder = usePecoStore.getState().pageOrder;
     let skippedChars: SkippedPdfTextChar[] = [];
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
-      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; });
+      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; }, savePageOrder);
     let savedBytes: Uint8Array;
     // issue #164: PDF生成フェーズに遷移
     setSaveStep?.('pdf-gen');

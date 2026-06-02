@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
@@ -42,25 +43,29 @@ async function writeFileAtomically(path: string, bytes: Uint8Array): Promise<voi
  *
  * displayIndices must correspond to the current pageOrder of the document
  * (i.e. the same index space used by ThumbnailPanel).
+ *
+ * issue #209: extractPagesToFile is wrapped in useCallback for stable reference.
+ * pageOrder is read from store at call time (getState()) to always reflect
+ * the latest delete/reorder state.
  */
 export function usePageExtraction(
   showToast: (msg: string, isError?: boolean) => void,
 ) {
-  const extractPagesToFile = async (displayIndices: number[]): Promise<void> => {
+  const extractPagesToFile = useCallback(async (displayIndices: number[]): Promise<void> => {
     if (displayIndices.length === 0) {
       showToast('抽出するページが選択されていません。', true);
       return;
     }
 
-    const { document: doc } = usePecoStore.getState();
+    const { document: doc, pageOrder } = usePecoStore.getState();
     if (!doc) {
       showToast('PDFが開かれていません。', true);
       return;
     }
 
-    // Resolve display indices to original (source) page indices via pageOrder.
-    const pageOrder = doc.pageOrder;
-    const sourceIndices = pageOrder
+    // issue #209: use store.pageOrder (canonical) instead of doc.pageOrder (removed).
+    // Resolve display indices to original (source) page indices via store pageOrder.
+    const sourceIndices = pageOrder.length > 0
       ? displayIndices.map((di) => pageOrder[di])
       : displayIndices;
 
@@ -83,7 +88,7 @@ export function usePageExtraction(
       const msg = err instanceof Error ? err.message : String(err);
       showToast(`ページの書き出しに失敗しました: ${msg}`, true);
     }
-  };
+  }, [showToast]);
 
   return { extractPagesToFile };
 }
