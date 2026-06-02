@@ -140,7 +140,7 @@ function SingleReplaceTab({ id, onClose, onConfirm, hasSelection }: SingleReplac
     [pattern, caseSensitive, useRegex],
   );
 
-  const { counts, preview, regexError } = useFindReplace(query, scope, replacement, 20);
+  const { counts, preview, regexError, isSearching } = useFindReplace(query, scope, replacement, 20);
 
   const patternInputRef = useRef<HTMLInputElement>(null);
 
@@ -267,6 +267,8 @@ function SingleReplaceTab({ id, onClose, onConfirm, hasSelection }: SingleReplac
         <div className="replace-dialog-preview" aria-live="polite">
           {pattern.length === 0 ? (
             <span>検索文字列を入力してください</span>
+          ) : isSearching ? (
+            <span className="replace-dialog-searching">検索中...</span>
           ) : (
             <span>
               {counts.hits} 件 / {counts.blocks} ブロック / {counts.pages} ページ

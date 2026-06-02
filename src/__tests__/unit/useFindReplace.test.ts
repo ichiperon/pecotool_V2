@@ -1,14 +1,15 @@
 /**
- * useFindReplace (issue #93 + #98) のロジック層単体テスト。
+ * useFindReplace (issue #93 + #98 + #222) のロジック層単体テスト。
  *
  *  - buildRegexOrError: 通常文字列 / 大小区別 / regex / 構文エラー
  *  - countMatches: scope=selection/current/all, 大小区別, regex
  *  - buildMatchPreview (issue #98): before/after / マッチ範囲 / replacement 反映 /
  *    maxItems 打ち切り / scope / 大小区別 / regex / ゼロ幅マッチ
+ *  - useFindReplace hook (issue #222): scope='all' debounce / scope='current' 即時
  *
  * React Hook 部分 (useFindReplace) は ReplaceDialog.test.tsx で間接的に検証済み。
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // pdfLoader (DOMMatrix を要求する pdfjs を import している) は pure 関数テストには不要
 vi.mock('../../utils/pdfLoader', () => ({
@@ -644,5 +645,123 @@ describe('issue #105: buildMatchPreview と replaceText の literal $ 一致', (
       selectedIds: new Set(),
     });
     expect(r2.items[0].after).toBe('$1');
+  });
+});
+
+// ── issue #222: useFindReplace hook — scope='all' debounce ──────────────────
+//
+// pecoStore と pdfLoader を最小限 mock して renderHook で hook 挙動を検証する。
+// vi.useFakeTimers で setTimeout をコントロールし debounce の on/off を確認する。
+
+vi.mock('../../store/pecoStore', () => {
+  // テスト中に pages を差し替えられるよう store object を外に出す
+  const store: Record<string, unknown> = {
+    document: null,
+    currentPageIndex: 0,
+    selectedIds: new Set<string>(),
+    replaceText: vi.fn(),
+  };
+  return {
+    usePecoStore: Object.assign(
+      vi.fn((selector: (s: typeof store) => unknown) => selector(store)),
+      { getState: vi.fn(() => store) },
+    ),
+    __store: store,
+  };
+});
+
+import { renderHook, act } from '@testing-library/react';
+import { useFindReplace, type ReplaceQuery } from '../../hooks/useFindReplace';
+import { usePecoStore } from '../../store/pecoStore';
+
+// テスト用ページ/ブロックを store.document にセットするヘルパー
+function setStoreDocument(blocks: Array<{ id: string; text: string }>) {
+  const store = (
+    usePecoStore as unknown as { __store: Record<string, unknown> }
+  ).__store ?? (vi.mocked(usePecoStore).mock as unknown as { store: Record<string, unknown> }).store;
+
+  // module 内の store object への参照を usePecoStore の mock 経由で差し替える
+  vi.mocked(usePecoStore).mockImplementation((selector: (s: unknown) => unknown) => {
+    const doc = {
+      filePath: '/test.pdf',
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: blocks.map(b => ({
+          id: b.id,
+          text: b.text,
+          originalText: b.text,
+          bbox: { x: 0, y: 0, width: 100, height: 20 },
+          writingMode: 'horizontal' as const,
+          order: 0,
+          isNew: false,
+          isDirty: false,
+        })), isDirty: false, thumbnail: null }],
+      ]),
+    };
+    return selector({
+      document: doc,
+      currentPageIndex: 0,
+      selectedIds: new Set<string>(),
+      replaceText: vi.fn(),
+    });
+  });
+}
+
+describe('useFindReplace hook (issue #222): debounce', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    // pdfLoader.getAllTemporaryPageData は既に上部で mock 済み (空 Map を返す)
+    setStoreDocument([{ id: 'b1', text: 'foobar' }]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('scope="all" で query 変化直後は isSearching=true、300ms 後に isSearching=false', () => {
+    const initQuery: ReplaceQuery = { pattern: '', caseSensitive: false, useRegex: false };
+    const { result, rerender } = renderHook(
+      ({ query, scope }: { query: ReplaceQuery; scope: 'all' | 'current' }) =>
+        useFindReplace(query, scope),
+      { initialProps: { query: initQuery, scope: 'all' as const } },
+    );
+
+    // 初期: pattern 空なので isSearching は false (同一参照で debounce が起きていない)
+    expect(result.current.isSearching).toBe(false);
+
+    const newQuery: ReplaceQuery = { pattern: 'foo', caseSensitive: false, useRegex: false };
+
+    act(() => {
+      rerender({ query: newQuery, scope: 'all' });
+    });
+
+    // 変化直後 (タイマー未経過) は検索中
+    expect(result.current.isSearching).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+
+    // 300ms 経過後は反映完了
+    expect(result.current.isSearching).toBe(false);
+  });
+
+  it('scope="current" で query 変化後は即座に isSearching=false (debounce 不要)', () => {
+    const initQuery: ReplaceQuery = { pattern: '', caseSensitive: false, useRegex: false };
+    const { result, rerender } = renderHook(
+      ({ query, scope }: { query: ReplaceQuery; scope: 'all' | 'current' }) =>
+        useFindReplace(query, scope),
+      { initialProps: { query: initQuery, scope: 'current' as const } },
+    );
+
+    const newQuery: ReplaceQuery = { pattern: 'foo', caseSensitive: false, useRegex: false };
+
+    act(() => {
+      rerender({ query: newQuery, scope: 'current' });
+    });
+
+    // scope='current' は delay=0 なので即時反映 → isSearching は false
+    expect(result.current.isSearching).toBe(false);
   });
 });

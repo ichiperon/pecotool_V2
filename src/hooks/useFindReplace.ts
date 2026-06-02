@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePecoStore } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
+import { useDebouncedValue } from './useDebouncedValue';
 import type { PageData, WritingMode } from '../types';
 
 export type ReplaceScope = 'selection' | 'current' | 'all';
@@ -293,7 +294,14 @@ export function useFindReplace(
   const currentPageIndex = usePecoStore(s => s.currentPageIndex);
   const selectedIds = usePecoStore(s => s.selectedIds);
 
-  const regexResult = useMemo(() => buildRegexOrError(query), [query]);
+  // issue #222: scope='all' のとき query 変化に 300ms debounce を入れる。
+  // scope='current' / 'selection' は軽量なので 0ms = 即時。
+  const debouncedQuery = useDebouncedValue(query, scope === 'all' ? 300 : 0);
+
+  // query と debouncedQuery が一致しない間は走査が未反映 (検索中) とみなす。
+  const isSearching = query !== debouncedQuery;
+
+  const regexResult = useMemo(() => buildRegexOrError(debouncedQuery), [debouncedQuery]);
 
   // issue #104: scope='all' のときだけ IDB 退避ページを取得する。
   // filePath / scope / pages Map 更新で再フェッチして件数を最新化する。
@@ -338,7 +346,7 @@ export function useFindReplace(
     return buildMatchPreview({
       re: regexResult.re,
       replacement,
-      useRegex: query.useRegex,
+      useRegex: debouncedQuery.useRegex,
       scope,
       pagesMap: document?.pages,
       currentPageIndex,
@@ -346,7 +354,7 @@ export function useFindReplace(
       maxItems: previewMaxItems,
       idbPages,
     });
-  }, [regexResult, replacement, query.useRegex, scope, document?.pages, currentPageIndex, selectedIds, previewMaxItems, idbPages]);
+  }, [regexResult, replacement, debouncedQuery.useRegex, scope, document?.pages, currentPageIndex, selectedIds, previewMaxItems, idbPages]);
 
   // 構文エラー: 空 pattern の場合は表示しない (error='' で返している)
   const regexError = 'error' in regexResult && regexResult.error ? regexResult.error : null;
@@ -358,14 +366,16 @@ export function useFindReplace(
     /** issue #98: before/after プレビュー (最初の previewMaxItems ブロック) */
     preview,
     regexError,
+    /** issue #222: scope='all' でキー入力から 300ms 以内は true (検索中) */
+    isSearching,
     /** dialog 側から実引数で replacement を渡すために返す薄いラッパ */
     runReplace: (replacement: string, opts?: { skipBlockIds?: ReadonlySet<string> }) =>
       replaceText({
         scope,
-        pattern: query.pattern,
+        pattern: debouncedQuery.pattern,
         replacement,
-        caseSensitive: query.caseSensitive,
-        useRegex: query.useRegex,
+        caseSensitive: debouncedQuery.caseSensitive,
+        useRegex: debouncedQuery.useRegex,
         skipBlockIds: opts?.skipBlockIds,
       }),
   };

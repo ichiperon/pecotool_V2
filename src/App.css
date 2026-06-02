@@ -2093,6 +2093,12 @@ body, #root {
   font-weight: 600;
 }
 
+/* issue #222: scope='all' で debounce 中の「検索中...」表示 */
+.replace-dialog-searching {
+  color: var(--text-muted, #6b7280);
+  font-style: italic;
+}
+
 /* issue #165: 正規表現入力エラー時の input 赤枠 (色のみに頼らないエラー提示) */
 .regex-input-error {
   border: 1.5px solid #dc2626;
