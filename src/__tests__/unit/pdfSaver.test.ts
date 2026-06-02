@@ -1004,6 +1004,89 @@ describe('pdfSaver / savePDF', () => {
     })
   })
 
+
+
+  // ── Wave-3 additions: fontBytes / no-dirty short-circuit edge cases ──────
+
+  describe('U-SV-30: fontBytes=undefined → StandardFonts.Helvetica が使われる', () => {
+    it('fontBytes を渡さない (undefined) とき embedFont は StandardFonts.Helvetica を引数に呼ばれる', async () => {
+      const doc = makeDoc([{
+        text: 'Hello',
+        writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      // savePDF の第3引数を省略 = fontBytes undefined → Helvetica fallback 経路
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.embedFont).toHaveBeenCalled()
+      const firstArg = m.embedFont.mock.calls[0][0]
+      // fontBytes undefined のとき buildPdfDocument は StandardFonts.Helvetica (='Helvetica' string) を渡す
+      expect(firstArg).toBe('Helvetica')
+    })
+  })
+
+  describe('U-SV-31: fontBytes を渡した場合に embedFont が throw → savePDF も reject する', () => {
+    it('embedFont が throw すると savePDF は reject する (buildPdfDocument は embedFont を catch しない)', async () => {
+      m.embedFont.mockRejectedValue(new Error('corrupt font data'))
+
+      const doc = makeDoc([{
+        text: 'テスト',
+        writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      // 破損フォントを fontBytes として渡す
+      const corruptFont = new ArrayBuffer(8)
+
+      // buildPdfDocument は embedFont の throw を catch しないため、savePDF も reject する。
+      // これは意図された仕様: 破損フォントでの保存は明示的に失敗すべき。
+      await expect(savePDF(new Uint8Array(), doc, corruptFont)).rejects.toThrow('corrupt font data')
+    })
+  })
+
+  describe('U-SV-32: pdfPageCount=0 (getPageCount=0) でもクラッシュしない', () => {
+    it('空 PDF (0 ページ) を渡しても savePDF は reject せず Uint8Array を返す', async () => {
+      // 0 ページ PDF を模倣: getPageCount=0、dirtyPages がある場合 pageIndex >= 0 なのでスキップされる
+      defaultPdfDocMock.getPageCount.mockReturnValue(0)
+      defaultPdfDocMock.getPages.mockReturnValue([])
+
+      const page: PageData = {
+        pageIndex: 0, width: 595, height: 842, isDirty: true, thumbnail: null,
+        textBlocks: [{
+          id: 'b0', text: 'NoPage', originalText: 'NoPage', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'empty.pdf', totalPages: 0, metadata: {},
+        pages: new Map([[0, page]]),
+      }
+      const result = await savePDF(new Uint8Array(), doc)
+      expect(result).toBeInstanceOf(Uint8Array)
+    })
+  })
+
+  describe('U-SV-33: dirty pages 0 件 + PecoTool メタ無し → embedFont は呼ばれない', () => {
+    it('全ページ non-dirty のとき embedFont は呼ばれない (short-circuit前の早期 return)', async () => {
+      // no-dirty 短絡は buildPdfDocument 内の sweepUnreachableObjects を通る経路。
+      // savePDF (mock fallback) では m.save の返却値がそのまま帰ってくる。
+      const page: PageData = {
+        pageIndex: 0, width: 595, height: 842, isDirty: false, thumbnail: null,
+        textBlocks: [{
+          id: 'b0', text: 'Untouched', originalText: 'Untouched', writingMode: 'horizontal',
+          order: 0, isNew: false, isDirty: false,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'clean.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, page]]),
+      }
+      await savePDF(new Uint8Array(), doc)
+      expect(m.embedFont).not.toHaveBeenCalled()
+    })
+  })
+
 })
 
 // ── Worker 経路テスト ─────────────────────────────────────────
