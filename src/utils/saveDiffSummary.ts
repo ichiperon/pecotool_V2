@@ -13,7 +13,18 @@ export interface SaveDiffSummary {
   changedPageCount: number;
   changedPages: number[];
   timestamp: number;
+  /** Set when the undo stack was truncated due to MAX_DIFF_ACTIONS. (#249) */
+  truncatedOlderCount?: number;
 }
+
+/**
+ * Maximum number of undo actions scanned for diff computation. (#249)
+ *
+ * When lastSavedActionIndex=0 and the undo stack is very large, walking the
+ * entire stack is O(n * blocks) and can block the main thread for hundreds of
+ * milliseconds. Cap at 50 actions and report older ones as truncatedOlderCount.
+ */
+const MAX_DIFF_ACTIONS = 50;
 
 /**
  * undoStack のうち lastSavedActionIndex 以降のエントリを集約し、
@@ -32,7 +43,27 @@ export function computeSaveDiff(
   const timestamp = Date.now();
 
   // lastSavedActionIndex 以降のアクションだけを対象にする
-  const recentActions = undoStack.slice(lastSavedActionIndex);
+  const allRecentActions = undoStack.slice(lastSavedActionIndex);
+
+  // Performance guard (#249): cap the number of scanned actions at MAX_DIFF_ACTIONS.
+  // When lastSavedActionIndex=0 and the undo stack is large, scanning every action
+  // is O(n * blocks) and can stall the main thread.
+  // Older actions beyond the cap are reported as truncatedOlderCount in the summary.
+  let truncatedOlderCount: number | undefined;
+  let recentActions: Action[];
+  if (allRecentActions.length > MAX_DIFF_ACTIONS) {
+    if (lastSavedActionIndex === 0) {
+      console.warn(
+        `[saveDiffSummary] lastSavedActionIndex=0 with ${allRecentActions.length} actions — ` +
+          `truncating to last ${MAX_DIFF_ACTIONS} for performance. ` +
+          `Consider checkpointing lastSavedActionIndex more frequently.`,
+      );
+    }
+    truncatedOlderCount = allRecentActions.length - MAX_DIFF_ACTIONS;
+    recentActions = allRecentActions.slice(allRecentActions.length - MAX_DIFF_ACTIONS);
+  } else {
+    recentActions = allRecentActions;
+  }
 
   // ブロックごとに初回 before と最終 after を蓄積する
   // key: `${pageIndex}:${blockId}`
@@ -146,5 +177,6 @@ export function computeSaveDiff(
     changedPageCount: changedPages.length,
     changedPages,
     timestamp,
+    ...(truncatedOlderCount !== undefined ? { truncatedOlderCount } : {}),
   };
 }
