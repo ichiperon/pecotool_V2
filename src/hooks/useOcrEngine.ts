@@ -11,8 +11,44 @@ import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore'
 import { sortOcrBlocks } from '../utils/ocrSort';
 import { logger } from '../utils/logger';
 import { perf } from '../utils/perfLogger';
+import { loadPage } from '../utils/pdfTextExtractor';
 
 const RENDER_SCALE = 2.0;
+
+/**
+ * #204: サンプルページ (先頭・中央・末尾の最大 3 点) の items.length をチェックして
+ * テキスト層の有無を判定する純粋ヘルパ (フック外でテスト可能)。
+ *
+ * @param pdf        getSharedPdfProxy などで取得済みの PDFDocumentProxy
+ * @param totalPages ドキュメントの総ページ数
+ * @returns 'has_text' : 1 ページ以上でテキスト item が存在する
+ *          'all_empty': 全サンプルページで items が 0
+ */
+export async function detectTextLayerSamples(
+  pdf: pdfjsLib.PDFDocumentProxy,
+  totalPages: number,
+): Promise<'all_empty' | 'has_text'> {
+  const sampleNums = Array.from(
+    new Set([1, Math.ceil(totalPages / 2), totalPages].filter((n) => n >= 1 && n <= totalPages))
+  );
+
+  const countItems = async (pageNum: number): Promise<number> => {
+    const page = await pdf.getPage(pageNum);
+    try {
+      const content = await page.getTextContent();
+      return content.items.filter((item) => {
+        const maybeStr = (item as { str?: unknown }).str;
+        return typeof maybeStr === 'string' && maybeStr.trim() !== '';
+      }).length;
+    } finally {
+      page.cleanup();
+    }
+  };
+
+  const counts = await Promise.all(sampleNums.map(countItems));
+  const anyHasText = counts.some((c) => c > 0);
+  return anyHasText ? 'has_text' : 'all_empty';
+}
 
 /**
  * Render a page from an isolated PDF document (not the shared LRU cache)
@@ -124,6 +160,9 @@ type OcrProgress = {
   fileCurrent?: number;
   fileTotal?: number;
   fileName?: string;
+  startedAt: number;
+  avgMsPerPage: number;
+  estimatedRemainingMs: number;
 };
 
 interface FolderOcrCallbacks {
@@ -189,7 +228,7 @@ export function useOcrEngine(
 
   const processAllPages = async (
     doc: PecoDocument,
-    progressForPage?: (pageIndex: number) => OcrProgress,
+    progressForPage?: (pageIndex: number, timing: { startedAt: number; avgMsPerPage: number; estimatedRemainingMs: number }) => OcrProgress,
   ) => {
     // #102: 開始時点の epoch を captured epoch として保持。
     // ループ内で getState().documentEpoch と比較し、F5 / Ctrl+O 経由で document が
@@ -197,6 +236,12 @@ export function useOcrEngine(
     // updatePageData による document 差し替えは epoch を増やさないので、書き込みは正常に続く。
     const capturedEpoch = usePecoStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
+
+    // #200: EMA タイミング変数
+    const startedAt = performance.now();
+    let avgMsPerPage = 0;
+    let pageStartTime = startedAt;
+
     try {
       for (let i = 0; i < doc.totalPages; i++) {
         if (cancelTokenRef.current) break;
@@ -206,7 +251,14 @@ export function useOcrEngine(
           break;
         }
 
-        setOcrProgress(progressForPage ? progressForPage(i) : { current: i + 1, total: doc.totalPages });
+        pageStartTime = performance.now();
+
+        const timing = { startedAt, avgMsPerPage, estimatedRemainingMs: avgMsPerPage * (doc.totalPages - i) };
+        setOcrProgress(
+          progressForPage
+            ? progressForPage(i, timing)
+            : { current: i + 1, total: doc.totalPages, startedAt, avgMsPerPage, estimatedRemainingMs: timing.estimatedRemainingMs },
+        );
         logger.log(`[OCR] 処理中: ${i + 1} / ${doc.totalPages} ページ`);
 
         let size: { pageWidth: number; pageHeight: number };
@@ -228,6 +280,15 @@ export function useOcrEngine(
             size.pageHeight,
             settings.ocrLanguage,
           );
+
+          // #200: ページ完了後の EMA 更新 (α=0.3)
+          const pageDurationMs = performance.now() - pageStartTime;
+          if (avgMsPerPage === 0) {
+            avgMsPerPage = pageDurationMs;
+          } else {
+            avgMsPerPage = 0.3 * pageDurationMs + 0.7 * avgMsPerPage;
+          }
+
           if (!isCurrentDocument(capturedEpoch)) {
             cancelTokenRef.current = true;
             showToast('OCRを中止しました（別のPDFが開かれました）。', true);
@@ -370,7 +431,7 @@ export function useOcrEngine(
 
     cancelTokenRef.current = false;
     setOcrRunning(true);
-    setOcrProgress({ current: 0, total: doc.totalPages });
+    setOcrProgress({ current: 0, total: doc.totalPages, startedAt: performance.now(), avgMsPerPage: 0, estimatedRemainingMs: 0 });
     perf.mark('ui.ocrRunAllPages', { totalPages: doc.totalPages });
 
     try {
@@ -436,7 +497,8 @@ export function useOcrEngine(
         cancelTokenRef.current = false;
         const filePath = pdfFiles[fileIndex];
         const fileName = filePath.split(/[\\/]/).pop() || filePath;
-        setOcrProgress({ current: 0, total: 0, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName });
+        const fileStartedAt = performance.now();
+        setOcrProgress({ current: 0, total: 0, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName, startedAt: fileStartedAt, avgMsPerPage: 0, estimatedRemainingMs: 0 });
 
         const opened = await callbacks.openPdf(filePath);
         if (!opened) continue;
@@ -444,19 +506,22 @@ export function useOcrEngine(
         const doc = usePecoStore.getState().document;
         if (!doc || doc.filePath !== filePath) continue;
 
-        await processAllPages(doc, (pageIndex) => ({
+        await processAllPages(doc, (pageIndex, timing) => ({
           current: pageIndex + 1,
           total: doc.totalPages,
           fileCurrent: fileIndex + 1,
           fileTotal: pdfFiles.length,
           fileName,
+          startedAt: timing.startedAt,
+          avgMsPerPage: timing.avgMsPerPage,
+          estimatedRemainingMs: timing.estimatedRemainingMs,
         }));
         // ユーザが明示的に cancelOcr() を押した場合のみフォルダ全体を停止する。
         // epoch 検知での内部 cancel はこのファイルだけスキップ扱いにし、次ファイルに進む。
         // ユーザ cancel と内部 cancel の区別がつかないため、cancelTokenRef は触らず次の
         // openPdf 直前で必ずリセットして判定を継続する。
 
-        setOcrProgress({ current: doc.totalPages, total: doc.totalPages, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName });
+        setOcrProgress({ current: doc.totalPages, total: doc.totalPages, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName, startedAt: fileStartedAt, avgMsPerPage: 0, estimatedRemainingMs: 0 });
         // #48: savePdf の戻り値で成功/失敗を明示判定する。
         // 旧実装は store の isDirty を見ていたが、saveTemporaryPageData の async は
         // non-atomic で残るため false positive 中止が起きていた。
@@ -479,6 +544,75 @@ export function useOcrEngine(
     }
   };
 
+  // #204: detectTextLayerSamples はモジュールトップレベルの export 関数に委譲する。
+  const detectTextLayerSamplesForDoc = async (
+    doc: PecoDocument,
+  ): Promise<'all_empty' | 'has_text'> => {
+    const pdf = await getSharedPdfProxy(doc.filePath);
+    return detectTextLayerSamples(pdf, doc.totalPages);
+  };
+
+  /**
+   * #204: 全ページのテキスト層を pdfTextExtractor.loadPage 経由で一括取り込む。
+   * OCR の代わりにテキスト層がある電子原稿 PDF で使う。
+   * ocrProgress には触れず、showToast で進捗を知らせる最小実装。
+   */
+  const importTextLayerAllPages = async (doc: PecoDocument, capturedEpoch: number) => {
+    const total = doc.totalPages;
+    showToast(`テキスト層を取り込み中... (全 ${total} ページ)`);
+    logger.log(`[TextLayer] 取り込み開始: ${total} ページ`);
+
+    const BATCH = 10;
+    for (let start = 0; start < total; start += BATCH) {
+      if (!isCurrentDocument(capturedEpoch)) {
+        showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
+        return;
+      }
+      const end = Math.min(start + BATCH, total);
+      const pageIndices = Array.from({ length: end - start }, (_, i) => start + i);
+
+      const pageDataList = await Promise.all(
+        pageIndices.map((i) =>
+          loadPage(
+            // loadPage の第 1 引数 (_pdf) は実際は getCachedPageProxy 内で参照するため
+            // ダミーの null cast で渡す (既存の呼び出し規約に準ずる)。
+            null as unknown as pdfjsLib.PDFDocumentProxy,
+            i,
+            doc.filePath,
+            null,
+            doc.mtime,
+          ).catch((e) => {
+            console.warn(`[TextLayer] ページ ${i + 1} 取り込み失敗:`, e);
+            return null;
+          })
+        )
+      );
+
+      if (!isCurrentDocument(capturedEpoch)) {
+        showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
+        return;
+      }
+
+      for (let idx = 0; idx < pageIndices.length; idx++) {
+        const pageIndex = pageIndices[idx];
+        const pageData = pageDataList[idx];
+        if (!pageData) continue;
+        usePecoStore.getState().updatePageData(pageIndex, {
+          textBlocks: pageData.textBlocks,
+          isDirty: true,
+          isTextExtracted: true,
+          ocrCleared: false,
+        }, false);
+      }
+
+      logger.log(`[TextLayer] 取り込み済み: ${end} / ${total} ページ`);
+      // UI スレッドを解放
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    showToast(`テキスト層の取り込みが完了しました（全 ${total} ページ）`);
+  };
+
   const checkAndPromptOcrZero = async (doc: PecoDocument) => {
     if (isOcrRunningRef.current) return;
     // #102: doc を渡された瞬間の epoch を保持。ask() の待機中に別 PDF へ切り替わったら
@@ -486,21 +620,30 @@ export function useOcrEngine(
     // 同 filePath で再ロードされた別 doc に対しても OCR を実行していた)。
     const capturedEpoch = usePecoStore.getState().documentEpoch;
     try {
-      const pdf = await getSharedPdfProxy(doc.filePath);
-      const page0 = await pdf.getPage(1);
-      let content: Awaited<ReturnType<pdfjsLib.PDFPageProxy['getTextContent']>>;
-      try {
-        content = await page0.getTextContent();
-      } finally {
-        page0.cleanup();
-      }
-      // pdfjs v5 では items が TextItem | TextMarkedContent の混在配列。str を持つのは TextItem のみ。
-      const hasText = content.items.some((item) => {
-        const maybeStr = (item as { str?: unknown }).str;
-        return typeof maybeStr === 'string' && maybeStr.trim() !== '';
-      });
+      // #204: 3 点サンプリングでテキスト層の有無を判定する。
+      const layerResult = await detectTextLayerSamplesForDoc(doc);
 
-      if (!hasText) {
+      if (layerResult === 'has_text') {
+        // テキスト層あり: 取り込むか OCR するかユーザーに問う。
+        // @tauri-apps/plugin-dialog の ask() は yes/no のみ。ここでは:
+        //   「はい」→ テキスト層を取り込む
+        //   「いいえ」→ OCR を実行するか再確認
+        const importConfirmed = await ask(
+          'このPDFにはテキスト層があります。OCRを実行せず既存のテキスト層を取り込みますか？\n\n「はい」→ テキスト層を取り込む\n「いいえ」→ OCR を実行するか確認します',
+          { title: 'テキスト層の検出', kind: 'info' }
+        );
+        if (!isCurrentDocument(capturedEpoch)) return;
+        if (importConfirmed) {
+          await importTextLayerAllPages(doc, capturedEpoch);
+        } else {
+          const ocrConfirmed = await ask(
+            '全ページ OCR を実行しますか？',
+            { title: 'OCR実行の提案', kind: 'info' }
+          );
+          if (ocrConfirmed && isCurrentDocument(capturedEpoch)) await runOcrAllPages();
+        }
+      } else {
+        // テキスト層なし: 既存挙動 (OCR を促す)
         const confirmed = await ask(
           'このPDFにはOCRデータが含まれていません。全ページOCRを実行しますか？',
           { title: 'OCR実行の提案', kind: 'info' }

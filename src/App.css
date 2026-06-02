@@ -1872,6 +1872,21 @@ body, #root {
   background: #b91c1c;
 }
 
+/* #200: OCR 進捗タイミング情報 */
+.ocr-timing-info {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #9ca3af;
+  letter-spacing: 0.02em;
+}
+
+.ocr-timing-elapsed,
+.ocr-timing-remaining,
+.ocr-timing-avg {
+  white-space: nowrap;
+}
+
 .ocr-cancel-button:focus-visible {
   outline: 2px solid #fff;
   outline-offset: 2px;

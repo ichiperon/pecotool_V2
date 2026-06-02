@@ -69,6 +69,14 @@ const SaveDialog = lazy(() =>
   import("./components/SaveDialog").then(m => ({ default: m.SaveDialog }))
 );
 
+// #200: OCR 進捗の残り時間推定表示
+function formatMmSs(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 function App() {
   // 細粒度selectorで購読: 各state変化が独立してComponentに伝わる。
   // document 全体は購読せず、UI で実際に使う primitive のみを個別 selector で取る。
@@ -808,6 +816,22 @@ function App() {
                     : `OCR処理中... (${ocrProgress.current}/${ocrProgress.total})`
                   : 'OCR処理中...'}
               </div>
+              {/* #200: 経過時間 / 推定残り時間 / 平均 ms/page */}
+              {ocrProgress && (
+                <div className="ocr-timing-info">
+                  <span className="ocr-timing-elapsed">
+                    経過: {formatMmSs(performance.now() - ocrProgress.startedAt)}
+                  </span>
+                  <span className="ocr-timing-remaining">
+                    残り: {ocrProgress.current <= 3
+                      ? '計算中...'
+                      : formatMmSs(ocrProgress.estimatedRemainingMs)}
+                  </span>
+                  <span className="ocr-timing-avg">
+                    平均: {ocrProgress.current <= 3 ? '---' : `${Math.round(ocrProgress.avgMsPerPage)} ms/p`}
+                  </span>
+                </div>
+              )}
               {/* issue #163: overlay 内に大きなキャンセル動線を配置。
                   従来は Toolbar の小さな X だけで気付きにくく、Esc も効かなかった。 */}
               <button
