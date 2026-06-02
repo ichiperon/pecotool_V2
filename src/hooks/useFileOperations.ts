@@ -26,7 +26,7 @@ import {
 } from './useFontLoader';
 import { PecoDocument, PageData } from '../types';
 import { perf } from '../utils/perfLogger';
-import { flushActiveOcrCardText } from '../utils/ocrEditFlush';
+import { commitActiveOcrCardEdit } from '../components/OcrCard';
 import { computeSaveDiff } from '../utils/saveDiffSummary';
 import type { SaveDiffSummary } from '../utils/saveDiffSummary';
 
@@ -615,7 +615,7 @@ export function useFileOperations(
     // blur-commit 設計になっており、Ctrl+S 時にフォーカス中だと最新編集が store に
     // 無い。flushActiveOcrCardText は focus 中の .ocr-card-content を直接読んで
     // 同期 updatePageData するため、直後の _executeSave スナップショットに載る。
-    flushActiveOcrCardText();
+    commitActiveOcrCardEdit();
     const { document } = usePecoStore.getState();
     if (!document) {
       showToast("PDFが開かれていません。", true);
@@ -710,7 +710,7 @@ export function useFileOperations(
       showToast('高圧縮 (ラスタライズ) は現在未実装です。通常形式で保存します。', true);
       options = { ...options, compression: 'none' };
     }
-    flushActiveOcrCardText();
+    commitActiveOcrCardEdit();
     const { document } = usePecoStore.getState();
     if (!document) return;
     if (isSavingRef.current) {
@@ -801,7 +801,7 @@ export function useFileOperations(
       showToast('保存処理が進行中です。');
       return false;
     }
-    flushActiveOcrCardText();
+    commitActiveOcrCardEdit();
     isSavingRef.current = true;
     setIsSaving?.(true);
     try {

@@ -1,6 +1,15 @@
-import { usePecoStore } from '../store/pecoStore';
+import type { PecoDocument, PageData } from '../types';
 
-export function flushActiveOcrCardText(): boolean {
+type UpdatePageDataFn = (pageIndex: number, data: Partial<PageData>) => void;
+
+/**
+ * フォーカス中の .ocr-card-content DOM テキストを store へ確定する pure util。
+ * store への依存をなくすため updatePageData と document を引数で受け取る。
+ */
+export function flushActiveOcrCardText(
+  updatePageData: UpdatePageDataFn,
+  document: PecoDocument | null,
+): boolean {
   if (typeof window === 'undefined') return false;
 
   const active = window.document.activeElement;
@@ -13,7 +22,6 @@ export function flushActiveOcrCardText(): boolean {
   const blockId = content.dataset.blockId;
   if (!Number.isInteger(pageIndex) || !blockId) return false;
 
-  const { document, updatePageData } = usePecoStore.getState();
   const page = document?.pages.get(pageIndex);
   if (!page) return false;
 

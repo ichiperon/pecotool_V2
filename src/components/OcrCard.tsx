@@ -12,7 +12,11 @@ export interface OcrCardHandle {
   focusContent: () => void;
 }
 
-export const commitActiveOcrCardEdit = flushActiveOcrCardText;
+/** store アクセス付きラッパー。保存前コミット等の caller から呼ぶ。 */
+export function commitActiveOcrCardEdit(): boolean {
+  const { updatePageData, document } = usePecoStore.getState();
+  return flushActiveOcrCardText(updatePageData, document);
+}
 
 interface OcrCardProps {
   block: TextBlock;
@@ -204,7 +208,7 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-      flushActiveOcrCardText();
+      commitActiveOcrCardEdit();
     }
 
     const direction = e.key === 'ArrowDown' ? 'down' : e.key === 'ArrowUp' ? 'up' : null;
