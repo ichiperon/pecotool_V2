@@ -2327,12 +2327,47 @@ body, #root {
   pointer-events: none;
 }
 
-.onboarding-overlay {
+/* fix(#212): replaced clip-path:polygon(evenodd,...) with 4-mask overlay */
+.onboarding-overlay-masks {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
   pointer-events: auto;
   cursor: pointer;
+}
+
+.onboarding-mask {
+  position: fixed;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: auto;
+}
+
+/* top mask: full width, from viewport top to spotlight top */
+.onboarding-mask--top {
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+/* bottom mask: full width, from spotlight bottom to viewport bottom */
+.onboarding-mask--bottom {
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+/* left mask: from spotlight top to spotlight bottom, left side */
+.onboarding-mask--left {
+  left: 0;
+}
+
+/* right mask: from spotlight top to spotlight bottom, right side */
+.onboarding-mask--right {
+  right: 0;
+}
+
+/* full-screen mask when no spotlight target (step 1) */
+.onboarding-mask--full {
+  inset: 0;
 }
 
 .onboarding-spotlight-border {

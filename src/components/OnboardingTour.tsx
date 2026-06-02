@@ -194,20 +194,6 @@ export function OnboardingTour({ onClose }: OnboardingTourProps) {
     handleFinish();
   };
 
-  // Build clip-path for spotlight overlay
-  const buildClipPath = (rect: SpotlightRect): string => {
-    const { top, left, width, height } = rect;
-    const right = left + width;
-    const bottom = top + height;
-    // Outer polygon (counter-clockwise to create hole) with inner rectangle (clockwise)
-    return (
-      `polygon(evenodd, ` +
-      `0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ` +
-      `${left}px ${top}px, ${left}px ${bottom}px, ${right}px ${bottom}px, ${right}px ${top}px, ${left}px ${top}px` +
-      `)`
-    );
-  };
-
   return (
     <div
       className="onboarding-tour-root"
@@ -215,21 +201,49 @@ export function OnboardingTour({ onClose }: OnboardingTourProps) {
       aria-modal="true"
       aria-label="チュートリアル"
     >
-      {/* Overlay with spotlight hole */}
+      {/* Overlay: 4-mask divs to create spotlight hole */}
       <AnimatePresence mode="wait">
         <motion.div
           key={`overlay-${stepIndex}`}
-          className="onboarding-overlay"
+          className="onboarding-overlay-masks"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
-          style={{
-            clipPath: spotRect ? buildClipPath(spotRect) : undefined,
-          }}
           onClick={handleSkip}
           aria-hidden="true"
-        />
+        >
+          {spotRect ? (
+            <>
+              <div
+                className="onboarding-mask onboarding-mask--top"
+                style={{ height: spotRect.top }}
+              />
+              <div
+                className="onboarding-mask onboarding-mask--bottom"
+                style={{ top: spotRect.top + spotRect.height }}
+              />
+              <div
+                className="onboarding-mask onboarding-mask--left"
+                style={{
+                  top: spotRect.top,
+                  height: spotRect.height,
+                  width: spotRect.left,
+                }}
+              />
+              <div
+                className="onboarding-mask onboarding-mask--right"
+                style={{
+                  top: spotRect.top,
+                  height: spotRect.height,
+                  left: spotRect.left + spotRect.width,
+                }}
+              />
+            </>
+          ) : (
+            <div className="onboarding-mask onboarding-mask--full" />
+          )}
+        </motion.div>
       </AnimatePresence>
 
       {/* Spotlight border highlight */}
