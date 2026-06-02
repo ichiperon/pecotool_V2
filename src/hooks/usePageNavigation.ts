@@ -222,6 +222,11 @@ export function usePageNavigation({
   useEffect(() => {
     if (!filePath) return;
     const loadOwner = { controller: null as AbortController | null };
+    // issue #141: getCachedPageProxy の await 後に effect が cleanup された場合
+    // setCurrentPageProxy を呼ばないためのフラグ。store の live チェックでも
+    // 同一 (filePath, epoch, pageIndex) のまま別 effect run に切り替わる例
+    // (例: 同ページに対する再ロード) を捕捉できないため、cancelled で確実に止める。
+    let cancelled = false;
     // 未ロード、またはOCR全消去で作られたダミー（width===0）の場合はロードする
     if (!currentPageExists || currentPageWidth === 0) {
       loadCurrentPage(currentPageIndex, loadOwner);
@@ -238,6 +243,7 @@ export function usePageNavigation({
       void (async () => {
         try {
           const qp = await getCachedPageProxy(filePath, currentPageIndex);
+          if (cancelled) return;
           // レースチェック: 現在もこのページが選択されているか
           const live = usePecoStore.getState();
           if (live.document?.filePath === filePath && live.documentEpoch === documentEpoch && live.currentPageIndex === currentPageIndex) {
@@ -249,6 +255,7 @@ export function usePageNavigation({
       })();
     }
     return () => {
+      cancelled = true;
       // この effect run が開始したロードだけを中止する。
       if (loadOwner.controller && currentLoadAbortRef.current === loadOwner.controller) {
         loadOwner.controller.abort();
