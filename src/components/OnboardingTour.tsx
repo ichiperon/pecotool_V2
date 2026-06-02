@@ -13,7 +13,7 @@ export interface TourStep {
 
 const TOUR_STEPS: TourStep[] = [
   {
-    title: 'ようこそ PecoTool へ',
+    title: 'ようこそ Peco へ',
     description: '日本語 OCR + PDF 編集ツールです。\nこのツアーで基本的な操作を紹介します。',
     targetSelector: null,
   },

@@ -1,4 +1,4 @@
-# PecoTool v2
+# Peco
 
 PDF 内テキストの OCR 抽出・編集・上書き保存を行う Windows デスクトップアプリケーション (v1.6.9)。
 

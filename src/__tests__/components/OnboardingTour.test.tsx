@@ -35,7 +35,7 @@ beforeEach(() => {
 describe('OnboardingTour: step rendering', () => {
   it('OT-01: renders step 1 title on initial mount', () => {
     render(<OnboardingTour onClose={vi.fn()} />);
-    expect(screen.getByText('ようこそ PecoTool へ')).toBeTruthy();
+    expect(screen.getByText('ようこそ Peco へ')).toBeTruthy();
   });
 
   it('OT-02: renders "次へ" button on first step', () => {
@@ -80,7 +80,7 @@ describe('OnboardingTour: step rendering', () => {
     render(<OnboardingTour onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: '次へ' }));
     fireEvent.click(screen.getByRole('button', { name: '戻る' }));
-    expect(screen.getByText('ようこそ PecoTool へ')).toBeTruthy();
+    expect(screen.getByText('ようこそ Peco へ')).toBeTruthy();
   });
 });
 

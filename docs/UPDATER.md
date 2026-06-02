@@ -1,6 +1,6 @@
 # Auto-Updater: Release & Key Generation Guide
 
-PecoTool v2 uses `tauri-plugin-updater` (Tauri 2.x) for automatic update notifications.
+Peco uses `tauri-plugin-updater` (Tauri 2.x) for automatic update notifications.
 
 ## How it works
 
