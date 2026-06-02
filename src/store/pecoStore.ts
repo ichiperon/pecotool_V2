@@ -731,16 +731,35 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         }
 
         re.lastIndex = 0;
-        // hit 数の数えと replace を同時に。matchAll は countOnly に高コスト。
-        // ここでは「replace 結果が同じか?」で changed 判定をしてから match 数を数える。
-        const replaced = b.text.replace(re, safeReplacement);
-        if (replaced === b.text) {
+        // issue #177: replace と count を 1 回の regex 走査で済ませる。
+        // 旧実装は `b.text.replace(re, safeReplacement)` と `b.text.match(re)` を
+        // 2 回走らせており、scope='all' の長大テキスト × 全ページでメインスレッド
+        // をブロックしていた。replacer に関数を渡せば match ごとに hit++ できる。
+        // safeReplacement (useRegex=false) の '$$' エスケープは replacer の戻り値では
+        // 不要 (文字列が返り値としてそのまま使われる) のため、生の replacement を返す。
+        let hits = 0;
+        const literalReplacement = replacement;
+        const replaced = b.text.replace(re, useRegex
+          ? (...args) => {
+              hits++;
+              // useRegex=true: 後方参照を反映させるため $-string で再 replace する。
+              // ただし replacer 内で動的に行うので、match 全体を素材に同じ正規表現
+              // ではなく安全に safeReplacement を適用する手段が必要。ここでは
+              // String.prototype.replace の "1回限り" 呼び出しで $-参照を解決する。
+              const matchStr = args[0] as string;
+              // groups + offset + full string の余剰引数を捨てて再構築する必要は無く、
+              // matchStr に対して同じ re で 1 回 replace すれば $1...$n が解決される。
+              const oneShot = new RegExp(re.source, re.flags.replace('g', ''));
+              return matchStr.replace(oneShot, safeReplacement);
+            }
+          : () => {
+              hits++;
+              return literalReplacement;
+            });
+        if (hits === 0) {
           newTextBlocks.push(b);
           continue;
         }
-        // 件数カウントは match() で取得 (replace が走った後でも match の入力は元 text)
-        const matches = b.text.match(re);
-        const hits = matches ? matches.length : 0;
         totalHits += hits;
         totalBlocks++;
         pageChanged = true;
