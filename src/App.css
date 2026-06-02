@@ -2094,6 +2094,231 @@ body, #root {
   outline-color: #dc2626;
 }
 
+/* Visually hidden helper for screen-reader-only text */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ─── Feature #198: ReplaceDialog tab bar ─── */
+.replace-dialog-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--header-bg);
+  padding: 0 20px;
+}
+
+.replace-dialog-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #6b7280;
+  padding: 8px 12px;
+  margin-right: 4px;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.replace-dialog-tab:hover {
+  color: var(--text-color);
+}
+
+.replace-dialog-tab.active {
+  color: var(--accent-color);
+  border-bottom-color: var(--accent-color);
+}
+
+/* ─── Feature #198: RuleSet tab ─── */
+.ruleset-toolbar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.ruleset-toolbar-btn {
+  background: #f3f4f6;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+  color: var(--text-color);
+  white-space: nowrap;
+}
+
+.ruleset-toolbar-btn:hover {
+  background: #e5e7eb;
+}
+
+.ruleset-toolbar-btn.primary {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: #fff;
+}
+
+.ruleset-toolbar-btn.primary:hover {
+  background: #1d4ed8;
+}
+
+.ruleset-toolbar-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ruleset-table-wrapper {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.ruleset-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.ruleset-table th {
+  background: #f9fafb;
+  border-bottom: 1px solid var(--border-color);
+  padding: 5px 8px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.ruleset-table td {
+  border-bottom: 1px solid #f3f4f6;
+  padding: 4px 8px;
+  vertical-align: middle;
+}
+
+.ruleset-table tr:last-child td {
+  border-bottom: none;
+}
+
+.ruleset-table tr:hover td {
+  background: #f9fafb;
+}
+
+.ruleset-table input[type="text"] {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  font-size: 12px;
+  padding: 2px 5px;
+  background: #fff;
+  color: var(--text-color);
+}
+
+.ruleset-table input[type="text"]:focus {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
+.ruleset-table input[type="checkbox"] {
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+}
+
+.ruleset-row-delete {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #9ca3af;
+  padding: 2px 4px;
+  border-radius: 3px;
+  line-height: 1;
+  font-size: 14px;
+}
+
+.ruleset-row-delete:hover {
+  color: var(--danger-color);
+  background: #fee2e2;
+}
+
+.ruleset-empty {
+  text-align: center;
+  color: #9ca3af;
+  font-size: 12px;
+  padding: 16px 0;
+}
+
+.ruleset-progress {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #1e40af;
+}
+
+.ruleset-error {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #dc2626;
+}
+
+.ruleset-note-input {
+  font-size: 11px !important;
+  color: #6b7280 !important;
+}
+
+/* ruleset table column widths */
+.ruleset-col-enabled {
+  width: 28px;
+}
+
+.ruleset-col-regex,
+.ruleset-col-case {
+  width: 42px;
+}
+
+.ruleset-col-delete {
+  width: 28px;
+}
+
+/* ruleset table cell alignment for checkbox columns */
+.ruleset-td-center {
+  text-align: center;
+}
+
+/* ruleset file input (hidden) */
+.ruleset-file-input-hidden {
+  display: none;
+}
+
+/* ruleset footer hint */
+.ruleset-footer-hint {
+  font-size: 11px;
+  color: #9ca3af;
+  margin: 0;
+}
+
+/* AlertCircle icon inline in error banner */
+.ruleset-error-icon {
+  vertical-align: middle;
+  margin-right: 4px;
+}
+
 /* ─── Feature #203: Onboarding Tour ─── */
 .onboarding-tour-root {
   position: fixed;

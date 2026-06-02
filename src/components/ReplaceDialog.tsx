@@ -1,14 +1,16 @@
 /**
- * Find & Replace ダイアログ (issue #93 + issue #98).
+ * Find & Replace ダイアログ (issue #93 + issue #98 + issue #198).
  *
  *  - Modal (#40) を通じて Esc/role/aria を委譲。
- *  - 検索 / 置換 / スコープ / 大小区別 / 正規表現 を UI で受け取り、
+ *  - 2 タブ構成: 「単発置換」/ 「ルールセット」
+ *  - 単発置換タブ: 検索 / 置換 / スコープ / 大小区別 / 正規表現 を UI で受け取り、
  *    useFindReplace で計算したプレビュー件数をリアルタイム表示。
  *  - issue #98: 件数の下に before/after プレビュー (最大 20 ブロック) を <mark> 風ハイライト付きで表示。
  *  - [置換実行] で onConfirm を呼び出し、結果を親 (App.tsx) で toast 表示する。
  *  - 全ページスコープでヒット数 > 50 の場合は ask() で確認 (親側責務)。
+ *  - issue #198: ルールセットタブで辞書管理・一括適用。
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { X, AlertCircle } from 'lucide-react';
 import { Modal, useModalTitleId } from './ui/Modal';
 import {
@@ -16,6 +18,16 @@ import {
   type ReplaceScope,
   type MatchPreviewItem,
 } from '../hooks/useFindReplace';
+import {
+  loadRuleSet,
+  saveRuleSet,
+  createRule,
+  exportRuleSetToJson,
+  importRuleSetFromJson,
+  type ProofreadingRule,
+  type ProofreadingRuleSet,
+} from '../utils/proofreadingRules';
+import { usePecoStore } from '../store/pecoStore';
 
 interface ReplaceDialogProps {
   onClose: () => void;
@@ -36,6 +48,8 @@ interface ReplaceDialogProps {
   hasSelection: boolean;
 }
 
+type TabId = 'single' | 'ruleset';
+
 const SCOPE_LABELS: Record<ReplaceScope, string> = {
   selection: '選択BB',
   current: '現ページ',
@@ -44,6 +58,72 @@ const SCOPE_LABELS: Record<ReplaceScope, string> = {
 
 export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialogProps) {
   const titleId = useModalTitleId();
+  const [activeTab, setActiveTab] = useState<TabId>('single');
+
+  return (
+    <Modal
+      onClose={onClose}
+      titleId={titleId}
+      backdropClassName="modal-backdrop"
+      dialogClassName="modal replace-dialog"
+    >
+      <div className="modal-header">
+        <span id={titleId}>検索と置換</span>
+        <button type="button" className="modal-close" onClick={onClose} aria-label="閉じる">
+          <X size={16} />
+        </button>
+      </div>
+
+      {/* Tab bar */}
+      <div className="replace-dialog-tabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'single' ? 'true' : 'false'}
+          aria-controls="replace-tab-single"
+          className={`replace-dialog-tab${activeTab === 'single' ? ' active' : ''}`}
+          onClick={() => setActiveTab('single')}
+        >
+          単発置換
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'ruleset' ? 'true' : 'false'}
+          aria-controls="replace-tab-ruleset"
+          className={`replace-dialog-tab${activeTab === 'ruleset' ? ' active' : ''}`}
+          onClick={() => setActiveTab('ruleset')}
+        >
+          ルールセット
+        </button>
+      </div>
+
+      {activeTab === 'single' && (
+        <SingleReplaceTab
+          id="replace-tab-single"
+          onClose={onClose}
+          onConfirm={onConfirm}
+          hasSelection={hasSelection}
+        />
+      )}
+      {activeTab === 'ruleset' && (
+        <RuleSetTab id="replace-tab-ruleset" />
+      )}
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Single Replace Tab (extracted from original ReplaceDialog body)
+// ---------------------------------------------------------------------------
+interface SingleReplaceTabProps {
+  id: string;
+  onClose: () => void;
+  onConfirm: ReplaceDialogProps['onConfirm'];
+  hasSelection: boolean;
+}
+
+function SingleReplaceTab({ id, onClose, onConfirm, hasSelection }: SingleReplaceTabProps) {
   const [pattern, setPattern] = useState('');
   const [replacement, setReplacement] = useState('');
   const [scope, setScope] = useState<ReplaceScope>(hasSelection ? 'selection' : 'current');
@@ -62,7 +142,6 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
 
   const { counts, preview, regexError } = useFindReplace(query, scope, replacement, 20);
 
-  // pattern を変更したら検索 input に focus が残るようにする
   const patternInputRef = useRef<HTMLInputElement>(null);
 
   const isExecuteDisabled =
@@ -81,18 +160,7 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
   };
 
   return (
-    <Modal
-      onClose={onClose}
-      titleId={titleId}
-      backdropClassName="modal-backdrop"
-      dialogClassName="modal replace-dialog"
-    >
-      <div className="modal-header">
-        <span id={titleId}>検索と置換</span>
-        <button className="modal-close" onClick={onClose} aria-label="閉じる">
-          <X size={16} />
-        </button>
-      </div>
+    <div role="tabpanel" id={id}>
       <div className="modal-body">
         <div className="replace-dialog-row">
           <label htmlFor="replace-find-input">検索文字列</label>
@@ -110,7 +178,7 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
                 handleConfirm();
               }
             }}
-            aria-invalid={regexError !== null}
+            aria-invalid={regexError !== null ? 'true' : 'false'}
             aria-describedby={regexError ? 'replace-regex-error' : undefined}
           />
         </div>
@@ -216,10 +284,11 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
         )}
       </div>
       <div className="modal-footer replace-dialog-footer">
-        <button className="cancel-btn" onClick={onClose}>
+        <button type="button" className="cancel-btn" onClick={onClose}>
           キャンセル
         </button>
         <button
+          type="button"
           className="confirm-btn"
           onClick={handleConfirm}
           disabled={isExecuteDisabled}
@@ -227,9 +296,301 @@ export function ReplaceDialog({ onClose, onConfirm, hasSelection }: ReplaceDialo
           置換実行
         </button>
       </div>
-    </Modal>
+    </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// RuleSet Tab (issue #198)
+// ---------------------------------------------------------------------------
+
+interface ApplyProgress {
+  total: number;
+  done: number;
+  results: Array<{ pattern: string; hits: number; blocks: number; pages: number }>;
+}
+
+function RuleSetTab({ id }: { id: string }) {
+  const replaceText = usePecoStore((s) => s.replaceText);
+
+  const [ruleSet, setRuleSet] = useState<ProofreadingRuleSet>(() => loadRuleSet());
+  const [progress, setProgress] = useState<ApplyProgress | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Persist whenever ruleSet changes
+  useEffect(() => {
+    saveRuleSet(ruleSet);
+  }, [ruleSet]);
+
+  const handleAddRule = useCallback(() => {
+    setRuleSet((prev) => ({
+      ...prev,
+      rules: [...prev.rules, createRule()],
+    }));
+  }, []);
+
+  const handleDeleteRule = useCallback((id: string) => {
+    setRuleSet((prev) => ({
+      ...prev,
+      rules: prev.rules.filter((r) => r.id !== id),
+    }));
+  }, []);
+
+  const handleRuleChange = useCallback(
+    (id: string, field: keyof Omit<ProofreadingRule, 'id'>, value: unknown) => {
+      setRuleSet((prev) => ({
+        ...prev,
+        rules: prev.rules.map((r) =>
+          r.id === id ? { ...r, [field]: value } : r,
+        ),
+      }));
+    },
+    [],
+  );
+
+  const handleExport = useCallback(() => {
+    const json = exportRuleSetToJson(ruleSet);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pecotool-ruleset.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [ruleSet]);
+
+  const handleImportClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const text = ev.target?.result;
+        if (typeof text !== 'string') return;
+        const result = importRuleSetFromJson(text);
+        if ('error' in result) {
+          setImportError(result.error);
+        } else {
+          setImportError(null);
+          setRuleSet(result);
+        }
+      };
+      reader.readAsText(file, 'utf-8');
+      // reset so the same file can be re-imported
+      e.target.value = '';
+    },
+    [],
+  );
+
+  const enabledRules = useMemo(
+    () => ruleSet.rules.filter((r) => r.enabled && r.pattern.length > 0),
+    [ruleSet.rules],
+  );
+
+  const handleBatchApply = useCallback(async () => {
+    if (enabledRules.length === 0) return;
+    setProgress({ total: enabledRules.length, done: 0, results: [] });
+
+    const results: ApplyProgress['results'] = [];
+    for (let i = 0; i < enabledRules.length; i++) {
+      const rule = enabledRules[i];
+      const result = await replaceText({
+        scope: 'all',
+        pattern: rule.pattern,
+        replacement: rule.replacement,
+        caseSensitive: rule.caseSensitive,
+        useRegex: rule.isRegex,
+      });
+      results.push({
+        pattern: rule.pattern,
+        hits: result.hits,
+        blocks: result.blocks,
+        pages: result.pages,
+      });
+      setProgress({ total: enabledRules.length, done: i + 1, results: [...results] });
+    }
+  }, [enabledRules, replaceText]);
+
+  const totalApplied = progress
+    ? progress.results.reduce((sum, r) => sum + r.hits, 0)
+    : 0;
+
+  return (
+    <div role="tabpanel" id={id}>
+      <div className="modal-body">
+        {/* Toolbar */}
+        <div className="ruleset-toolbar">
+          <button type="button" className="ruleset-toolbar-btn" onClick={handleAddRule}>
+            + ルール追加
+          </button>
+          <button
+            type="button"
+            className="ruleset-toolbar-btn primary"
+            onClick={handleBatchApply}
+            disabled={enabledRules.length === 0 || (progress !== null && progress.done < progress.total)}
+          >
+            一括適用
+            {enabledRules.length > 0 && ` (${enabledRules.length} 件)`}
+          </button>
+          <button type="button" className="ruleset-toolbar-btn" onClick={handleExport}>
+            JSONエクスポート
+          </button>
+          <button type="button" className="ruleset-toolbar-btn" onClick={handleImportClick}>
+            JSONインポート
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="ruleset-file-input-hidden"
+            onChange={handleFileChange}
+            aria-label="JSONファイルを選択"
+          />
+        </div>
+
+        {importError && (
+          <div className="ruleset-error" role="alert">
+            <AlertCircle size={13} aria-hidden="true" className="ruleset-error-icon" />
+            {importError}
+          </div>
+        )}
+
+        {/* Progress */}
+        {progress !== null && (
+          <div className="ruleset-progress" aria-live="polite">
+            {progress.done < progress.total
+              ? `適用中… ${progress.done} / ${progress.total} ルール`
+              : `完了: ${totalApplied} 件置換 (${progress.total} ルール適用)`}
+          </div>
+        )}
+
+        {/* Rule table */}
+        <div className="ruleset-table-wrapper">
+          {ruleSet.rules.length === 0 ? (
+            <div className="ruleset-empty">ルールがありません。「+ ルール追加」から追加してください。</div>
+          ) : (
+            <table className="ruleset-table" aria-label="置換ルール一覧">
+              <thead>
+                <tr>
+                  <th className="ruleset-col-enabled">有効</th>
+                  <th>検索パターン</th>
+                  <th>置換後</th>
+                  <th className="ruleset-col-regex">正規表現</th>
+                  <th className="ruleset-col-case">大小区別</th>
+                  <th>メモ</th>
+                  <th className="ruleset-col-delete"><span className="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {ruleSet.rules.map((rule) => (
+                  <RuleRow
+                    key={rule.id}
+                    rule={rule}
+                    onChange={handleRuleChange}
+                    onDelete={handleDeleteRule}
+                  />
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <p className="ruleset-footer-hint">
+          ルールは上から順番に適用されます。一括適用後は Ctrl+Z で 1 ルールずつ元に戻せます。
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RuleRow
+// ---------------------------------------------------------------------------
+interface RuleRowProps {
+  rule: ProofreadingRule;
+  onChange: (id: string, field: keyof Omit<ProofreadingRule, 'id'>, value: unknown) => void;
+  onDelete: (id: string) => void;
+}
+
+function RuleRow({ rule, onChange, onDelete }: RuleRowProps) {
+  return (
+    <tr>
+      <td className="ruleset-td-center">
+        <input
+          type="checkbox"
+          checked={rule.enabled}
+          onChange={(e) => onChange(rule.id, 'enabled', e.target.checked)}
+          aria-label={`ルール "${rule.pattern}" を有効化`}
+        />
+      </td>
+      <td>
+        <input
+          type="text"
+          value={rule.pattern}
+          onChange={(e) => onChange(rule.id, 'pattern', e.target.value)}
+          placeholder="検索文字列"
+          aria-label="検索パターン"
+        />
+      </td>
+      <td>
+        <input
+          type="text"
+          value={rule.replacement}
+          onChange={(e) => onChange(rule.id, 'replacement', e.target.value)}
+          placeholder="置換後の文字列"
+          aria-label="置換文字列"
+        />
+      </td>
+      <td className="ruleset-td-center">
+        <input
+          type="checkbox"
+          checked={rule.isRegex}
+          onChange={(e) => onChange(rule.id, 'isRegex', e.target.checked)}
+          aria-label="正規表現として扱う"
+        />
+      </td>
+      <td className="ruleset-td-center">
+        <input
+          type="checkbox"
+          checked={rule.caseSensitive}
+          onChange={(e) => onChange(rule.id, 'caseSensitive', e.target.checked)}
+          aria-label="大文字・小文字を区別する"
+        />
+      </td>
+      <td>
+        <input
+          type="text"
+          value={rule.note ?? ''}
+          onChange={(e) => onChange(rule.id, 'note', e.target.value || undefined)}
+          placeholder="メモ (任意)"
+          aria-label="メモ"
+          className="ruleset-note-input"
+        />
+      </td>
+      <td>
+        <button
+          type="button"
+          className="ruleset-row-delete"
+          onClick={() => onDelete(rule.id)}
+          aria-label={`ルール "${rule.pattern}" を削除`}
+          title="削除"
+        >
+          ×
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MatchPreviewList / MatchPreviewRow / renderWithHighlights
+// (unchanged from original issue #98 implementation)
+// ---------------------------------------------------------------------------
 
 /**
  * issue #98: ブロック単位の before/after プレビュー一覧。
