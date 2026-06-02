@@ -685,7 +685,12 @@ export function useFileOperations(
           {
             label: '別名で保存',
             onClick: () => {
-              void executeSaveAsRef.current?.();
+              const fn = executeSaveAsRef.current;
+              if (!fn) {
+                showToast('別名で保存機能が初期化中です。少し待って再度試してください。', true);
+                return;
+              }
+              void fn();
             },
           },
         );
