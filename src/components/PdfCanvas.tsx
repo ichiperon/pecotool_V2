@@ -331,6 +331,15 @@ export function PdfCanvas({
   // handle drag: どの handle を掴んでいるか (0=始点 1=中点 2=終点)、null=非ドラッグ
   const curveHandleDragRef = useRef<{ handleIndex: number; blockId: string } | null>(null);
 
+  // ── #205: Polyline 作成 draft state ───────────────────────────
+  // ダブルクリックで開始、シングルクリックで点追加、Enter で確定、Esc でキャンセル
+  const [polylineDraftPoints, setPolylineDraftPoints] = useState<Array<{ x: number; y: number }>>([]);
+  const [polylineDraftActive, setPolylineDraftActive] = useState(false);
+  // マウス現在位置 (canvas 座標) を ref で保持して preview 線に使う（再レンダ不要）
+  const polylineMousePosRef = useRef<{ x: number; y: number } | null>(null);
+  // ダブルクリック直後のシングルクリックイベントを抑制するためのタイムスタンプ ref
+  const lastDoubleClickTimeRef = useRef<number>(0);
+
   // ── #191: 範囲指定 OCR ドラッグ状態 ───────────────────────────
   const [rangeOcrDrag, setRangeOcrDrag] = useState<{
     isDrawing: boolean;
@@ -705,6 +714,47 @@ export function PdfCanvas({
             }
             context.restore();
           }
+
+          // #205: polyline draft 描画 (draft 中のみ)
+          if (isCurveMode && polylineDraftActive && polylineDraftPoints.length > 0) {
+            context.save();
+            // 確定済み点: 黄色の小円
+            context.fillStyle = "rgba(255, 230, 0, 1)";
+            context.strokeStyle = "rgba(200, 160, 0, 1)";
+            context.lineWidth = 1.5;
+            for (const dp of polylineDraftPoints) {
+              context.beginPath();
+              context.arc(dp.x * scale, dp.y * scale, 5, 0, Math.PI * 2);
+              context.fill();
+              context.stroke();
+            }
+            // 確定済み点間の接続線
+            if (polylineDraftPoints.length >= 2) {
+              context.beginPath();
+              context.strokeStyle = "rgba(255, 220, 0, 0.9)";
+              context.lineWidth = 1.5;
+              context.setLineDash([]);
+              context.moveTo(polylineDraftPoints[0].x * scale, polylineDraftPoints[0].y * scale);
+              for (let di = 1; di < polylineDraftPoints.length; di++) {
+                context.lineTo(polylineDraftPoints[di].x * scale, polylineDraftPoints[di].y * scale);
+              }
+              context.stroke();
+            }
+            // マウスカーソルへの仮線 (最後の確定点→マウス位置)
+            const mousePos = polylineMousePosRef.current;
+            if (mousePos) {
+              const last = polylineDraftPoints[polylineDraftPoints.length - 1];
+              context.beginPath();
+              context.strokeStyle = "rgba(255, 230, 0, 0.45)";
+              context.lineWidth = 1;
+              context.setLineDash([4, 4]);
+              context.moveTo(last.x * scale, last.y * scale);
+              context.lineTo(mousePos.x, mousePos.y);
+              context.stroke();
+              context.setLineDash([]);
+            }
+            context.restore();
+          }
         }
       }
 
@@ -814,6 +864,8 @@ export function PdfCanvas({
     isCurveMode,
     curveClickPoints,
     rangeOcrDrag,
+    polylineDraftActive,
+    polylineDraftPoints,
     // issue #172: dragPreviewBboxes は ref 経由で読み、購読 effect で
     // RAF redraw を直接スケジュールする。ここでは依存に含めないことで
     // BB 500+ 環境での毎フレーム再 render を回避する。
@@ -902,9 +954,19 @@ export function PdfCanvas({
       return;
     }
 
-    // curve mode: handle drag 開始 or 3 点クリック収集
+    // curve mode: handle drag 開始 or 3 点クリック収集 or polyline draft 点追加
     if (isCurveMode && selectedIds.size === 1) {
       const selectedId = Array.from(selectedIds)[0];
+
+      // #205: polyline draft 中はシングルクリックで点を追加する
+      // ダブルクリック直後の synthetic click を無視するため 300ms ガード
+      if (polylineDraftActive) {
+        const now = Date.now();
+        if (now - lastDoubleClickTimeRef.current < 300) return;
+        const pdfPos = canvasToPdf(pos);
+        setPolylineDraftPoints((prev) => [...prev, pdfPos]);
+        return;
+      }
 
       // handle hit-test (既存 curve がある場合)
       const hit = hitTestCurveHandle(pos);
@@ -975,6 +1037,20 @@ export function PdfCanvas({
       return;
     }
 
+    // #205: polyline draft 中はマウス位置を ref に保持して preview 線を描画
+    if (polylineDraftActive) {
+      polylineMousePosRef.current = pos;
+      // preview 再描画は RAF 経由でスケジュール
+      if (renderOverlaysRef.current) {
+        if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
+        overlayRafRef.current = requestAnimationFrame(() => {
+          renderOverlaysRef.current?.();
+          overlayRafRef.current = null;
+        });
+      }
+      return;
+    }
+
     // curve handle drag 中: handle 位置を更新して curve を再算出
     if (curveHandleDragRef.current) {
       const { blockId, handleIndex } = curveHandleDragRef.current;
@@ -1028,6 +1104,61 @@ export function PdfCanvas({
       if (overlayCanvasRef.current) overlayCanvasRef.current.style.cursor = hoverCursor;
     });
   };
+
+  // #205: polyline draft 確定ヘルパー
+  const confirmPolylineDraft = useCallback(() => {
+    if (!polylineDraftActive || polylineDraftPoints.length < 2) return;
+    const selectedId = selectedIds.size === 1 ? Array.from(selectedIds)[0] : null;
+    if (!selectedId) return;
+    const page = getPageData();
+    if (page) {
+      const newCurve: CurveDefinition = { type: "polyline", points: polylineDraftPoints };
+      const newBlocks = page.textBlocks.map((b) =>
+        b.id === selectedId ? { ...b, curve: newCurve, isDirty: true } : b,
+      );
+      updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
+    }
+    setPolylineDraftPoints([]);
+    setPolylineDraftActive(false);
+    polylineMousePosRef.current = null;
+  }, [polylineDraftActive, polylineDraftPoints, selectedIds, getPageData, updatePageData, pageIndex]);
+
+  // #205: ダブルクリックで polyline 作成開始
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    if (disableDrawing) return;
+    if (!isCurveMode || selectedIds.size !== 1) return;
+    // polyline draft が既にアクティブな場合はダブルクリックで確定
+    if (polylineDraftActive) {
+      confirmPolylineDraft();
+      return;
+    }
+    const pos = getMousePos(e);
+    const pdfPos = canvasToPdf(pos);
+    lastDoubleClickTimeRef.current = Date.now();
+    // arc 収集をリセットしてから polyline draft 開始
+    setCurveClickPoints([]);
+    setPolylineDraftPoints([pdfPos]);
+    setPolylineDraftActive(true);
+    polylineMousePosRef.current = pos;
+  };
+
+  // #205: キーボードで Enter 確定 / Esc キャンセル
+  useEffect(() => {
+    if (!polylineDraftActive) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        confirmPolylineDraft();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setPolylineDraftPoints([]);
+        setPolylineDraftActive(false);
+        polylineMousePosRef.current = null;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [polylineDraftActive, confirmPolylineDraft]);
 
   const handleMouseUp = () => {
     if (disableDrawing) return;
@@ -1106,6 +1237,7 @@ export function PdfCanvas({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onDoubleClick={handleDoubleClick}
         style={{
           position: "absolute",
           top: 0,
@@ -1115,7 +1247,7 @@ export function PdfCanvas({
             isRangeOcrMode
               ? "crosshair"
               : isCurveMode
-              ? "crosshair"
+              ? polylineDraftActive ? "cell" : "crosshair"
               : isDrawingMode || isSplitMode
               ? "crosshair"
               : drag.draggedId
