@@ -46,7 +46,14 @@ export async function detectTextLayerSamples(
     }
   };
 
-  const counts = await Promise.all(sampleNums.map(countItems));
+  // allSettled: 一部のページで getTextContent が失敗しても残りのサンプルで判定を継続する。
+  // rejected になったページは warn して 0 件扱いとする。
+  const results = await Promise.allSettled(sampleNums.map(countItems));
+  const counts = results.map((r) => {
+    if (r.status === 'fulfilled') return r.value;
+    console.warn('[OCR] detectTextLayerSamples: サンプルページのテキスト取得に失敗:', r.reason);
+    return 0;
+  });
   const anyHasText = counts.some((c) => c > 0);
   return anyHasText ? 'has_text' : 'all_empty';
 }
