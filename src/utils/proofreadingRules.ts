@@ -1,11 +1,11 @@
 /**
- * OCR proofreading dictionary / rule-set utilities (issue #198).
+ * OCR 校正辞書 / ルールセット ユーティリティ (issue #198)。
  *
- * Provides load/save via localStorage, JSON export/import, and a helper
- * to iterate rules in order for bulk-apply.
+ * localStorage へのロード/保存、JSON エクスポート/インポート、
+ * および一括適用のためにルールを順番に走査するヘルパーを提供する。
  *
- * Storage key: `pecotool.proofreadingRules`
- * Schema version: 1 (future versions must be backward-compatible)
+ * ストレージキー: `pecotool.proofreadingRules`
+ * スキーマバージョン: 1 (将来バージョンは後方互換を維持すること)
  */
 
 export interface ProofreadingRule {
@@ -61,8 +61,8 @@ export function importRuleSetFromJson(json: string): ProofreadingRuleSet | { err
 }
 
 /**
- * Validate and normalize a raw parsed value into ProofreadingRuleSet.
- * Returns `{ error: string }` on failure so callers can surface the message.
+ * パース済みの未知値を ProofreadingRuleSet に検証・正規化する。
+ * 失敗した場合は呼び出し元がメッセージを表示できるよう `{ error: string }` を返す。
  */
 export function validateRuleSet(raw: unknown): ProofreadingRuleSet | { error: string } {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -105,6 +105,16 @@ export function validateRuleSet(raw: unknown): ProofreadingRuleSet | { error: st
       return { error: `rules[${i}].enabled が真偽値ではありません` };
     }
 
+    // isRegex=true の場合、pattern が有効な正規表現かどうかを検証する (#231)
+    if (rule['isRegex'] === true) {
+      try {
+        new RegExp(rule['pattern'] as string);
+      } catch {
+        return { error: `rules[${i}].pattern が不正な正規表現です: ${String(rule['pattern'])}` };
+      }
+    }
+
+    // 以下のキャストは上記の typeof 型ガードを通過済みのため安全 (#235)
     rules.push({
       id: rule['id'] as string,
       pattern: rule['pattern'] as string,
@@ -120,7 +130,7 @@ export function validateRuleSet(raw: unknown): ProofreadingRuleSet | { error: st
 }
 
 /**
- * Create a new rule with a generated UUID and sensible defaults.
+ * UUID を生成し、デフォルト値を設定した新しいルールを作成する。
  */
 export function createRule(partial?: Partial<Omit<ProofreadingRule, 'id'>>): ProofreadingRule {
   return {
