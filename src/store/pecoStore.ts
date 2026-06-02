@@ -131,12 +131,12 @@ interface PecoState {
    * displayIndices は pageOrder 配列上のインデックス (表示順序の位置)。
    * undoable=true (default) で undo スタックに積む。
    */
-  deletePages: (displayIndices: number[]) => void;
+  deletePages: (displayIndices: number[]) => Promise<void>;
   /**
    * issue #193: ドラッグ並べ替えでページ順序を変更する。
    * fromDisplayIndex / toDisplayIndex は pageOrder 配列上のインデックス。
    */
-  movePage: (fromDisplayIndex: number, toDisplayIndex: number) => void;
+  movePage: (fromDisplayIndex: number, toDisplayIndex: number) => Promise<void>;
   /**
    * issue #207: 指定した pageIndex のページを時計回りに delta 度回転する。
    * delta は 90 | 180 | 270 のいずれか。
@@ -277,7 +277,14 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   isRangeOcrMode: false,
 
   // issue #193: ページ削除
-  deletePages: (displayIndices) => {
+  // TODO(#219): ここでは IDB I/O を直接発火する設計。将来 `usePageManagement` hook に
+  // 切り出す候補。現状は action 内で副作用を完結させており、schedulePendingIdbWrite /
+  // deleteTemporaryPageKeys / renameTemporaryPageKeys を直接呼び出している。
+  deletePages: async (displayIndices) => {
+    // #215: 進行中の IDB 書き込みが完了してから rename/delete を実行することで
+    // renameTemporaryPageKeys とのキー競合レース条件を防ぐ。
+    await waitForPendingIdbSaves();
+
     const state = get();
     if (!state.document || displayIndices.length === 0) return;
 
@@ -384,7 +391,14 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   },
 
   // issue #193: ページ並べ替え
-  movePage: (fromDisplayIndex, toDisplayIndex) => {
+  // TODO(#219): ここでは IDB I/O を直接発火する設計。将来 `usePageManagement` hook に
+  // 切り出す候補。現状は action 内で副作用を完結させており、renameTemporaryPageKeys を
+  // 直接呼び出している。
+  movePage: async (fromDisplayIndex, toDisplayIndex) => {
+    // #215: 進行中の IDB 書き込みが完了してから rename を実行することで
+    // renameTemporaryPageKeys とのキー競合レース条件を防ぐ。
+    await waitForPendingIdbSaves();
+
     const state = get();
     if (!state.document) return;
     if (fromDisplayIndex === toDisplayIndex) return;
