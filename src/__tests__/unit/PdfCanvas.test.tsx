@@ -2,6 +2,7 @@ import { render, fireEvent, cleanup, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { PdfCanvas } from '../../components/PdfCanvas'
 import { usePecoStore } from '../../store/pecoStore'
+import { useViewerStore } from '../../store/viewerStore'
 import * as pdfLoader from '../../utils/pdfLoader'
 
 // ── Mocking ──────────────────────────────────────────────────
@@ -80,13 +81,15 @@ beforeEach(() => {
         ]
       }]])
     },
+    selectedIds: new Set(),
+  } as any);
+  useViewerStore.setState({
     zoom: 100,
     showOcr: true,
     ocrOpacity: 0.5,
-    selectedIds: new Set(),
     isDrawingMode: false,
     isSplitMode: false,
-  } as any);
+  });
 });
 
 // PdfCanvas は <canvas> を 3 枚レンダリングする:
@@ -198,7 +201,7 @@ describe('PdfCanvas', () => {
   })
 
   it('should enter drawing mode and allow drawing a new block', () => {
-    usePecoStore.setState({ isDrawingMode: true } as any);
+    useViewerStore.setState({ isDrawingMode: true });
     const { container } = render(<PdfCanvas pageIndex={0} />);
     const overlay = container.querySelectorAll('canvas')[OVERLAY_INTERACTIVE_INDEX];
 
@@ -348,13 +351,15 @@ describe('PdfCanvas', () => {
           filePath: 'test.pdf',
           pages: new Map([[0, { pageIndex: 0, textBlocks: blocks }]]),
         },
+        selectedIds: new Set(),
+      } as any)
+      useViewerStore.setState({
         zoom: 100,
         showOcr: true,
         ocrOpacity: 0.5,
-        selectedIds: new Set(),
         isDrawingMode: false,
         isSplitMode: false,
-      } as any)
+      })
 
       const { staticCtx, dynamicCtx } = setupCanvasContexts()
 
@@ -389,13 +394,15 @@ describe('PdfCanvas', () => {
           filePath: 'test.pdf',
           pages: new Map([[0, { pageIndex: 0, textBlocks: blocks }]]),
         },
+        selectedIds: new Set(),
+      } as any)
+      useViewerStore.setState({
         zoom: 100,
         showOcr: true,
         ocrOpacity: 0.5,
-        selectedIds: new Set(),
         isDrawingMode: true, // drawing モードで開始
         isSplitMode: false,
-      } as any)
+      })
 
       const { staticCtx, dynamicCtx } = setupCanvasContexts()
 
@@ -448,14 +455,16 @@ describe('PdfCanvas', () => {
           filePath: 'test.pdf',
           pages: new Map([[0, { pageIndex: 0, textBlocks: blocks }]]),
         },
+        selectedIds: new Set(['b3']),
+      } as any)
+      useViewerStore.setState({
         zoom: 100,
         showOcr: true,
         ocrOpacity: 0.5,
-        selectedIds: new Set(['b3']),
         isDrawingMode: false,
         isSplitMode: false,
         dragPreviewBboxes: null,
-      } as any)
+      })
 
       const { dynamicCtx } = setupCanvasContexts()
 
@@ -466,7 +475,7 @@ describe('PdfCanvas', () => {
       const baseDynamicFillRectCalls = dynamicCtx.fillRect.mock.calls.length
 
       act(() => {
-        usePecoStore.getState().setDragPreviewBboxes(
+        useViewerStore.getState().setDragPreviewBboxes(
           new Map([['b3', { x: 80, y: 80, width: 18, height: 18 }]])
         )
       })

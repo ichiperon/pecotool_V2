@@ -27,6 +27,7 @@ vi.mock('../../utils/pdfLoader', () => ({
 
 import { useAutoBackup, BackupData } from '../../hooks/useAutoBackup';
 import { usePecoStore } from '../../store/pecoStore';
+import { useViewerStore } from '../../store/viewerStore';
 import { saveTemporaryPageDataBatch, clearTemporaryChanges, getAllTemporaryPageData } from '../../utils/pdfLoader';
 import type { PageData, PecoDocument } from '../../types';
 
@@ -320,12 +321,7 @@ function resetStore() {
     originalBytes: null,
     pageAccessOrder: [],
     currentPageIndex: 0,
-    zoom: 100,
     isDirty: false,
-    showOcr: true,
-    showTextPreview: false,
-    isDrawingMode: false,
-    isSplitMode: false,
     selectedIds: new Set(),
     lastSelectedId: null,
     clipboard: [],
@@ -335,6 +331,13 @@ function resetStore() {
     lastIdbError: null,
     currentPageProxy: null,
     currentPageProxyKey: null,
+  });
+  useViewerStore.setState({
+    zoom: 100,
+    showOcr: true,
+    showTextPreview: false,
+    isDrawingMode: false,
+    isSplitMode: false,
   });
 }
 

@@ -3,8 +3,11 @@ import {
   usePecoStore,
   waitForPendingIdbSaves,
   selectCurrentPageTextBlocks,
-  selectDragPreviewBboxes,
 } from '../../store/pecoStore'
+import {
+  useViewerStore,
+  selectDragPreviewBboxes,
+} from '../../store/viewerStore'
 import * as pdfLoader from '../../utils/pdfLoader'
 import type { PecoDocument, PageData, Action, TextBlock, BoundingBox } from '../../types'
 
@@ -56,23 +59,33 @@ function makeDoc(pages: Map<number, PageData> = new Map([[0, makePage()]])): Pec
 }
 
 const INITIAL_STATE = {
-  document:          null,
-  documentEpoch:     0,
-  thumbnails:        new Map(),
-  currentPageIndex:  0,
+  document:            null,
+  documentEpoch:       0,
+  thumbnails:          new Map(),
+  pageOrder:           [] as number[],
+  pageAccessOrder:     [] as number[],
+  currentPageIndex:    0,
+  isDirty:             false,
+  lastSavedActionIndex: 0,
+  selectedIds:         new Set<string>(),
+  lastSelectedId:      null as string | null,
+  clipboard:           [] as any[],
+  undoStack:           [] as Action[],
+  redoStack:           [] as Action[],
+  pendingRestoration:  null,
+  lastIdbError:        null,
+  currentPageProxy:    null,
+  currentPageProxyKey: null,
+} as const
+
+const VIEWER_INITIAL_STATE = {
   zoom:              100,
-  isDirty:           false,
   showOcr:           true,
   showTextPreview:   false,
   isDrawingMode:     false,
   isSplitMode:       false,
   isCurveMode:       false,
   isRangeOcrMode:    false,
-  selectedIds:       new Set<string>(),
-  undoStack:         [] as Action[],
-  redoStack:         [] as Action[],
-  currentPageProxy:  null,
-  currentPageProxyKey: null,
   dragPreviewBboxes: null as Map<string, BoundingBox> | null,
 } as const
 
@@ -80,6 +93,7 @@ const INITIAL_STATE = {
 
 beforeEach(() => {
   usePecoStore.setState({ ...INITIAL_STATE })
+  useViewerStore.setState({ ...VIEWER_INITIAL_STATE })
 })
 
 // ── テスト ────────────────────────────────────────────────────
@@ -793,26 +807,29 @@ describe('pecoStore', () => {
         clipboard: [makeBlock()],
         undoStack: [action],
         redoStack: [action],
+        pageAccessOrder: [0, 1],
+      })
+      useViewerStore.setState({
         isDrawingMode: true,
         isSplitMode: true,
         showTextPreview: true,
-        pageAccessOrder: [0, 1],
       })
 
       usePecoStore.getState().setDocument(makeDoc())
 
       const s = usePecoStore.getState()
+      const vs = useViewerStore.getState()
       expect(s.selectedIds.size).toBe(0)
       expect(s.lastSelectedId).toBeNull()
       expect(s.clipboard).toHaveLength(0)
       expect(s.undoStack).toHaveLength(0)
       expect(s.redoStack).toHaveLength(0)
-      expect(s.isDrawingMode).toBe(false)
-      expect(s.isSplitMode).toBe(false)
-      expect(s.showTextPreview).toBe(false)
+      expect(vs.isDrawingMode).toBe(false)
+      expect(vs.isSplitMode).toBe(false)
+      expect(vs.showTextPreview).toBe(false)
       expect(s.pageAccessOrder).toHaveLength(0)
       expect(s.currentPageIndex).toBe(0)
-      expect(s.showOcr).toBe(true)
+      expect(vs.showOcr).toBe(true)
     })
 
     it('U-PS-58: pendingRestoration がある場合 isDirty=true', () => {
@@ -1167,16 +1184,16 @@ describe('pecoStore', () => {
   // ── issue #91: dragPreviewBboxes ───────────────────────────────
   describe('issue #91: dragPreviewBboxes', () => {
     it('初期状態では dragPreviewBboxes は null', () => {
-      expect(selectDragPreviewBboxes(usePecoStore.getState())).toBeNull()
+      expect(selectDragPreviewBboxes(useViewerStore.getState())).toBeNull()
     })
 
     it('setDragPreviewBboxes(map) で dragPreviewBboxes が更新される', () => {
       const map = new Map<string, BoundingBox>([
         ['b1', { x: 10, y: 20, width: 30, height: 40 }],
       ])
-      usePecoStore.getState().setDragPreviewBboxes(map)
+      useViewerStore.getState().setDragPreviewBboxes(map)
 
-      const got = selectDragPreviewBboxes(usePecoStore.getState())
+      const got = selectDragPreviewBboxes(useViewerStore.getState())
       expect(got).toBe(map)
       expect(got!.get('b1')).toEqual({ x: 10, y: 20, width: 30, height: 40 })
     })
@@ -1185,22 +1202,22 @@ describe('pecoStore', () => {
       const map = new Map<string, BoundingBox>([
         ['b1', { x: 10, y: 20, width: 30, height: 40 }],
       ])
-      usePecoStore.getState().setDragPreviewBboxes(map)
-      expect(selectDragPreviewBboxes(usePecoStore.getState())).not.toBeNull()
+      useViewerStore.getState().setDragPreviewBboxes(map)
+      expect(selectDragPreviewBboxes(useViewerStore.getState())).not.toBeNull()
 
-      usePecoStore.getState().setDragPreviewBboxes(null)
-      expect(selectDragPreviewBboxes(usePecoStore.getState())).toBeNull()
+      useViewerStore.getState().setDragPreviewBboxes(null)
+      expect(selectDragPreviewBboxes(useViewerStore.getState())).toBeNull()
     })
 
     it('setDocument(doc) は dragPreviewBboxes をクリアする (ファイル切替で持ち越さない)', () => {
       const map = new Map<string, BoundingBox>([
         ['b1', { x: 10, y: 20, width: 30, height: 40 }],
       ])
-      usePecoStore.getState().setDragPreviewBboxes(map)
-      expect(selectDragPreviewBboxes(usePecoStore.getState())).not.toBeNull()
+      useViewerStore.getState().setDragPreviewBboxes(map)
+      expect(selectDragPreviewBboxes(useViewerStore.getState())).not.toBeNull()
 
       usePecoStore.getState().setDocument(makeDoc())
-      expect(selectDragPreviewBboxes(usePecoStore.getState())).toBeNull()
+      expect(selectDragPreviewBboxes(useViewerStore.getState())).toBeNull()
     })
 
     it('dragPreviewBboxes 更新は textBlocks 参照を変更しない', () => {
@@ -1216,7 +1233,7 @@ describe('pecoStore', () => {
       const previewMap = new Map<string, BoundingBox>([
         ['b1', { x: 999, y: 999, width: 50, height: 20 }],
       ])
-      usePecoStore.getState().setDragPreviewBboxes(previewMap)
+      useViewerStore.getState().setDragPreviewBboxes(previewMap)
 
       const after = selectCurrentPageTextBlocks(usePecoStore.getState())
       // 動的層 overlay のみ再描画される (静的層 effect は textBlocks 依存なので不発)
@@ -1919,50 +1936,50 @@ describe('pecoStore', () => {
   // ── issue #189: toggleCurveMode ───────────────────────────────
   describe('issue #189: toggleCurveMode', () => {
     it('U-CM-01: 初期状態では isCurveMode=false', () => {
-      expect(usePecoStore.getState().isCurveMode).toBe(false)
+      expect(useViewerStore.getState().isCurveMode).toBe(false)
     })
 
     it('U-CM-02: toggleCurveMode で ON/OFF が反転する', () => {
-      usePecoStore.getState().toggleCurveMode()
-      expect(usePecoStore.getState().isCurveMode).toBe(true)
+      useViewerStore.getState().toggleCurveMode()
+      expect(useViewerStore.getState().isCurveMode).toBe(true)
 
-      usePecoStore.getState().toggleCurveMode()
-      expect(usePecoStore.getState().isCurveMode).toBe(false)
+      useViewerStore.getState().toggleCurveMode()
+      expect(useViewerStore.getState().isCurveMode).toBe(false)
     })
 
     it('U-CM-03: curveMode ON 時は isDrawingMode / isSplitMode が OFF になる', () => {
-      usePecoStore.setState({ isDrawingMode: true, isSplitMode: true })
-      usePecoStore.getState().toggleCurveMode()
+      useViewerStore.setState({ isDrawingMode: true, isSplitMode: true })
+      useViewerStore.getState().toggleCurveMode()
 
-      const s = usePecoStore.getState()
+      const s = useViewerStore.getState()
       expect(s.isCurveMode).toBe(true)
       expect(s.isDrawingMode).toBe(false)
       expect(s.isSplitMode).toBe(false)
     })
 
     it('U-CM-04: toggleDrawingMode ON 時は isCurveMode が OFF になる', () => {
-      usePecoStore.setState({ isCurveMode: true })
-      usePecoStore.getState().toggleDrawingMode()
+      useViewerStore.setState({ isCurveMode: true })
+      useViewerStore.getState().toggleDrawingMode()
 
-      const s = usePecoStore.getState()
+      const s = useViewerStore.getState()
       expect(s.isDrawingMode).toBe(true)
       expect(s.isCurveMode).toBe(false)
     })
 
     it('U-CM-05: toggleSplitMode ON 時は isCurveMode が OFF になる', () => {
-      usePecoStore.setState({ isCurveMode: true })
-      usePecoStore.getState().toggleSplitMode()
+      useViewerStore.setState({ isCurveMode: true })
+      useViewerStore.getState().toggleSplitMode()
 
-      const s = usePecoStore.getState()
+      const s = useViewerStore.getState()
       expect(s.isSplitMode).toBe(true)
       expect(s.isCurveMode).toBe(false)
     })
 
     it('U-CM-06: setDocument で isCurveMode がリセットされる', () => {
-      usePecoStore.setState({ isCurveMode: true })
+      useViewerStore.setState({ isCurveMode: true })
       usePecoStore.getState().setDocument(makeDoc())
 
-      expect(usePecoStore.getState().isCurveMode).toBe(false)
+      expect(useViewerStore.getState().isCurveMode).toBe(false)
     })
   })
 
@@ -2557,60 +2574,60 @@ describe('pecoStore', () => {
 
   describe('#191 isRangeOcrMode', () => {
     it('初期値は false', () => {
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(false)
     })
 
     it('toggleRangeOcrMode で true になる', () => {
-      usePecoStore.getState().toggleRangeOcrMode()
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
+      useViewerStore.getState().toggleRangeOcrMode()
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(true)
     })
 
     it('toggleRangeOcrMode を 2 回呼ぶと false に戻る', () => {
-      usePecoStore.getState().toggleRangeOcrMode()
-      usePecoStore.getState().toggleRangeOcrMode()
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+      useViewerStore.getState().toggleRangeOcrMode()
+      useViewerStore.getState().toggleRangeOcrMode()
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(false)
     })
 
     it('toggleRangeOcrMode ON で isDrawingMode が OFF になる', () => {
-      usePecoStore.setState({ isDrawingMode: true })
-      usePecoStore.getState().toggleRangeOcrMode()
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
-      expect(usePecoStore.getState().isDrawingMode).toBe(false)
+      useViewerStore.setState({ isDrawingMode: true })
+      useViewerStore.getState().toggleRangeOcrMode()
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(true)
+      expect(useViewerStore.getState().isDrawingMode).toBe(false)
     })
 
     it('toggleRangeOcrMode ON で isSplitMode が OFF になる', () => {
-      usePecoStore.setState({ isSplitMode: true })
-      usePecoStore.getState().toggleRangeOcrMode()
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
-      expect(usePecoStore.getState().isSplitMode).toBe(false)
+      useViewerStore.setState({ isSplitMode: true })
+      useViewerStore.getState().toggleRangeOcrMode()
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(true)
+      expect(useViewerStore.getState().isSplitMode).toBe(false)
     })
 
     it('toggleRangeOcrMode ON で isCurveMode が OFF になる', () => {
-      usePecoStore.setState({ isCurveMode: true })
-      usePecoStore.getState().toggleRangeOcrMode()
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(true)
-      expect(usePecoStore.getState().isCurveMode).toBe(false)
+      useViewerStore.setState({ isCurveMode: true })
+      useViewerStore.getState().toggleRangeOcrMode()
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(true)
+      expect(useViewerStore.getState().isCurveMode).toBe(false)
     })
 
     it('toggleDrawingMode ON で isRangeOcrMode が OFF になる', () => {
-      usePecoStore.setState({ isRangeOcrMode: true })
-      usePecoStore.getState().toggleDrawingMode()
-      expect(usePecoStore.getState().isDrawingMode).toBe(true)
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+      useViewerStore.setState({ isRangeOcrMode: true })
+      useViewerStore.getState().toggleDrawingMode()
+      expect(useViewerStore.getState().isDrawingMode).toBe(true)
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(false)
     })
 
     it('toggleSplitMode ON で isRangeOcrMode が OFF になる', () => {
-      usePecoStore.setState({ isRangeOcrMode: true })
-      usePecoStore.getState().toggleSplitMode()
-      expect(usePecoStore.getState().isSplitMode).toBe(true)
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+      useViewerStore.setState({ isRangeOcrMode: true })
+      useViewerStore.getState().toggleSplitMode()
+      expect(useViewerStore.getState().isSplitMode).toBe(true)
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(false)
     })
 
     it('toggleCurveMode ON で isRangeOcrMode が OFF になる', () => {
-      usePecoStore.setState({ isRangeOcrMode: true })
-      usePecoStore.getState().toggleCurveMode()
-      expect(usePecoStore.getState().isCurveMode).toBe(true)
-      expect(usePecoStore.getState().isRangeOcrMode).toBe(false)
+      useViewerStore.setState({ isRangeOcrMode: true })
+      useViewerStore.getState().toggleCurveMode()
+      expect(useViewerStore.getState().isCurveMode).toBe(true)
+      expect(useViewerStore.getState().isRangeOcrMode).toBe(false)
     })
   })
 })

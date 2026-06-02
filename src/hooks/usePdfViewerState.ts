@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { usePecoStore, selectZoom } from '../store/pecoStore';
+import { usePecoStore } from '../store/pecoStore';
+import { useViewerStore, selectZoom } from '../store/viewerStore';
 
 // ズーム倍率・自動フィット・ResizeObserver をまとめて管理する。
 // document 全体ではなく primitive (isFileLoaded/pageWidth/pageHeight) のみ購読することで、
 // updatePageData による document 参照差し替えで毎回この hook が再実行されないようにする。
 export function usePdfViewerState(currentPageIndex: number) {
-  const zoom = usePecoStore(selectZoom);
-  const setZoom = usePecoStore((s) => s.setZoom);
+  const zoom = useViewerStore(selectZoom);
+  const setZoom = useViewerStore((s) => s.setZoom);
   const isFileLoaded = usePecoStore((s) => s.document !== null);
   // 現在ページの width/height のみ購読（他ページ/他フィールド編集では再レンダしない）
   const pageWidth = usePecoStore((s) => s.document?.pages.get(currentPageIndex)?.width);

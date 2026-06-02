@@ -9,6 +9,7 @@ vi.mock('../../utils/pdfLoader', () => ({
 
 import { usePdfViewerState } from '../../hooks/usePdfViewerState'
 import { usePecoStore } from '../../store/pecoStore'
+import { useViewerStore } from '../../store/viewerStore'
 import type { PecoDocument, PageData } from '../../types'
 
 // ── ResizeObserver スパイ ──
@@ -66,8 +67,8 @@ beforeEach(() => {
       [2, makePage({ pageIndex: 2, width: 595, height: 842 })],
     ])),
     currentPageIndex: 0,
-    zoom: 100,
   } as any)
+  useViewerStore.setState({ zoom: 100 })
 })
 
 afterEach(() => {
@@ -156,7 +157,7 @@ describe('usePdfViewerState (issue #26)', () => {
     // ref に isAutoFit=false が反映されたあとの zoom を baseline とする。
     // (mount 初期に fitToScreen が走って zoom が変わる場合があるため、
     //  ここを基準に「callback 前後で動かない」ことを検証する)
-    const zoomBeforeCallback = usePecoStore.getState().zoom
+    const zoomBeforeCallback = useViewerStore.getState().zoom
 
     // 最新の observer の callback を呼ぶ
     const lastObserver = observerInstances[observerInstances.length - 1]
@@ -168,7 +169,7 @@ describe('usePdfViewerState (issue #26)', () => {
     await new Promise<void>((r) => requestAnimationFrame(() => r()))
 
     // isAutoFit=false のため zoom は変わらない
-    expect(usePecoStore.getState().zoom).toBe(zoomBeforeCallback)
+    expect(useViewerStore.getState().zoom).toBe(zoomBeforeCallback)
 
     document.body.removeChild(container)
   })

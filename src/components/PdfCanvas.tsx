@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   usePecoStore,
-  selectZoom,
-  selectShowOcr,
-  selectOcrOpacity,
   selectSelectedIds,
-  selectIsDrawingMode,
-  selectIsSplitMode,
-  selectIsCurveMode,
-  selectIsRangeOcrMode,
   selectCurrentPageTextBlocks,
   selectDocumentFilePath,
   selectDocumentTotalPages,
 } from "../store/pecoStore";
+import {
+  useViewerStore,
+  selectZoom,
+  selectShowOcr,
+  selectOcrOpacity,
+  selectIsDrawingMode,
+  selectIsSplitMode,
+  selectIsCurveMode,
+  selectIsRangeOcrMode,
+} from "../store/viewerStore";
 import { useSearchStore, selectSearchTerm, selectSearchHitIndex } from "../store/searchStore";
 import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
@@ -83,31 +86,31 @@ export function PdfCanvas({
     }
     return map;
   }, [currentTextBlocks]);
-  const zoom = usePecoStore(selectZoom);
-  const showOcr = usePecoStore(selectShowOcr);
-  const ocrOpacity = usePecoStore(selectOcrOpacity);
+  const zoom = useViewerStore(selectZoom);
+  const showOcr = useViewerStore(selectShowOcr);
+  const ocrOpacity = useViewerStore(selectOcrOpacity);
   const selectedIds = usePecoStore(selectSelectedIds);
-  const isDrawingMode = usePecoStore(selectIsDrawingMode);
-  const isSplitMode = usePecoStore(selectIsSplitMode);
-  const isCurveMode = usePecoStore(selectIsCurveMode);
-  const isRangeOcrMode = usePecoStore(selectIsRangeOcrMode);
+  const isDrawingMode = useViewerStore(selectIsDrawingMode);
+  const isSplitMode = useViewerStore(selectIsSplitMode);
+  const isCurveMode = useViewerStore(selectIsCurveMode);
+  const isRangeOcrMode = useViewerStore(selectIsRangeOcrMode);
   const searchTerm = useSearchStore(selectSearchTerm);
   const searchHitIndex = useSearchStore(selectSearchHitIndex);
   const updatePageData = usePecoStore((s) => s.updatePageData);
-  const toggleDrawingMode = usePecoStore((s) => s.toggleDrawingMode);
-  const toggleSplitMode = usePecoStore((s) => s.toggleSplitMode);
+  const toggleDrawingMode = useViewerStore((s) => s.toggleDrawingMode);
+  const toggleSplitMode = useViewerStore((s) => s.toggleSplitMode);
   const toggleSelection = usePecoStore((s) => s.toggleSelection);
   const setSelectedIds = usePecoStore((s) => s.setSelectedIds);
   const clearSelection = usePecoStore((s) => s.clearSelection);
   const pushAction = usePecoStore((s) => s.pushAction);
-  const setDragPreviewBboxes = usePecoStore((s) => s.setDragPreviewBboxes);
+  const setDragPreviewBboxes = useViewerStore((s) => s.setDragPreviewBboxes);
   // issue #91: ドラッグ中のみ非 null。動的層 overlay で選択 BB の bbox を上書きする。
   // issue #172: usePecoStore(selectDragPreviewBboxes) で購読すると毎フレーム
   // setDragPreviewBboxes 毎に PdfCanvas 全体が再レンダされ、useEffect 再走の
   // コストが BB 500+ で顕著になる。ref に同期して React 再レンダを抑え、
   // 値変化時は overlay の RAF redraw だけを直接スケジュールする。
   const dragPreviewBboxesRef = useRef<Map<string, BoundingBox> | null>(
-    usePecoStore.getState().dragPreviewBboxes,
+    useViewerStore.getState().dragPreviewBboxes,
   );
 
   // issue #106: render 時点の `document` state を closure 保持すると、
@@ -634,7 +637,7 @@ export function PdfCanvas({
   // この経路では React 再 render が走らないため、ドラッグ中の毎フレーム
   // re-render → useEffect 再走の山が消える。
   useEffect(() => {
-    return usePecoStore.subscribe((state, prevState) => {
+    return useViewerStore.subscribe((state, prevState) => {
       if (state.dragPreviewBboxes === prevState.dragPreviewBboxes) return;
       dragPreviewBboxesRef.current = state.dragPreviewBboxes;
       const render = renderOverlaysRef.current;
