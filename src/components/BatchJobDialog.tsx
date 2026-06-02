@@ -96,31 +96,11 @@ export const BatchJobDialog: React.FC<BatchJobDialogProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="フォルダ一括バッチ処理"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        backgroundColor: 'rgba(0,0,0,0.5)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 9999,
-      }}
+      className="batch-job-dialog-backdrop"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        style={{
-          background: '#1f2937',
-          borderRadius: 8,
-          padding: 24,
-          width: 640,
-          maxWidth: '90vw',
-          maxHeight: '85vh',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 16,
-          color: '#f9fafb',
-          boxShadow: '0 25px 50px rgba(0,0,0,0.5)',
-        }}
+        className="batch-job-dialog-panel"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
