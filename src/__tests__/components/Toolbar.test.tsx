@@ -28,6 +28,7 @@ vi.mock('lucide-react', () => {
     SquareCheckBig: s('SquareCheckBig'),
     Replace: s('Replace'),
     Spline: s('Spline'),
+    Crop: s('Crop'),
   }
 })
 
