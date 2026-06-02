@@ -118,3 +118,140 @@ describe('isCurveDefinition / 不正値', () => {
     expect(isCurveDefinition([])).toBe(false);
   });
 });
+
+// ─── 境界値・追加 edge cases ──────────────────────────────────────────────────
+
+describe('isCurveDefinition / arc boundary values', () => {
+  it('AB-arc-01: radius が 0 でも accept (実装的に valid)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: 0,
+        startAngle: 0,
+        endAngle: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it('AB-arc-02: radius が負数 — accept (型バリデーションのみ)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: -1,
+        startAngle: 0,
+        endAngle: Math.PI,
+      }),
+    ).toBe(true);
+  });
+
+  it('AB-arc-03: startAngle > endAngle — accept (逆向き arc として有効)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: 10,
+        startAngle: Math.PI,
+        endAngle: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it('AB-arc-04: radius が Infinity — accept (型バリデーションのみ)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: Infinity,
+        startAngle: 0,
+        endAngle: Math.PI,
+      }),
+    ).toBe(true);
+  });
+
+  it('AB-arc-05: radius が NaN — accept (NaN は typeof number)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: NaN,
+        startAngle: 0,
+        endAngle: Math.PI,
+      }),
+    ).toBe(true);
+  });
+
+  it('AB-arc-06: center.y が undefined — reject', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0 },
+        radius: 10,
+        startAngle: 0,
+        endAngle: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('AB-arc-07: center が null — reject', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: null,
+        radius: 10,
+        startAngle: 0,
+        endAngle: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('AB-arc-08: startAngle 欠損 — reject', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: 10,
+        endAngle: 1,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('isCurveDefinition / polyline boundary values', () => {
+  it('AB-poly-01: points が空配列 — reject (2点未満)', () => {
+    expect(isCurveDefinition({ type: 'polyline', points: [] })).toBe(false);
+  });
+
+  it('AB-poly-02: points が undefined — reject', () => {
+    expect(isCurveDefinition({ type: 'polyline' })).toBe(false);
+  });
+
+  it('AB-poly-03: points 内の点が number でなく object 型違い — reject', () => {
+    expect(
+      isCurveDefinition({
+        type: 'polyline',
+        points: [
+          { x: 0, y: 0 },
+          { x: '100', y: 50 },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it('AB-poly-04: 非常に多い点 (1000点) でも accept', () => {
+    const manyPoints = Array.from({ length: 1000 }, (_, i) => ({ x: i, y: i }));
+    expect(
+      isCurveDefinition({ type: 'polyline', points: manyPoints }),
+    ).toBe(true);
+  });
+
+  it('AB-poly-05: 同一座標の 2 点 (degenerate) でも accept (型バリデーション通過)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'polyline',
+        points: [{ x: 5, y: 5 }, { x: 5, y: 5 }],
+      }),
+    ).toBe(true);
+  });
+});

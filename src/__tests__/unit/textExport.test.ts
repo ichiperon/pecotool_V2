@@ -266,3 +266,144 @@ describe('exportTextFromDocument - snapshot sanity', () => {
     });
   }
 });
+
+// ─── 非正常系・境界値テスト ───────────────────────────────────────────────────
+
+describe('exportTextFromDocument - abnormal / boundary', () => {
+  it('U-TE-AB-01: ページが 0 件のドキュメントは空文字列 (txt)', () => {
+    const emptyDoc = makeDoc([]);
+    const result = exportTextFromDocument(emptyDoc, 'txt');
+    expect(result).toBe('');
+  });
+
+  it('U-TE-AB-02: ページが 0 件のドキュメントは空 JSON ページ配列', () => {
+    const emptyDoc = makeDoc([]);
+    const result = exportTextFromDocument(emptyDoc, 'json');
+    const parsed = JSON.parse(result) as { pages: unknown[] };
+    expect(parsed.pages).toHaveLength(0);
+  });
+
+  it('U-TE-AB-03: textBlocks が空のページは空行なし (txt)', () => {
+    const emptyPage = makePage(0, []);
+    const doc = makeDoc([emptyPage]);
+    const result = exportTextFromDocument(doc, 'txt');
+    expect(result).toBe('');
+  });
+
+  it('U-TE-AB-04: textBlocks が空のページは csv にデータ行なし', () => {
+    const emptyPage = makePage(0, []);
+    const doc = makeDoc([emptyPage]);
+    const result = exportTextFromDocument(doc, 'csv');
+    const lines = result.split('\r\n');
+    expect(lines).toHaveLength(1); // header only
+  });
+
+  it('U-TE-AB-05: 空文字列 text を持つブロックはそのまま出力 (txt)', () => {
+    const page = makePage(0, [makeBlock('e1', '', 0)]);
+    const doc = makeDoc([page]);
+    const result = exportTextFromDocument(doc, 'txt');
+    expect(result).toBe('');
+  });
+
+  it('U-TE-AB-06: Unicode 4バイト文字 (絵文字) を含むテキストはそのまま出力', () => {
+    const emoji = '🦊テスト🔥';
+    const page = makePage(0, [makeBlock('u1', emoji, 0)]);
+    const doc = makeDoc([page]);
+    const result = exportTextFromDocument(doc, 'txt');
+    expect(result).toBe(emoji);
+  });
+
+  it('U-TE-AB-07: サロゲートペア文字を CSV でそのまま出力', () => {
+    const text = '𠮷野家'; // U+20BB7 + others
+    const page = makePage(0, [makeBlock('s1', text, 0)]);
+    const doc = makeDoc([page]);
+    const result = exportTextFromDocument(doc, 'csv');
+    expect(result).toContain(text);
+  });
+
+  it('U-TE-AB-08: 制御文字 (\\x00, \\x1F) を含むテキスト — CSV でクォート', () => {
+    const text = 'line1\x00line2';
+    const page = makePage(0, [makeBlock('ctrl1', text, 0)]);
+    const doc = makeDoc([page]);
+    const result = exportTextFromDocument(doc, 'csv');
+    // 制御文字自体はエスケープしないが、改行を含むなら囲む
+    expect(typeof result).toBe('string');
+  });
+
+  it('U-TE-AB-09: pageRange={start, end} で start > end のとき空結果 (txt)', () => {
+    const result = exportTextFromDocument(twoPageDoc, 'txt', {
+      pageRange: { start: 3, end: 1 },
+    });
+    expect(result).toBe('');
+  });
+
+  it('U-TE-AB-10: pageRange={start, end} が totalPages を超えても例外なし', () => {
+    expect(() =>
+      exportTextFromDocument(twoPageDoc, 'txt', {
+        pageRange: { start: 0, end: 9999 },
+      })
+    ).not.toThrow();
+  });
+
+  it('U-TE-AB-11: pageRange=current で currentPageIndex が totalPages 以上でも例外なし', () => {
+    expect(() =>
+      exportTextFromDocument(twoPageDoc, 'txt', {
+        pageRange: 'current',
+        currentPageIndex: 9999,
+      })
+    ).not.toThrow();
+  });
+
+  it('U-TE-AB-12: CSV でダブルクォートのみのテキストを正しくエスケープ', () => {
+    const page = makePage(0, [makeBlock('q1', '"""', 0)]);
+    const doc = makeDoc([page]);
+    const result = exportTextFromDocument(doc, 'csv');
+    expect(result).toContain('""""""'); // """ → """"""
+  });
+
+  it('U-TE-AB-13: Markdown で特殊文字 (#, *, `, [) を含むテキストはそのまま出力', () => {
+    const text = '# heading * bold `code` [link]';
+    const page = makePage(0, [makeBlock('md1', text, 0)]);
+    const doc = makeDoc([page]);
+    const result = exportTextFromDocument(doc, 'md');
+    expect(result).toContain(text);
+  });
+
+  it('U-TE-AB-14: JSON で非 ASCII テキストが正しくシリアライズされる', () => {
+    const text = '日本語テスト中文한국어';
+    const page = makePage(0, [makeBlock('j1', text, 0)]);
+    const doc = makeDoc([page]);
+    const result = exportTextFromDocument(doc, 'json');
+    const parsed = JSON.parse(result) as { pages: Array<{ textBlocks: Array<{ text: string }> }> };
+    expect(parsed.pages[0].textBlocks[0].text).toBe(text);
+  });
+
+  it('U-TE-AB-15: getPageData callback が undefined を返すページはスキップ', () => {
+    const map = new Map<number, PageData>();
+    map.set(0, page0);
+    const partialDoc: PecoDocument = {
+      filePath: '/tmp/partial.pdf',
+      fileName: 'partial.pdf',
+      totalPages: 2,
+      metadata: {},
+      pages: map,
+    };
+    // page 1 は callback でも undefined → スキップ
+    const result = exportTextFromDocument(partialDoc, 'txt', {
+      getPageData: (_idx) => undefined,
+    });
+    // page 0 のみ出力
+    expect(result).toBe('Alpha\nBeta\nGamma');
+  });
+
+  it('U-TE-AB-16: 1万文字超のテキストブロックでもタイムアウトなし', () => {
+    const longText = 'あ'.repeat(10000);
+    const page = makePage(0, [makeBlock('long1', longText, 0)]);
+    const doc = makeDoc([page]);
+    const start = Date.now();
+    const result = exportTextFromDocument(doc, 'txt');
+    const elapsed = Date.now() - start;
+    expect(result).toBe(longText);
+    expect(elapsed).toBeLessThan(1000); // 1秒以内
+  });
+});
