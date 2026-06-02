@@ -1,19 +1,11 @@
 import {
-  PDFDocument, StandardFonts, PDFName, PDFRawStream,
+  PDFDocument, StandardFonts, PDFName,
   pushGraphicsState, popGraphicsState, translate, scale, degrees,
-  concatTransformationMatrix, PDFArray,
   PDFDict, PDFHexString
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import { deflate } from 'pako';
-import {
-  stripTextBlocks,
-  stripEmptyGraphicsStateBlocksOnly,
-  hasTextOperatorsOutsideTextObjects,
-} from './pdfContentStream';
 import { extractPdfVersion, restorePdfVersion, stripCatalogVersion } from './pdfVersion';
 import {
-  PECO_FONT_KEY_TAG,
   isPecoToolFontKey,
 } from './pdfPecoToolMarkers';
 import { ensureDenseClassicXref } from './pdfClassicXref';
@@ -35,382 +27,32 @@ import type { SaveDialogOptions } from '../hooks/useFileOperations';
 import {
   createSkippedTextCollector,
   getSkippedTextChars,
-  recordSkippedTextChar,
   sanitizeTextForPdfCopy,
   stripUnsafePdfCopyChars,
-  type SkippedTextCollector,
 } from './pdfSkippedTextChars';
-import type { PDFObject, PDFRef, PDFFont } from '@cantoo/pdf-lib';
+import type { PDFObject, PDFFont } from '@cantoo/pdf-lib';
 import {
-  decodeStreamContents,
-  bytesEqual,
-  concatWithNewlines,
-  isPdfRef,
   collectPageContentRefCounts,
-  deleteIfUniqueRef,
-  cleanContentStream,
   cleanFormXObjectsInResources,
   pruneStalePecoToolResources,
+  replacePageTextContentStreams,
+  pageHasTextOperatorDamage,
+  sanitizeBBoxMetaTexts,
+  stripEmptyQBlocksOnPage,
+  getRotationCm,
+  normalizeRotation,
+  getViewportSize,
+  asPageIndex,
+  isRepairTextBlock,
+  makeFontSupportSet,
+  splitTextBySupportedFont,
+  measureRuns,
+  getFontDescentRatio,
+  setPageFontWithStableKey,
+  type RepairTextBlock,
+  type RepairPageData,
 } from './pdfSaverCore';
 
-function replacePageTextContentStreams(
-  pageNode: {
-    get?: (key: PDFName) => PDFObject | undefined;
-    Contents?: () => PDFObject | undefined;
-    set: (key: PDFName, value: PDFObject) => void;
-  },
-  context: typeof PDFDocument.prototype.context,
-  contentRefCounts: Map<string, number>,
-): void {
-  const contentsKey = PDFName.of('Contents');
-  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
-  if (!rawContents) return;
-
-  const resolved = context.lookup(rawContents);
-  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
-  type ResolvedEntry = { ref: unknown; stream: PDFRawStream; decoded: Uint8Array };
-  const resolvedEntries: ResolvedEntry[] = [];
-
-  // #78: 詳細コメントは pdfSaver.ts 側参照。
-  // decode 失敗があれば merge せず、成功 stream のみ in-place で個別 strip する。
-  let anyDecodeFailed = false;
-  for (const streamRef of streams) {
-    const stream = context.lookup(streamRef);
-    if (!(stream instanceof PDFRawStream)) {
-      // issue #44: see pdfSaver.ts comment.
-      console.warn('[pdf.worker] Skipping text strip: page content stream is not a PDFRawStream', {
-        streamType: stream?.constructor?.name ?? typeof stream,
-      });
-      anyDecodeFailed = true;
-      continue;
-    }
-    const decoded = decodeStreamContents(stream);
-    if (decoded === null) {
-      cleanContentStream(stream);
-      anyDecodeFailed = true;
-      continue;
-    }
-    resolvedEntries.push({ ref: streamRef, stream, decoded });
-  }
-
-  if (anyDecodeFailed) {
-    for (const entry of resolvedEntries) {
-      const cleaned = stripTextBlocks(entry.decoded);
-      if (bytesEqual(cleaned, entry.decoded)) continue;
-      entry.stream.updateContents(deflate(cleaned));
-      entry.stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
-      entry.stream.dict.delete(PDFName.of('DecodeParms'));
-    }
-    return;
-  }
-
-  const merged = concatWithNewlines(resolvedEntries.map((e) => e.decoded));
-  const cleaned = stripTextBlocks(merged);
-  if (!bytesEqual(cleaned, merged)) {
-    pageNode.set(contentsKey, context.register(context.flateStream(cleaned)));
-    if (resolved instanceof PDFArray) deleteIfUniqueRef(context, rawContents, contentRefCounts);
-    for (const streamRef of streams) {
-      deleteIfUniqueRef(context, streamRef, contentRefCounts);
-    }
-  }
-}
-
-function pageHasTextOperatorDamage(
-  pageNode: { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
-  context: typeof PDFDocument.prototype.context,
-): boolean {
-  const contentsKey = PDFName.of('Contents');
-  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
-  if (!rawContents) return false;
-
-  const resolved = context.lookup(rawContents);
-  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
-  for (const streamRef of streams) {
-    const stream = context.lookup(streamRef);
-    if (!(stream instanceof PDFRawStream)) continue;
-    const decoded = decodeStreamContents(stream);
-    if (decoded !== null && hasTextOperatorsOutsideTextObjects(decoded)) return true;
-  }
-  return false;
-}
-
-function sanitizeBBoxMetaTexts(
-  bboxMeta: Record<string, unknown>,
-  skippedChars: SkippedTextCollector,
-): boolean {
-  let changed = false;
-  for (const [pageKey, entries] of Object.entries(bboxMeta)) {
-    if (!Array.isArray(entries)) continue;
-    const pageIndex = Number(pageKey);
-    const normalizedPageIndex = Number.isInteger(pageIndex) ? pageIndex : undefined;
-    let pageChanged = false;
-    const cleanedEntries = entries.map((entry) => {
-      if (entry === null || typeof entry !== 'object') return entry;
-      const text = (entry as { text?: unknown }).text;
-      if (typeof text !== 'string') return entry;
-      const cleanedText = sanitizeTextForPdfCopy(text, skippedChars, normalizedPageIndex);
-      if (cleanedText === text) return entry;
-      pageChanged = true;
-      return { ...(entry as Record<string, unknown>), text: cleanedText };
-    });
-    if (pageChanged) {
-      bboxMeta[pageKey] = cleanedEntries;
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-/**
- * issue #96 要件2: 未編集ページの content stream から「空 q-Q ラッパー」だけを除去する軽量パス。
- * 詳細は pdfSaver.ts 側参照（同一ロジック）。
- */
-function stripEmptyQBlocksOnPage(
-  pageNode: {
-    get?: (key: PDFName) => PDFObject | undefined;
-    Contents?: () => PDFObject | undefined;
-    set: (key: PDFName, value: PDFObject) => void;
-  },
-  context: typeof PDFDocument.prototype.context,
-): void {
-  const contentsKey = PDFName.of('Contents');
-  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
-  if (!rawContents) return;
-  const resolved = context.lookup(rawContents);
-  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
-  for (const streamRef of streams) {
-    const stream = context.lookup(streamRef);
-    if (!(stream instanceof PDFRawStream)) continue;
-    const decoded = decodeStreamContents(stream);
-    if (decoded === null) continue;
-    const cleaned = stripEmptyGraphicsStateBlocksOnly(decoded);
-    if (bytesEqual(cleaned, decoded)) continue;
-    stream.updateContents(deflate(cleaned));
-    stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
-    stream.dict.delete(PDFName.of('DecodeParms'));
-  }
-}
-
-interface FontRun {
-  text: string;
-  font: PDFFont;
-}
-
-/**
- * #71: 詳細コメントは pdfSaver.ts 側参照。
- * 回転ページで viewport-space bbox を正しく描画するための cm (concat matrix) を返す。
- */
-function getRotationCm(
-  rotation: number,
-  pageW: number,
-  pageH: number,
-) {
-  switch (rotation) {
-    case 0:
-      return [] as const;
-    case 90:
-      return [concatTransformationMatrix(0, 1, -1, 0, pageW, 0)] as const;
-    case 180:
-      return [concatTransformationMatrix(-1, 0, 0, -1, pageW, pageH)] as const;
-    case 270:
-      // Critical 数式誤りを修正。pdfjs convertToPdfPoint の R=270 は user(pageW - y_v, pageH - x_v)。
-      // 旧 [.. pageH-pageW pageW] は OCR テキストを画面外に描画していた (#71 の regression)。
-      return [concatTransformationMatrix(0, -1, 1, 0, 0, pageH)] as const;
-    default:
-      return [] as const;
-  }
-}
-
-function normalizeRotation(angle: number): number {
-  return ((Math.round(angle) % 360) + 360) % 360;
-}
-
-function getViewportSize(rotation: number, pageW: number, pageH: number): { vw: number; vh: number } {
-  if (rotation === 90 || rotation === 270) return { vw: pageH, vh: pageW };
-  return { vw: pageW, vh: pageH };
-}
-
-interface RepairTextBlock {
-  text: string;
-  bbox: { x: number; y: number; width: number; height: number };
-  writingMode: 'horizontal' | 'vertical';
-  order: number;
-  /** issue #186: 湾曲ベースライン定義 (任意) */
-  curve?: import('../types').CurveDefinition;
-}
-
-interface RepairPageData {
-  textBlocks: RepairTextBlock[];
-}
-
-function asPageIndex(value: unknown): number | null {
-  const pageIndex = typeof value === 'string' ? parseInt(value, 10) : value;
-  return typeof pageIndex === 'number' && Number.isInteger(pageIndex) ? pageIndex : null;
-}
-
-/**
- * issue #96 Option B: existingBBoxMeta から読み出した 1 ページ分のエントリが
- * 「再描画に必要な最小情報」を備えているか検証する type guard。
- * 詳細は pdfSaver.ts 側コメント参照。
- */
-function isRepairTextBlock(value: unknown): value is RepairTextBlock {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  if (typeof v.text !== 'string') return false;
-  if (typeof v.order !== 'number') return false;
-  if (v.writingMode !== 'horizontal' && v.writingMode !== 'vertical') return false;
-  const bbox = v.bbox as Record<string, unknown> | null | undefined;
-  if (!bbox || typeof bbox !== 'object') return false;
-  return (
-    typeof bbox.x === 'number' &&
-    typeof bbox.y === 'number' &&
-    typeof bbox.width === 'number' &&
-    typeof bbox.height === 'number'
-  );
-}
-
-function makeFontSupportSet(font: PDFFont): Set<number> | null {
-  if (typeof font.getCharacterSet !== 'function') return null;
-  return new Set(font.getCharacterSet());
-}
-
-function splitTextBySupportedFont(
-  text: string,
-  primaryFont: PDFFont,
-  primarySupport: Set<number> | null,
-  fallbackFonts: Array<{ font: PDFFont; support: Set<number> | null }>,
-  skippedChars?: SkippedTextCollector,
-  pageIndex?: number,
-): FontRun[] {
-  const runs: FontRun[] = [];
-  // issue #179: 中間配列を生成しないよう string iterator を直接 for...of で回す。
-  // pdfSaver.ts 側と同じ最適化。
-  for (const char of text) {
-    const codePoint = char.codePointAt(0);
-    let font = primaryFont;
-    if (codePoint !== undefined && primarySupport !== null && !primarySupport.has(codePoint)) {
-      const fallbackFont = fallbackFonts.find((fallback) => fallback.support?.has(codePoint))?.font;
-      if (!fallbackFont) {
-        if (skippedChars) recordSkippedTextChar(skippedChars, 'unsupported-font', char, pageIndex);
-        continue;
-      }
-      font = fallbackFont;
-    }
-    const last = runs[runs.length - 1];
-    if (last?.font === font) {
-      last.text += char;
-    } else {
-      runs.push({ text: char, font });
-    }
-  }
-  return runs;
-}
-
-function measureRuns(runs: FontRun[], size: number): { width: number; height: number } {
-  let width = 0;
-  let height = 0;
-  for (const run of runs) {
-    width += run.font.widthOfTextAtSize(run.text, size);
-    height = Math.max(height, run.font.heightAtSize(size));
-  }
-  return { width, height };
-}
-
-/**
- * フォントの descent 比 |descent| / (ascent + |descent|) を返す。
- * pdf-lib heightAtSize({descender:false}) は unitsPerEm≠1000 で誤差を持つため
- * embedder 経由で fontkit の生メトリクスから直接算出する (詳細は pdfSaver.ts 側参照)。
- */
-function getFontDescentRatio(font: PDFFont, fontSize: number): number {
-  const fk = (font as unknown as {
-    embedder?: { font?: { ascent?: number; descent?: number } };
-  }).embedder?.font;
-  if (fk && typeof fk.ascent === 'number' && typeof fk.descent === 'number') {
-    const span = fk.ascent - fk.descent; // ascent + |descent| (descent は負値)
-    if (span > 0) return Math.abs(fk.descent) / span;
-  }
-  const full = font.heightAtSize(fontSize);
-  if (full > 0) {
-    return (full - font.heightAtSize(fontSize, { descender: false })) / full;
-  }
-  return 0.2;
-}
-
-/**
- * #80: Resources.Font dict scan で既存 key を再利用する (pdfSaver.ts 側詳細参照)。
- * `font.ref` 完全一致 + key tag prefix が `/<font.name>-` 一致のみ採用。
- */
-function findExistingFontKey(page: unknown, font: PDFFont): PDFName | undefined {
-  const pageLike = page as {
-    node?: { Resources?: () => PDFDict | undefined };
-  };
-  const resources = pageLike.node?.Resources?.();
-  const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
-  if (!fontDict) return undefined;
-
-  const targetRefKey = font.ref.toString();
-  // issue #96 Fix 1: 統一タグ PECO_FONT_KEY_TAG で生成されたキーのみ再利用対象とする。
-  const tagPrefix = `/${PECO_FONT_KEY_TAG}-`;
-  for (const [key, value] of fontDict.entries()) {
-    if (!isPdfRef(value)) continue;
-    if (value.toString() !== targetRefKey) continue;
-    if (!key.toString().startsWith(tagPrefix)) continue;
-    return key;
-  }
-  return undefined;
-}
-
-/**
- * 修正 (#33, #80): Resources の Font 辞書登録と pageLike state の同期を分離する。
- * 詳細コメントは pdfSaver.ts 側参照。
- *
- * #80: cache → scan → newFontDictionary の 3 段。内部 API 依存は scan miss 時のみ。
- */
-function getOrRegisterPageFontKey(
-  page: unknown,
-  font: PDFFont,
-  fontKeys: Map<PDFFont, PDFName>,
-): PDFName | undefined {
-  const cached = fontKeys.get(font);
-  if (cached) return cached;
-
-  // #80: 内部 API を叩く前に Font dict scan を 1 回挟む。
-  const existing = findExistingFontKey(page, font);
-  if (existing) {
-    fontKeys.set(font, existing);
-    return existing;
-  }
-
-  const pageLike = page as {
-    fontKey?: PDFName;
-    node?: { newFontDictionary?: (tag: string, fontRef: PDFRef) => PDFName };
-    setFont?: (font: PDFFont) => void;
-  };
-  // issue #96 Fix 1: PECO_FONT_KEY_TAG を渡して `/PecoF-<random>` 形式の key を生成。
-  let key = pageLike.node?.newFontDictionary?.(PECO_FONT_KEY_TAG, font.ref);
-  if (!key) {
-    pageLike.setFont?.(font);
-    key = pageLike.fontKey;
-  }
-  if (key) fontKeys.set(font, key);
-  return key;
-}
-
-function syncPageFontState(page: unknown, font: PDFFont, key: PDFName | undefined): void {
-  const pageLike = page as { font?: PDFFont; fontKey?: PDFName };
-  if (!key) return;
-  pageLike.font = font;
-  pageLike.fontKey = key;
-}
-
-function setPageFontWithStableKey(
-  page: unknown,
-  font: PDFFont,
-  fontKeys: Map<PDFFont, PDFName>,
-): void {
-  const key = getOrRegisterPageFontKey(page, font, fontKeys);
-  syncPageFontState(page, font, key);
-}
 
 async function handleSavePdf(
   originalPdfBytes: Uint8Array,
@@ -590,6 +232,7 @@ async function handleSavePdf(
       },
       pdfDoc.context,
       contentRefCounts,
+      '[pdf.worker]',
     );
 
     if (!customFont) continue;
