@@ -10,7 +10,7 @@ export interface SaveDiffEntry {
 
 export interface SaveDiffSummary {
   entries: SaveDiffEntry[];
-  totalPages: number;
+  changedPageCount: number;
   changedPages: number[];
   timestamp: number;
 }
@@ -143,7 +143,7 @@ export function computeSaveDiff(
 
   return {
     entries,
-    totalPages: changedPages.length,
+    changedPageCount: changedPages.length,
     changedPages,
     timestamp,
   };

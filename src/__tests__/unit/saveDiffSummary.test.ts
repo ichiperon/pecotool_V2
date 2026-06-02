@@ -35,7 +35,7 @@ describe('computeSaveDiff', () => {
     const result = computeSaveDiff([], 0);
     expect(result.entries).toHaveLength(0);
     expect(result.changedPages).toHaveLength(0);
-    expect(result.totalPages).toBe(0);
+    expect(result.changedPageCount).toBe(0);
   });
 
   it('lastSavedActionIndex 以前のアクションは無視する', () => {
