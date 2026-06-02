@@ -78,6 +78,101 @@ function layoutOnArc(
   return result;
 }
 
+/**
+ * viewport 座標系 (y-down) のまま各文字の transform を返す overlay 描画用ヘルパー
+ * (issue #188 / Phase 4)。
+ *
+ * `layoutTextOnCurve` と異なり PDF y-up への flip を行わない。
+ * PdfCanvas の canvas は viewport 座標系で描画するため pageHeight flip が不要。
+ * 既存の `layoutTextOnCurve` は PDF saver 側で使い続け、このバリアントは
+ * overlay 描画専用に使う。
+ *
+ * 返り値の x/y は viewport 座標系 (y-down)、rotation は viewport 接線方向 (radian)。
+ *
+ * @param text 描画文字列
+ * @param curve arc または polyline
+ * @param fontSize  将来拡張のため受け取るが現実装では未使用
+ */
+export function layoutTextOnCurveViewport(
+  text: string,
+  curve: CurveDefinition,
+  fontSize: number,
+): GlyphTransform[] {
+  void fontSize;
+
+  const chars: string[] = [];
+  for (const ch of text) chars.push(ch);
+  if (chars.length === 0) return [];
+
+  if (curve.type === 'arc') {
+    return layoutOnArcViewport(chars, curve);
+  }
+  return layoutOnPolylineViewport(chars, curve);
+}
+
+function layoutOnArcViewport(
+  chars: string[],
+  curve: Extract<CurveDefinition, { type: 'arc' }>,
+): GlyphTransform[] {
+  const { center, radius, startAngle, endAngle } = curve;
+  const n = chars.length;
+  const sweep = endAngle - startAngle;
+  const dir = sweep >= 0 ? 1 : -1;
+
+  const result: GlyphTransform[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = (i + 0.5) / n;
+    const theta = startAngle + t * sweep;
+    const x = center.x + radius * Math.cos(theta);
+    const y = center.y + radius * Math.sin(theta);
+    // viewport y-down 接線方向
+    const rotation = theta + (dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+    result.push({ char: chars[i], x, y, rotation });
+  }
+  return result;
+}
+
+function layoutOnPolylineViewport(
+  chars: string[],
+  curve: Extract<CurveDefinition, { type: 'polyline' }>,
+): GlyphTransform[] {
+  const { points } = curve;
+  type Seg = { x0: number; y0: number; x1: number; y1: number; len: number; cum: number };
+  const segs: Seg[] = [];
+  let total = 0;
+  for (let i = 0; i + 1 < points.length; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) continue;
+    segs.push({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, len, cum: total });
+    total += len;
+  }
+  if (segs.length === 0 || total === 0) return [];
+
+  const n = chars.length;
+  const result: GlyphTransform[] = [];
+  for (let i = 0; i < n; i++) {
+    const d = ((i + 0.5) / n) * total;
+    let seg = segs[segs.length - 1];
+    for (const s of segs) {
+      if (d <= s.cum + s.len) {
+        seg = s;
+        break;
+      }
+    }
+    const localT = (d - seg.cum) / seg.len;
+    const x = seg.x0 + localT * (seg.x1 - seg.x0);
+    const y = seg.y0 + localT * (seg.y1 - seg.y0);
+    // viewport (y-down) 接線方向
+    const rotation = Math.atan2(seg.y1 - seg.y0, seg.x1 - seg.x0);
+    result.push({ char: chars[i], x, y, rotation });
+  }
+  return result;
+}
+
 function layoutOnPolyline(
   chars: string[],
   curve: Extract<CurveDefinition, { type: 'polyline' }>,

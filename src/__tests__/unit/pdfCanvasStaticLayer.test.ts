@@ -12,6 +12,11 @@
  *   - 選択ブロックは描画スキップ
  *   - showOcr=false なら clearRect 以外は呼ばれない
  *   - text 非空ならテキスト描画パス (rotate / fillText) が走る
+ *
+ * Phase 4 (#188): curve 付き block の描画テストを追加。
+ *   - fillRect が文字数分呼ばれる (axis-aligned は 1 回、curve は字数分)
+ *   - drawImage は呼ばれない (Phase 2 cache 再導入 guard 維持)
+ *   - save / restore / translate / rotate が呼ばれる (字ごとの回転)
  */
 import { describe, it, expect, vi } from 'vitest'
 
@@ -21,7 +26,7 @@ vi.mock('pdfjs-dist', () => ({ default: {} }))
 vi.mock('../../utils/pdfLoader', () => ({ getCachedPageProxy: vi.fn() }))
 
 import { drawStaticBlock, renderStaticLayer } from '../../components/PdfCanvas'
-import type { TextBlock } from '../../types'
+import type { TextBlock, CurveDefinition } from '../../types'
 
 function makeMockContext() {
   return {
@@ -180,5 +185,100 @@ describe('PdfCanvas static layer guardrail (cache regression detector)', () => {
     )
     expect(ctx.rotate).toHaveBeenCalled()
     expect(ctx.fillText).toHaveBeenCalled()
+  })
+})
+
+describe('PdfCanvas static layer – curve block (Phase 4 #188)', () => {
+  function makeCurveBlock(text: string, curve: CurveDefinition): TextBlock {
+    return {
+      id: 'c0',
+      text,
+      originalText: '',
+      bbox: { x: 50, y: 50, width: 200, height: 40 },
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: false,
+      curve,
+    }
+  }
+
+  const arcCurve: CurveDefinition = {
+    type: 'arc',
+    center: { x: 150, y: 150 },
+    radius: 80,
+    startAngle: Math.PI,
+    endAngle: 2 * Math.PI,
+  }
+
+  it('curve (arc) 付き block: fillRect が文字数分呼ばれる (字ごと描画)', () => {
+    const ctx = makeMockContext()
+    const text = 'ABCDE'
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock(text, arcCurve),
+      1,
+      0.5,
+    )
+    // curve パスでは 1 文字ごとに fillRect が 1 回呼ばれる
+    expect(ctx.fillRect).toHaveBeenCalledTimes(text.length)
+  })
+
+  it('curve 描画でも drawImage は呼ばれない (cache 再導入 guard 維持)', () => {
+    const ctx = makeMockContext()
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock('ABC', arcCurve),
+      1,
+      0.5,
+    )
+    expect(ctx.drawImage).not.toHaveBeenCalled()
+  })
+
+  it('curve 描画で save / restore / translate / rotate が呼ばれる (字ごと回転)', () => {
+    const ctx = makeMockContext()
+    const text = 'XYZ'
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock(text, arcCurve),
+      1,
+      0.5,
+    )
+    // 3 文字 → save/restore/translate/rotate 各 3 回以上
+    expect(ctx.save).toHaveBeenCalledTimes(text.length)
+    expect(ctx.restore).toHaveBeenCalledTimes(text.length)
+    expect(ctx.translate).toHaveBeenCalledTimes(text.length)
+    expect(ctx.rotate).toHaveBeenCalledTimes(text.length)
+  })
+
+  it('axis-aligned (curve なし) block は依然として fillRect が 1 回', () => {
+    const ctx = makeMockContext()
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeBlock({ text: '' }), // curve なし
+      1,
+      0.5,
+    )
+    expect(ctx.fillRect).toHaveBeenCalledTimes(1)
+  })
+
+  it('curve (polyline) 付き block: fillRect が文字数分呼ばれる', () => {
+    const ctx = makeMockContext()
+    const polylineCurve: CurveDefinition = {
+      type: 'polyline',
+      points: [
+        { x: 50, y: 100 },
+        { x: 150, y: 80 },
+        { x: 250, y: 100 },
+      ],
+    }
+    const text = 'WX'
+    drawStaticBlock(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock(text, polylineCurve),
+      1,
+      0.5,
+    )
+    expect(ctx.fillRect).toHaveBeenCalledTimes(text.length)
   })
 })

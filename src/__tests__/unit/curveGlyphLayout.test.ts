@@ -9,7 +9,7 @@
  *  - 空文字列で空配列
  */
 import { describe, expect, it } from 'vitest';
-import { layoutTextOnCurve } from '../../utils/curveGlyphLayout';
+import { layoutTextOnCurve, layoutTextOnCurveViewport } from '../../utils/curveGlyphLayout';
 import type { CurveDefinition } from '../../types';
 
 describe('layoutTextOnCurve / arc', () => {
@@ -201,5 +201,91 @@ describe('layoutTextOnCurve / edge cases', () => {
     expect(glyphs).toHaveLength(2);
     expect(glyphs[0].char).toBe('🦊');
     expect(glyphs[1].char).toBe('A');
+  });
+});
+
+// ── Phase 4 (#188): layoutTextOnCurveViewport (overlay 用 viewport 座標系) ───
+
+describe('layoutTextOnCurveViewport / arc', () => {
+  it('arc 上の各文字が viewport 円周上 (radius ±0.01) に位置する', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 100, y: 100 },
+      radius: 50,
+      startAngle: Math.PI,
+      endAngle: 2 * Math.PI,
+    };
+    const glyphs = layoutTextOnCurveViewport('ABCDEF', arc, 12);
+    expect(glyphs).toHaveLength(6);
+    for (const g of glyphs) {
+      // viewport 座標系のまま (y-flip なし)
+      const dist = Math.hypot(g.x - 100, g.y - 100);
+      expect(dist).toBeCloseTo(50, 1);
+    }
+  });
+
+  it('viewport y 座標は pageHeight flip されない (y は center.y に近い値)', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 0, y: 50 },
+      radius: 10,
+      startAngle: 0,
+      endAngle: Math.PI / 2,
+    };
+    const glyphs = layoutTextOnCurveViewport('A', arc, 12);
+    // viewport y-down: center.y=50 付近に乗るはず (PDF flip なら pageHeight - 50)
+    expect(glyphs[0].y).toBeCloseTo(50 + 10 * Math.sin((0.5 / 1) * (Math.PI / 2)), 1);
+  });
+
+  it('空文字で空配列 (arc)', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 0, y: 0 },
+      radius: 10,
+      startAngle: 0,
+      endAngle: Math.PI,
+    };
+    expect(layoutTextOnCurveViewport('', arc, 12)).toEqual([]);
+  });
+});
+
+describe('layoutTextOnCurveViewport / polyline', () => {
+  it('水平セグメント: rotation は 0 (viewport 接線方向)', () => {
+    const polyline: CurveDefinition = {
+      type: 'polyline',
+      points: [
+        { x: 0, y: 50 },
+        { x: 100, y: 50 },
+      ],
+    };
+    const glyphs = layoutTextOnCurveViewport('AB', polyline, 12);
+    for (const g of glyphs) {
+      expect(g.rotation).toBeCloseTo(0, 6);
+    }
+  });
+
+  it('viewport y は flip されない (polyline)', () => {
+    const polyline: CurveDefinition = {
+      type: 'polyline',
+      points: [
+        { x: 0, y: 30 },
+        { x: 100, y: 30 },
+      ],
+    };
+    const glyphs = layoutTextOnCurveViewport('AB', polyline, 12);
+    // y は viewport のまま 30 付近であること (PDF flip なら pageHeight - 30)
+    expect(glyphs[0].y).toBeCloseTo(30, 6);
+    expect(glyphs[1].y).toBeCloseTo(30, 6);
+  });
+
+  it('空文字で空配列 (polyline)', () => {
+    const polyline: CurveDefinition = {
+      type: 'polyline',
+      points: [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+      ],
+    };
+    expect(layoutTextOnCurveViewport('', polyline, 12)).toEqual([]);
   });
 });

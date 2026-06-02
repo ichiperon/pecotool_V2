@@ -15,6 +15,8 @@ import { classifyDirection, getDirectionLabel } from "../utils/bulkReorder";
 import { usePdfRendering } from "../hooks/usePdfRendering";
 import { useCanvasDrawing } from "../hooks/useCanvasDrawing";
 import { useBlockDragResize } from "../hooks/useBlockDragResize";
+import { isCurveDefinition } from "../utils/curveDefinition";
+import { layoutTextOnCurveViewport } from "../utils/curveGlyphLayout";
 import type { TextBlock, BoundingBox } from "../types";
 
 interface PdfCanvasProps {
@@ -30,6 +32,13 @@ export function drawStaticBlock(
   scale: number,
   opacity: number,
 ): void {
+  // curve 付き block は per-glyph の curve 描画パスへ
+  if (block.curve && isCurveDefinition(block.curve)) {
+    drawStaticBlockCurve(context, block, scale, opacity);
+    return;
+  }
+
+  // ── 既存 axis-aligned パス (変更禁止) ──────────────────────────────────
   const x = block.bbox.x * scale;
   const y = block.bbox.y * scale;
   const w = block.bbox.width * scale;
@@ -83,6 +92,57 @@ export function drawStaticBlock(
   context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
   context.fillText(block.text, 0, 0);
   context.restore();
+}
+
+/**
+ * curve 付き TextBlock の static overlay 描画 (issue #188 / Phase 4)。
+ * 各文字を viewport 座標系上のカーブに沿って配置し、
+ * 文字幅×文字高の矩形を青塗り + 赤テキストで描く (inset=1)。
+ */
+function drawStaticBlockCurve(
+  context: CanvasRenderingContext2D,
+  block: TextBlock,
+  scale: number,
+  opacity: number,
+): void {
+  const h = block.bbox.height * scale;
+  const fontSize = Math.max(10, h * 0.8);
+  const inset = 1;
+  const baseAlpha = opacity;
+  const fillAlpha = opacity * 0.25;
+
+  context.font = `bold ${fontSize}px sans-serif`;
+  context.textBaseline = "top";
+
+  // curve! が valid である前提 (呼び出し元で guard 済み)
+  const glyphs = layoutTextOnCurveViewport(block.text, block.curve!, fontSize);
+
+  for (const g of glyphs) {
+    const gx = g.x * scale;
+    const gy = g.y * scale;
+    // 簡易文字幅は fontSize 相当の正方形 (等幅概算)
+    const gw = fontSize;
+    const gh = fontSize;
+
+    context.save();
+    context.translate(gx, gy);
+    context.rotate(g.rotation);
+
+    // 文字背景: 青塗り
+    context.fillStyle = `rgba(0, 150, 255, ${fillAlpha})`;
+    context.fillRect(-gw / 2 + inset, -inset, gw - inset * 2, gh - inset * 2);
+
+    // 文字本体: 赤テキスト
+    if (block.text) {
+      context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+      context.lineWidth = 3;
+      context.strokeText(g.char, -gw / 2, -gh * 0.1);
+      context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+      context.fillText(g.char, -gw / 2, -gh * 0.1);
+    }
+
+    context.restore();
+  }
 }
 
 export function renderStaticLayer(
@@ -416,6 +476,38 @@ export function PdfCanvas({
               context.fillText(block.text, 0, 0);
               context.restore();
             }
+          }
+
+          // curve 付き block: baseline path を黄色 stroke で可視化 (Phase 4)
+          // handle drag は Phase 5 担当のため本 phase では stroke のみ
+          if (block.curve && isCurveDefinition(block.curve)) {
+            const curve = block.curve;
+            context.save();
+            context.strokeStyle = "rgba(255, 220, 0, 0.9)";
+            context.lineWidth = 2;
+            context.setLineDash([4, 3]);
+            context.beginPath();
+            if (curve.type === "arc") {
+              context.arc(
+                curve.center.x * scale,
+                curve.center.y * scale,
+                curve.radius * scale,
+                curve.startAngle,
+                curve.endAngle,
+                curve.startAngle > curve.endAngle,
+              );
+            } else {
+              const pts = curve.points;
+              if (pts.length > 0) {
+                context.moveTo(pts[0].x * scale, pts[0].y * scale);
+                for (let pi = 1; pi < pts.length; pi++) {
+                  context.lineTo(pts[pi].x * scale, pts[pi].y * scale);
+                }
+              }
+            }
+            context.stroke();
+            context.setLineDash([]);
+            context.restore();
           }
         }
       }
