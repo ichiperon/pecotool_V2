@@ -67,6 +67,20 @@ export function sweepUnreachableObjects(pdfDoc: PDFDocument): SweepResult {
 
   const enqueue = (obj: PDFObject | undefined | null): void => {
     if (!obj) return;
+    // issue #185: 同一の Dict / Stream / Array が複数の親から参照されると
+    // pop 時の visited チェックだけでは queue に重複したまま積まれ、巨大 PDF
+    // で queue.length が膨らんで pop コスト/到達性走査時間が悪化する。
+    // push 直前に visited 済 (composite) / reachable 済 (PDFRef) なら捨てる
+    // ことで redundant enqueue を抑止する。
+    if (obj instanceof PDFRef) {
+      if (reachable.has(refKey(obj))) return;
+    } else if (
+      obj instanceof PDFDict ||
+      obj instanceof PDFStream ||
+      obj instanceof PDFArray
+    ) {
+      if (visitedObjects.has(obj)) return;
+    }
     queue.push(obj);
   };
 
