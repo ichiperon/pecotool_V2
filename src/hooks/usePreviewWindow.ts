@@ -63,7 +63,26 @@ export function usePreviewWindow() {
     try {
       const windows = await getAllWindows();
       let win = windows.find(w => w.label === 'preview-window');
-      if (win && isPreviewOpen) {
+      // React state と Tauri 側 window 可視状態が乖離している場合 (例: 子ウィンドウを
+      // OS の閉じるボタンで閉じたが preview-hidden emit が間に合っていない等) は、
+      // 実体側を真として state を補正してから toggle を判断する。
+      let actuallyVisible = isPreviewOpen;
+      if (win) {
+        try {
+          actuallyVisible = await win.isVisible();
+        } catch (e) {
+          logUnlessTauriWindowNotFound(e);
+        }
+        if (actuallyVisible !== isPreviewOpen) {
+          setIsPreviewOpen(actuallyVisible);
+        }
+      } else if (isPreviewOpen) {
+        // window が消滅しているのに state が open のままなら閉じ扱いに補正。
+        actuallyVisible = false;
+        setIsPreviewOpen(false);
+      }
+
+      if (win && actuallyVisible) {
         await win.hide();
         setIsPreviewOpen(false);
       } else {
