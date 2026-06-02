@@ -93,6 +93,17 @@ body, #root {
   gap: 16px;
   white-space: nowrap;
   position: relative;
+  /* button 要素として使われる場合のデフォルト styling を打ち消す */
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+}
+
+.menu-dropdown-item:disabled {
+  color: #9ca3af;
+  cursor: default;
 }
 
 .menu-dropdown-item:hover {

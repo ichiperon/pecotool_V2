@@ -65,11 +65,11 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
         </button>
         {activeMenu === 'file' && (
           <div className="menu-dropdown">
-            <div className="menu-dropdown-item" onClick={() => run(() => props.onOpen())}>
+            <button type="button" className="menu-dropdown-item" onClick={() => run(() => props.onOpen())}>
               開く<span className="menu-shortcut">Ctrl+O</span>
-            </div>
+            </button>
 
-            {/* 最近使ったファイル */}
+            {/* 最近使ったファイル (親はサブメニュー hover トリガなので div のまま) */}
             <div
               className={`menu-dropdown-item menu-has-sub ${showRecent ? 'active' : ''}`}
               onMouseEnter={() => setShowRecent(true)}
@@ -80,14 +80,15 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
               {showRecent && props.recentFiles.length > 0 && (
                 <div className="menu-submenu">
                   {props.recentFiles.map((path, i) => (
-                    <div
+                    <button
+                      type="button"
                       key={i}
                       className="menu-dropdown-item"
                       title={path}
                       onClick={() => run(() => props.onOpen(path))}
                     >
                       {path.split(/[\\/]/).pop()}
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -98,32 +99,40 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
               )}
             </div>
 
-            <div
+            <button
+              type="button"
               className={`menu-dropdown-item ${!props.isFileLoaded ? 'disabled' : ''}`}
-              onClick={() => props.isFileLoaded && run(props.onReload)}
+              onClick={() => run(props.onReload)}
+              disabled={!props.isFileLoaded}
             >
               再読み込み<span className="menu-shortcut">F5</span>
-            </div>
+            </button>
             <div className="menu-separator" />
-            <div
+            <button
+              type="button"
               className={`menu-dropdown-item ${!props.isFileLoaded ? 'disabled' : ''}`}
-              onClick={() => props.isFileLoaded && run(props.onClose)}
+              onClick={() => run(props.onClose)}
+              disabled={!props.isFileLoaded}
             >
               閉じる
-            </div>
+            </button>
             <div className="menu-separator" />
-            <div
+            <button
+              type="button"
               className={`menu-dropdown-item ${!canSave ? 'disabled' : ''}`}
-              onClick={() => canSave && run(props.onSave)}
+              onClick={() => run(props.onSave)}
+              disabled={!canSave}
             >
               保存<span className="menu-shortcut">Ctrl+S</span>
-            </div>
-            <div
+            </button>
+            <button
+              type="button"
               className={`menu-dropdown-item ${!props.isFileLoaded ? 'disabled' : ''}`}
-              onClick={() => props.isFileLoaded && run(props.onSaveAs)}
+              onClick={() => run(props.onSaveAs)}
+              disabled={!props.isFileLoaded}
             >
               別名で保存<span className="menu-shortcut">Ctrl+Shift+S</span>
-            </div>
+            </button>
           </div>
         )}
       </div>
@@ -138,9 +147,9 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
         </button>
         {activeMenu === 'settings' && (
           <div className="menu-dropdown">
-            <div className="menu-dropdown-item" onClick={() => run(props.onShowOcrSettings)}>
+            <button type="button" className="menu-dropdown-item" onClick={() => run(props.onShowOcrSettings)}>
               OCR 序列設定
-            </div>
+            </button>
           </div>
         )}
       </div>
@@ -155,20 +164,20 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
         </button>
         {activeMenu === 'help' && (
           <div className="menu-dropdown">
-            <div className="menu-dropdown-item" onClick={() => run(props.onShowShortcuts)}>
+            <button type="button" className="menu-dropdown-item" onClick={() => run(props.onShowShortcuts)}>
               ショートカットキー一覧
-            </div>
-            <div className="menu-dropdown-item" onClick={() => run(props.onShowUsage)}>
+            </button>
+            <button type="button" className="menu-dropdown-item" onClick={() => run(props.onShowUsage)}>
               ツールの使い方
-            </div>
+            </button>
             <div className="menu-separator" />
-            <div className="menu-dropdown-item" onClick={() => run(props.onOpenLogFolder)}>
+            <button type="button" className="menu-dropdown-item" onClick={() => run(props.onOpenLogFolder)}>
               ログフォルダを開く
-            </div>
+            </button>
             <div className="menu-separator" />
-            <div className="menu-dropdown-item" onClick={() => run(props.onShowVersion)}>
+            <button type="button" className="menu-dropdown-item" onClick={() => run(props.onShowVersion)}>
               バージョン情報
-            </div>
+            </button>
           </div>
         )}
       </div>
