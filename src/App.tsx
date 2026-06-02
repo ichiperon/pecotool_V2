@@ -15,7 +15,9 @@ import {
   selectCurrentPage,
 } from "./store/pecoStore";
 import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
-import { ask } from '@tauri-apps/plugin-dialog';
+import { ask, save } from '@tauri-apps/plugin-dialog';
+import { writeTextFile } from '@tauri-apps/plugin-fs';
+import { exportTextFromDocument, type TextExportFormat } from './utils/textExport';
 import { destroySharedPdfProxy } from "./utils/pdfLoader";
 import { readReorderThreshold, writeReorderThreshold } from "./utils/reorderThreshold";
 import { PdfCanvas } from "./components/PdfCanvas";
@@ -24,7 +26,7 @@ import { TextBlock } from "./types";
 import { perf } from "./utils/perfLogger";
 
 // Hooks
-import { useFileOperations, type SaveStep } from "./hooks/useFileOperations";
+import { useFileOperations, type SaveStep, type SaveDialogOptions } from "./hooks/useFileOperations";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useConsoleLogs } from "./hooks/useConsoleLogs";
 import { usePreviewWindow } from "./hooks/usePreviewWindow";
@@ -60,6 +62,10 @@ const ReplaceDialog = lazy(() =>
 );
 const ConsolePanel = lazy(() =>
   import("./components/Console/ConsolePanel").then(m => ({ default: m.ConsolePanel }))
+);
+// issue #197: 別名で保存ダイアログ
+const SaveDialog = lazy(() =>
+  import("./components/SaveDialog").then(m => ({ default: m.SaveDialog }))
 );
 
 function App() {
@@ -102,6 +108,7 @@ function App() {
     helpModal, setHelpModal,
     showOcrSettings, setShowOcrSettings,
     showReplace, setShowReplace,
+    showSaveDialog, setShowSaveDialog,
     showToast,
   } = useDialogState();
   const { zoom, setZoom, isAutoFit, setIsAutoFit, viewerRef, fitToScreen } =
@@ -143,11 +150,16 @@ function App() {
   });
   // #102: isOcrRunning の最新値を ref 同期 (handleOpen 内ガードで参照)。
   isOcrRunningRef.current = isOcrRunning;
+  // issue #197: EACCES フォールバック toast の「別名で保存」ボタンも dialog 経由にする。
+  // setShowSaveDialog は useDialogState から取得済み。ref 化して常に最新を参照する。
+  const setShowSaveDialogRef = useRef(setShowSaveDialog);
+  setShowSaveDialogRef.current = setShowSaveDialog;
   const { handleOpen, handleSave, executeSaveAs, isSavingRef: fileOpsIsSavingRef } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
     (doc) => { checkAndPromptOcrZero(doc); },
     isOcrRunningRef,
     setSaveStep,
+    () => { setShowSaveDialogRef.current(true); },
   );
   // #102: フォルダ OCR ループ内では openPdf に bypassOcrGuard=true を立てて呼ぶ。
   // これがないと OCR 中の handleOpen ガードに引っかかってループが進まない。
@@ -196,11 +208,45 @@ function App() {
     await handleOpen(filePath);
   }, [filePath, handleOpen, isOcrRunning, isSaving, showToast]);
 
-  const handleSaveAs = async () => {
+  // issue #197: 別名で保存は SaveDialog を経由して圧縮オプションを選ばせてから実行する。
+  const handleSaveAs = useCallback(() => {
     if (!isFileLoaded) return;
     perf.mark('ui.saveAs');
-    await executeSaveAs();
-  };
+    setShowSaveDialog(true);
+  }, [isFileLoaded, setShowSaveDialog]);
+
+  // issue #197: SaveDialog の onConfirm ハンドラ。
+  const handleSaveDialogConfirm = useCallback(async (
+    compression: 'none' | 'compressed' | 'rasterized',
+    rasterizeQuality?: number,
+  ) => {
+    setShowSaveDialog(false);
+    const options: SaveDialogOptions = { compression, rasterizeQuality };
+    await executeSaveAs(options);
+  }, [executeSaveAs, setShowSaveDialog]);
+
+  const handleExport = useCallback(async (
+    scope: 'current' | 'all',
+    format: TextExportFormat,
+  ) => {
+    const doc = usePecoStore.getState().document;
+    if (!doc) return;
+    const text = exportTextFromDocument(doc, format, {
+      pageRange: scope === 'current' ? 'current' : undefined,
+      currentPageIndex,
+      // TODO: LRU退避ページの取得 (getAllTemporaryPageData経由) は未実装。
+      // 現状は document.pages に乗っているページのみエクスポート対象。
+    });
+    const defaultName = doc.fileName.replace(/\.pdf$/i, '') + '_export.' + format;
+    const filterName = format === 'txt' ? 'Text' : format === 'md' ? 'Markdown' : format.toUpperCase();
+    const savePath = await save({
+      defaultPath: defaultName,
+      filters: [{ name: filterName, extensions: [format] }],
+    });
+    if (!savePath) return;
+    await writeTextFile(savePath, text);
+    showToast(`${savePath} にエクスポートしました`);
+  }, [currentPageIndex, showToast]);
 
   const handleOpenLogFolder = useCallback(async () => {
     try {
@@ -596,6 +642,19 @@ function App() {
         </Suspense>
       )}
 
+      {/* issue #197: 別名で保存ダイアログ */}
+      {showSaveDialog && (
+        <Suspense fallback={null}>
+          <SaveDialog
+            isEstimating={false}
+            estimatedSizes={null}
+            defaultCompression="none"
+            onConfirm={handleSaveDialogConfirm}
+            onCancel={() => setShowSaveDialog(false)}
+          />
+        </Suspense>
+      )}
+
       <MenuBar
         isFileLoaded={isFileLoaded}
         isDirty={isDirty}
@@ -611,6 +670,7 @@ function App() {
         onReload={handleReload}
         onShowOcrSettings={() => setShowOcrSettings(true)}
         onOpenLogFolder={handleOpenLogFolder}
+        onExport={handleExport}
       />
 
       <Toolbar

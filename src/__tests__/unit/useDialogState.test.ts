@@ -133,6 +133,22 @@ describe('useDialogState.showToast', () => {
     expect(result.current.notification).toBeNull();
   });
 
+  it('showSaveDialog: 初期値 false、setShowSaveDialog で切り替え可能 (issue #197)', () => {
+    const { result } = renderHook(() => useDialogState());
+
+    expect(result.current.showSaveDialog).toBe(false);
+
+    act(() => {
+      result.current.setShowSaveDialog(true);
+    });
+    expect(result.current.showSaveDialog).toBe(true);
+
+    act(() => {
+      result.current.setShowSaveDialog(false);
+    });
+    expect(result.current.showSaveDialog).toBe(false);
+  });
+
   it('unmount 時に未解決の timer がクリアされる (リーク防止)', () => {
     const { result, unmount } = renderHook(() => useDialogState());
     act(() => {

@@ -28,6 +28,8 @@ export function useDialogState() {
   const [showOcrSettings, setShowOcrSettings] = useState(false);
   // issue #93: Find & Replace ダイアログ表示フラグ
   const [showReplace, setShowReplace] = useState(false);
+  // issue #197: 別名で保存ダイアログ表示フラグ
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
 
   // action 付きトーストはユーザー操作待ちのため、自動消滅させずに表示し続ける。
   // 保存失敗フォールバック (issue #53) のように「別名で保存」ボタンを押されるまで
@@ -73,6 +75,8 @@ export function useDialogState() {
     setShowOcrSettings,
     showReplace,
     setShowReplace,
+    showSaveDialog,
+    setShowSaveDialog,
     showToast,
   };
 }

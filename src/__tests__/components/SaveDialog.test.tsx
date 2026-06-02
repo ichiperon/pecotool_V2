@@ -5,6 +5,7 @@ import { SaveDialog } from '../../components/SaveDialog'
 vi.mock('lucide-react', () => ({
   X: () => null,
   Loader2: (props: any) => <span className={props.className}>loading</span>,
+  AlertTriangle: () => null,
 }))
 
 // ── ヘルパー ──────────────────────────────────────────────────

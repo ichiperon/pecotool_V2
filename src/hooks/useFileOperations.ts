@@ -310,6 +310,16 @@ function formatSaveToast(prefix: string, size: number, skippedChars: SkippedPdfT
 /** issue #164: 保存ロック画面に現在進行中のステップを表示するためのフェーズ識別子。 */
 export type SaveStep = 'changes' | 'pdf-gen' | 'safe-replace' | null;
 
+/**
+ * issue #197: 別名で保存ダイアログで選択した圧縮オプション。
+ * SaveDialog.tsx の onConfirm と一致するシグネチャ。
+ * actual compression/rasterization は別 issue で実装予定 (現状は無視される)。
+ */
+export interface SaveDialogOptions {
+  compression: 'none' | 'compressed' | 'rasterized';
+  rasterizeQuality?: number;
+}
+
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean, action?: { label: string; onClick: () => void }) => void,
   setIsSaving?: (v: boolean) => void,
@@ -326,6 +336,11 @@ export function useFileOperations(
    * _executeSave のフェーズ遷移ごとに呼ばれる。null は「保存していない / 終了」を意味する。
    */
   setSaveStep?: (step: SaveStep) => void,
+  /**
+   * issue #197: EACCES 系エラー時の「別名で保存」トーストから SaveDialog を開くコールバック。
+   * undefined のときは従来通り executeSaveAs を直接呼ぶ (後方互換)。
+   */
+  onRequestSaveDialog?: () => void,
 ) {
   const setDocument = usePecoStore((s) => s.setDocument);
   const setDocumentFilePath = usePecoStore((s) => s.setDocumentFilePath);
@@ -334,7 +349,8 @@ export function useFileOperations(
   // executeSaveAs は下で定義されるため、_executeSave / handleSave から参照できるよう
   // ref で間接化する。issue #53: writeFileAtomically が EACCES/EBUSY で失敗したときに
   // showToast の action ボタンから「別名で保存」へフォールバックさせるのに使う。
-  const executeSaveAsRef = useRef<(() => Promise<void>) | null>(null);
+  // issue #197: SaveDialogOptions を受け取れるよう型拡張 (呼び出し元は undefined でも可)。
+  const executeSaveAsRef = useRef<((options?: SaveDialogOptions) => Promise<void>) | null>(null);
 
   // localStorage 上の peco-recent-files を string[] として読み出す。
   // 改ざん・型不整合・壊れた JSON は全て空配列にフォールバックする。
@@ -699,6 +715,12 @@ export function useFileOperations(
           {
             label: '別名で保存',
             onClick: () => {
+              // issue #197: SaveDialog が設定されている場合は dialog 経由で保存オプション選択へ。
+              // 未設定 (後方互換) の場合は executeSaveAs を直接呼ぶ。
+              if (onRequestSaveDialog) {
+                onRequestSaveDialog();
+                return;
+              }
               const fn = executeSaveAsRef.current;
               if (!fn) {
                 showToast('別名で保存機能が初期化中です。少し待って再度試してください。', true);
@@ -719,7 +741,15 @@ export function useFileOperations(
     }
   };
 
-  const executeSaveAs = async () => {
+  /**
+   * issue #197: SaveDialog から選んだ圧縮オプションを受け取れるよう signature 拡張。
+   * options が undefined のときは従来通りデフォルト挙動 (後方互換)。
+   * actual compression/rasterization は TODO: 別 issue で実装。
+   */
+  const executeSaveAs = async (options?: SaveDialogOptions) => {
+    // TODO: options.compression / options.rasterizeQuality を _executeSave に伝搬する
+    // (actual compression/rasterization は別 issue で実装予定)
+    void options;
     flushActiveOcrCardText();
     const { document } = usePecoStore.getState();
     if (!document) return;
