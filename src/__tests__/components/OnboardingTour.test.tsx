@@ -1,31 +1,57 @@
 /**
  * Feature #203: OnboardingTour component tests
  */
+import React from 'react';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
 import { OnboardingTour, shouldShowOnboarding, resetOnboarding, ONBOARDING_STORAGE_KEY } from '../../components/OnboardingTour';
 
-// framer-motion: replace with pass-through stubs to avoid animation issues in jsdom
+// framer-motion: replace with pass-through stubs to avoid animation issues in jsdom.
+// Use forwardRef so tooltipRef in OnboardingTour resolves correctly.
 vi.mock('framer-motion', () => ({
   motion: {
-    div: ({ children, onClick, style, className, role }: {
-      children?: React.ReactNode;
-      onClick?: React.MouseEventHandler;
-      style?: React.CSSProperties;
-      className?: string;
-      role?: string;
-    }) => (
-      <div onClick={onClick} style={style} className={className} role={role}>
-        {children}
-      </div>
+    // Spread all props via HTMLAttributes so role/style/etc. are typed correctly.
+    div: React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+      ({ children, ...rest }, ref) => (
+        // eslint-disable-next-line react/forbid-dom-props
+        <div ref={ref} {...rest}>
+          {children}
+        </div>
+      ),
     ),
   },
   AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
+/**
+ * Render OnboardingTour and flush the 50ms setTimeout that computes tooltipPos.
+ * Without flushing timers the tooltip stays visibility:hidden and
+ * getByRole cannot resolve accessible names for buttons inside it.
+ */
+function renderTour(onClose: () => void) {
+  vi.useFakeTimers();
+  let result!: ReturnType<typeof render>;
+  act(() => { result = render(<OnboardingTour onClose={onClose} />); });
+  act(() => { vi.runAllTimers(); });
+  vi.useRealTimers();
+  return result;
+}
+
+/**
+ * Click a button inside the tooltip and flush the follow-up 50ms timer
+ * (step change triggers another setTimeout for tooltipPos recompute).
+ */
+function clickAndFlush(btn: HTMLElement) {
+  vi.useFakeTimers();
+  act(() => { fireEvent.click(btn); });
+  act(() => { vi.runAllTimers(); });
+  vi.useRealTimers();
+}
+
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  vi.useRealTimers();
 });
 
 beforeEach(() => {
@@ -34,62 +60,62 @@ beforeEach(() => {
 
 describe('OnboardingTour: step rendering', () => {
   it('OT-01: renders step 1 title on initial mount', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     expect(screen.getByText('ようこそ Peco へ')).toBeTruthy();
   });
 
   it('OT-02: renders "次へ" button on first step', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     expect(screen.getByRole('button', { name: '次へ' })).toBeTruthy();
   });
 
   it('OT-03: renders "スキップ" button on first step', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     expect(screen.getByRole('button', { name: 'スキップ' })).toBeTruthy();
   });
 
   it('OT-04: "戻る" button is NOT visible on the first step', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     expect(screen.queryByRole('button', { name: '戻る' })).toBeNull();
   });
 
   it('OT-05: clicking "次へ" advances to step 2', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+    renderTour(vi.fn());
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
     expect(screen.getByText('PDF を読み込む')).toBeTruthy();
   });
 
   it('OT-06: step counter shows "1 / 5" on step 1', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     expect(screen.getByText('1 / 5')).toBeTruthy();
   });
 
   it('OT-07: step counter shows "2 / 5" after advancing to step 2', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+    renderTour(vi.fn());
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
     expect(screen.getByText('2 / 5')).toBeTruthy();
   });
 
   it('OT-08: "戻る" appears from step 2 onwards', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+    renderTour(vi.fn());
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
     expect(screen.getByRole('button', { name: '戻る' })).toBeTruthy();
   });
 
   it('OT-09: clicking "戻る" goes back to step 1', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
-    fireEvent.click(screen.getByRole('button', { name: '戻る' }));
+    renderTour(vi.fn());
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
+    clickAndFlush(screen.getByRole('button', { name: '戻る' }));
     expect(screen.getByText('ようこそ Peco へ')).toBeTruthy();
   });
 });
 
 describe('OnboardingTour: last step', () => {
   function advanceToLastStep(onClose: () => void) {
-    render(<OnboardingTour onClose={onClose} />);
+    renderTour(onClose);
     // Advance through all steps (5 total, need 4 clicks)
     for (let i = 0; i < 4; i++) {
-      fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+      clickAndFlush(screen.getByRole('button', { name: '次へ' }));
     }
   }
 
@@ -116,13 +142,13 @@ describe('OnboardingTour: last step', () => {
 describe('OnboardingTour: skip', () => {
   it('OT-13: clicking "スキップ" calls onClose', () => {
     const onClose = vi.fn();
-    render(<OnboardingTour onClose={onClose} />);
+    renderTour(onClose);
     fireEvent.click(screen.getByRole('button', { name: 'スキップ' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('OT-14: clicking "スキップ" sets localStorage flag', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     fireEvent.click(screen.getByRole('button', { name: 'スキップ' }));
     expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBe('true');
   });
@@ -153,27 +179,27 @@ describe('shouldShowOnboarding / resetOnboarding', () => {
 
 describe('OnboardingTour: accessibility', () => {
   it('OT-19: root element has role="dialog" and aria-modal="true"', () => {
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     const dialog = screen.getByRole('dialog', { name: 'チュートリアル' });
     expect(dialog.getAttribute('aria-modal')).toBe('true');
   });
 
   it('OT-20: progress dots count matches total steps (5)', () => {
-    const { container } = render(<OnboardingTour onClose={vi.fn()} />);
+    const { container } = renderTour(vi.fn());
     const dots = container.querySelectorAll('.onboarding-dot');
     expect(dots).toHaveLength(5);
   });
 
   it('OT-21: first dot has "active" class on step 1', () => {
-    const { container } = render(<OnboardingTour onClose={vi.fn()} />);
+    const { container } = renderTour(vi.fn());
     const dots = container.querySelectorAll('.onboarding-dot');
     expect(dots[0].classList.contains('active')).toBe(true);
     expect(dots[1].classList.contains('active')).toBe(false);
   });
 
   it('OT-22: second dot becomes "active" on step 2', () => {
-    const { container } = render(<OnboardingTour onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+    const { container } = renderTour(vi.fn());
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
     const dots = container.querySelectorAll('.onboarding-dot');
     expect(dots[1].classList.contains('active')).toBe(true);
   });
@@ -181,14 +207,14 @@ describe('OnboardingTour: accessibility', () => {
 
 describe('OnboardingTour: 4-mask overlay (fix #212)', () => {
   it('OT-23: no invalid clip-path with evenodd keyword is applied to overlay', () => {
-    const { container } = render(<OnboardingTour onClose={vi.fn()} />);
+    const { container } = renderTour(vi.fn());
     // The old single overlay with clip-path should not exist
     const oldOverlay = container.querySelector('.onboarding-overlay');
     expect(oldOverlay).toBeNull();
   });
 
   it('OT-24: step 1 (no spotlight target) renders full-screen mask', () => {
-    const { container } = render(<OnboardingTour onClose={vi.fn()} />);
+    const { container } = renderTour(vi.fn());
     // Step 1 has targetSelector=null, so full mask is rendered
     const fullMask = container.querySelector('.onboarding-mask--full');
     expect(fullMask).not.toBeNull();
@@ -200,7 +226,7 @@ describe('OnboardingTour: 4-mask overlay (fix #212)', () => {
   });
 
   it('OT-25: overlay wrapper uses onboarding-overlay-masks class (not old onboarding-overlay)', () => {
-    const { container } = render(<OnboardingTour onClose={vi.fn()} />);
+    const { container } = renderTour(vi.fn());
     expect(container.querySelector('.onboarding-overlay-masks')).not.toBeNull();
     expect(container.querySelector('.onboarding-overlay')).toBeNull();
   });
@@ -215,9 +241,9 @@ describe('OnboardingTour: 4-mask overlay (fix #212)', () => {
     });
     document.body.appendChild(mockEl);
 
-    const { container } = render(<OnboardingTour onClose={vi.fn()} />);
+    const { container } = renderTour(vi.fn());
     // Advance to step 2 which targets [data-tour="menubar-file"]
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
 
     // After the 50ms timeout, spotRect would be set — but jsdom timers are sync-faked
     // We verify at least that the mask structure exists (the 4-div branch is reachable)
@@ -240,7 +266,7 @@ describe('OnboardingTour: 4-mask overlay (fix #212)', () => {
 describe('OnboardingTour: Esc key cancels tour (wave 5)', () => {
   it('OT-27: pressing Escape key calls onClose', () => {
     const onClose = vi.fn();
-    const { container } = render(<OnboardingTour onClose={onClose} />);
+    const { container } = renderTour(onClose);
     // Dispatch keydown Escape on the root element
     const root = container.firstElementChild as HTMLElement;
     fireEvent.keyDown(root, { key: 'Escape', code: 'Escape' });
@@ -261,7 +287,7 @@ describe('OnboardingTour: ResizeObserver absence (wave 5)', () => {
 
     let error: Error | null = null;
     try {
-      render(<OnboardingTour onClose={vi.fn()} />);
+      renderTour(vi.fn());
     } catch (e) {
       error = e as Error;
     } finally {
@@ -280,9 +306,9 @@ describe('OnboardingTour: missing targetSelector DOM element (wave 5)', () => {
     const existing = document.querySelector('[data-tour="menubar-file"]');
     if (existing) existing.remove();
 
-    render(<OnboardingTour onClose={vi.fn()} />);
+    renderTour(vi.fn());
     // Advance to step 2 (targetSelector = '[data-tour="menubar-file"]')
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
 
     // spotRect will be null (element not found) → full-screen mask rendered
     // The overlay wrapper must still exist (no crash)
@@ -297,8 +323,8 @@ describe('OnboardingTour: missing targetSelector DOM element (wave 5)', () => {
     const existing = document.querySelector('[data-tour="menubar-file"]');
     if (existing) existing.remove();
 
-    render(<OnboardingTour onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole('button', { name: '次へ' }));
+    renderTour(vi.fn());
+    clickAndFlush(screen.getByRole('button', { name: '次へ' }));
     expect(screen.getByText('2 / 5')).toBeTruthy();
   });
 });

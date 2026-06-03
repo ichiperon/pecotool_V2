@@ -12,6 +12,7 @@ import { render, fireEvent, screen, cleanup } from '@testing-library/react';
 vi.mock('lucide-react', () => ({
   X: () => null,
   Replace: () => null,
+  AlertCircle: () => null,
 }));
 
 import { ReplaceDialog } from '../../components/ReplaceDialog';
