@@ -572,7 +572,7 @@ async fn run_ocr(
 pub(crate) fn write_ocr_temp_bytes(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
     let temp_dir = std::env::temp_dir();
     let temp_path = temp_dir.join(format!(
-        "peco_ocr_{}_{}",
+        "peco_ocr_{}_{}.png",
         std::process::id(),
         // cheap uniqueness: ptr address of the slice header
         bytes.as_ptr() as usize,
