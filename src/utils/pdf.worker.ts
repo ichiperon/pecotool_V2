@@ -365,10 +365,28 @@ async function handleSavePdf(
   }
 
   // issue #96 要件2: 未編集ページにも空 q-Q ラッパー除去のみ適用 (詳細は pdfSaver.ts 側参照)。
+  // issue #1 (Acrobat 7 TJ 互換 仮修正): BT 外テキスト演算子が漏れているページを strip する。
+  // 詳細は pdfSaver.ts 側コメント参照 (同一ロジック)。
   const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
   for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
     if (dirtyPageIndexSet.has(pi)) continue;
     const page = pdfDoc.getPage(pi);
+    // issue #1: BT 外テキスト演算子検出 → strip のみ (再描画なし)
+    if (pageHasTextOperatorDamage(
+      page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
+      pdfDoc.context,
+    )) {
+      replacePageTextContentStreams(
+        page.node as unknown as {
+          get?: (key: PDFName) => PDFObject | undefined;
+          Contents?: () => PDFObject | undefined;
+          set: (key: PDFName, value: PDFObject) => void;
+        },
+        pdfDoc.context,
+        contentRefCounts,
+        '[pdf.worker#1]',
+      );
+    }
     stripEmptyQBlocksOnPage(
       page.node as unknown as {
         get?: (key: PDFName) => PDFObject | undefined;
