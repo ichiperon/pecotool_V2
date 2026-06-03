@@ -117,7 +117,6 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof Ribbon>> = 
     onShowShortcuts: vi.fn(),
     onShowUsage: vi.fn(),
     onShowVersion: vi.fn(),
-    onShowTour: vi.fn(),
     onShowOcrSettings: vi.fn(),
     onOpenLogFolder: vi.fn(),
     onCheckUpdate: vi.fn(),
@@ -179,30 +178,10 @@ describe('Ribbon', () => {
     expect(screen.getByTitle('ログフォルダを開く')).toBeTruthy()
   })
 
-  it('C-RB-07: ヘルプタブクリックでチュートリアルボタンが表示される', () => {
+  it('C-RB-07: ヘルプタブクリックでショートカットボタンが表示される', () => {
     renderRibbon()
     fireEvent.click(screen.getByText('ヘルプ'))
-    expect(screen.getByTitle('チュートリアルを表示')).toBeTruthy()
-  })
-
-  // ── data-tour 属性移植確認 ──────────────────────────────────
-  it('C-RB-08: data-tour="menubar-file" がファイルタブに付いている', () => {
-    renderRibbon()
-    const fileTab = screen.getByText('ファイル').closest('button')!
-    expect(fileTab.getAttribute('data-tour')).toBe('menubar-file')
-  })
-
-  it('C-RB-09: data-tour="menubar-help" がヘルプタブに付いている', () => {
-    renderRibbon()
-    const helpTab = screen.getByText('ヘルプ').closest('button')!
-    expect(helpTab.getAttribute('data-tour')).toBe('menubar-help')
-  })
-
-  it('C-RB-10: data-tour="toolbar-ocr" がOCRタブのOCR実行ボタンに付いている', () => {
-    renderRibbon()
-    fireEvent.click(screen.getByText('OCR'))
-    const ocrBtn = screen.getByTitle('OCR実行')
-    expect(ocrBtn.getAttribute('data-tour')).toBe('toolbar-ocr')
+    expect(screen.getByTitle('ショートカットキー一覧')).toBeTruthy()
   })
 
   // ── ファイルタブ機能 ─────────────────────────────────────────

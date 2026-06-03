@@ -58,7 +58,6 @@ export const OcrTab: React.FC<OcrTabProps> = (props) => {
             onClick={(e) => { e.stopPropagation(); setShowOcrDropdown(!showOcrDropdown); }}
             disabled={props.isOcrRunning}
             title="OCR実行"
-            data-tour="toolbar-ocr"
             size="large"
           >
             {props.isOcrRunning

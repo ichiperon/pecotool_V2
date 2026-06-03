@@ -169,7 +169,6 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
             disabled={props.isOcrRunning}
             title="OCR実行"
             style={{ padding: '4px 8px', borderLeft: '1px solid transparent', borderRadius: '4px' }}
-            data-tour="toolbar-ocr"
           >
             {props.isOcrRunning
               ? <Loader2 size={14} style={{ marginRight: '4px', animation: 'spin 1s linear infinite' }} />

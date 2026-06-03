@@ -21,7 +21,6 @@ interface MenuBarProps {
   onOpenLogFolder: () => void;
   onExport: (scope: 'current' | 'all', format: TextExportFormat) => void;
   onCheckUpdate: () => void;
-  onShowTour: () => void;
 }
 
 export const MenuBar: React.FC<MenuBarProps> = (props) => {
@@ -67,7 +66,6 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
         <button
           className={`menubar-item ${activeMenu === 'file' ? 'active' : ''}`}
           onClick={() => toggle('file')}
-          data-tour="menubar-file"
         >
           ファイル
         </button>
@@ -233,16 +231,11 @@ export const MenuBar: React.FC<MenuBarProps> = (props) => {
         <button
           className={`menubar-item ${activeMenu === 'help' ? 'active' : ''}`}
           onClick={() => toggle('help')}
-          data-tour="menubar-help"
         >
           ヘルプ
         </button>
         {activeMenu === 'help' && (
           <div className="menu-dropdown">
-            <button type="button" className="menu-dropdown-item" onClick={() => run(props.onShowTour)}>
-              チュートリアルを表示
-            </button>
-            <div className="menu-separator" />
             <button type="button" className="menu-dropdown-item" onClick={() => run(props.onShowShortcuts)}>
               ショートカットキー一覧
             </button>

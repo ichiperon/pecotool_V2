@@ -1,5 +1,4 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { shouldShowOnboarding, ONBOARDING_STORAGE_KEY } from "./components/OnboardingTour";
 import "./App.css";
 import {
   usePecoStore,
@@ -55,11 +54,6 @@ import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 // Components
 import { Ribbon } from "./components/Ribbon/Ribbon";
 import { HelpMenu } from "./components/HelpMenu";
-
-// Feature #203: onboarding tour (lazy)
-const OnboardingTour = lazy(() =>
-  import("./components/OnboardingTour").then(m => ({ default: m.OnboardingTour }))
-);
 
 // Lazy-loaded modal/dialog components: 初回描画に不要なため code-split
 const OcrSettingsModal = lazy(() =>
@@ -170,9 +164,6 @@ function App() {
   const isOcrRunningRef = useRef(false);
 
   const [reorderThreshold, setReorderThreshold] = useState(() => readReorderThreshold());
-
-  // Feature #203: First-launch onboarding tour
-  const [showOnboarding, setShowOnboarding] = useState(() => shouldShowOnboarding());
 
   // issue #201: diff プレビューモーダルの状態
   // diffPreviewSummary が非 null のときモーダルを表示し、
@@ -865,14 +856,6 @@ function App() {
         onShowShortcuts={() => setHelpModal('shortcuts')}
         onShowUsage={() => setHelpModal('usage')}
         onShowVersion={() => setHelpModal('version')}
-        onShowTour={() => {
-          try {
-            localStorage.removeItem(ONBOARDING_STORAGE_KEY);
-          } catch {
-            /* ignore */
-          }
-          setShowOnboarding(true);
-        }}
         onShowOcrSettings={() => setShowOcrSettings(true)}
         onOpenLogFolder={handleOpenLogFolder}
         onCheckUpdate={checkForUpdate}
@@ -1089,13 +1072,6 @@ function App() {
           </div>
         </div>
       )}
-      {/* Feature #203: First-launch onboarding tour */}
-      {showOnboarding && (
-        <Suspense fallback={null}>
-          <OnboardingTour onClose={() => setShowOnboarding(false)} />
-        </Suspense>
-      )}
-
       {notification && (notification.isError ? (
         <div className="toast toast-error" role="alert" aria-live="assertive">
           <span>{notification.message}</span>

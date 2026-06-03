@@ -82,7 +82,6 @@ export interface RibbonProps {
   onShowShortcuts: () => void;
   onShowUsage: () => void;
   onShowVersion: () => void;
-  onShowTour: () => void;
   onShowOcrSettings: () => void;
   onOpenLogFolder: () => void;
   onCheckUpdate: () => void;
@@ -149,7 +148,6 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           active={activeTab === 'file'}
           onClick={() => setActiveTab('file')}
           title="ファイル (Alt+F)"
-          data-tour="menubar-file"
         >
           ファイル
         </RibbonTab>
@@ -190,7 +188,6 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
           active={activeTab === 'help'}
           onClick={() => setActiveTab('help')}
           title="ヘルプ (Alt+H)"
-          data-tour="menubar-help"
         >
           ヘルプ
         </RibbonTab>
@@ -286,7 +283,6 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
         )}
         {activeTab === 'help' && (
           <HelpTab
-            onShowTour={props.onShowTour}
             onShowShortcuts={props.onShowShortcuts}
             onShowUsage={props.onShowUsage}
             onShowVersion={props.onShowVersion}
