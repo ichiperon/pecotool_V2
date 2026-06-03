@@ -61,4 +61,31 @@ test.describe('OcrTab: OCR 実行・消去ドロップダウン', () => {
     await rangeBtn.click();
     await expect(rangeBtn).not.toHaveClass(/active/);
   });
+
+  test('[OT-05] 全ページ OCR クリックはエラーをスローしない (v2.0.8 regression)', async ({ page }) => {
+    // Regression guard: v2.0.8 で infraStore 分離後に runOcrAllPages が呼べることを確認する。
+    // ask() は tauriMock で false を返すため confirmation dialog でキャンセル扱いになり
+    // 実際の OCR 処理は走らないが、クリックからハンドラ呼び出しまでの配線が壊れていないことを検証する。
+    await loadFixtureDocument(page);
+    await page.locator('[role="tablist"] button', { hasText: 'OCR' }).click();
+
+    const ocrBtn = page.locator('button', { hasText: 'OCR実行' });
+    await expect(ocrBtn).toBeEnabled();
+    await ocrBtn.click();
+
+    const allPagesBtn = page.locator('.ribbon-dropdown-item', { hasText: '全ページ' });
+    await expect(allPagesBtn).toBeVisible();
+
+    // ページコンソールエラーをキャプチャ
+    const errors: string[] = [];
+    page.on('pageerror', (err) => errors.push(err.message));
+
+    await allPagesBtn.click();
+
+    // クリック後にドロップダウンが閉じる (=ハンドラが呼ばれた証拠)
+    await expect(allPagesBtn).not.toBeVisible({ timeout: 3000 });
+
+    // コンソールにエラーが出ていないこと
+    expect(errors).toHaveLength(0);
+  });
 });

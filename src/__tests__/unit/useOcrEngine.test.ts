@@ -27,11 +27,18 @@ vi.mock('../../utils/pdfLoader', () => ({
 vi.mock('../../utils/pdfTextExtractor', () => ({ loadPage: vi.fn() }));
 vi.mock('../../store/pecoStore', () => ({
   usePecoStore: Object.assign(
-    vi.fn((sel: any) => sel({ document: null, currentPageIndex: 0, documentEpoch: 0 })),
-    { getState: vi.fn(() => ({ document: null, documentEpoch: 0, updatePageData: vi.fn() })) },
+    vi.fn((sel: any) => sel({ document: null, currentPageIndex: 0 })),
+    { getState: vi.fn(() => ({ document: null, updatePageData: vi.fn() })) },
   ),
   selectHasDocument: (s: any) => !!s.document,
   selectCurrentPageIndex: (s: any) => s.currentPageIndex ?? 0,
+}));
+// #278: documentEpoch は infraStore に移動したためこちらでモックする
+vi.mock('../../store/infraStore', () => ({
+  useInfraStore: Object.assign(
+    vi.fn((sel: any) => sel({ documentEpoch: 0, pageAccessOrder: [], pendingRestoration: null, lastIdbError: null, currentPageProxy: null, currentPageProxyKey: null })),
+    { getState: vi.fn(() => ({ documentEpoch: 0 })) },
+  ),
 }));
 vi.mock('../../store/ocrSettingsStore', () => ({
   useOcrSettingsStore: Object.assign(vi.fn(() => ({})), {

@@ -46,6 +46,7 @@ export async function installTauriMocks(page: Page): Promise<void> {
       // File dialog mocks
       'plugin:dialog|open': () => null,
       'plugin:dialog|save': () => '/mock/output.pdf',
+      'plugin:dialog|ask': () => false, // default: user cancels confirmation dialogs
       // Filesystem mocks
       'plugin:fs|write_file': () => null,
       'plugin:fs|write_text_file': () => null,
