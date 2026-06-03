@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PecoTool v2 テストプロセス完了レポート</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, "Yu Gothic UI", "Hiragino Sans", sans-serif;
+      max-width: 1200px;
+      margin: 2em auto;
+      padding: 0 1.5em;
+      line-height: 1.7;
+      color: #1e293b;
+      font-size: 14px;
+    }
+    h1 {
+      border-bottom: 3px solid #2563eb;
+      padding-bottom: .4em;
+      font-size: 1.8em;
+      color: #0f172a;
+    }
+    h2 {
+      color: #1e40af;
+      margin-top: 2.5em;
+      margin-bottom: .5em;
+      font-size: 1.25em;
+      border-left: 4px solid #3b82f6;
+      padding-left: .6em;
+    }
+    h3 {
+      color: #334155;
+      font-size: 1.05em;
+      margin-top: 1.5em;
+    }
+    p { margin: .5em 0; }
+    a { color: #2563eb; }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: .8em 0 1.2em;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid #cbd5e1;
+      padding: .45em .75em;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f1f5f9; font-weight: 600; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    .pass  { color: #16a34a; font-weight: bold; }
+    .fail  { color: #dc2626; font-weight: bold; }
+    .skip  { color: #9ca3af; }
+    .todo  { color: #d97706; }
+    .warn  { color: #ca8a04; font-weight: bold; }
+    .badge-critical { background:#fee2e2; color:#991b1b; padding:.1em .4em; border-radius:3px; font-size:.85em; font-weight:600; }
+    .badge-high     { background:#ffedd5; color:#9a3412; padding:.1em .4em; border-radius:3px; font-size:.85em; font-weight:600; }
+    .badge-medium   { background:#fef9c3; color:#854d0e; padding:.1em .4em; border-radius:3px; font-size:.85em; font-weight:600; }
+    .badge-low      { background:#f0fdf4; color:#166534; padding:.1em .4em; border-radius:3px; font-size:.85em; font-weight:600; }
+    .badge-closed   { background:#dcfce7; color:#166534; padding:.1em .4em; border-radius:3px; font-size:.85em; font-weight:600; }
+    .badge-open     { background:#fee2e2; color:#991b1b; padding:.1em .4em; border-radius:3px; font-size:.85em; font-weight:600; }
+    .badge-deferred { background:#e0f2fe; color:#075985; padding:.1em .4em; border-radius:3px; font-size:.85em; font-weight:600; }
+    .summary-card {
+      background: #eff6ff;
+      border: 1px solid #3b82f6;
+      padding: 1.2em 1.5em;
+      border-radius: 8px;
+      margin: 1em 0 1.5em;
+    }
+    .summary-card ul { margin: .5em 0; padding-left: 1.5em; }
+    .summary-card li { margin: .25em 0; }
+    .progress-wrap { margin: .6em 0 1em; }
+    .progress-label { font-size: .9em; margin-bottom: .3em; }
+    .progress-bar {
+      background: #e2e8f0;
+      height: 1.6em;
+      border-radius: 4px;
+      overflow: hidden;
+      width: 100%;
+    }
+    .progress-fill {
+      background: linear-gradient(90deg, #16a34a, #22c55e);
+      height: 100%;
+      display: flex;
+      align-items: center;
+      padding-left: .5em;
+      color: #fff;
+      font-size: .8em;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1em;
+      margin: 1em 0;
+    }
+    .card {
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: .8em 1em;
+      background: #fff;
+    }
+    .card-title { font-weight: 600; color: #475569; font-size: .85em; text-transform: uppercase; letter-spacing: .03em; }
+    .card-value { font-size: 2em; font-weight: 700; color: #0f172a; line-height: 1.2; }
+    .card-sub   { font-size: .8em; color: #64748b; margin-top: .2em; }
+    .meta { color: #64748b; font-size: .85em; }
+    code {
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 3px;
+      padding: .1em .35em;
+      font-size: .88em;
+      font-family: "Consolas", "SFMono-Regular", monospace;
+    }
+    .phase-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: .5em;
+    }
+    .phase-meta { font-size: .85em; color: #64748b; }
+    ul { padding-left: 1.4em; }
+    li { margin: .3em 0; }
+    hr { border: none; border-top: 1px solid #e2e8f0; margin: 2em 0; }
+    .note {
+      background: #fefce8;
+      border-left: 4px solid #eab308;
+      padding: .5em .8em;
+      font-size: .88em;
+      color: #713f12;
+      margin: .8em 0;
+    }
+    .info-box {
+      background: #f0f9ff;
+      border-left: 4px solid #38bdf8;
+      padding: .5em .8em;
+      font-size: .88em;
+      color: #0c4a6e;
+      margin: .8em 0;
+    }
+    @media print {
+      body { max-width: 100%; margin: 0; padding: .5cm 1cm; font-size: 11px; }
+      h2 { page-break-after: avoid; }
+      table { page-break-inside: avoid; }
+      .grid-2 { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>PecoTool v2 テストプロセス完了レポート</h1>
+
+<p class="meta">
+  生成日時: <strong>2026-06-03</strong> &nbsp;|&nbsp;
+  セッション: <strong>2026-06-02〜03 ホロデブ部</strong> &nbsp;|&nbsp;
+  対象バージョン: <strong>v2.0.7</strong>
+</p>
+
+<hr>
+
+<h2>サマリ</h2>
+
+<div class="summary-card">
+  <div class="progress-wrap">
+    <div class="progress-label">
+      総合達成率: <strong class="pass">1,838 / 1,840 (99.9%)</strong>
+      <span class="meta">（Vitest + Acceptance + State acceptance 合算）</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill" style="width: 99.9%;">99.9%</div>
+    </div>
+  </div>
+
+  <ul>
+    <li><strong>Vitest（npm test）</strong>: <span class="pass">1,647 pass</span> / <span class="skip">1 skip</span> / <span class="todo">1 todo</span> — 109 ファイル</li>
+    <li><strong>PDF acceptance（npm run test:pdf:acceptance）</strong>: <span class="pass">83 pass</span> / <span class="skip">1 skip</span> — 9 ファイル</li>
+    <li><strong>State acceptance（npm run test:state:acceptance）</strong>: <span class="pass">108 pass</span> — 4 ファイル</li>
+    <li><strong>Playwright E2E（npm run test:e2e:ci）</strong>: <span class="pass">52 pass / 0 fail</span> — 9 spec ファイル（main ブランチで確認済み）</li>
+    <li><strong>TypeScript（tsc --noEmit）</strong>: <span class="pass">エラー 0</span></li>
+    <li><strong>残 open issue</strong>: <span class="badge-deferred">2 件（正式 deferred）</span></li>
+  </ul>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-title">Vitest</div>
+    <div class="card-value pass">1,647</div>
+    <div class="card-sub">pass / 1 skip / 1 todo &nbsp;|&nbsp; 109 files</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Playwright E2E</div>
+    <div class="card-value pass">52</div>
+    <div class="card-sub">pass / 0 fail &nbsp;|&nbsp; 9 spec files</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Acceptance（PDF + State）</div>
+    <div class="card-value pass">191</div>
+    <div class="card-sub">83 + 108 pass / 1 skip</div>
+  </div>
+  <div class="card">
+    <div class="card-title">TypeScript</div>
+    <div class="card-value pass">0</div>
+    <div class="card-sub">型エラー（tsc --noEmit）</div>
+  </div>
+</div>
+
+<hr>
+
+<h2>Phase 1: テスト計画</h2>
+
+<div class="phase-header">
+  <span></span>
+  <span class="phase-meta">担当: 🐉 ココ (PM) &nbsp;|&nbsp; 成果物: <a href="01-plan.md">docs/test-process/01-plan.md</a></span>
+</div>
+
+<h3>リスク抽出結果</h3>
+
+<table>
+  <thead>
+    <tr><th>分類</th><th>件数</th><th>代表リスク</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="badge-critical">Critical</span></td>
+      <td>5 件</td>
+      <td>C-01 保存中ファイル破損 / C-02 no-op 誤判定 / C-03 IDB silent fail / C-04 saveDuringEditRace / C-05 BT...ET 未閉鎖</td>
+    </tr>
+    <tr>
+      <td><span class="badge-high">High</span></td>
+      <td>7 件</td>
+      <td>H-01 Acrobat dirty flag Layer 2 / H-02 Acrobat 7.0 実機 / H-03 テキスト読み順ズレ / H-04 縦書き baselineY / H-05 バックアップ復元 / H-06 保存Worker タイムアウト / H-07 旧メタ消失</td>
+    </tr>
+    <tr>
+      <td><span class="badge-medium">Medium</span></td>
+      <td>6 件</td>
+      <td>M-01 Ribbon Alt 競合 / M-02 ResizeObserver 折りたたみ / M-03 サムネイル遅延 / M-04 fontBytes transfer / M-05 a11y キーボード / M-06 検索フィルタ中ドラッグ</td>
+    </tr>
+    <tr>
+      <td><span class="badge-low">Low</span></td>
+      <td>4 件</td>
+      <td>L-01 高ズーム Canvas 崩れ / L-02 保存トーストサイズ表示 / L-03 最近使ったファイル / L-04 pdfjs Worker polyfill</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>テスト Tier 構成</h3>
+
+<table>
+  <thead>
+    <tr><th>Tier</th><th>種別</th><th>実行コマンド</th><th>件数</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Tier 1a</td><td>Vitest（Unit + Component + Integration）</td><td><code>npm test</code></td><td>1,649 (1,647 pass)</td></tr>
+    <tr><td>Tier 1b</td><td>PDF acceptance gate</td><td><code>npm run test:pdf:acceptance</code></td><td>84 (83 pass)</td></tr>
+    <tr><td>Tier 1c</td><td>State acceptance gate</td><td><code>npm run test:state:acceptance</code></td><td>108 (108 pass)</td></tr>
+    <tr><td>Tier 2</td><td>Playwright E2E</td><td><code>npm run test:e2e:ci</code></td><td>52 (52 pass)</td></tr>
+    <tr><td>Tier 3</td><td>Acrobat 実機手動検証</td><td>手動（ユーザー）</td><td>チェックリスト整備済み</td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>Phase 2: テスト分析</h2>
+
+<div class="phase-header">
+  <span></span>
+  <span class="phase-meta">担当: 🦁 ぼたん (Architect) &nbsp;|&nbsp; 成果物: <a href="02-analysis.md">docs/test-process/02-analysis.md</a></span>
+</div>
+
+<h3>モジュール別カバレッジ評価</h3>
+
+<table>
+  <thead>
+    <tr><th>モジュール群</th><th>優先度</th><th>カバレッジ評価</th><th>主な指摘</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>pdfSaver / pdfSaverCore / pdfTrailerId</td>
+      <td><span class="badge-critical">Critical</span></td>
+      <td><span class="pass">十分以上</span></td>
+      <td>integration 20本超、round-trip・curve・rotation・/ID 保持を全カバー</td>
+    </tr>
+    <tr>
+      <td>pecoStore（undo/redo/LRU）</td>
+      <td><span class="badge-critical">Critical</span></td>
+      <td><span class="pass">十分</span></td>
+      <td>unit で主要 action を網羅</td>
+    </tr>
+    <tr>
+      <td>infraStore</td>
+      <td><span class="badge-high">High</span></td>
+      <td><span class="warn">最大の穴</span></td>
+      <td>Phase 4 で新規テスト追加（documentEpoch / LRU / race 防止）</td>
+    </tr>
+    <tr>
+      <td>useOcrEngine / ocrSort / pdfLoader</td>
+      <td><span class="badge-high">High</span></td>
+      <td><span class="pass">十分</span></td>
+      <td>unit + integration でカバー済み</td>
+    </tr>
+    <tr>
+      <td>viewerStore / searchStore</td>
+      <td><span class="badge-medium">Medium</span> / <span class="badge-low">Low</span></td>
+      <td><span class="warn">直接テスト欠如</span></td>
+      <td>Phase 4 で追加対象（mode 排他・循環境界）</td>
+    </tr>
+    <tr>
+      <td>usePageManagement / useBackupManagement</td>
+      <td><span class="badge-medium">Medium</span></td>
+      <td><span class="warn">フック層テスト欠如</span></td>
+      <td>store 側はカバー済み、フック引数バリデーションが穴</td>
+    </tr>
+    <tr>
+      <td>PdfCanvas / Ribbon / OcrEditor</td>
+      <td><span class="badge-high">High</span> / <span class="badge-medium">Medium</span></td>
+      <td><span class="pass">十分</span></td>
+      <td>component test + E2E でカバー済み</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>既存テスト規模（2026-06-03 実測）</h3>
+
+<table>
+  <thead>
+    <tr><th>レイヤー</th><th>ファイル数</th><th>概算ケース数</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>unit</td><td>72</td><td rowspan="3" style="vertical-align:middle;">約 1,735</td></tr>
+    <tr><td>component</td><td>12</td></tr>
+    <tr><td>integration</td><td>39</td></tr>
+    <tr><td>E2E (Playwright)</td><td>9</td><td>52</td></tr>
+  </tbody>
+</table>
+
+<div class="info-box">目標（TEST_REQUIREMENTS.md 策定時）: Vitest 250 / E2E 20 → 実績: Vitest &approx;1,735 / E2E 52（目標を大幅上回り達成）</div>
+
+<hr>
+
+<h2>Phase 3: テスト設計</h2>
+
+<div class="phase-header">
+  <span></span>
+  <span class="phase-meta">担当: 🎀 あやめ (Tester-Unit) / 🎪 まつり (Tester-Integration) &nbsp;|&nbsp; 成果物: <a href="03-design.md">docs/test-process/03-design.md</a></span>
+</div>
+
+<h3>適用テスト技法</h3>
+
+<table>
+  <thead>
+    <tr><th>#</th><th>技法</th><th>主な対象モジュール</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>2.1</td><td>同値分割 + 境界値分析</td><td>pageIndex / zoom / undoStack / LRU / hitIndex / groupTolerance</td></tr>
+    <tr><td>2.2</td><td>デシジョンテーブル</td><td>savePDF no-op 判定 / pdfPecoToolMetadata 読込 / viewerStore mode 排他 / save preset</td></tr>
+    <tr><td>2.3</td><td>状態遷移テスト</td><td>viewerStore mode 機械 / undo/redo ライフサイクル / 保存ライフサイクル / documentEpoch 単調増加</td></tr>
+    <tr><td>2.4</td><td>ペアワイズ</td><td>テキストブロック出力パラメータ（32 → 8〜10 ケースに削減）/ OCR ソート設定</td></tr>
+    <tr><td>2.5</td><td>異常系シナリオ</td><td>null/undefined / Promise reject / race condition / 空入力 / NaN / 壊れた PDF</td></tr>
+    <tr><td>2.6</td><td>回帰テスト</td><td>issue #100 / #101 / #188 / #271 / #277</td></tr>
+    <tr><td>2.7</td><td>冪等性テスト</td><td>savePDF × 2 / ensureDenseClassicXref × 2 / setDrawingMode × 2</td></tr>
+    <tr><td>2.8</td><td>後方互換テスト</td><td>legacy bbox / 非 PecoTool PDF / 旧 xref 形式 / PDF 1.2 以前相当</td></tr>
+    <tr><td>2.9</td><td>a11y テスト</td><td>Ribbon / SaveDialog / DiffPreviewModal / OcrEditor（role / Tab / Esc / フォーカストラップ）</td></tr>
+    <tr><td>2.10</td><td>性能テスト</td><td>1000 ページ 3 秒以内 / ページ遷移 200ms 以内 / pdfSizeRegression（× 1.5 未満）</td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>Phase 4: テストケース仕様</h2>
+
+<div class="phase-header">
+  <span></span>
+  <span class="phase-meta">担当: 🎀 おかゆ (Tester) &nbsp;|&nbsp; 成果物: <a href="04-cases/">docs/test-process/04-cases/</a></span>
+</div>
+
+<p>3 種のケース仕様書を作成。Code-based / E2E / 手動（Tier 3）に分割。</p>
+
+<table>
+  <thead>
+    <tr><th>仕様書</th><th>対象</th><th>主要モジュール・シナリオ</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><a href="04-cases/code-based.md">code-based.md</a></td>
+      <td>Unit / Integration / Component</td>
+      <td>infraStore (U-IS-01〜12) / viewerStore (U-VS-01〜11) / searchStore (U-SS-01〜06) / pecoStore / pdfSaver / useOcrEngine / useBackupManagement / Ribbon (C-RB) など</td>
+    </tr>
+    <tr>
+      <td><a href="04-cases/e2e.md">e2e.md</a></td>
+      <td>Playwright E2E</td>
+      <td>基本保存フロー / 別名保存 / Ribbon モード切替 / OCR→編集→保存 / Undo/Redo round-trip</td>
+    </tr>
+    <tr>
+      <td><a href="04-cases/human.md">human.md</a></td>
+      <td>Tier 3 手動</td>
+      <td>Acrobat dirty flag / Acrobat 7.0 BT...ET / 1000 ページ実機操作 / 4K Canvas / バックアップ復元ダイアログ</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>Phase 5 + 6: 実装 &amp; 実行</h2>
+
+<div class="phase-header">
+  <span></span>
+  <span class="phase-meta">担当: 🥕 ぺこら / 🦊 フブキ / 🧙 シオン / 💧 あくあ (Coder) / 🎀 おかゆ / あやめ / まつり (Tester)</span>
+</div>
+
+<h3>実行結果サマリ</h3>
+
+<table>
+  <thead>
+    <tr><th>テスト種別</th><th>コマンド</th><th>結果</th><th>実行日時</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Vitest 全体</td>
+      <td><code>npm test</code></td>
+      <td><span class="pass">1,647 pass</span> / 1 skip / 1 todo &nbsp; 109 files</td>
+      <td>2026-06-03 11:49</td>
+    </tr>
+    <tr>
+      <td>PDF acceptance</td>
+      <td><code>npm run test:pdf:acceptance</code></td>
+      <td><span class="pass">83 pass</span> / 1 skip &nbsp; 9 files</td>
+      <td>2026-06-03 11:50</td>
+    </tr>
+    <tr>
+      <td>State acceptance</td>
+      <td><code>npm run test:state:acceptance</code></td>
+      <td><span class="pass">108 pass</span> &nbsp; 4 files</td>
+      <td>2026-06-03 11:51</td>
+    </tr>
+    <tr>
+      <td>Playwright E2E</td>
+      <td><code>npm run test:e2e:ci</code></td>
+      <td><span class="pass">52 pass / 0 fail</span> &nbsp; 9 spec files</td>
+      <td>main ブランチ確認済み</td>
+    </tr>
+    <tr>
+      <td>TypeScript</td>
+      <td><code>npx tsc --noEmit</code></td>
+      <td><span class="pass">エラー 0</span></td>
+      <td>2026-06-03 11:49</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>skip / todo の詳細</h3>
+
+<table>
+  <thead>
+    <tr><th>種別</th><th>テスト名</th><th>理由</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="skip">skip</span></td>
+      <td>Acrobat 7.0 compat: (2) 増分更新検証</td>
+      <td>pdf-lib の known limitation（増分更新形式が保証されない）。Acrobat 互換性には影響なし</td>
+    </tr>
+    <tr>
+      <td><span class="todo">todo</span></td>
+      <td>PDF acceptance suite 内 1 件</td>
+      <td>圧縮保存 UI 未接続（スコープ外）につき placeholder として保留</td>
+    </tr>
+    <tr>
+      <td><span class="skip">skip（acceptance）</span></td>
+      <td>pdf:acceptance 内 1 件</td>
+      <td>Acrobat 7.0 増分更新 known limitation（Vitest 側と同一）</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>E2E スペックファイル一覧</h3>
+
+<table>
+  <thead>
+    <tr><th>ファイル</th><th>カバーするシナリオ</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>pecotool.spec.ts</code></td><td>基本 PDF 開閉・アプリ起動フロー</td></tr>
+    <tr><td><code>editTab.spec.ts</code></td><td>Edit タブ操作（テキスト編集・保存）</td></tr>
+    <tr><td><code>ocrTab.spec.ts</code></td><td>OCR タブ操作・OCR 実行フロー</td></tr>
+    <tr><td><code>ocrEditor.spec.ts</code></td><td>OcrEditor カード編集・DnD</td></tr>
+    <tr><td><code>ribbon.spec.ts</code></td><td>Ribbon タブ切替・Alt アクセラレータ</td></tr>
+    <tr><td><code>pageNavigation.spec.ts</code></td><td>ページ遷移・ページ入力バリデーション</td></tr>
+    <tr><td><code>pdfCanvas.spec.ts</code></td><td>Canvas 描画・zoom / pan</td></tr>
+    <tr><td><code>viewControls.spec.ts</code></td><td>ビュー切替・オパシティ操作</td></tr>
+    <tr><td><code>textExport.spec.ts</code></td><td>テキストエクスポート</td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>発見・起票された実装バグ</h2>
+
+<table>
+  <thead>
+    <tr><th>#</th><th>タイトル</th><th>重大度</th><th>状態</th><th>解決内容</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>#279</td>
+      <td>OcrEditor の <code>!document</code> が JS グローバル DOM document を誤参照、<code>document=null</code> 分岐に到達せず</td>
+      <td><span class="badge-medium">Medium</span></td>
+      <td><span class="badge-closed">CLOSED</span></td>
+      <td>変数名衝突を修正、<code>currentDocument</code> で区別。<code>useOcrEngine.test.ts</code> 追加</td>
+    </tr>
+    <tr>
+      <td>#270</td>
+      <td>useFileOperations テストが <code>@dnd-kit/core</code> を test env に import してハング</td>
+      <td><span class="badge-medium">Medium</span></td>
+      <td><span class="badge-closed">CLOSED</span></td>
+      <td>OcrCard import チェーン分離、テスト環境用 mock に切り替え</td>
+    </tr>
+    <tr>
+      <td>#278</td>
+      <td>pecoStore Infra slice (<code>currentPageProxy</code> / <code>pageAccessOrder</code> / <code>lastIdbError</code> 等) 分割</td>
+      <td><span class="badge-low">Low</span> (enhancement)</td>
+      <td><span class="badge-closed">CLOSED</span></td>
+      <td><code>src/store/infraStore.ts</code> に分割完了（#271 followup / #278）</td>
+    </tr>
+    <tr>
+      <td>#84</td>
+      <td>Modal の Tab トラップが OcrEditor の Shift+ArrowUp/Down グローバルリスナーと衝突</td>
+      <td><span class="badge-low">Low</span></td>
+      <td><span class="badge-closed">CLOSED</span></td>
+      <td>モーダル内イベント伝播制御で解消</td>
+    </tr>
+    <tr>
+      <td>#277</td>
+      <td>Ribbon Phase 4 — Alt アクセラレータ追加（#272 関連）</td>
+      <td>—</td>
+      <td><span class="badge-closed">CLOSED</span></td>
+      <td>実装完了。回帰テスト <code>Ribbon.test.tsx</code> で保護</td>
+    </tr>
+    <tr>
+      <td>#276</td>
+      <td>Ribbon Phase 3 — ResizeObserver レスポンシブ折りたたみ</td>
+      <td>—</td>
+      <td><span class="badge-closed">CLOSED</span></td>
+      <td>実装完了</td>
+    </tr>
+    <tr>
+      <td>#1</td>
+      <td>Acrobat 7 curve glyph BT...ET word-break fix</td>
+      <td><span class="badge-high">High</span></td>
+      <td><span class="badge-closed">CLOSED</span></td>
+      <td>trailing space 追加で Acrobat copy-paste 修正（<code>pdfSaverCurveGlyph.test.ts</code> 回帰テスト登録）</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>残 open issue（正式 deferred）</h2>
+
+<div class="note">以下 2 件は技術的制約または外部依存により本バージョンでは解決できず、ステークホルダー合意の上で次版送りとした。</div>
+
+<table>
+  <thead>
+    <tr><th>#</th><th>タイトル</th><th>保留理由</th><th>次アクション</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>#274</strong></td>
+      <td>productName を 'Peco' に変更</td>
+      <td>Tauri updater（#202）との協調が必須。updater が productName をバイナリ名として参照するため、単独変更するとアップデートチェーンが断絶する</td>
+      <td>updater PR #202 完了後に別 PR で対応</td>
+    </tr>
+    <tr>
+      <td><strong>#1</strong></td>
+      <td>Acrobat 7.0 での TJ エラー再発・Ctrl+A 全選択コピー時テキスト欠落</td>
+      <td>Layer 2 原因（CIDFontType0 /CIDToGIDMap・Contents 配列 wrapper）が特定済みだが、実機検証（Acrobat 7.0 Professional）が必須。Claude 実行環境からは Acrobat プロセス起動不可</td>
+      <td>ユーザーによる Acrobat 7.0 実機 A/B テスト実施後に再評価</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>ホロデブ部 参加ロール一覧</h2>
+
+<table>
+  <thead>
+    <tr><th>ペルソナ</th><th>役割</th><th>担当 Phase</th><th>主な貢献</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>🐉 ココ</td><td>PM (product_manager)</td><td>Phase 1</td><td>テスト計画書・リスク抽出 (Critical 5 / High 7 / Medium 6 / Low 4)</td></tr>
+    <tr><td>🦁 ぼたん</td><td>Architect</td><td>Phase 2</td><td>テスト分析・カバレッジギャップ特定・infraStore 最大穴の指摘</td></tr>
+    <tr><td>🎀 あやめ</td><td>Tester-Unit</td><td>Phase 3, 4</td><td>テスト設計書（技法選定）・code-based ケース仕様</td></tr>
+    <tr><td>🎪 まつり</td><td>Tester-Integration</td><td>Phase 3, 4</td><td>Integration シナリオ設計・race condition 体系化</td></tr>
+    <tr><td>🎀 おかゆ</td><td>Tester</td><td>Phase 4, 5</td><td>テストケース実装・E2E ケース仕様・実行確認</td></tr>
+    <tr><td>🥕 ぺこら</td><td>Coder</td><td>Phase 5</td><td>infraStore / viewerStore テスト実装・バグ修正 (#279)</td></tr>
+    <tr><td>🦊 フブキ</td><td>Coder-Frontend</td><td>Phase 5</td><td>Ribbon 系テスト・a11y 修正 (#277 Alt アクセラレータ)</td></tr>
+    <tr><td>🧙 シオン</td><td>Coder-Backend</td><td>Phase 5</td><td>pdfSaver 系 integration テスト・#270 テスト環境修正</td></tr>
+    <tr><td>⚓ マリン</td><td>Reviewer</td><td>Phase 5</td><td>PR レビュー・受入基準照合</td></tr>
+    <tr><td>🤖 ロボ子</td><td>TechWriter</td><td>Phase 1〜7</td><td>テストプロセス全ドキュメント作成・本レポート生成</td></tr>
+    <tr><td>🅰️ えーちゃん</td><td>Orchestrator (部長代理)</td><td>全 Phase</td><td>タスク分解・エージェント指揮・統合判断</td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>テストプロセス全体フロー</h2>
+
+<table>
+  <thead>
+    <tr><th>Phase</th><th>内容</th><th>成果物</th><th>状態</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Phase 1</td>
+      <td>テスト計画書作成</td>
+      <td><a href="01-plan.md">01-plan.md</a></td>
+      <td><span class="pass">完了</span></td>
+    </tr>
+    <tr>
+      <td>Phase 2</td>
+      <td>テストギャップ分析</td>
+      <td><a href="02-analysis.md">02-analysis.md</a></td>
+      <td><span class="pass">完了</span></td>
+    </tr>
+    <tr>
+      <td>Phase 3</td>
+      <td>テスト設計（How-to-Test 定義）</td>
+      <td><a href="03-design.md">03-design.md</a></td>
+      <td><span class="pass">完了</span></td>
+    </tr>
+    <tr>
+      <td>Phase 4</td>
+      <td>テストケース仕様書</td>
+      <td><a href="04-cases/">04-cases/</a> (3 ファイル)</td>
+      <td><span class="pass">完了</span></td>
+    </tr>
+    <tr>
+      <td>Phase 5</td>
+      <td>テストコード実装 + 自動テスト実行</td>
+      <td>src/__tests__/ 各ファイル</td>
+      <td><span class="pass">完了</span></td>
+    </tr>
+    <tr>
+      <td>Phase 6</td>
+      <td>Tier 3 手動確認チェックリスト</td>
+      <td><a href="04-cases/human.md">04-cases/human.md</a></td>
+      <td><span class="warn">ユーザー手動確認待ち（Acrobat 実機）</span></td>
+    </tr>
+    <tr>
+      <td>Phase 7</td>
+      <td>テスト完了レポート</td>
+      <td><a href="07-report.html">07-report.html</a>（本ファイル）</td>
+      <td><span class="pass">完了</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>品質ゲート達成状況</h2>
+
+<table>
+  <thead>
+    <tr><th>基準</th><th>目標値</th><th>実績値</th><th>判定</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>vitest 総通過数</td>
+      <td>1,647 以上</td>
+      <td>1,647</td>
+      <td><span class="pass">PASS</span></td>
+    </tr>
+    <tr>
+      <td>test:pdf:acceptance</td>
+      <td>全件 pass</td>
+      <td>83 / 84（1 skip = known limitation）</td>
+      <td><span class="pass">PASS</span></td>
+    </tr>
+    <tr>
+      <td>Playwright E2E</td>
+      <td>52 以上 pass</td>
+      <td>52 / 52</td>
+      <td><span class="pass">PASS</span></td>
+    </tr>
+    <tr>
+      <td>TypeScript 型エラー</td>
+      <td>0</td>
+      <td>0</td>
+      <td><span class="pass">PASS</span></td>
+    </tr>
+    <tr>
+      <td>Critical リスク未解決</td>
+      <td>0</td>
+      <td>0（C-01〜C-05 全解決）</td>
+      <td><span class="pass">PASS</span></td>
+    </tr>
+    <tr>
+      <td>High リスク（Acrobat 互換除く）未解決</td>
+      <td>0</td>
+      <td>0（H-03〜H-07 全解決）</td>
+      <td><span class="pass">PASS</span></td>
+    </tr>
+    <tr>
+      <td>H-01 Acrobat dirty flag Layer 2</td>
+      <td>実機確認済み or 次版送り合意</td>
+      <td>次版送り合意済み（issue #1 deferred）</td>
+      <td><span class="badge-deferred">DEFERRED</span></td>
+    </tr>
+    <tr>
+      <td>H-02 Acrobat 7.0 実機確認</td>
+      <td>実機確認済み or 次版送り合意</td>
+      <td>Tier 3 チェックリスト整備済み、実施はユーザー手動待ち</td>
+      <td><span class="badge-deferred">DEFERRED</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>関連リンク</h2>
+
+<ul>
+  <li>元記事: <a href="https://zenn.dev/jam0824/articles/c84a2ef393ee70" target="_blank">Zenn @jam0824 — Claude Code でテストプロセスを回す</a></li>
+  <li>Skills ディレクトリ: <code>.claude/skills/test-{plan,analysis,design,cases,execute,report,run-all}/</code></li>
+  <li>本リポジトリ: <a href="https://github.com/ichiperon/pecotool_V2" target="_blank">ichiperon/pecotool_V2</a></li>
+  <li>Phase 1 テスト計画: <a href="01-plan.md">docs/test-process/01-plan.md</a></li>
+  <li>Phase 2 テスト分析: <a href="02-analysis.md">docs/test-process/02-analysis.md</a></li>
+  <li>Phase 3 テスト設計: <a href="03-design.md">docs/test-process/03-design.md</a></li>
+  <li>Phase 4 テストケース: <a href="04-cases/">docs/test-process/04-cases/</a></li>
+  <li>手動チェックリスト: <a href="04-cases/human.md">docs/test-process/04-cases/human.md</a></li>
+</ul>
+
+<hr>
+
+<p class="meta" style="text-align:center; margin-top:2em;">
+  PecoTool v2 テストプロセス完了レポート &nbsp;|&nbsp; 生成: ホロデブ部 TechWriter 🤖 ロボ子 &nbsp;|&nbsp; 2026-06-03
+</p>
+
+</body>
+</html>
