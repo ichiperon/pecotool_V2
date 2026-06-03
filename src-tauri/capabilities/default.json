@@ -28,6 +28,18 @@
       ]
     },
     {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$APPDATA/pecotool/**" },
+        { "path": "$APPCONFIG/pecotool/**" },
+        { "path": "$APPLOCALDATA/pecotool/**" },
+        { "path": "$TEMP/**" }
+      ]
+    },
+    {
       "identifier": "fs:allow-read-file",
       "allow": [
         { "path": "$DESKTOP/**" },
