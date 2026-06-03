@@ -1,7 +1,8 @@
 import React from 'react';
-import { ZoomIn, ZoomOut, Maximize, Eye, ClipboardList } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize, Eye, ClipboardList, AlertCircle } from 'lucide-react';
 import { RibbonGroup } from '../RibbonGroup';
 import { RibbonButton } from '../RibbonButton';
+import { useOcrSettingsStore } from '../../../store/ocrSettingsStore';
 
 interface ViewTabProps {
   isFileLoaded: boolean;
@@ -23,6 +24,9 @@ interface ViewTabProps {
 }
 
 export const ViewTab: React.FC<ViewTabProps> = (props) => {
+  const showLowConfidenceHighlight = useOcrSettingsStore(s => s.showLowConfidenceHighlight);
+  const setShowLowConfidenceHighlight = useOcrSettingsStore(s => s.setShowLowConfidenceHighlight);
+
   return (
     <>
       <RibbonGroup title="ズーム">
@@ -57,6 +61,17 @@ export const ViewTab: React.FC<ViewTabProps> = (props) => {
           title="プレビュー"
         >
           <ClipboardList size={14} /><span>テキスト確認</span>
+        </RibbonButton>
+      </RibbonGroup>
+
+      <RibbonGroup title="信頼度">
+        <RibbonButton
+          onClick={() => setShowLowConfidenceHighlight(!showLowConfidenceHighlight)}
+          className={showLowConfidenceHighlight ? 'active' : ''}
+          title="低信頼ハイライト"
+          aria-pressed={showLowConfidenceHighlight ? 'true' : 'false'}
+        >
+          <AlertCircle size={14} /><span>低信頼ハイライト</span>
         </RibbonButton>
       </RibbonGroup>
 

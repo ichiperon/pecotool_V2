@@ -2,6 +2,7 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest'
 import { Ribbon } from '../../components/Ribbon/Ribbon'
 import type { PageData } from '../../types'
+import { useOcrSettingsStore } from '../../store/ocrSettingsStore'
 
 // jsdom does not implement ResizeObserver; provide a no-op stub
 beforeAll(() => {
@@ -41,6 +42,7 @@ vi.mock('lucide-react', () => {
     Replace: s('Replace'),
     Spline: s('Spline'),
     Crop: s('Crop'),
+    AlertCircle: s('AlertCircle'),
   }
 })
 
@@ -338,5 +340,27 @@ describe('Ribbon', () => {
     fireEvent.keyDown(window, { key: 'e', altKey: false })
     const fileTab = screen.getByText('ファイル').closest('button')!
     expect(fileTab.classList.contains('ribbon-tab--active')).toBe(true)
+  })
+
+  // ── 表示タブ: 低信頼ハイライトトグル (#192 followup) ─────────
+  it('C-RB-30: 表示タブ: 低信頼ハイライトボタンをクリックすると store state が反転する', () => {
+    // store を初期状態 (showLowConfidenceHighlight=true) にリセット
+    useOcrSettingsStore.setState({ showLowConfidenceHighlight: true })
+
+    renderRibbon()
+    fireEvent.click(screen.getByText('表示'))
+
+    const btn = screen.getByTitle('低信頼ハイライト') as HTMLButtonElement
+    // 初期状態 ON → active クラスと aria-pressed=true
+    expect(btn.getAttribute('aria-pressed')).toBe('true')
+    expect(btn.classList.contains('active')).toBe(true)
+
+    // クリックで OFF に反転
+    fireEvent.click(btn)
+    expect(useOcrSettingsStore.getState().showLowConfidenceHighlight).toBe(false)
+
+    // 再クリックで ON に戻る
+    fireEvent.click(btn)
+    expect(useOcrSettingsStore.getState().showLowConfidenceHighlight).toBe(true)
   })
 })
