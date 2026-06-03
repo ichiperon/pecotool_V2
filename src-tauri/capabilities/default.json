@@ -58,6 +58,13 @@
         { "path": "$APPDATA/pecotool/**" },
         { "path": "$APPLOCALDATA/pecotool/**" }
       ]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [
+        { "path": "$APPDATA/pecotool/**" },
+        { "path": "$APPLOCALDATA/pecotool/**" }
+      ]
     }
   ]
 }

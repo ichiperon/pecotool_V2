@@ -22,7 +22,13 @@
       "Bash(xargs cat:*)",
       "Bash(xargs grep:*)",
       "Read(//c/Users/user/.claude/**)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "PowerShell(Get-Process node -ErrorAction SilentlyContinue)",
+      "PowerShell(Stop-Process -Force -Confirm:$false)",
+      "Bash(mkdir -p \"C:\\\\Users\\\\user\\\\Desktop\\\\workspace20\\\\pecotool_v2\\\\.claude\\\\skills\\\\test-design\")"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\user\\Desktop\\workspace20\\pecotool_v2\\.claude\\skills"
     ]
   }
 }

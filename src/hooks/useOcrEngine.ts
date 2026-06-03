@@ -94,7 +94,14 @@ async function renderPageToTempFile(
 
     const baseDir = await appLocalDataDir();
     const tmpDirPath = await join(baseDir, 'pecotool', 'temp');
-    try { await mkdir(tmpDirPath, { recursive: true }); } catch { /* already exists */ }
+    try { await mkdir(tmpDirPath, { recursive: true }); } catch (e) {
+      const msg = String(e);
+      // "already exists" は無視、それ以外 (permission / scope error 等) は visible に。
+      if (!msg.toLowerCase().includes('exist')) {
+        console.error('[OCR] temp dir mkdir failed:', e);
+        throw e;
+      }
+    }
     const fileName = `peco_ocr_${pageIndex}_${Date.now()}.png`;
     const tempPath = await join(tmpDirPath, fileName);
     await writeFile(tempPath, bytes);
@@ -810,7 +817,14 @@ export function useOcrEngine(
 
       const baseDir = await appLocalDataDir();
       const tmpDirPath = await join(baseDir, 'pecotool', 'temp');
-      try { await mkdir(tmpDirPath, { recursive: true }); } catch { /* already exists */ }
+      try { await mkdir(tmpDirPath, { recursive: true }); } catch (e) {
+      const msg = String(e);
+      // "already exists" は無視、それ以外 (permission / scope error 等) は visible に。
+      if (!msg.toLowerCase().includes('exist')) {
+        console.error('[OCR] temp dir mkdir failed:', e);
+        throw e;
+      }
+    }
       const fileName = `peco_region_ocr_${pageIndex}_${Date.now()}.png`;
       tempPath = await join(tmpDirPath, fileName);
       await writeFile(tempPath, bytes);
