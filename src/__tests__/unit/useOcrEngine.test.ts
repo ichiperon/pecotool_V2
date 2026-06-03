@@ -12,10 +12,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // ─── detectTextLayerSamples 用モック ──────────────────────────
 // Tauri / pdfLoader / pdfTextExtractor への依存をスタブする
 vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(), open: vi.fn() }));
-vi.mock('@tauri-apps/plugin-fs', () => ({ writeFile: vi.fn(), remove: vi.fn() }));
+vi.mock('@tauri-apps/plugin-fs', () => ({ writeFile: vi.fn(), mkdir: vi.fn(), remove: vi.fn() }));
 vi.mock('@tauri-apps/api/path', () => ({
-  tempDir: vi.fn(async () => '/tmp'),
-  join: vi.fn(async (a: string, b: string) => `${a}/${b}`),
+  appLocalDataDir: vi.fn(async () => '/appLocalData'),
+  join: vi.fn(async (...parts: string[]) => parts.join('/')),
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('../../utils/pdfLoader', () => ({

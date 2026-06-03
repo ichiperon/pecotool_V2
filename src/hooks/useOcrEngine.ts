@@ -2,8 +2,8 @@ import { useRef, useState } from 'react';
 import type * as pdfjsLib from 'pdfjs-dist';
 import { invoke } from '@tauri-apps/api/core';
 import { ask, open } from '@tauri-apps/plugin-dialog';
-import { writeFile, remove } from '@tauri-apps/plugin-fs';
-import { tempDir, join } from '@tauri-apps/api/path';
+import { writeFile, mkdir, remove } from '@tauri-apps/plugin-fs';
+import { appLocalDataDir, join } from '@tauri-apps/api/path';
 import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { useInfraStore } from '../store/infraStore';
 import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
@@ -92,9 +92,11 @@ async function renderPageToTempFile(
     const arrayBuffer = await blob.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
 
-    const tmp = await tempDir();
+    const baseDir = await appLocalDataDir();
+    const tmpDirPath = await join(baseDir, 'pecotool', 'temp');
+    try { await mkdir(tmpDirPath, { recursive: true }); } catch { /* already exists */ }
     const fileName = `peco_ocr_${pageIndex}_${Date.now()}.png`;
-    const tempPath = await join(tmp, fileName);
+    const tempPath = await join(tmpDirPath, fileName);
     await writeFile(tempPath, bytes);
     return { tempPath };
   } finally {
@@ -806,9 +808,11 @@ export function useOcrEngine(
       cropCanvas.width = 0;
       cropCanvas.height = 0;
 
-      const tmp = await tempDir();
+      const baseDir = await appLocalDataDir();
+      const tmpDirPath = await join(baseDir, 'pecotool', 'temp');
+      try { await mkdir(tmpDirPath, { recursive: true }); } catch { /* already exists */ }
       const fileName = `peco_region_ocr_${pageIndex}_${Date.now()}.png`;
-      tempPath = await join(tmp, fileName);
+      tempPath = await join(tmpDirPath, fileName);
       await writeFile(tempPath, bytes);
 
       const scale = zoom / 100;
