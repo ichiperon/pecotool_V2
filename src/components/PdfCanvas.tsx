@@ -25,7 +25,7 @@ import { useBlockDragResize } from "../hooks/useBlockDragResize";
 import { useCurveEditor } from "../hooks/useCurveEditor";
 import { isCurveDefinition } from "../utils/curveDefinition";
 import { arcHandlePositions } from "../utils/arcFromThreePoints";
-import { renderStaticLayer } from "../utils/pdfCanvasRender";
+import { renderStaticLayer, drawStaticBlockCurve } from "../utils/pdfCanvasRender";
 import type { TextBlock, BoundingBox } from "../types";
 
 // #236: resize/curve handle sizes
@@ -99,7 +99,6 @@ export function PdfCanvas({
   const searchHitIndex = useSearchStore(selectSearchHitIndex);
   const updatePageData = usePecoStore((s) => s.updatePageData);
   const toggleDrawingMode = useViewerStore((s) => s.toggleDrawingMode);
-  const toggleSplitMode = useViewerStore((s) => s.toggleSplitMode);
   const toggleSelection = usePecoStore((s) => s.toggleSelection);
   const setSelectedIds = usePecoStore((s) => s.setSelectedIds);
   const clearSelection = usePecoStore((s) => s.clearSelection);
@@ -152,7 +151,6 @@ export function PdfCanvas({
     updatePageData,
     setSelectedIds,
     toggleDrawingMode,
-    toggleSplitMode,
   });
 
   const drag = useBlockDragResize({
@@ -356,7 +354,24 @@ export function PdfCanvas({
           });
 
           if (block.text) {
-            if (block.writingMode === "vertical") {
+            if (block.curve && isCurveDefinition(block.curve)) {
+              // issue #290: curve 付き block は per-glyph の curve 描画パスへ
+              drawStaticBlockCurve(
+                context,
+                block,
+                scale,
+                Math.min(1.0, ocrOpacity * 2),
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                {
+                  fillColor: `rgba(0, 100, 255, ${fillAlpha})`,
+                  strokeColor: `rgba(255, 255, 255, ${baseAlpha})`,
+                  textColor: `rgba(0, 50, 255, ${baseAlpha})`,
+                },
+              );
+            } else if (block.writingMode === "vertical") {
               const fontSize = Math.max(10, w * 0.8);
               context.save();
               context.font = `bold ${fontSize}px sans-serif`;
@@ -856,6 +871,12 @@ export function PdfCanvas({
               : "default",
         }}
       />
+      {/* issue #290: curve mode ガイダンスヒント */}
+      {isCurveMode && selectedIds.size === 1 && (
+        <div className="curve-mode-guidance" role="status" aria-live="polite">
+          BB を 1 つ選択 → 3 点クリックで弧 / ダブルクリック開始で折れ線
+        </div>
+      )}
       {loadError && !pdfPage && (
         <div
           className="pdf-load-error-overlay"

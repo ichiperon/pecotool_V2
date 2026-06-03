@@ -2,16 +2,27 @@
  * PdfCanvas overlay 描画ユーティリティ (issue #218)
  *
  * Public exports:
- *   - `drawStaticBlock`   — axis-aligned または curve 付きブロックを 1 件描画
- *   - `renderStaticLayer` — TextBlock[] 全体をキャンバスに一括描画
- *
- * Internal helper (not exported):
- *   - `drawStaticBlockCurve` — curve 付きブロック専用の per-glyph 描画。
- *     `drawStaticBlock` から内部的に呼び出されるのみ。
+ *   - `drawStaticBlock`      — axis-aligned または curve 付きブロックを 1 件描画
+ *   - `drawStaticBlockCurve` — curve 付きブロック専用の per-glyph 描画 (色セット引数付き)
+ *   - `renderStaticLayer`    — TextBlock[] 全体をキャンバスに一括描画
  */
 import { isCurveDefinition } from "./curveDefinition";
 import { layoutTextOnCurveViewport } from "./curveGlyphLayout";
 import type { TextBlock } from "../types";
+
+/**
+ * curve 付きブロックを描画する際の色セット (実際の rgba 文字列を格納)。
+ * 静的層は青系塗り/赤テキスト、動的層は選択ハイライト青系で使い分ける。
+ * alpha は呼び出し元で計算済みの rgba(...) 文字列として渡す。
+ */
+export interface BlockColors {
+  /** glyph 背景の塗り色 */
+  fillColor: string;
+  /** glyph テキストのアウトライン色 */
+  strokeColor: string;
+  /** glyph テキスト本体の色 */
+  textColor: string;
+}
 
 export function drawStaticBlock(
   context: CanvasRenderingContext2D,
@@ -108,11 +119,14 @@ export function drawStaticBlock(
 }
 
 /**
- * curve 付き TextBlock の static overlay 描画 (issue #188 / Phase 4)。
+ * curve 付き TextBlock の overlay 描画 (issue #188 / Phase 4, #290)。
  * 各文字を viewport 座標系上のカーブに沿って配置し、
- * 文字幅×文字高の矩形を青塗り + 赤テキストで描く (inset=1)。
+ * 文字幅×文字高の矩形をカラーセットで描く (inset=1)。
+ *
+ * @param colors - 省略時は静的層デフォルト色 (青塗り/赤テキスト) を使用。
+ *                 動的層 (選択ハイライト) は呼び出し元で構築した色を渡す。
  */
-function drawStaticBlockCurve(
+export function drawStaticBlockCurve(
   context: CanvasRenderingContext2D,
   block: TextBlock,
   scale: number,
@@ -121,6 +135,7 @@ function drawStaticBlockCurve(
   isActiveHit?: boolean,
   confidenceThreshold?: number,
   showLowConfidenceHighlight?: boolean,
+  colors?: BlockColors,
 ): void {
   const h = block.bbox.height * scale;
   const fontSize = Math.max(10, h * 0.8);
@@ -128,15 +143,28 @@ function drawStaticBlockCurve(
   const baseAlpha = opacity;
   const fillAlpha = opacity * 0.25;
 
-  // #192: 低信頼ブロックは赤系塗り、通常は青系
-  const isLowConfidence =
-    showLowConfidenceHighlight === true &&
-    block.confidence !== undefined &&
-    confidenceThreshold !== undefined &&
-    block.confidence <= confidenceThreshold;
-  const fillColor = isLowConfidence
-    ? `rgba(220, 38, 38, ${fillAlpha})`
-    : `rgba(0, 150, 255, ${fillAlpha})`;
+  let fillColor: string;
+  let glyphStrokeColor: string;
+  let glyphTextColor: string;
+
+  if (colors) {
+    // 呼び出し元から明示的な色セットが渡された場合 (動的層など)
+    fillColor = colors.fillColor;
+    glyphStrokeColor = colors.strokeColor;
+    glyphTextColor = colors.textColor;
+  } else {
+    // #192: 低信頼ブロックは赤系塗り、通常は青系 (静的層デフォルト)
+    const isLowConfidence =
+      showLowConfidenceHighlight === true &&
+      block.confidence !== undefined &&
+      confidenceThreshold !== undefined &&
+      block.confidence <= confidenceThreshold;
+    fillColor = isLowConfidence
+      ? `rgba(220, 38, 38, ${fillAlpha})`
+      : `rgba(0, 150, 255, ${fillAlpha})`;
+    glyphStrokeColor = `rgba(255, 255, 255, ${baseAlpha})`;
+    glyphTextColor = `rgba(255, 0, 0, ${baseAlpha})`;
+  }
 
   context.font = `bold ${fontSize}px sans-serif`;
   context.textBaseline = "top";
@@ -163,15 +191,13 @@ function drawStaticBlockCurve(
     // setTransform(a, b, c, d, e, f) = 2D affine: translate(gx,gy) * rotate(rotation)
     context.setTransform(cos, sin, -sin, cos, gx, gy);
 
-    // 文字背景: 低信頼は赤系、通常は青系
     context.fillStyle = fillColor;
     context.fillRect(-gw / 2 + inset, -inset, gw - inset * 2, gh - inset * 2);
 
-    // 文字本体: 赤テキスト
     if (block.text) {
-      context.strokeStyle = `rgba(255, 255, 255, ${baseAlpha})`;
+      context.strokeStyle = glyphStrokeColor;
       context.strokeText(g.char, -gw / 2, -gh * 0.1);
-      context.fillStyle = `rgba(255, 0, 0, ${baseAlpha})`;
+      context.fillStyle = glyphTextColor;
       context.fillText(g.char, -gw / 2, -gh * 0.1);
     }
   }

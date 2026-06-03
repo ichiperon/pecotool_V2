@@ -25,7 +25,7 @@ import { describe, it, expect, vi } from 'vitest'
 vi.mock('pdfjs-dist', () => ({ default: {} }))
 vi.mock('../../utils/pdfLoader', () => ({ getCachedPageProxy: vi.fn() }))
 
-import { drawStaticBlock, renderStaticLayer } from '../../utils/pdfCanvasRender'
+import { drawStaticBlock, drawStaticBlockCurve, renderStaticLayer } from '../../utils/pdfCanvasRender'
 import type { TextBlock, CurveDefinition } from '../../types'
 
 function makeMockContext() {
@@ -572,5 +572,105 @@ describe('PdfCanvas static layer – confidence args passthrough regression (#24
     )
 
     expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+  })
+})
+
+// ── issue #290: 動的層で curve 付き block が drawStaticBlockCurve を通ること ──
+describe('PdfCanvas overlay – curve block in dynamic layer (#290)', () => {
+  const arcCurve: CurveDefinition = {
+    type: 'arc',
+    center: { x: 150, y: 150 },
+    radius: 80,
+    startAngle: Math.PI,
+    endAngle: 2 * Math.PI,
+  }
+
+  function makeCurveBlock(text: string): TextBlock {
+    return {
+      id: 'c0',
+      text,
+      originalText: '',
+      bbox: { x: 50, y: 50, width: 200, height: 40 },
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: false,
+      curve: arcCurve,
+    }
+  }
+
+  it('curve 付き block を drawStaticBlockCurve に colors 引数付きで呼ぶと per-glyph fillRect が走る', () => {
+    const ctx = makeMockContext()
+    const text = 'ABC'
+    const colors = {
+      fillColor: 'rgba(0, 100, 255, 0.3)',
+      strokeColor: 'rgba(255, 255, 255, 1)',
+      textColor: 'rgba(0, 50, 255, 1)',
+    }
+
+    drawStaticBlockCurve(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock(text),
+      1,
+      1,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      colors,
+    )
+
+    // per-glyph fillRect が文字数分 (setTransform で各文字の変換後に描画)
+    expect(ctx.fillRect).toHaveBeenCalledTimes(text.length)
+    // drawImage は一切呼ばれない
+    expect(ctx.drawImage).not.toHaveBeenCalled()
+  })
+
+  it('colors 引数で渡した fillColor が glyph 背景色 (fillRect 直前) として使われる', () => {
+    const fillColor = 'rgba(0, 100, 255, 0.25)'
+    const capturedFillStyles: string[] = []
+
+    // fillRect 呼び出し時点の fillStyle をキャプチャ
+    const ctx = {
+      ...makeMockContext(),
+      fillStyle: '',
+      fillRect: vi.fn(function (this: { fillStyle: string }) {
+        capturedFillStyles.push(this.fillStyle)
+      }),
+    }
+
+    drawStaticBlockCurve(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock('X'),
+      1,
+      1,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { fillColor, strokeColor: 'rgba(255,255,255,1)', textColor: 'rgba(0,50,255,1)' },
+    )
+
+    // fillRect 直前に fillColor が設定されている
+    expect(capturedFillStyles[0]).toBe(fillColor)
+  })
+
+  it('Ctrl+A 全選択相当: curve block が selectedIds に入ると静的層でスキップされ renderStaticLayer は fillRect を呼ばない', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeCurveBlock('HI')
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(['c0']), // selectedIds に含める (動的層に移行)
+      true,
+      100,
+      0.5,
+    )
+
+    // 静的層では selectedIds に含まれるブロックはスキップ
+    expect(ctx.fillRect).not.toHaveBeenCalled()
   })
 })
