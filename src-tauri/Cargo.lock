@@ -4097,7 +4097,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "2.0.10"
+version = "2.0.12"
 dependencies = [
  "lopdf",
  "serde",
