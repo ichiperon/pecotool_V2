@@ -307,10 +307,10 @@ describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getC
     const sharedPage = makeFakePage('shared:A:0')
 
     // store に事前 publish しておく
-    usePecoStore.setState({
+    useInfraStore.setState({
       currentPageProxy: sharedPage as any,
       currentPageProxyKey: 'file-A.pdf:0',
-    } as any)
+    })
 
     const { result } = renderHook(
       (props: HookProps) =>
@@ -337,11 +337,11 @@ describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getC
     const stalePage = makeFakePage('stale:A:0')
     const refreshedPage = makeFakePage('fresh:A:0')
 
-    usePecoStore.setState({
+    useInfraStore.setState({
       currentPageProxy: stalePage as any,
       currentPageProxyKey: 'file-A.pdf:0',
       documentEpoch: 1,
-    } as any)
+    })
     getCachedPageProxyMock.mockResolvedValue(refreshedPage)
 
     const { result, rerender } = renderHook(
@@ -546,9 +546,13 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
     // bitmap cache が hit する状況を作る: getBitmapCache を真に返すよう mock 上書き
     const cacheModule = await import('../../utils/bitmapCache')
     const bitmap = { close: vi.fn() } as unknown as ImageBitmap
-    // viewport(scale=1) は 200x100 になる
+    // renderCacheKey は filePath:pageIndex:documentEpoch:zoom:dpr の形式。
+    // jsdom では window.devicePixelRatio が undefined になるため 1 に固定して dpr=100 にする。
+    const origDpr = window.devicePixelRatio
+    Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true, writable: true })
+    // viewport(scale=1) は 200x100 になる; key の dpr 部分は Math.round(1*100)=100
     vi.mocked(cacheModule.getBitmapCache).mockImplementation((key) => {
-      if (key === 'file-A.pdf:0:0:100') {
+      if (key === 'file-A.pdf:0:0:100:100') {
         return { bitmap, zoom: 100, width: 200, height: 100 } as any
       }
       return undefined
@@ -583,6 +587,7 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
 
     // 後続テストのために mock を戻す (next describe テストが期待する null 返却に)
     vi.mocked(cacheModule.getBitmapCache).mockReturnValue(undefined as any)
+    Object.defineProperty(window, 'devicePixelRatio', { value: origDpr, configurable: true, writable: true })
   })
 
   it('documentEpoch 変更前に開始した render 結果を新 epoch の cache key に保存しない', async () => {

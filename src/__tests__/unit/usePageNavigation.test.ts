@@ -35,6 +35,7 @@ vi.mock('../../utils/pdfLoader', () => ({
 
 import { usePageNavigation } from '../../hooks/usePageNavigation'
 import { usePecoStore } from '../../store/pecoStore'
+import { useInfraStore } from '../../store/infraStore'
 import type { PecoDocument, PageData } from '../../types'
 
 function makePage(pageIndex: number, isDirty = false, width = 100): PageData {
@@ -64,13 +65,13 @@ beforeEach(() => {
   // store をクリーンに
   usePecoStore.setState({
     document: null,
-    documentEpoch: 0,
     selectedIds: new Set<string>(),
     undoStack: [],
     redoStack: [],
     isDirty: false,
     currentPageIndex: 0,
-  } as any)
+  })
+  useInfraStore.setState({ documentEpoch: 0 })
 })
 
 afterEach(() => {
@@ -601,9 +602,9 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
     }
     usePecoStore.setState({
       document: docA,
-      documentEpoch: 1,
       currentPageIndex: 0,
-    } as any)
+    })
+    useInfraStore.setState({ documentEpoch: 1 })
 
     const showToast = vi.fn()
     const triggerThumbnailLoad = vi.fn()
@@ -642,9 +643,9 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
     }
     usePecoStore.setState({
       document: docB,
-      documentEpoch: 2,
       currentPageIndex: 0,
-    } as any)
+    })
+    useInfraStore.setState({ documentEpoch: 2 })
 
     await waitFor(() => {
       expect(loadPageMock).toHaveBeenCalledWith(
@@ -690,9 +691,9 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
         pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
         mtime: 100,
       },
-      documentEpoch: 1,
       currentPageIndex: 0,
-    } as any)
+    })
+    useInfraStore.setState({ documentEpoch: 1 })
 
     const showToast = vi.fn()
     const triggerThumbnailLoad = vi.fn()
@@ -719,9 +720,9 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
           pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
           mtime: 200,
         },
-        documentEpoch: 2,
         currentPageIndex: 0,
-      } as any)
+      })
+      useInfraStore.setState({ documentEpoch: 2 })
     })
 
     resolveMetaA(metaA)
