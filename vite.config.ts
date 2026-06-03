@@ -48,6 +48,19 @@ export default defineConfig(async () => ({
     },
   },
 
+  // Resolve alias for modules unavailable in plain browser context (dev server / E2E).
+  // @tauri-apps/plugin-updater is only available inside a real Tauri runtime.
+  // Without this alias the vite import-analysis plugin throws an error that prevents
+  // the dev server from serving the app — which breaks all Playwright E2E tests.
+  resolve: {
+    alias: {
+      '@tauri-apps/plugin-updater': new URL(
+        './src/__tests__/__stubs__/tauri-plugin-updater.e2e.ts',
+        import.meta.url,
+      ).pathname,
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
