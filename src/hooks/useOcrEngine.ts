@@ -2,8 +2,6 @@ import { useRef, useState } from 'react';
 import type * as pdfjsLib from 'pdfjs-dist';
 import { invoke } from '@tauri-apps/api/core';
 import { ask, open } from '@tauri-apps/plugin-dialog';
-import { writeFile, mkdir, remove } from '@tauri-apps/plugin-fs';
-import { appLocalDataDir, join } from '@tauri-apps/api/path';
 import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { useInfraStore } from '../store/infraStore';
 import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
@@ -63,19 +61,16 @@ export async function detectTextLayerSamples(
  * Render a page from an isolated PDF document (not the shared LRU cache)
  * so it never conflicts with PdfCanvas's concurrent render on the same proxy.
  *
- * 戻り値: テンポラリ画像パス。
+ * 戻り値: PNG bytes (Uint8Array)。
+ * Rust 側の run_ocr に直接渡すため、Tauri fs-scope を経由しない (#285 D案)。
  *
- * #71 修正: 以前は scale=1.0 viewport を返し、OCR の bbox を
- *   convertViewportBBoxToPdfUserSpace で PDF user space に変換していた。
- *   しかし pdfSaver 側は bbox を viewport-y (top-down) と仮定して描画していたため、
- *   R=0 では偶然キャンセルされ、R=90/180/270 では位置がページ外へ飛んでいた。
- *   修正後: OCR の bbox は viewport 空間のまま store に入れ、pdfSaver が
+ * #71 修正: bbox は viewport 空間のまま store に入れ、pdfSaver が
  *   page.getRotation() を読んで cm で位置補正する設計に統一した。
  */
-async function renderPageToTempFile(
+async function renderPageToBytes(
   ocrPdf: pdfjsLib.PDFDocumentProxy,
   pageIndex: number,
-): Promise<{ tempPath: string }> {
+): Promise<Uint8Array> {
   const page = await ocrPdf.getPage(pageIndex + 1);
   const canvas = document.createElement('canvas');
   try {
@@ -90,22 +85,7 @@ async function renderPageToTempFile(
 
     const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
     const arrayBuffer = await blob.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-
-    const baseDir = await appLocalDataDir();
-    const tmpDirPath = await join(baseDir, 'pecotool', 'temp');
-    try { await mkdir(tmpDirPath, { recursive: true }); } catch (e) {
-      const msg = String(e);
-      // "already exists" は無視、それ以外 (permission / scope error 等) は visible に。
-      if (!msg.toLowerCase().includes('exist')) {
-        console.error('[OCR] temp dir mkdir failed:', e);
-        throw e;
-      }
-    }
-    const fileName = `peco_ocr_${pageIndex}_${Date.now()}.png`;
-    const tempPath = await join(tmpDirPath, fileName);
-    await writeFile(tempPath, bytes);
-    return { tempPath };
+    return new Uint8Array(arrayBuffer);
   } finally {
     canvas.width = 0;
     canvas.height = 0;
@@ -145,33 +125,25 @@ async function runOcrForPage(
   pageHeight: number,
   languageTag?: string,
 ): Promise<{ result: OcrResult }> {
-  let tempPath: string | null = null;
+  // #285 D案: bytes を直接 Rust に渡す。Tauri fs-scope を経由しないため
+  // Windows UNC verbatim prefix (\\?\) によるスコープ不一致が発生しない。
+  const bytes = await renderPageToBytes(ocrPdf, pageIndex);
+  const raw = await invoke<string>('run_ocr', {
+    imageBytes: Array.from(bytes),
+    pageWidth,
+    pageHeight,
+    renderScale: RENDER_SCALE,
+    languageTag: languageTag ?? null,
+  });
+  let parsed: OcrResult;
   try {
-    const rendered = await renderPageToTempFile(ocrPdf, pageIndex);
-    tempPath = rendered.tempPath;
-    const raw = await invoke<string>('run_ocr', {
-      imagePath: tempPath,
-      pageWidth,
-      pageHeight,
-      renderScale: RENDER_SCALE,
-      languageTag: languageTag ?? null,
-    });
-    let parsed: OcrResult;
-    try {
-      parsed = JSON.parse(raw) as OcrResult;
-    } catch (e) {
-      return {
-        result: { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` },
-      };
-    }
-    return { result: parsed };
-  } finally {
-    if (tempPath) {
-      remove(tempPath).catch((e) => {
-        console.warn(`[OCR] テンポラリファイルの削除に失敗: ${tempPath}`, e);
-      });
-    }
+    parsed = JSON.parse(raw) as OcrResult;
+  } catch (e) {
+    return {
+      result: { status: 'error', blocks: [], message: `JSONパース失敗: ${e}` },
+    };
   }
+  return { result: parsed };
 }
 
 type OcrProgress = {
@@ -799,7 +771,6 @@ export function useOcrEngine(
     if (sw < 2 || sh < 2) return;
 
     setOcrRunning(true);
-    let tempPath: string | null = null;
     try {
       // pdfCanvas からクロップ画像を生成
       const cropCanvas = document.createElement('canvas');
@@ -815,26 +786,14 @@ export function useOcrEngine(
       cropCanvas.width = 0;
       cropCanvas.height = 0;
 
-      const baseDir = await appLocalDataDir();
-      const tmpDirPath = await join(baseDir, 'pecotool', 'temp');
-      try { await mkdir(tmpDirPath, { recursive: true }); } catch (e) {
-      const msg = String(e);
-      // "already exists" は無視、それ以外 (permission / scope error 等) は visible に。
-      if (!msg.toLowerCase().includes('exist')) {
-        console.error('[OCR] temp dir mkdir failed:', e);
-        throw e;
-      }
-    }
-      const fileName = `peco_region_ocr_${pageIndex}_${Date.now()}.png`;
-      tempPath = await join(tmpDirPath, fileName);
-      await writeFile(tempPath, bytes);
-
       const scale = zoom / 100;
+      // #285 D案: bytes を直接 Rust に渡す。Tauri fs-scope を経由しないため
+      // Windows UNC verbatim prefix (\\?\) によるスコープ不一致が発生しない。
       // クロップ画像は zoom 済みピクセルなので renderScale として zoom / 100 を渡す。
       // pageWidth/pageHeight はクロップ前のページ全体サイズ（座標変換に使われる）。
       const settings = useOcrSettingsStore.getState();
       const raw = await invoke<string>('run_ocr', {
-        imagePath: tempPath,
+        imageBytes: Array.from(bytes),
         pageWidth: pageData.width,
         pageHeight: pageData.height,
         renderScale: scale,
@@ -896,11 +855,6 @@ export function useOcrEngine(
       console.error('[OCR] 範囲指定OCR エラー:', e);
       showToast(`範囲指定OCRに失敗しました: ${e}`, true);
     } finally {
-      if (tempPath) {
-        remove(tempPath).catch((e) => {
-          console.warn(`[OCR] テンポラリファイルの削除に失敗: ${tempPath}`, e);
-        });
-      }
       setOcrRunning(false);
     }
   };

@@ -541,10 +541,13 @@ async fn list_ocr_languages() -> Result<Vec<OcrLanguageInfo>, String> {
     .map_err(|e| format!("スレッドエラー: {}", e))?
 }
 
+/// Write `bytes` to a uniquely-named temp file, run OCR on it, then clean up.
+/// The temp file lives in `std::env::temp_dir()` and is never subject to Tauri
+/// fs-scope validation, so the `\\?\`-prefix canonicalization issue (#285) cannot
+/// occur here.
 #[tauri::command]
 async fn run_ocr(
-    app: tauri::AppHandle,
-    image_path: String,
+    image_bytes: Vec<u8>,
     page_width: f64,
     page_height: f64,
     render_scale: f64,
@@ -552,14 +555,30 @@ async fn run_ocr(
 ) -> Result<String, String> {
     let _ = (page_width, page_height); // 座標変換は render_scale のみ使用
     let result = tokio::task::spawn_blocking(move || {
-        let image = validate_allowed_existing_file_path(&app, &image_path)?;
-        let image = image.to_string_lossy().to_string();
+        let temp_path = write_ocr_temp_bytes(&image_bytes)?;
+        let image = temp_path.to_string_lossy().to_string();
         let tag = language_tag.unwrap_or_else(|| "ja".to_string());
-        do_windows_ocr(&image, render_scale, &tag)
+        let ocr_result = do_windows_ocr(&image, render_scale, &tag);
+        let _ = std::fs::remove_file(&temp_path);
+        ocr_result
     })
     .await
     .map_err(|e| format!("スレッドエラー: {}", e))??;
     Ok(result)
+}
+
+/// Write image bytes to a uniquely-named temp PNG and return its path.
+/// Uses `std::env::temp_dir()` directly, bypassing Tauri fs-scope checks.
+pub(crate) fn write_ocr_temp_bytes(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    let temp_dir = std::env::temp_dir();
+    let temp_path = temp_dir.join(format!(
+        "peco_ocr_{}_{}",
+        std::process::id(),
+        // cheap uniqueness: ptr address of the slice header
+        bytes.as_ptr() as usize,
+    ));
+    std::fs::write(&temp_path, bytes).map_err(|e| format!("temp write failed: {}", e))?;
+    Ok(temp_path)
 }
 
 fn do_windows_ocr(image_path: &str, render_scale: f64, language_tag: &str) -> Result<String, String> {
@@ -1082,6 +1101,53 @@ fn hex_value(c: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use tauri::http::{HeaderMap, HeaderValue};
+
+    // ── run_ocr byte-path (#285) ──────────────────────────────────
+
+    #[test]
+    fn write_ocr_temp_bytes_creates_and_can_be_removed() {
+        let data = b"fake png data for test";
+        let path = write_ocr_temp_bytes(data).expect("write_ocr_temp_bytes should succeed");
+
+        // ファイルが作成されていること
+        assert!(path.exists(), "temp file must exist after write");
+
+        // 内容が一致すること
+        let read_back = std::fs::read(&path).expect("read back should succeed");
+        assert_eq!(read_back, data);
+
+        // クリーンアップできること
+        std::fs::remove_file(&path).expect("cleanup should succeed");
+        assert!(!path.exists(), "temp file must be removed after cleanup");
+    }
+
+    #[test]
+    fn write_ocr_temp_bytes_path_is_not_unc_verbatim() {
+        let data = b"\x89PNG\r\n\x1a\n"; // minimal PNG header bytes
+        let path = write_ocr_temp_bytes(data).expect("write should succeed");
+        let path_str = path.to_string_lossy();
+
+        // std::env::temp_dir() + join は UNC verbatim prefix を付けない
+        // (canonicalize() を呼ばないので \\?\ にならない)
+        assert!(
+            !path_str.starts_with(r"\\?\"),
+            "temp path must not have UNC verbatim prefix, got: {path_str}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_ocr_temp_bytes_two_calls_produce_different_paths() {
+        let data1 = b"payload_one";
+        let data2 = b"payload_two";
+        let p1 = write_ocr_temp_bytes(data1).expect("first write");
+        let p2 = write_ocr_temp_bytes(data2).expect("second write");
+        // ポインタアドレスが異なるので名前が衝突しない
+        assert_ne!(p1, p2, "each call must produce a unique path");
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
 
     #[test]
     fn extract_ttc_face_rejects_zero_tables() {
