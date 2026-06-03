@@ -83,6 +83,7 @@ vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
 import { savePDF, __setSaveWorkerFactoryForTest, __resetSaveStateForTest } from '../../utils/pdfSaver'
 import { loadPage, getSharedPdfProxy, destroySharedPdfProxy } from '../../utils/pdfLoader'
 import { usePecoStore } from '../../store/pecoStore'
+import { useInfraStore } from '../../store/infraStore'
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -455,14 +456,14 @@ describe('S-03-03: backup JSON ラウンドトリップ (setPendingRestoration �
       },
     }
 
-    usePecoStore.getState().setPendingRestoration(restoration as any)
-    expect(usePecoStore.getState().pendingRestoration).toBe(restoration)
+    useInfraStore.getState().setPendingRestoration(restoration as any)
+    expect(useInfraStore.getState().pendingRestoration).toBe(restoration)
 
     // setDocument を呼ぶと pendingRestoration がクリアされ、isDirty=true で確定する
     usePecoStore.getState().setDocument(baseDoc)
 
     const state = usePecoStore.getState()
-    expect(state.pendingRestoration).toBeNull()
+    expect(useInfraStore.getState().pendingRestoration).toBeNull()
     expect(state.isDirty).toBe(true) // 復元データがある場合は即 dirty
     expect(state.document).toBe(baseDoc)
     expect(state.undoStack).toEqual([])

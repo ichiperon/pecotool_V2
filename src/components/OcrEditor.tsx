@@ -19,7 +19,7 @@ import {
 } from '@dnd-kit/sortable';
 import { useState } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
-import { usePecoStore, selectCurrentPage } from '../store/pecoStore';
+import { usePecoStore, selectCurrentPage, selectHasDocument } from '../store/pecoStore';
 import { useViewerStore } from '../store/viewerStore';
 import { useSearchStore, selectSearchTerm, selectSearchHitIndex } from '../store/searchStore';
 import { SortableOcrCard } from './SortableOcrCard';
@@ -42,6 +42,7 @@ export function OcrEditor({
   // 同参照のままなら再レンダされない。
   const currentPageIndex = usePecoStore(s => s.currentPageIndex);
   const currentPage = usePecoStore(selectCurrentPage);
+  const hasDocument = usePecoStore(selectHasDocument);
   const selectedIds = usePecoStore(s => s.selectedIds);
   const lastSelectedId = usePecoStore(s => s.lastSelectedId);
   const updatePageData = usePecoStore(s => s.updatePageData);
@@ -467,7 +468,7 @@ export function OcrEditor({
         )}
       </div>
       <div className="scroll-content">
-        {!document ? (
+        {!hasDocument ? (
           <div className="placeholder">データなし</div>
         ) : !currentPage ? (
           <div className="placeholder">読み込み中...</div>

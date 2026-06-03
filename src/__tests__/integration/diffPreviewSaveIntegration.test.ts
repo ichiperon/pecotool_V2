@@ -339,10 +339,9 @@ describe('DiffPreview + useFileOperations integration (wave 7)', () => {
     }
   });
 
-  // ── D-06: onRequestDiffPreview が reject → handleSave が例外を投げる (実装の現行動作を記録)
-  // ※ NOTE: onRequestDiffPreview の reject は handleSave の try/catch 外にあるため
-  //    現在の実装では handleSave が unhandled rejection になる。
-  //    これは実装上の gap (issue 起票済み: catch が必要) であり、このテストは現行動作を記録する。
+  // ── D-06: onRequestDiffPreview が reject → handleSave は catch してトースト表示し false を返す
+  // #270 で onRequestDiffPreview の reject を try/catch で捕捉する修正が入った。
+  // reject は handleSave 内で吸収され、showToast が呼ばれ、savePDF は呼ばれず false が返る。
   it('D-06: onRequestDiffPreview が reject すると handleSave が reject する (実装現行動作)', async () => {
     const filePath = '/diff-preview/reject.pdf';
     setupDirtyDoc(filePath);
@@ -363,7 +362,7 @@ describe('DiffPreview + useFileOperations integration (wave 7)', () => {
       ),
     );
 
-    // 現行実装では onRequestDiffPreview reject → handleSave が throw する
+    // #270 以降: onRequestDiffPreview reject は catch されて throw しない
     let threw = false;
     await act(async () => {
       try {
@@ -375,8 +374,10 @@ describe('DiffPreview + useFileOperations integration (wave 7)', () => {
 
     // savePDF は呼ばれない
     expect(savePDF).not.toHaveBeenCalled();
-    // 現行実装では throw する
-    expect(threw).toBe(true);
+    // #270 以降: catch して toast を出すため throw しない
+    expect(threw).toBe(false);
+    // エラートーストが呼ばれる
+    expect(showToast).toHaveBeenCalled();
   });
 
   // ── D-07: 複数ページ変更の diff preview 通し ─────────────────────────────

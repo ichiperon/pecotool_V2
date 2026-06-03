@@ -15,6 +15,7 @@ vi.mock('lucide-react', () => ({
   Loader2: (props: { className?: string }) => <span className={props.className}>loading</span>,
   RotateCcw: () => null,
   Trash2: () => null,
+  AlertTriangle: () => null,
 }));
 
 import { HelpModal } from '../../components/HelpModal';
@@ -135,7 +136,7 @@ describe('BackupRestoreDialog (#40): A11y / Esc', () => {
   it('処理中でないとき ✕ クリックで onClose が呼ばれる', () => {
     const onClose = vi.fn();
     render(<BackupRestoreDialog {...base} onClose={onClose} />);
-    fireEvent.click(screen.getByRole('button', { name: '閉じる' }));
+    fireEvent.click(screen.getByRole('button', { name: '閉じて次回起動時に再表示する' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
@@ -174,7 +175,7 @@ describe('BackupRestoreDialog (#42): 復元処理中の close ガード', () => 
         onCloseSuppressed={onCloseSuppressed}
       />,
     );
-    const closeBtn = screen.getByRole('button', { name: '閉じる' });
+    const closeBtn = screen.getByRole('button', { name: '閉じて次回起動時に再表示する' });
     // disabled なボタンへの click はブラウザ仕様で無視される (=onClose も走らない)
     expect((closeBtn as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(closeBtn);
