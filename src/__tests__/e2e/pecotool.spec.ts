@@ -1,132 +1,10 @@
 import { test, expect } from '@playwright/test';
+import { installTauriMocks, getTauriInvokeHistory, loadFixtureDocument } from './helpers/tauriMock';
 
 /**
  * Phase 3: E2E テスト (Playwright)
  * Tauri アプリケーションの主要な操作フローを自動テストします。
  */
-
-async function installTauriMocks(page: import('@playwright/test').Page) {
-  await page.addInitScript(() => {
-    const callbacks = new Map<number, (payload: unknown) => void>();
-    const invokeHistory: Array<{ cmd: string; args?: unknown }> = [];
-    const previewWindows = new Set<string>();
-    let callbackId = 1;
-
-    (window as any).__TAURI_INVOKE_HISTORY__ = invokeHistory;
-    (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
-      unregisterListener: () => {},
-    };
-    const knownInvokes: Record<string, (args?: any) => unknown> = {
-      'plugin:event|listen': (args) => args?.handler ?? 0,
-      'plugin:event|unlisten': () => null,
-      'plugin:event|emit': () => null,
-      'plugin:window|get_all_windows': () => ['main', ...previewWindows],
-      'plugin:webview|create_webview_window': (args) => {
-        previewWindows.add(args?.label ?? 'preview-window');
-        return null;
-      },
-      'plugin:window|show': () => null,
-      'plugin:window|hide': () => null,
-      'plugin:window|set_focus': () => null,
-      check_pending_backups: () => [],
-      clear_backup: () => null,
-      save_backup: () => null,
-      load_meiryo_font: () => {
-        throw new Error('not available in e2e browser');
-      },
-    };
-
-    (window as any).__TAURI_INTERNALS__ = {
-      metadata: {
-        currentWindow: { label: 'main' },
-        currentWebview: { windowLabel: 'main', label: 'main' },
-      },
-      callbacks,
-      transformCallback: (callback: (payload: unknown) => void, once = false) => {
-        const id = callbackId++;
-        callbacks.set(id, (payload: unknown) => {
-          if (once) callbacks.delete(id);
-          callback(payload);
-        });
-        return id;
-      },
-      unregisterCallback: (id: number) => {
-        callbacks.delete(id);
-      },
-      runCallback: (id: number, payload: unknown) => {
-        callbacks.get(id)?.(payload);
-      },
-      convertFileSrc: (filePath: string) => `http://asset.localhost/${encodeURIComponent(filePath)}`,
-      invoke: async (cmd: string, args?: any) => {
-        const handler = knownInvokes[cmd];
-        if (!handler) throw new Error(`[e2e tauri mock] Unknown invoke: ${cmd}`);
-        invokeHistory.push({ cmd, args });
-        return handler(args);
-      },
-    };
-  });
-}
-
-async function getTauriInvokeHistory(page: import('@playwright/test').Page) {
-  return page.evaluate(() => (window as any).__TAURI_INVOKE_HISTORY__ ?? []) as Promise<Array<{ cmd: string; args?: unknown }>>;
-}
-
-async function loadFixtureDocument(page: import('@playwright/test').Page) {
-  await page.evaluate(async () => {
-    const { usePecoStore } = await import('/src/store/pecoStore.ts');
-    usePecoStore.getState().setDocument({
-      filePath: 'e2e-fixture.pdf',
-      fileName: 'e2e-fixture.pdf',
-      totalPages: 2,
-      metadata: {},
-      pages: new Map([
-        [0, {
-          width: 600,
-          height: 800,
-          rotation: 0,
-          textBlocks: [
-            {
-              id: 'block-1',
-              text: '最初のOCRテキスト',
-              bbox: { x: 80, y: 90, width: 160, height: 32 },
-              writingMode: 'horizontal',
-              order: 0,
-              isDirty: false,
-            },
-            {
-              id: 'block-2',
-              text: '二つ目のOCRテキスト',
-              bbox: { x: 80, y: 150, width: 180, height: 32 },
-              writingMode: 'horizontal',
-              order: 1,
-              isDirty: false,
-            },
-          ],
-          isTextExtracted: true,
-          isDirty: false,
-        }],
-        [1, {
-          width: 600,
-          height: 800,
-          rotation: 0,
-          textBlocks: [
-            {
-              id: 'block-3',
-              text: '2ページ目',
-              bbox: { x: 60, y: 80, width: 120, height: 30 },
-              writingMode: 'horizontal',
-              order: 0,
-              isDirty: false,
-            },
-          ],
-          isTextExtracted: true,
-          isDirty: false,
-        }],
-      ]),
-    });
-  });
-  await expect(page.locator('.ocr-card').first()).toBeVisible();
-}
 
 test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
 
@@ -140,12 +18,14 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
 
   test.describe('E-F: ファイル操作', () => {
     test('[E-F-01] 初期状態のツールバー確認', async ({ page }) => {
-      // ファイルメニューから開く導線が存在することを確認
-      const fileMenu = page.locator('button', { hasText: 'ファイル' });
-      await expect(fileMenu).toBeVisible();
-      await fileMenu.click();
-      await expect(page.locator('.menu-dropdown-item', { hasText: '開く' })).toBeVisible();
-      
+      // Ribbon のファイルタブが初期表示されていることを確認
+      const fileTab = page.locator('[role="tablist"] button', { hasText: 'ファイル' });
+      await expect(fileTab).toBeVisible();
+      await expect(fileTab).toHaveClass(/active/);
+
+      // ファイルタブ内に「開く」ボタンが存在することを確認
+      await expect(page.locator('button', { hasText: '開く' }).first()).toBeVisible();
+
       // 未読み込み時のプレースホルダー確認
       await expect(page.locator('.empty-state')).toContainText('PDFファイルを [開く] から読み込んでください');
 
@@ -164,19 +44,27 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
   test.describe('E-C: キャンバス操作・編集', () => {
     test('[E-C-01] 描画モードの切り替え', async ({ page }) => {
       await loadFixtureDocument(page);
+
+      // 編集タブに切り替えて「追加」ボタンを操作する（Ribbon Phase 1 以降）
+      const editTab = page.locator('[role="tablist"] button', { hasText: '編集' });
+      await editTab.click();
+
       const addBtn = page.locator('button', { hasText: '追加' });
       await addBtn.click();
-      
+
       // ボタンが active クラスを持つことを確認
       await expect(addBtn).toHaveClass(/active/);
-      
+
       // キャンバスのカーソルが crosshair に変わっているか確認 (CSS 経由)
       const wrapper = page.locator('.canvas-wrapper');
       await expect(wrapper).toHaveClass(/drawing-mode/);
     });
 
     test('[E-C-05] 複数選択（UI操作）', async ({ page }) => {
-      // ツールバーのボタン類が正しく有効化/無効化されるか
+      // 編集タブに切り替えてグループ化ボタンの無効状態を確認する（Ribbon Phase 1 以降）
+      const editTab = page.locator('[role="tablist"] button', { hasText: '編集' });
+      await editTab.click();
+
       const groupBtn = page.locator('button', { hasText: 'グループ化' });
       await expect(groupBtn).toBeDisabled(); // 選択なしなら無効
     });
@@ -184,9 +72,13 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
 
   test.describe('E-K: キーボードショートカット', () => {
     test('[E-K-03] フィット（Ctrl+0）', async ({ page }) => {
+      // 表示タブに切り替えてフィットボタンの状態を確認する（Ribbon Phase 1 以降）
+      const viewTab = page.locator('[role="tablist"] button', { hasText: '表示' });
+      await viewTab.click();
+
       // ショートカットキーのイベントが発火して Fit モードになるか
       await page.keyboard.press('Control+0');
-      const fitBtn = page.getByTitle(/フィット/);
+      const fitBtn = page.locator('button', { hasText: 'フィット' });
       await expect(fitBtn).toHaveClass(/active/);
     });
 
@@ -206,6 +98,11 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
   test.describe('E-P: プレビューウィンドウ連携', () => {
     test('[E-P-01] プレビューボタンの動作確認', async ({ page }) => {
       await loadFixtureDocument(page);
+
+      // 表示タブに切り替えて「テキスト確認」ボタンを操作する（Ribbon Phase 1 以降）
+      const viewTab = page.locator('[role="tablist"] button', { hasText: '表示' });
+      await viewTab.click();
+
       const previewBtn = page.locator('button', { hasText: 'テキスト確認' });
       await expect(previewBtn).toBeVisible();
       await previewBtn.click();
@@ -272,7 +169,7 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
       // dirty マークが出ることを確認
       await expect(page.locator('.status-bar')).toContainText(/未保存/);
 
-      // Ctrl+Z で戻る
+      // Ctrl+Z で戻る（グローバルショートカット。Ribbon に依存しない）
       await page.keyboard.press('Control+Z');
 
       // 元テキストに復元されていること
@@ -294,6 +191,10 @@ test.describe('PecoTool v2: アプリ全体操作 E2E テスト', () => {
       // 1 枚目クリック + Ctrl クリックで 2 枚目追加選択
       await cards.nth(0).click();
       await cards.nth(1).click({ modifiers: ['Control'] });
+
+      // 編集タブに切り替えてグループ化ボタンを操作する（Ribbon Phase 1 以降）
+      const editTab = page.locator('[role="tablist"] button', { hasText: '編集' });
+      await editTab.click();
 
       // グループ化ボタンが有効化されること
       const groupBtn = page.locator('button', { hasText: 'グループ化' });
