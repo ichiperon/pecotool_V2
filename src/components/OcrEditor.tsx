@@ -405,15 +405,27 @@ export function OcrEditor({
   // - 単一選択時のみ発火 (複数選択ドラッグ等で勝手にジャンプしないように)。
   // - filteredBlocks / selectedIds は ref 経由で読み、依存を lastSelectedId のみにして
   //   1 文字編集ごとにこの effect が再実行されるのを防ぐ (focusBlockByIndex と同方針)。
+  // issue #291: scroll 完了後に対象 OcrCard の contentEditable へ自動フォーカスする。
+  // - 既に contentEditable 内で編集中の場合はフォーカスを奪わない (race 防止)。
   useEffect(() => {
     if (!lastSelectedId) return;
     if (selectedIdsRef.current.size !== 1) return;
     const index = filteredBlocksRef.current.findIndex(b => b.id === lastSelectedId);
     if (index === -1) return;
+    const targetId = lastSelectedId;
     virtuosoRef.current?.scrollIntoView({
       index,
       behavior: 'auto',
       align: 'center',
+      done: () => {
+        // 既に contentEditable 内を編集中なら focus を奪わない
+        const active = window.document.activeElement;
+        if (active && active.closest('[contenteditable="true"]')) return;
+        const card = window.document.querySelector(
+          `[data-block-id="${targetId}"].ocr-card-content`
+        ) as HTMLElement | null;
+        card?.focus();
+      },
     });
   }, [lastSelectedId]);
 

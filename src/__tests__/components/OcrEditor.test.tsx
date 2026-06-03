@@ -963,7 +963,11 @@ describe('OcrEditor', () => {
       const calls = getScrollCalls()
       expect(calls.length).toBe(1)
       // filteredBlocks 内 b3 の index = 2、align:'center' / behavior:'auto'
-      expect(calls[0][0]).toEqual({ index: 2, behavior: 'auto', align: 'center' })
+      // issue #291: done コールバックも含まれる
+      expect(calls[0][0].index).toBe(2)
+      expect(calls[0][0].behavior).toBe('auto')
+      expect(calls[0][0].align).toBe('center')
+      expect(typeof calls[0][0].done).toBe('function')
     })
 
     it('C-OE-04-02: 複数選択時は scrollIntoView しない (一括選択で勝手にジャンプしない)', () => {
@@ -1019,6 +1023,71 @@ describe('OcrEditor', () => {
       expect(calls.length).toBe(1)
       // b3 は生配列では index 2 だが、filteredBlocks (b2,b3) 内では index 1
       expect(calls[0][0].index).toBe(1)
+    })
+
+    it('C-OE-04-05: scroll done コールバックで対象カードの contentEditable にフォーカスされる', () => {
+      // Virtuoso モックは scrollIntoView 時に done() を即時呼ぶ設定になっている
+      const { container } = setup(navBlocks)
+
+      // 単一選択で b2 を選ぶ
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2']), lastSelectedId: 'b2' } as any)
+      })
+
+      // scrollIntoView が呼ばれていること
+      const calls = getScrollCalls()
+      expect(calls.length).toBe(1)
+      // done コールバックの存在を確認
+      expect(typeof calls[0][0].done).toBe('function')
+
+      // done() を手動で呼ぶ (モックは呼ばないため明示実行)
+      const contentEl = container.querySelector('[data-block-id="b2"].ocr-card-content') as HTMLElement
+      expect(contentEl).not.toBeNull()
+      // done() を呼んだ後、対象要素にフォーカスが当たる
+      // NOTE: Virtuoso モック (仮想化なし) は done を呼ばないため直接確認
+      calls[0][0].done()
+      expect(document.activeElement).toBe(contentEl)
+    })
+
+    it('C-OE-04-06: 既に contentEditable を編集中の場合、done コールバックはフォーカスを奪わない', () => {
+      const { container } = setup(navBlocks)
+
+      // b1 の contentEditable にフォーカスを当てて「編集中」状態を再現
+      const b1Content = container.querySelector('[data-block-id="b1"].ocr-card-content') as HTMLElement
+      b1Content.focus()
+      expect(document.activeElement).toBe(b1Content)
+      // contenteditable="true" 属性が付いていることを確認
+      expect(b1Content.getAttribute('contenteditable')).toBe('true')
+
+      // b2 を単一選択 (act の外で事前フォーカス済みのため、act内でfocus変化なし)
+      act(() => {
+        usePecoStore.setState({ selectedIds: new Set(['b2']), lastSelectedId: 'b2' } as any)
+      })
+
+      const calls = getScrollCalls()
+      expect(calls.length).toBe(1)
+
+      // b1 に再フォーカスしてから done() を呼ぶ (act 内のstore更新でfocusが外れた場合の補正)
+      b1Content.focus()
+      expect(document.activeElement).toBe(b1Content)
+
+      // done() を呼んでも b1 のフォーカスは奪われない (isContentEditable ガード)
+      calls[0][0].done()
+      expect(document.activeElement).toBe(b1Content)
+    })
+
+    it('C-OE-04-07: 複数選択では done コールバック自体がセットされない (scrollIntoView が呼ばれない)', () => {
+      setup(navBlocks)
+
+      act(() => {
+        usePecoStore.setState({
+          selectedIds: new Set(['b1', 'b2']),
+          lastSelectedId: 'b2',
+        } as any)
+      })
+
+      // 複数選択では scrollIntoView は呼ばれない
+      expect(getScrollCalls().length).toBe(0)
     })
   })
 
