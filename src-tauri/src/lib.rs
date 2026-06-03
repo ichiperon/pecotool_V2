@@ -567,18 +567,68 @@ async fn run_ocr(
     Ok(result)
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static OCR_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Write image bytes to a uniquely-named temp PNG and return its path.
 /// Uses `std::env::temp_dir()` directly, bypassing Tauri fs-scope checks.
+/// Uniqueness is guaranteed by combining PID, nanosecond timestamp, and a
+/// per-process monotonic counter — preventing collisions even when the same
+/// bytes (and therefore the same pointer) are written in rapid succession.
 pub(crate) fn write_ocr_temp_bytes(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
     let temp_dir = std::env::temp_dir();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = OCR_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temp_path = temp_dir.join(format!(
-        "peco_ocr_{}_{}.png",
+        "peco_ocr_{}_{}_{}.png",
         std::process::id(),
-        // cheap uniqueness: ptr address of the slice header
-        bytes.as_ptr() as usize,
+        nanos,
+        counter,
     ));
     std::fs::write(&temp_path, bytes).map_err(|e| format!("temp write failed: {}", e))?;
     Ok(temp_path)
+}
+
+/// Heuristic OCR confidence (0.0..=1.0).
+///
+/// Windows.Media.Ocr does not expose per-word confidence, so we approximate
+/// based on simple text/geometry signals. This is a heuristic for highlighting
+/// "likely-misread" blocks, not an actual model probability.
+fn estimate_confidence(text: &str, width: f64, height: f64) -> f64 {
+    // 1) Empty text: very likely garbage
+    if text.is_empty() {
+        return 0.3;
+    }
+    let char_count = text.chars().count() as f64;
+    // 2) Single character: unstable read
+    if char_count == 1.0 {
+        return 0.5;
+    }
+    // 3) High symbol ratio (ASCII punctuation + fullwidth symbols) -> low confidence
+    let symbol_count = text
+        .chars()
+        .filter(|c| {
+            c.is_ascii_punctuation()
+                || matches!(*c, '\u{3000}'..='\u{303F}')  // CJK punctuation
+                || matches!(*c, '\u{FF00}'..='\u{FF1F}')  // Fullwidth ASCII symbols
+        })
+        .count() as f64;
+    let symbol_ratio = symbol_count / char_count;
+    if symbol_ratio > 0.5 {
+        return 0.5;
+    }
+    // 4) Extreme aspect ratio (very wide or very narrow box) -> likely mis-segmented
+    let aspect = if height > 0.0 { width / height } else { 1.0 };
+    if aspect > 20.0 || aspect < 0.05 {
+        return 0.5;
+    }
+    // 5) Normal block: high confidence
+    0.9
 }
 
 fn do_windows_ocr(image_path: &str, render_scale: f64, language_tag: &str) -> Result<String, String> {
@@ -727,11 +777,13 @@ fn do_windows_ocr(image_path: &str, render_scale: f64, language_tag: &str) -> Re
             "horizontal"
         };
 
+        let text = text_parts.join("");
+        let confidence = estimate_confidence(&text, w, h);
         blocks.push(serde_json::json!({
-            "text": text_parts.join(""),
+            "text": text,
             "bbox": { "x": x, "y": y, "width": w, "height": h },
             "writingMode": writing_mode,
-            "confidence": 1.0
+            "confidence": confidence
         }));
     }
 
@@ -1143,8 +1195,40 @@ mod tests {
         let data2 = b"payload_two";
         let p1 = write_ocr_temp_bytes(data1).expect("first write");
         let p2 = write_ocr_temp_bytes(data2).expect("second write");
-        // ポインタアドレスが異なるので名前が衝突しない
+        // nanos + atomic counter により別 bytes でも同 bytes でも衝突しない
         assert_ne!(p1, p2, "each call must produce a unique path");
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    // ── regression: #289 unique temp file naming ──────────────────────────
+
+    #[test]
+    fn write_ocr_temp_bytes_100_sequential_all_unique() {
+        let data = b"same bytes for every call";
+        let mut paths = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let p = write_ocr_temp_bytes(data).expect("write should succeed");
+            paths.push(p);
+        }
+        // 全パスがユニークであること
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), 100, "all 100 paths must be distinct");
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn write_ocr_temp_bytes_same_bytes_twice_produce_different_paths() {
+        // 同一 bytes スライス（同 ptr）を 2 回渡しても別 path を返すこと
+        let data = b"identical payload";
+        let p1 = write_ocr_temp_bytes(data).expect("first write");
+        let p2 = write_ocr_temp_bytes(data).expect("second write");
+        assert_ne!(
+            p1, p2,
+            "same bytes must not collide: nanos+counter must differ"
+        );
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
     }
@@ -1199,6 +1283,47 @@ mod tests {
             validate_pdf_chunk_offset_contiguous(8, 12).unwrap_err(),
             "chunk offset mismatch: expected 8, got 12"
         );
+    }
+
+    // ── estimate_confidence heuristic (#287) ─────────────────────────────
+
+    #[test]
+    fn estimate_confidence_empty_text_returns_low() {
+        let c = estimate_confidence("", 100.0, 20.0);
+        assert!((c - 0.3).abs() < f64::EPSILON, "empty text must return 0.3, got {c}");
+    }
+
+    #[test]
+    fn estimate_confidence_single_char_returns_mid() {
+        let c = estimate_confidence("A", 20.0, 20.0);
+        assert!((c - 0.5).abs() < f64::EPSILON, "single char must return 0.5, got {c}");
+    }
+
+    #[test]
+    fn estimate_confidence_high_symbol_ratio_returns_mid() {
+        // "!!!" -> 3 symbols / 3 chars = 1.0 ratio > 0.5
+        let c = estimate_confidence("!!!", 30.0, 20.0);
+        assert!((c - 0.5).abs() < f64::EPSILON, "symbol-heavy text must return 0.5, got {c}");
+    }
+
+    #[test]
+    fn estimate_confidence_normal_text_returns_high() {
+        let c = estimate_confidence("通常のテキスト", 200.0, 20.0);
+        assert!((c - 0.9).abs() < f64::EPSILON, "normal text must return 0.9, got {c}");
+    }
+
+    #[test]
+    fn estimate_confidence_extreme_aspect_wide_returns_mid() {
+        // aspect = 420.0 / 20.0 = 21.0 > 20.0
+        let c = estimate_confidence("normal text here", 420.0, 20.0);
+        assert!((c - 0.5).abs() < f64::EPSILON, "extremely wide box must return 0.5, got {c}");
+    }
+
+    #[test]
+    fn estimate_confidence_extreme_aspect_narrow_returns_mid() {
+        // aspect = 1.0 / 100.0 = 0.01 < 0.05
+        let c = estimate_confidence("normal text here", 1.0, 100.0);
+        assert!((c - 0.5).abs() < f64::EPSILON, "extremely narrow box must return 0.5, got {c}");
     }
 }
 
