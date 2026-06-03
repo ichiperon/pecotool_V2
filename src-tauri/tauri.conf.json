@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "pecotool-v2",
+  "productName": "Peco",
   "version": "2.0.7",
   "identifier": "com.ichip.pecotool-v2",
   "build": {

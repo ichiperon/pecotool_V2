@@ -68,7 +68,7 @@ Format:
   "platforms": {
     "windows-x86_64": {
       "signature": "<contents of the .sig file>",
-      "url": "https://github.com/ichiperon/pecotool_V2/releases/download/v2.x.y/pecotool-v2_2.x.y_x64-setup.nsis.zip"
+      "url": "https://github.com/ichiperon/pecotool_V2/releases/download/v2.x.y/Peco_2.x.y_x64-setup.nsis.zip"
     }
   }
 }
@@ -81,10 +81,32 @@ The `.sig` file is generated automatically by `cargo tauri build` when the signi
 1. Create a tag: `git tag v2.x.y && git push origin v2.x.y`
 2. Draft a release on GitHub with the tag.
 3. Attach the following artifacts:
-   - `pecotool-v2_2.x.y_x64-setup.nsis.zip` (signed installer zip)
-   - `pecotool-v2_2.x.y_x64-setup.nsis.zip.sig` (signature file)
+   - `Peco_2.x.y_x64-setup.nsis.zip` (signed installer zip)
+   - `Peco_2.x.y_x64-setup.nsis.zip.sig` (signature file)
    - `latest.json` (update manifest)
 4. Publish the release.
+
+## Upgrading from v2.0.7 or earlier (installer name change)
+
+Starting from v2.0.8, the Windows installer is built with `productName: "Peco"`, so the
+generated NSIS artifact name changed:
+
+| Version | Installer filename |
+| --- | --- |
+| v2.0.7 and earlier | `pecotool-v2_2.x.y_x64-setup.nsis.zip` |
+| v2.0.8 and later | `Peco_2.x.y_x64-setup.nsis.zip` |
+
+**Impact for existing users upgrading from v2.0.7 or earlier:**
+
+- The Tauri `identifier` (`com.ichip.pecotool-v2`) and `$APPDATA` path are **unchanged**, so
+  user settings and data are preserved across the upgrade.
+- NSIS treats the new installer as a distinct product name. Windows may show a separate
+  entry in "Add or Remove Programs" for the old `pecotool-v2` install. Users should
+  uninstall the old entry manually after upgrading, or the new installer's passive mode
+  will overwrite the existing installation silently if the install path matches.
+- The `latest.json` manifest hosted at the endpoint must use the new asset URL format
+  (`Peco_2.x.y_x64-setup.nsis.zip`) for v2.0.8+ releases. The updater endpoint URL itself
+  is unchanged.
 
 ## Development / test mode
 
