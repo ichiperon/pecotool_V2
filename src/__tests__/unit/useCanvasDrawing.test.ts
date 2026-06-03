@@ -37,6 +37,8 @@ function renderDrawing(pageData: PageData, selectedIds = new Set<string>()) {
   const updatePageData = vi.fn();
   const setSelectedIds = vi.fn();
   const toggleDrawingMode = vi.fn();
+  // #292: toggleSplitMode は useCanvasDrawing から除去されたが、
+  // テスト内で呼ばれないことを検証するため mock を保持する
   const toggleSplitMode = vi.fn();
 
   const hook = renderHook(() =>
@@ -48,7 +50,6 @@ function renderDrawing(pageData: PageData, selectedIds = new Set<string>()) {
       updatePageData,
       setSelectedIds,
       toggleDrawingMode,
-      toggleSplitMode,
     })
   );
 
@@ -119,7 +120,7 @@ describe('useCanvasDrawing: Issue #7 BB描画モードは BB が作れた時だ�
   });
 });
 
-describe('useCanvasDrawing: Issue #5 分割不可ブロックは split モードを維持', () => {
+describe('useCanvasDrawing: Issue #5/#292 分割後も split モードを維持 (連続分割)', () => {
   it('1 文字ブロックをクリックしても split モードは維持される (toggleSplitMode が呼ばれない)', () => {
     // 1 文字のブロック (graphemes.length < 2 で splitBlockAtRatio が null を返す)
     const oneCharBlock: TextBlock = {
@@ -141,7 +142,7 @@ describe('useCanvasDrawing: Issue #5 分割不可ブロックは split モード
     expect(toggleSplitMode).not.toHaveBeenCalled();
   });
 
-  it('複数文字ブロックを正常に分割した時は split モードを解除する', () => {
+  it('#292: 複数文字ブロックを正常に分割した後も split モードを維持する (連続分割可能)', () => {
     const multiBlock: TextBlock = {
       ...makeBlock('multi', 0, { x: 50, y: 50, width: 100, height: 40 }),
       text: 'abcdef',
@@ -157,10 +158,11 @@ describe('useCanvasDrawing: Issue #5 分割不可ブロックは split モード
 
     expect(returned).toBe(true);
     expect(updatePageData).toHaveBeenCalledTimes(1);
-    expect(toggleSplitMode).toHaveBeenCalledTimes(1);
+    // #292: 分割成功後も toggleSplitMode を呼ばない (モード継続)
+    expect(toggleSplitMode).not.toHaveBeenCalled();
   });
 
-  it('ブロック外をクリックしたら split モードは解除される (既存挙動の維持)', () => {
+  it('#292: ブロック外をクリックしても split モードは維持される (Esc 解除へ移行)', () => {
     const page = makePage([makeBlock('a', 0, { x: 50, y: 50, width: 40, height: 20 })]);
     const { result, toggleSplitMode, updatePageData } = renderDrawing(page);
 
@@ -172,8 +174,8 @@ describe('useCanvasDrawing: Issue #5 分割不可ブロックは split モード
 
     expect(returned).toBe(false);
     expect(updatePageData).not.toHaveBeenCalled();
-    // ブロック外クリックは既存通り解除される (cancel UX)
-    expect(toggleSplitMode).toHaveBeenCalledTimes(1);
+    // #292: ブロック外でも toggleSplitMode を呼ばない (Esc キーで解除する設計)
+    expect(toggleSplitMode).not.toHaveBeenCalled();
   });
 });
 
@@ -244,6 +246,8 @@ describe('useCanvasDrawing: zoom スケールの座標変換', () => {
     const updatePageData = vi.fn();
     const setSelectedIds = vi.fn();
     const toggleDrawingMode = vi.fn();
+    // #292: toggleSplitMode は useCanvasDrawing から除去されたが、
+    // 呼ばれないことを検証するため mock を保持する
     const toggleSplitMode = vi.fn();
     const hook = renderHook(() =>
       useCanvasDrawing({
@@ -254,7 +258,6 @@ describe('useCanvasDrawing: zoom スケールの座標変換', () => {
         updatePageData,
         setSelectedIds,
         toggleDrawingMode,
-        toggleSplitMode,
       })
     );
     return { ...hook, updatePageData, setSelectedIds, toggleDrawingMode, toggleSplitMode };
@@ -293,7 +296,8 @@ describe('useCanvasDrawing: zoom スケールの座標変換', () => {
 
     expect(returned).toBe(true);
     expect(updatePageData).toHaveBeenCalledTimes(1);
-    expect(toggleSplitMode).toHaveBeenCalledTimes(1);
+    // #292: 分割成功後も toggleSplitMode は呼ばれない (モード継続)
+    expect(toggleSplitMode).not.toHaveBeenCalled();
 
     // 分割後 2 ブロックの合計幅 = 元の幅 (100)
     const blocks = updatePageData.mock.calls[0][1].textBlocks as TextBlock[];

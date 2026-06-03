@@ -15,7 +15,6 @@ interface UseCanvasDrawingParams {
   ) => void;
   setSelectedIds: (ids: string[]) => void;
   toggleDrawingMode: () => void;
-  toggleSplitMode: () => void;
 }
 
 interface UseCanvasDrawingResult {
@@ -35,7 +34,7 @@ interface UseCanvasDrawingResult {
 
 // 描画モード（新規bbox作成）と分割モード（クリックでblock分割）のマウス処理
 export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawingResult {
-  const { pageIndex, zoom, getPageData, selectedIds, updatePageData, setSelectedIds, toggleDrawingMode, toggleSplitMode } =
+  const { pageIndex, zoom, getPageData, selectedIds, updatePageData, setSelectedIds, toggleDrawingMode } =
     params;
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
@@ -170,12 +169,10 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
             vertical: isVertical,
           });
           updatePageData(pageIndex, { textBlocks: finalBlocks, isDirty: true });
-          toggleSplitMode();
           return true;
         }
       }
     }
-    toggleSplitMode();
     return false;
   };
 

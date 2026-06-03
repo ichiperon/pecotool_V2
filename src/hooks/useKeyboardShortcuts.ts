@@ -31,6 +31,8 @@ interface ShortcutActions {
   /** issue #189: curve モード ON のとき Esc で解除する */
   isCurveMode?: boolean;
   toggleCurveMode?: () => void;
+  /** issue #292: split モード ON のとき Esc で解除する */
+  isSplitMode?: boolean;
 }
 
 export function useKeyboardShortcuts(actions: ShortcutActions) {
@@ -137,6 +139,9 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       } else if (e.key === 'Escape' && ac.isCurveMode && !isEditing) {
         e.preventDefault();
         ac.toggleCurveMode?.();
+      } else if (e.key === 'Escape' && ac.isSplitMode && !isEditing) {
+        e.preventDefault();
+        ac.toggleSplitMode();
       }
     };
     window.addEventListener('keydown', handler);

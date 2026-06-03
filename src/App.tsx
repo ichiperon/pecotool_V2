@@ -557,6 +557,7 @@ function App() {
     },
     isCurveMode,
     toggleCurveMode,
+    isSplitMode,
   });
 
   // issue #163: OCR 実行中の Esc キーで cancelOcr。

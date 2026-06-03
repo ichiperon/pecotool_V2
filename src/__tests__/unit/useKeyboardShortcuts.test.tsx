@@ -2,7 +2,14 @@ import { renderHook, cleanup } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 
-function makeActions(overrides: Partial<{ isOcrRunning: boolean; openReplace: () => void }> = {}) {
+function makeActions(
+  overrides: Partial<{
+    isOcrRunning: boolean;
+    openReplace: () => void;
+    isCurveMode: boolean;
+    isSplitMode: boolean;
+  }> = {},
+) {
   return {
     undo: vi.fn(),
     redo: vi.fn(),
@@ -24,6 +31,8 @@ function makeActions(overrides: Partial<{ isOcrRunning: boolean; openReplace: ()
     searchInputRef: { current: null },
     openReplace: vi.fn(),
     isOcrRunning: false,
+    isCurveMode: false,
+    isSplitMode: false,
     ...overrides,
   };
 }
@@ -223,5 +232,50 @@ describe('useKeyboardShortcuts: OCR 実行中ガード (issue #102 / #103)', () 
     press(window, 'h');
 
     expect(openReplace).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('useKeyboardShortcuts: Esc split mode 解除 (issue #292)', () => {
+  function pressEsc(target: EventTarget = window) {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      ctrlKey: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    target.dispatchEvent(event);
+    return event;
+  }
+
+  it('#292: isSplitMode=true のとき Esc で toggleSplitMode が呼ばれる', () => {
+    const actions = makeActions({ isSplitMode: true });
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = pressEsc();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.toggleSplitMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('#292: isSplitMode=false のとき Esc で toggleSplitMode は呼ばれない', () => {
+    const actions = makeActions({ isSplitMode: false });
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    pressEsc();
+
+    expect(actions.toggleSplitMode).not.toHaveBeenCalled();
+  });
+
+  it('#292: isEditing 中 (contentEditable focus) は Esc が split mode に効かない', () => {
+    const actions = makeActions({ isSplitMode: true });
+    const content = document.createElement('div');
+    content.setAttribute('contenteditable', 'true');
+    document.body.appendChild(content);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    content.focus();
+    pressEsc(content);
+
+    expect(actions.toggleSplitMode).not.toHaveBeenCalled();
   });
 });
