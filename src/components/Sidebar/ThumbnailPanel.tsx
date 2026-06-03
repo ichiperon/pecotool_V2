@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import {
   DndContext,
@@ -51,6 +51,20 @@ const SortableThumbnailWrapper: React.FC<SortableThumbnailWrapperProps> = ({ dis
     isDragging,
   } = useSortable({ id: displayIndex });
 
+  // 修正 A (issue #286): 右クリック / 中クリックの pointerdown を dnd-kit に渡さない。
+  // listeners がそのまま展開されると button=2 (右クリック) でも PointerSensor が
+  // pointerdown をキャプチャし、contextmenu イベントの発火と競合する。
+  const safeListeners = useMemo(() => {
+    if (!listeners) return undefined;
+    return {
+      ...listeners,
+      onPointerDown: (e: React.PointerEvent) => {
+        if (e.button !== 0) return; // 左クリック以外は dnd-kit に渡さない
+        listeners.onPointerDown?.(e);
+      },
+    };
+  }, [listeners]);
+
   // transform / transition は動的値のため style prop が必要 (CSS クラスでは表現不可)
   const transformStyle = CSS.Transform.toString(transform);
   const dynamicStyle = {
@@ -64,7 +78,7 @@ const SortableThumbnailWrapper: React.FC<SortableThumbnailWrapperProps> = ({ dis
       style={dynamicStyle}
       className={`thumbnail-sortable-wrapper thumbnail-grab-handle${isDragging ? ' thumbnail-sortable-wrapper--dragging' : ''}`}
       {...attributes}
-      {...listeners}
+      {...safeListeners}
     >
       {children}
     </div>
@@ -229,14 +243,26 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   }, [currentPageIndex]);
 
   // コンテキストメニューを閉じるグローバルハンドラ
+  // 修正 B (issue #286): capture フェーズをやめ RAF で遅延登録する。
+  //   - capture: true のままだと、メニューを開いた同一 contextmenu イベントが
+  //     bubble より先に close を発火させ、即閉じするケースがある。
+  //   - RAF 遅延により「メニューを開いたイベント自体」が完全に処理された後で
+  //     close リスナーが登録されるため、連続右クリックでも正しく動作する。
   useEffect(() => {
     if (!contextMenu.visible) return;
-    const close = () => setContextMenu(CONTEXT_MENU_INITIAL);
-    window.addEventListener('click', close, { capture: true });
-    window.addEventListener('contextmenu', close, { capture: true });
+    let rafId: number;
+    let close: (() => void) | null = null;
+    rafId = requestAnimationFrame(() => {
+      close = () => setContextMenu(CONTEXT_MENU_INITIAL);
+      window.addEventListener('click', close);
+      window.addEventListener('contextmenu', close);
+    });
     return () => {
-      window.removeEventListener('click', close, { capture: true });
-      window.removeEventListener('contextmenu', close, { capture: true });
+      cancelAnimationFrame(rafId);
+      if (close) {
+        window.removeEventListener('click', close);
+        window.removeEventListener('contextmenu', close);
+      }
     };
   }, [contextMenu.visible]);
 
@@ -407,6 +433,7 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
           role="menu"
           aria-label="ページ操作メニュー"
           onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
         >
           <button
             type="button"

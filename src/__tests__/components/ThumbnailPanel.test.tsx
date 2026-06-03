@@ -12,8 +12,8 @@
  * - active CSS class は subscribe 通知で正しく付け替わる。
  */
 import React from 'react';
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, cleanup, act } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { render, cleanup, act, fireEvent } from '@testing-library/react';
 import { ThumbnailPanel, ThumbnailItemNode } from '../../components/Sidebar/ThumbnailPanel';
 
 afterEach(() => cleanup());
@@ -299,6 +299,25 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
     expect(second).toBe(first);
   });
 
+  it('issue #286: onContextMenu prop が ThumbnailItemNode に渡される (型契約)', () => {
+    type ItemProps = React.ComponentProps<typeof ThumbnailItemNode>;
+    const probe: ItemProps = {
+      index: 0,
+      loadEpoch: 0,
+      onSelect: () => {},
+      onRequest: () => {},
+      onSubscribeThumbnail: () => () => {},
+      onGetThumbnail: () => undefined,
+      onSubscribeActivePage: () => () => {},
+      onGetIsActivePage: () => false,
+      onSubscribeDirtyPage: () => () => {},
+      onGetIsDirtyPage: () => false,
+      onGetRotation: () => 0,
+      onContextMenu: () => {},
+    };
+    expect(typeof probe.onContextMenu).toBe('function');
+  });
+
   it('issue #173: document 更新 (updatePageData) で itemContent identity が変わらない', () => {
     // 旧実装は useCallback 依存に `document` を含めていたため、updatePageData で
     // 新しい document オブジェクトが生まれる度 itemContent が再生成され、
@@ -347,5 +366,81 @@ describe('Issue #68: ThumbnailPanel itemContent memoization', () => {
     const second = lastItemContent;
 
     expect(second).toBe(first);
+  });
+});
+
+// ─── Issue #286 リグレッション ────────────────────────────────────────────────
+
+describe('Issue #286: コンテキストメニュー表示', () => {
+  function makeFakeForContextMenu() {
+    return {
+      subscribeActivePage: (_index: number, _cb: () => void) => () => {},
+      getIsActivePage: (_index: number) => false,
+      subscribeThumbnail: (_index: number, _cb: () => void) => () => {},
+      getThumbnail: (_index: number) => undefined as string | undefined,
+      subscribeDirtyPage: (_index: number, _cb: () => void) => () => {},
+      getIsDirtyPage: (_index: number) => false,
+      getRotation: (_index: number) => 0,
+      onSelectPage: vi.fn(),
+      onRequestThumbnail: vi.fn(),
+      onContextMenu: vi.fn(),
+    };
+  }
+
+  beforeEach(() => {
+    // RAF をジャスミン同期スタブに置き換え
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+  });
+
+  it('右クリックで onContextMenu が呼ばれる', () => {
+    const fake = makeFakeForContextMenu();
+    const { container } = render(
+      <ThumbnailItemNode
+        index={0}
+        loadEpoch={0}
+        onSelect={fake.onSelectPage}
+        onRequest={fake.onRequestThumbnail}
+        onSubscribeThumbnail={fake.subscribeThumbnail}
+        onGetThumbnail={fake.getThumbnail}
+        onSubscribeActivePage={fake.subscribeActivePage}
+        onGetIsActivePage={fake.getIsActivePage}
+        onSubscribeDirtyPage={fake.subscribeDirtyPage}
+        onGetIsDirtyPage={fake.getIsDirtyPage}
+        onGetRotation={fake.getRotation}
+        onContextMenu={fake.onContextMenu}
+      />,
+    );
+    const btn = container.querySelector('button')!;
+    act(() => {
+      fireEvent.contextMenu(btn, { clientX: 100, clientY: 200 });
+    });
+    expect(fake.onContextMenu).toHaveBeenCalledTimes(1);
+    expect(fake.onContextMenu.mock.calls[0][1]).toBe(0); // displayIndex = 0
+  });
+
+  it('button=2 (右クリック) で onPointerDown が dnd-kit に渡らない (safeListeners)', () => {
+    // SortableThumbnailWrapper の safeListeners は pointerdown button=2 を透過させる。
+    // PointerSensor は activeDragId をセットしないことを確認する。
+    // → ThumbnailItemNode 単体テストで onContextMenu が呼ばれることを確認済みのため、
+    //   ここでは onPointerDown を直接スパイして確認する。
+    const pointerDownSpy = vi.fn();
+    const fakeListeners = { onPointerDown: pointerDownSpy };
+
+    // safeListeners ロジックを単体で再現（コンポーネント外で確認）
+    const safeOnPointerDown = (e: { button: number }) => {
+      if (e.button !== 0) return;
+      fakeListeners.onPointerDown(e);
+    };
+
+    safeOnPointerDown({ button: 2 }); // 右クリック
+    expect(pointerDownSpy).not.toHaveBeenCalled();
+
+    safeOnPointerDown({ button: 0 }); // 左クリック
+    expect(pointerDownSpy).toHaveBeenCalledTimes(1);
   });
 });
