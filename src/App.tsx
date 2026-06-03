@@ -690,10 +690,11 @@ function App() {
     <div
       className="app-container"
       onContextMenu={(e) => {
+        // Prevent the browser default context menu app-wide, but do NOT open
+        // HelpMenu here. HelpMenu is now triggered only via the explicit
+        // pdf-canvas-container onContextMenu below (scope-limited).
+        // Fixes: spurious right-click HelpMenu on Ribbon / OcrEditor / etc.
         e.preventDefault();
-        // Issue #45: モーダル/ダイアログ表示中は背後に HelpMenu を重ねて開かない
-        if (helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
-        setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
       }}
       onClick={() => {
         if (helpMenu.visible) setHelpMenu({ ...helpMenu, visible: false });
@@ -903,7 +904,15 @@ function App() {
           className={`pdf-viewer-panel ${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : ''}`}
           onMouseDown={handleViewerMouseDown} onMouseMove={handleViewerMouseMove} onMouseUp={stopPanning} onMouseLeave={stopPanning}
         >
-          <div className="pdf-canvas-container">
+          <div
+            className="pdf-canvas-container"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              // Issue #45: モーダル/ダイアログ表示中は背後に HelpMenu を重ねて開かない
+              if (helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
+              setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
+            }}
+          >
             {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} onRangeOcr={(canvas, rect) => { void runOcrOnRegion(canvas, rect, currentPageIndex, zoom); }} confidenceThreshold={ocrConfidenceThreshold} showLowConfidenceHighlight={showLowConfidenceHighlight} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
           {(isLoadingFile || isLoadingPageMeta) && (
