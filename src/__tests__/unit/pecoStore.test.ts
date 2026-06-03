@@ -715,7 +715,9 @@ describe('pecoStore', () => {
       expect(state.document!.pages.get(1)!.textBlocks).toHaveLength(0)
     })
 
-    it('U-PS-50: 未ロードページにも OCR 消去スタブを撒く (totalPages=5, loaded=2)', () => {
+    it('U-PS-50: ロード済みページのみ OCR 消去スタブを撒く (totalPages=5, loaded=2)', () => {
+      // perf(#241): clearOcrAllPages は in-memory に存在するページのみ走査する設計。
+      // LRU 退避済みページ (Map に無いもの) は次回 loadPage 時に textBlocks=[] で生成される。
       const page0 = makePage({ pageIndex: 0 })
       const page2 = makePage({ pageIndex: 2 })
       const doc: PecoDocument = {
@@ -730,17 +732,14 @@ describe('pecoStore', () => {
       usePecoStore.getState().clearOcrAllPages()
 
       const pages = usePecoStore.getState().document!.pages
-      expect(pages.size).toBe(5)
+      // in-memory の 2 件のみ処理される (未ロードの 1, 3, 4 は Map に存在しない)
+      expect(pages.size).toBe(2)
       expect(pages.has(0)).toBe(true)
       expect(pages.has(2)).toBe(true)
-      expect(pages.has(1)).toBe(true)
       expect(pages.get(0)!.textBlocks).toHaveLength(0)
       expect(pages.get(0)!.isDirty).toBe(true)
       expect(pages.get(2)!.textBlocks).toHaveLength(0)
       expect(pages.get(2)!.isDirty).toBe(true)
-      expect(pages.get(1)!.textBlocks).toHaveLength(0)
-      expect(pages.get(1)!.isDirty).toBe(true)
-      expect(pages.get(1)!.ocrCleared).toBe(true)
     })
 
     it('U-PS-51: clearOcrAllPages で undo/redo スタックがクリアされる', () => {
@@ -2002,7 +2001,7 @@ describe('pecoStore', () => {
       return makeDoc(pages)
     }
 
-    it('中間ページを削除すると pages が詰め直される', () => {
+    it('中間ページを削除すると pages が詰め直される', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2012,7 +2011,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().deletePages([1]) // 表示インデックス 1 (元ページ1) を削除
+      await usePecoStore.getState().deletePages([1]) // 表示インデックス 1 (元ページ1) を削除
 
       const state = usePecoStore.getState()
       expect(state.document!.totalPages).toBe(2)
@@ -2040,7 +2039,7 @@ describe('pecoStore', () => {
       expect(state.currentPageIndex).toBe(1)
     })
 
-    it('末尾ページを削除すると currentPageIndex が末尾に収まる', () => {
+    it('末尾ページを削除すると currentPageIndex が末尾に収まる', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2050,7 +2049,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().deletePages([2])
+      await usePecoStore.getState().deletePages([2])
 
       const state = usePecoStore.getState()
       expect(state.document!.totalPages).toBe(2)
@@ -2074,7 +2073,7 @@ describe('pecoStore', () => {
       expect(state.document!.totalPages).toBe(1)
     })
 
-    it('削除後に undo で元の状態に戻る', () => {
+    it('削除後に undo で元の状態に戻る', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2084,7 +2083,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().deletePages([1])
+      await usePecoStore.getState().deletePages([1])
       expect(usePecoStore.getState().document!.totalPages).toBe(2)
 
       usePecoStore.getState().undo()
@@ -2095,7 +2094,7 @@ describe('pecoStore', () => {
       expect(state.redoStack).toHaveLength(1)
     })
 
-    it('undoStack に delete_pages action が積まれる', () => {
+    it('undoStack に delete_pages action が積まれる', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2105,7 +2104,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().deletePages([2])
+      await usePecoStore.getState().deletePages([2])
 
       const state = usePecoStore.getState()
       expect(state.undoStack).toHaveLength(1)
@@ -2123,7 +2122,7 @@ describe('pecoStore', () => {
       return makeDoc(pages)
     }
 
-    it('from=0 to=2 で先頭ページが末尾に移動する', () => {
+    it('from=0 to=2 で先頭ページが末尾に移動する', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2133,7 +2132,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().movePage(0, 2)
+      await usePecoStore.getState().movePage(0, 2)
 
       const state = usePecoStore.getState()
       // 元順 [0,1,2] → 0を末尾へ → [1,2,0]
@@ -2142,7 +2141,7 @@ describe('pecoStore', () => {
       expect(state.isDirty).toBe(true)
     })
 
-    it('並べ替え後に currentPageIndex が移動元に追従する', () => {
+    it('並べ替え後に currentPageIndex が移動元に追従する', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2152,7 +2151,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().movePage(0, 2)
+      await usePecoStore.getState().movePage(0, 2)
 
       // currentPageIndex=0 のページが from=0 → to=2 へ移動したので追従
       expect(usePecoStore.getState().currentPageIndex).toBe(2)
@@ -2175,7 +2174,7 @@ describe('pecoStore', () => {
       expect(state.isDirty).toBe(false)
     })
 
-    it('undoStack に reorder_pages action が積まれる', () => {
+    it('undoStack に reorder_pages action が積まれる', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2185,14 +2184,14 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().movePage(0, 1)
+      await usePecoStore.getState().movePage(0, 1)
 
       const state = usePecoStore.getState()
       expect(state.undoStack).toHaveLength(1)
       expect(state.undoStack[0].type).toBe('reorder_pages')
     })
 
-    it('並べ替え後に undo で元の順序に戻る', () => {
+    it('並べ替え後に undo で元の順序に戻る', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2202,7 +2201,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().movePage(0, 2)
+      await usePecoStore.getState().movePage(0, 2)
       usePecoStore.getState().undo()
 
       const state = usePecoStore.getState()
@@ -2439,7 +2438,7 @@ describe('pecoStore', () => {
 
     // ── BV-05: 同一ページの重複削除指定 → 1 回だけ削除 ──────────────────
 
-    it('BV-05: duplicate displayIndex in array → deduplicated (only 1 page deleted)', () => {
+    it('BV-05: duplicate displayIndex in array → deduplicated (only 1 page deleted)', async () => {
       const doc = makeFivePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2450,7 +2449,7 @@ describe('pecoStore', () => {
       })
 
       // インデックス 2 を重複指定 — Set に変換されるので実質 1 回削除
-      usePecoStore.getState().deletePages([2, 2, 2])
+      await usePecoStore.getState().deletePages([2, 2, 2])
 
       const state = usePecoStore.getState()
       expect(state.document!.totalPages).toBe(4)
@@ -2485,7 +2484,7 @@ describe('pecoStore', () => {
 
     // ── BV-08: undo で完全復元 (pages / pageOrder / currentPageIndex) ───────
 
-    it('BV-08: undo after deletePages fully restores pages, pageOrder, and currentPageIndex', () => {
+    it('BV-08: undo after deletePages fully restores pages, pageOrder, and currentPageIndex', async () => {
       const doc = makeFivePagesDoc()
       const beforeCurrentPageIndex = 2
       usePecoStore.setState({
@@ -2497,7 +2496,7 @@ describe('pecoStore', () => {
       })
 
       // ページ 1 と 3 を削除
-      usePecoStore.getState().deletePages([1, 3])
+      await usePecoStore.getState().deletePages([1, 3])
 
       const afterDelete = usePecoStore.getState()
       expect(afterDelete.document!.totalPages).toBe(3)
@@ -2518,7 +2517,7 @@ describe('pecoStore', () => {
 
     // ── BV-09: undo → redo で削除がやり直せる ────────────────────────────
 
-    it('BV-09: undo → redo restores the deleted state', () => {
+    it('BV-09: undo → redo restores the deleted state', async () => {
       const doc = makeFivePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2528,7 +2527,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().deletePages([0])
+      await usePecoStore.getState().deletePages([0])
       expect(usePecoStore.getState().document!.totalPages).toBe(4)
 
       usePecoStore.getState().undo()
@@ -2540,7 +2539,7 @@ describe('pecoStore', () => {
 
     // ── BV-10: 先頭ページを削除すると isDirty=true ──────────────────────
 
-    it('BV-10: deletePages sets isDirty=true', () => {
+    it('BV-10: deletePages sets isDirty=true', async () => {
       const doc = makeFivePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2551,7 +2550,7 @@ describe('pecoStore', () => {
         redoStack: [],
       })
 
-      usePecoStore.getState().deletePages([0])
+      await usePecoStore.getState().deletePages([0])
 
       expect(usePecoStore.getState().isDirty).toBe(true)
     })
