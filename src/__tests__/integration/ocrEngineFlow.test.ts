@@ -877,6 +877,57 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
       expect(p0.textBlocks[1].text).toBe('新規');
     });
 
+    it('PCT-046 同根バグ: pageData.width=0 のとき getCachedPageProxy 経由の有効な寸法が run_ocr に渡される', async () => {
+      // pageData の width/height を 0 にして store にセット
+      const pages = new Map<number, import('../../types').PageData>();
+      pages.set(0, {
+        pageIndex: 0,
+        width: 0,
+        height: 0,
+        textBlocks: [],
+        isDirty: false,
+        thumbnail: null,
+      });
+      const doc: import('../../types').PecoDocument = {
+        filePath: '/zero-size-region.pdf',
+        fileName: 'zero-size-region.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages,
+      };
+      usePecoStore.getState().setDocument(doc);
+      usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+      // getCachedPageProxy は width=612, height=792 を返す
+      h.getCachedPageProxyMock.mockResolvedValue(makeMockPage(612, 792));
+
+      let capturedRunOcrArgs: Record<string, unknown> | null = null;
+      h.invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'run_ocr') {
+          capturedRunOcrArgs = args ?? null;
+          return JSON.stringify({
+            status: 'ok',
+            blocks: [
+              { text: 'region', bbox: { x: 0, y: 0, width: 20, height: 10 }, writingMode: 'horizontal', confidence: 1 },
+            ],
+          });
+        }
+        return '';
+      });
+
+      const { result } = renderHook(() => useOcrEngine(() => {}));
+      const canvas = makeOffscreenCanvas(612, 792);
+
+      await act(async () => {
+        await result.current.runOcrOnRegion(canvas, { x: 10, y: 10, width: 50, height: 30 }, 0, 100);
+      });
+
+      // run_ocr が呼ばれ、有効な寸法（getCachedPageProxy 由来の 612×792）が渡されること
+      expect(capturedRunOcrArgs).not.toBeNull();
+      expect(capturedRunOcrArgs!.pageWidth).toBe(612);
+      expect(capturedRunOcrArgs!.pageHeight).toBe(792);
+    });
+
     it('キャンセル済みなら run_ocr 完了後の範囲指定OCR結果を store に反映しない', async () => {
       usePecoStore.getState().setDocument(makeDoc(1));
       usePecoStore.setState({ currentPageIndex: 0 } as any);
@@ -971,5 +1022,96 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     expect(p0.textBlocks ?? []).toHaveLength(0);
     // 破棄通知の toast が出ている
     expect(toasts.some((t) => t.err === true && t.msg.includes('破棄'))).toBe(true);
+  });
+});
+
+// PCT-046 回帰テスト: runOcrCurrentPage の pageWidth/pageHeight が常に有効な数値であること
+describe('PCT-046 regression: runOcrCurrentPage が pageWidth/pageHeight に有効な数値を渡す', () => {
+  it('pageData.width/height が 0 のとき、viewport から取得した値が run_ocr に渡される', async () => {
+    // pageData の width/height を 0 にした doc をセット
+    const pages = new Map<number, import('../../types').PageData>();
+    pages.set(0, {
+      pageIndex: 0,
+      width: 0,
+      height: 0,
+      textBlocks: [],
+      isDirty: false,
+      thumbnail: null,
+    });
+    const doc: import('../../types').PecoDocument = {
+      filePath: '/zero-size.pdf',
+      fileName: 'zero-size.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages,
+    };
+    usePecoStore.getState().setDocument(doc);
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    // openFreshPdfDoc が返す mock PDF は viewport width=595, height=842
+    const pdf = makeMockPdf(1, { width: 595, height: 842 });
+    h.openFreshPdfDocMock.mockResolvedValue(pdf);
+
+    let capturedRunOcrArgs: Record<string, unknown> | null = null;
+    h.invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'run_ocr') {
+        capturedRunOcrArgs = args ?? null;
+        return JSON.stringify({ status: 'ok', blocks: [] });
+      }
+      return '';
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    // run_ocr が呼ばれていること
+    expect(capturedRunOcrArgs).not.toBeNull();
+    // pageWidth/pageHeight が有効な数値（undefined でも 0 でもない）であること
+    expect(typeof capturedRunOcrArgs!.pageWidth).toBe('number');
+    expect(typeof capturedRunOcrArgs!.pageHeight).toBe('number');
+    expect(capturedRunOcrArgs!.pageWidth).toBeGreaterThan(0);
+    expect(capturedRunOcrArgs!.pageHeight).toBeGreaterThan(0);
+    // viewport の寸法が使われていること (scale=1.0 で 595×842)
+    expect(capturedRunOcrArgs!.pageWidth).toBe(595);
+    expect(capturedRunOcrArgs!.pageHeight).toBe(842);
+  });
+
+  it('pageData が未ロード（pages.get(0)===undefined）のとき、getCachedPageProxy 経由で取得した有効な寸法が run_ocr に渡される', async () => {
+    // pages.get(0) が undefined となるケース（未ロード / LRU 退避ページ）
+    // runOcrCurrentPage 先頭の getCachedPageProxy 経路を通り、合成 pageData（width=800, height=600）が使われる。
+    // getPageSize のフォールバック（viewport 再取得）は踏まない（pageData.width===800>0 のため）。
+    const pages = new Map<number, import('../../types').PageData>();
+    const doc: import('../../types').PecoDocument = {
+      filePath: '/no-page-data.pdf',
+      fileName: 'no-page-data.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages,
+    };
+    usePecoStore.getState().setDocument(doc);
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    // getCachedPageProxy が width=800, height=600 の viewport を返す
+    h.getCachedPageProxyMock.mockResolvedValue(makeMockPage(800, 600));
+    const pdf = makeMockPdf(1, { width: 800, height: 600 });
+    h.openFreshPdfDocMock.mockResolvedValue(pdf);
+
+    let capturedRunOcrArgs: Record<string, unknown> | null = null;
+    h.invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'run_ocr') {
+        capturedRunOcrArgs = args ?? null;
+        return JSON.stringify({ status: 'ok', blocks: [] });
+      }
+      return '';
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    // run_ocr が呼ばれていること
+    expect(capturedRunOcrArgs).not.toBeNull();
+    // getCachedPageProxy 経由の合成 pageData（width=800, height=600）がそのまま渡されること
+    expect(capturedRunOcrArgs!.pageWidth).toBe(800);
+    expect(capturedRunOcrArgs!.pageHeight).toBe(600);
   });
 });

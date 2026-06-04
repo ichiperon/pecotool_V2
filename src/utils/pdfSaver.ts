@@ -317,6 +317,8 @@ export async function buildPdfDocument(
           if (isCurveDefinition((block as { curve?: unknown }).curve)) {
             out.curve = (block as { curve: import('../types').CurveDefinition }).curve;
           }
+          // NOTE: confidence は repair 経路で引き継がない。次回保存時に bboxMeta 経由で再永続化されるため
+          // 一時的欠落に留まる（PCT-047 設計上の許容）。
           return out;
         });
       if (repairBlocks.length === 0) continue;
@@ -369,6 +371,9 @@ export async function buildPdfDocument(
       };
       // issue #186: 湾曲ベースラインが定義されていれば JSON に同梱
       if (b.curve) entry.curve = b.curve;
+      // #192 / PCT-047: confidence を永続化する。再オープン後も低信頼ハイライトが機能するよう、
+      // undefined でない場合のみキーを書き込む（後方互換: 欠如時は undefined 扱いのまま）。
+      if (b.confidence !== undefined) entry.confidence = b.confidence;
       return entry;
     });
     metaChanged = true;

@@ -513,6 +513,8 @@ export interface RepairTextBlock {
   order: number;
   /** issue #186: 湾曲ベースライン定義。未定義時は従来の axis-aligned 描画 */
   curve?: CurveDefinition;
+  /** PCT-047: OCR 信頼度 (0..1)。永続化のために追加。後方互換のため optional。 */
+  confidence?: number;
 }
 
 export interface RepairPageData {

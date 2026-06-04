@@ -7,6 +7,11 @@ export interface PecoToolBBoxMetaEntry {
   writingMode: string;
   order: number;
   text: string;
+  /**
+   * OCR 信頼度 (0..1)。#192 で追加。
+   * 既存 PDF (confidence 欠如) との後方互換のため optional にする。
+   */
+  confidence?: number;
 }
 
 // プロトタイプ汚染攻撃を防ぐためのキー拒否リスト
@@ -30,6 +35,14 @@ function isValidEntry(value: unknown): value is PecoToolBBoxMetaEntry {
   if (typeof e.writingMode !== 'string') return false;
   if (typeof e.text !== 'string') return false;
   if (!Number.isInteger(e.order) || (e.order as number) < 0) return false;
+  // confidence は後方互換のため optional。存在する場合は 0..1 の有限数値であること。
+  // Windows OCR は 0..1 を保証するため、範囲外（< 0 または > 1）はデータ破損とみなして弾く。
+  if (
+    e.confidence !== undefined &&
+    (!Number.isFinite(e.confidence as number) ||
+      (e.confidence as number) < 0 ||
+      (e.confidence as number) > 1)
+  ) return false;
   return true;
 }
 
