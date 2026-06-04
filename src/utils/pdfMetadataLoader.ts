@@ -46,20 +46,52 @@ function isValidEntry(value: unknown): value is PecoToolBBoxMetaEntry {
   return true;
 }
 
-function isValidBBoxMetaRecord(
+/**
+ * Sanitize a raw parsed value into a validated bbox meta record.
+ *
+ * Instead of rejecting the entire record when any entry is invalid,
+ * this function:
+ *   - Returns null only when the top-level structure is fundamentally broken
+ *     (non-object, null, or Array).
+ *   - Skips DANGEROUS_KEYS (__proto__ / constructor / prototype) entirely
+ *     (protects against prototype pollution; the page is dropped, not the whole record).
+ *   - Skips keys whose value is not an Array.
+ *   - Within each page array, keeps only entries that pass isValidEntry;
+ *     invalid entries are silently discarded.
+ *   - Returns a new record containing only valid entries.
+ *     Pages that end up with zero valid entries are omitted from the result.
+ */
+function sanitizeBBoxMetaRecord(
   value: unknown,
-): value is Record<string, PecoToolBBoxMetaEntry[]> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+): Record<string, PecoToolBBoxMetaEntry[]> | null {
+  // Structural guard: non-object or null or array → completely broken, return null.
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+
   const record = value as Record<string, unknown>;
+  const result: Record<string, PecoToolBBoxMetaEntry[]> = {};
+
   for (const key of Object.keys(record)) {
-    if (DANGEROUS_KEYS.has(key)) return false;
+    // DANGEROUS_KEYS: drop the key to prevent prototype pollution.
+    // Other pages remain unaffected.
+    if (DANGEROUS_KEYS.has(key)) continue;
+
     const arr = record[key];
-    if (!Array.isArray(arr)) return false;
-    for (const item of arr) {
-      if (!isValidEntry(item)) return false;
+    // Value must be an array; skip non-array page entries.
+    if (!Array.isArray(arr)) continue;
+
+    // Keep only valid entries; invalid ones are silently discarded.
+    const validEntries = arr.filter((item): item is PecoToolBBoxMetaEntry =>
+      isValidEntry(item),
+    );
+
+    // Omit pages that end up with zero valid entries
+    // (avoids injecting empty arrays where callers don't expect them).
+    if (validEntries.length > 0) {
+      result[key] = validEntries;
     }
   }
-  return true;
+
+  return result;
 }
 
 export interface PecoToolBBoxMetaSource {
@@ -79,11 +111,12 @@ async function loadSourceBytes(
 function validateParsedBBoxMeta(
   parsed: unknown,
 ): Record<string, PecoToolBBoxMetaEntry[]> | null {
-  if (!isValidBBoxMetaRecord(parsed)) {
-    console.warn('[loadPecoToolBBoxMeta] Metadata schema validation failed');
+  const sanitized = sanitizeBBoxMetaRecord(parsed);
+  if (sanitized === null) {
+    console.warn('[loadPecoToolBBoxMeta] Metadata schema validation failed: top-level structure is invalid');
     return null;
   }
-  return parsed;
+  return sanitized;
 }
 
 /**
