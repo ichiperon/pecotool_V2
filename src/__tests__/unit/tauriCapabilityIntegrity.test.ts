@@ -239,7 +239,13 @@ describe('Tauri capability vs source integrity', () => {
     const filesUsingMkdir = sourceFiles.filter((f) =>
       extractFsImports(f).includes('mkdir'),
     );
-    expect(filesUsingMkdir.length).toBeGreaterThan(0);
+    // #285 switched run_ocr to a byte-based invoke and eliminated the JS-side
+    // Tauri FS dependency, so directory creation now happens on the Rust side
+    // and no JS source calls mkdir() anymore. The guard therefore only asserts
+    // the capability when mkdir is actually imported from JS — if mkdir is ever
+    // reintroduced without fs:allow-mkdir, this still fails like the v2.0.10
+    // regression it was written for.
+    if (filesUsingMkdir.length === 0) return;
     expect(
       granted.has('fs:allow-mkdir'),
       'fs:allow-mkdir is missing from capabilities/default.json but mkdir is used in source',
