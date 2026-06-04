@@ -284,30 +284,41 @@ describe('PdfCanvas static layer – curve block (Phase 4 #188)', () => {
   })
 })
 
-// ── issue #192: 低信頼ハイライト (赤系 fillRect) ──────────────────────────
-describe('PdfCanvas static layer – low-confidence highlight (#192)', () => {
-  it('confidence が閾値以下 + showLowConfidenceHighlight=true → 赤系 fillStyle が設定される', () => {
+// ── PCT-048: 要確認ハイライト (赤系 fillRect) ─────────────────────────────
+// Replaces the old confidence-based test group (#192).
+// drawStaticBlock now receives an explicit `isProblematic` flag (9th arg)
+// instead of deriving it from confidence + threshold.
+describe('PdfCanvas static layer – problematic block highlight (PCT-048)', () => {
+  it('isProblematic=true + showLowConfidenceHighlight=true → 赤系 fillStyle が設定される', () => {
     const ctx = makeMockContext()
-    const block = makeBlock({ text: '', confidence: 0.5 })
+    const block = makeBlock({ text: '' })
 
     drawStaticBlock(
       ctx as unknown as CanvasRenderingContext2D,
       block,
       1,
       0.5,
-      undefined,
-      undefined,
-      0.7,   // threshold
-      true,  // showLowConfidenceHighlight
+      undefined, // searchTermLower
+      undefined, // isActiveHit
+      undefined, // _confidenceThreshold (deprecated, ignored)
+      true,      // showLowConfidenceHighlight
+      true,      // isProblematic
     )
 
     // fillStyle が赤系 rgba(220, 38, 38, ...) で設定されたことを確認
     expect(ctx.fillStyle).toMatch(/rgba\(220,\s*38,\s*38/)
   })
 
-  it('confidence が閾値より高い → 青系 fillStyle が設定される', () => {
-    const ctx = makeMockContext()
-    const block = makeBlock({ text: '', confidence: 0.9 })
+  it('isProblematic=false → 青系 fillStyle が fillRect 時に設定される', () => {
+    const capturedFillStyles: string[] = []
+    const ctx = {
+      ...makeMockContext(),
+      fillStyle: '',
+      fillRect: vi.fn(function (this: { fillStyle: string }) {
+        capturedFillStyles.push(this.fillStyle)
+      }),
+    }
+    const block = makeBlock({ text: 'normal' })
 
     drawStaticBlock(
       ctx as unknown as CanvasRenderingContext2D,
@@ -316,16 +327,18 @@ describe('PdfCanvas static layer – low-confidence highlight (#192)', () => {
       0.5,
       undefined,
       undefined,
-      0.7,
+      undefined,
       true,
+      false, // isProblematic=false
     )
 
-    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+    // First fillRect call is the block background fill
+    expect(capturedFillStyles[0]).toMatch(/rgba\(0,\s*150,\s*255/)
   })
 
-  it('showLowConfidenceHighlight=false のとき低信頼でも青系 fillStyle になる', () => {
+  it('showLowConfidenceHighlight=false のとき isProblematic=true でも青系 fillStyle になる', () => {
     const ctx = makeMockContext()
-    const block = makeBlock({ text: '', confidence: 0.3 })
+    const block = makeBlock({ text: '' })
 
     drawStaticBlock(
       ctx as unknown as CanvasRenderingContext2D,
@@ -334,16 +347,17 @@ describe('PdfCanvas static layer – low-confidence highlight (#192)', () => {
       0.5,
       undefined,
       undefined,
-      0.7,
-      false, // OFF
+      undefined,
+      false,  // showLowConfidenceHighlight=false
+      true,   // isProblematic=true (ignored because toggle is OFF)
     )
 
     expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
   })
 
-  it('confidence が undefined のとき低信頼でも青系 fillStyle になる (legacy)', () => {
+  it('isProblematic=undefined → 青系 fillStyle になる (フラグ未指定)', () => {
     const ctx = makeMockContext()
-    const block = makeBlock({ text: '', confidence: undefined })
+    const block = makeBlock({ text: '' })
 
     drawStaticBlock(
       ctx as unknown as CanvasRenderingContext2D,
@@ -352,17 +366,19 @@ describe('PdfCanvas static layer – low-confidence highlight (#192)', () => {
       0.5,
       undefined,
       undefined,
-      0.7,
+      undefined,
       true,
+      // isProblematic omitted
     )
 
     expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
   })
 
-  it('renderStaticLayer 経由でも低信頼ブロックに赤系が設定される', () => {
+  it('renderStaticLayer 経由: 空ブロックは赤系ハイライトになる (showLowConfidenceHighlight=true)', () => {
     const ctx = makeMockContext()
     const canvas = makeMockCanvas()
-    const block = makeBlock({ text: '', confidence: 0.4 })
+    // Empty text → isEmptyBlock() = true → getProblematicBlockIds flags it
+    const block = makeBlock({ text: '' })
 
     renderStaticLayer(
       ctx as unknown as CanvasRenderingContext2D,
@@ -374,11 +390,98 @@ describe('PdfCanvas static layer – low-confidence highlight (#192)', () => {
       0.5,
       undefined,
       undefined,
-      0.7,
-      true,
+      undefined, // _confidenceThreshold (deprecated)
+      true,      // showLowConfidenceHighlight
     )
 
     expect(ctx.fillStyle).toMatch(/rgba\(220,\s*38,\s*38/)
+  })
+
+  it('renderStaticLayer 経由: 非空ブロックは青系ハイライトになる (fillRect 時)', () => {
+    const capturedFillStyles: string[] = []
+    const ctx = {
+      ...makeMockContext(),
+      fillStyle: '',
+      fillRect: vi.fn(function (this: { fillStyle: string }) {
+        capturedFillStyles.push(this.fillStyle)
+      }),
+    }
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: 'hello' })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    )
+
+    // First fillRect call is the block background fill
+    expect(capturedFillStyles[0]).toMatch(/rgba\(0,\s*150,\s*255/)
+  })
+
+  it('renderStaticLayer 経由: showLowConfidenceHighlight=false → 空ブロックでも青系', () => {
+    const ctx = makeMockContext()
+    const canvas = makeMockCanvas()
+    const block = makeBlock({ text: '' })
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [block],
+      new Set(),
+      true,
+      100,
+      0.5,
+      undefined,
+      undefined,
+      undefined,
+      false, // showLowConfidenceHighlight=false
+    )
+
+    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
+  })
+
+  it('renderStaticLayer 経由: 完全重複ブロックの両方が赤系ハイライトになる', () => {
+    // PCT-048: BB overlap detection via getProblematicBlockIds
+    // Two identical bboxes → intersection/min = 1.0 >= BB_OVERLAP_RATIO
+    const capturedFillStyles: string[] = []
+    const ctx = {
+      ...makeMockContext(),
+      fillStyle: '',
+      fillRect: vi.fn(function (this: { fillStyle: string }) {
+        capturedFillStyles.push(this.fillStyle)
+      }),
+    }
+    const canvas = makeMockCanvas()
+    const blocks = [
+      makeBlock({ id: 'b1', text: 'A', bbox: { x: 0, y: 0, width: 100, height: 100 } }),
+      makeBlock({ id: 'b2', text: 'B', bbox: { x: 0, y: 0, width: 100, height: 100 } }),
+    ]
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      blocks,
+      new Set(),
+      true,
+      100,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    )
+
+    // Both blocks should use the red fill
+    expect(capturedFillStyles.every(s => /rgba\(220,\s*38,\s*38/.test(s))).toBe(true)
   })
 })
 
@@ -510,15 +613,15 @@ describe('PdfCanvas static layer – search highlight (issue #196)', () => {
   })
 })
 
-// ── issue #244: ocrConfidenceThreshold / showLowConfidenceHighlight が
-//   renderStaticLayer に正しく渡されることを確認するリグレッションテスト ──
-describe('PdfCanvas static layer – confidence args passthrough regression (#244)', () => {
-  it('ocrConfidenceThreshold が変化すると renderStaticLayer の引数に反映される', () => {
+// ── PCT-048: showLowConfidenceHighlight トグルが描画に正しく反映される ──
+// Replaces the old threshold passthrough regression test (#244).
+describe('PdfCanvas static layer – showLowConfidenceHighlight toggle (PCT-048)', () => {
+  it('showLowConfidenceHighlight=true → 空ブロックは赤系になる', () => {
     const ctx = makeMockContext()
     const canvas = makeMockCanvas()
-    const block = makeBlock({ text: '', confidence: 0.4 })
+    // Empty block is always flagged regardless of confidence value
+    const block = makeBlock({ text: '' })
 
-    // threshold=0.3 → confidence(0.4) > threshold なので青系
     renderStaticLayer(
       ctx as unknown as CanvasRenderingContext2D,
       canvas,
@@ -529,33 +632,16 @@ describe('PdfCanvas static layer – confidence args passthrough regression (#24
       0.5,
       undefined,
       undefined,
-      0.3,
-      true,
-    )
-    expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)
-
-    // threshold=0.7 → confidence(0.4) <= threshold なので赤系
-    const ctx2 = makeMockContext()
-    renderStaticLayer(
-      ctx2 as unknown as CanvasRenderingContext2D,
-      canvas,
-      [block],
-      new Set(),
-      true,
-      100,
-      0.5,
       undefined,
-      undefined,
-      0.7,
-      true,
+      true, // showLowConfidenceHighlight=true
     )
-    expect(ctx2.fillStyle).toMatch(/rgba\(220,\s*38,\s*38/)
+    expect(ctx.fillStyle).toMatch(/rgba\(220,\s*38,\s*38/)
   })
 
-  it('showLowConfidenceHighlight=false に切り替えると低信頼でも青系になる', () => {
+  it('showLowConfidenceHighlight=false に切り替えると空ブロックでも青系になる', () => {
     const ctx = makeMockContext()
     const canvas = makeMockCanvas()
-    const block = makeBlock({ text: '', confidence: 0.2 })
+    const block = makeBlock({ text: '' })
 
     renderStaticLayer(
       ctx as unknown as CanvasRenderingContext2D,
@@ -567,8 +653,8 @@ describe('PdfCanvas static layer – confidence args passthrough regression (#24
       0.5,
       undefined,
       undefined,
-      0.7,
-      false, // showLowConfidenceHighlight OFF
+      undefined,
+      false, // showLowConfidenceHighlight=false
     )
 
     expect(ctx.fillStyle).toMatch(/rgba\(0,\s*150,\s*255/)

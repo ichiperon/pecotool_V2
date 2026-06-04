@@ -26,6 +26,8 @@ import { SortableOcrCard } from './SortableOcrCard';
 import { OcrCardHandle } from './OcrCard';
 import { Search } from 'lucide-react';
 import { perf } from '../utils/perfLogger';
+import { getProblematicBlockIds } from '../utils/blockQuality';
+import { useOcrSettingsStore } from '../store/ocrSettingsStore';
 
 interface OcrEditorProps {
   width: number;
@@ -55,6 +57,20 @@ export function OcrEditor({
   const nextSearchHit = useSearchStore(s => s.nextSearchHit);
   const prevSearchHit = useSearchStore(s => s.prevSearchHit);
   const [activeId, setActiveId] = useState<string | null>(null);
+
+  // PCT-048: トグル状態を購読して problematicIds の useMemo に含める
+  const showLowConfidenceHighlight = useOcrSettingsStore(s => s.showLowConfidenceHighlight);
+
+  // PCT-048: Compute problematic block IDs for the current page once per
+  // textBlocks change, so each OcrCard can look up membership in O(1).
+  // Guard with showLowConfidenceHighlight so we skip the O(N^2) overlap scan
+  // when the feature is disabled.
+  const problematicIds = useMemo(() => {
+    if (!showLowConfidenceHighlight || !currentPage?.textBlocks?.length) {
+      return new Set<string>();
+    }
+    return getProblematicBlockIds(currentPage.textBlocks);
+  }, [showLowConfidenceHighlight, currentPage?.textBlocks]);
 
   // 仮想化対応: マウント/アンマウントされる各カードへの ref を id でひける Map に保持。
   // Virtuoso は可視範囲外のカードをアンマウントするので index ベースの配列は使えない。
@@ -395,9 +411,14 @@ export function OcrEditor({
   const filteredBlocksRef = useRef(filteredBlocks);
   const currentPageIndexRef = useRef(currentPageIndex);
   const handleSelectRef = useRef(handleSelect);
+  // PCT-048: problematicIds changes with each page edit; keep a ref so that
+  // the stable renderItem callback can access the latest value without being
+  // recreated (which would invalidate Virtuoso's itemContent memoisation).
+  const problematicIdsRef = useRef(problematicIds);
   filteredBlocksRef.current = filteredBlocks;
   currentPageIndexRef.current = currentPageIndex;
   handleSelectRef.current = handleSelect;
+  problematicIdsRef.current = problematicIds;
 
   // issue #116: BB クリックで lastSelectedId が変わったら、仮想化リストを
   // そのブロックまでスクロールさせる。OcrCard 側の per-card scrollIntoView は
@@ -444,6 +465,7 @@ export function OcrEditor({
           onNavigate={(dir) => handleNavigateRef.current(block.id, dir)}
           onExtendSelection={(dir) => handleExtendSelectionRef.current(block.id, dir)}
           onSelect={(id, ctrl, shift) => handleSelectRef.current(id, ctrl, shift)}
+          problematicIds={problematicIdsRef.current}
         />
       );
     },

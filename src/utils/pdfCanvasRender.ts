@@ -8,6 +8,7 @@
  */
 import { isCurveDefinition } from "./curveDefinition";
 import { layoutTextOnCurveViewport } from "./curveGlyphLayout";
+import { getProblematicBlockIds } from "./blockQuality";
 import type { TextBlock } from "../types";
 
 /**
@@ -31,38 +32,44 @@ export function drawStaticBlock(
   opacity: number,
   searchTermLower?: string,
   isActiveHit?: boolean,
-  confidenceThreshold?: number,
+  /** @deprecated Pass isProblematic instead. Kept for call-site compatibility — value is ignored. */
+  _confidenceThreshold?: number,
   showLowConfidenceHighlight?: boolean,
+  /** PCT-048: pre-computed flag from getProblematicBlockIds(); replaces confidence heuristic */
+  isProblematic?: boolean,
 ): void {
   // curve 付き block は per-glyph の curve 描画パスへ
   if (block.curve && isCurveDefinition(block.curve)) {
-    drawStaticBlockCurve(context, block, scale, opacity, searchTermLower, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
+    drawStaticBlockCurve(context, block, scale, opacity, searchTermLower, isActiveHit, undefined, showLowConfidenceHighlight, undefined, isProblematic);
     return;
   }
 
-  // ── 既存 axis-aligned パス (変更禁止) ──────────────────────────────────
+  // ── 既存 axis-aligned パス ──────────────────────────────────────────
   const x = block.bbox.x * scale;
   const y = block.bbox.y * scale;
   const w = block.bbox.width * scale;
   const h = block.bbox.height * scale;
   const inset = 1;
   const baseAlpha = opacity;
-  const fillAlpha = opacity * 0.25;
+  // PCT-048: alpha raised from 0.25 → 0.4 for problematic blocks so the
+  // highlight is clearly visible while normal blocks keep the subtle 0.25.
+  const normalFillAlpha = opacity * 0.25;
+  const problematicFillAlpha = opacity * 0.4;
 
-  // #192: 低信頼ブロックは赤系塗り、通常は青系
-  const isLowConfidence =
-    showLowConfidenceHighlight === true &&
-    block.confidence !== undefined &&
-    confidenceThreshold !== undefined &&
-    block.confidence <= confidenceThreshold;
+  // PCT-048: problematic flag (empty block or significant BB overlap)
+  const flagged = showLowConfidenceHighlight === true && isProblematic === true;
 
-  context.fillStyle = isLowConfidence
-    ? `rgba(220, 38, 38, ${fillAlpha})`
-    : `rgba(0, 150, 255, ${fillAlpha})`;
+  context.fillStyle = flagged
+    ? `rgba(220, 38, 38, ${problematicFillAlpha})`
+    : `rgba(0, 150, 255, ${normalFillAlpha})`;
   context.fillRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
-  context.strokeStyle = `rgba(255, 0, 0, ${baseAlpha})`;
-  context.lineWidth = 1;
+  // PCT-048: problematic blocks get a stronger red border (lineWidth 2),
+  // normal blocks keep the existing thin red outline (lineWidth 1).
+  context.strokeStyle = flagged
+    ? `rgba(220, 38, 38, ${baseAlpha})`
+    : `rgba(255, 0, 0, ${baseAlpha * 0.6})`;
+  context.lineWidth = flagged ? 2 : 1;
   context.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
 
   // issue #196: 検索ヒットの黄色ハイライト
@@ -133,15 +140,19 @@ export function drawStaticBlockCurve(
   opacity: number,
   searchTermLower?: string,
   isActiveHit?: boolean,
-  confidenceThreshold?: number,
+  /** @deprecated Ignored. Kept for call-site compatibility. */
+  _confidenceThreshold?: number,
   showLowConfidenceHighlight?: boolean,
   colors?: BlockColors,
+  /** PCT-048: pre-computed flag from getProblematicBlockIds() */
+  isProblematic?: boolean,
 ): void {
   const h = block.bbox.height * scale;
   const fontSize = Math.max(10, h * 0.8);
   const inset = 1;
   const baseAlpha = opacity;
-  const fillAlpha = opacity * 0.25;
+  const normalFillAlpha = opacity * 0.25;
+  const problematicFillAlpha = opacity * 0.4;
 
   let fillColor: string;
   let glyphStrokeColor: string;
@@ -153,15 +164,11 @@ export function drawStaticBlockCurve(
     glyphStrokeColor = colors.strokeColor;
     glyphTextColor = colors.textColor;
   } else {
-    // #192: 低信頼ブロックは赤系塗り、通常は青系 (静的層デフォルト)
-    const isLowConfidence =
-      showLowConfidenceHighlight === true &&
-      block.confidence !== undefined &&
-      confidenceThreshold !== undefined &&
-      block.confidence <= confidenceThreshold;
-    fillColor = isLowConfidence
-      ? `rgba(220, 38, 38, ${fillAlpha})`
-      : `rgba(0, 150, 255, ${fillAlpha})`;
+    // PCT-048: problematic flag (empty or overlapping block)
+    const flagged = showLowConfidenceHighlight === true && isProblematic === true;
+    fillColor = flagged
+      ? `rgba(220, 38, 38, ${problematicFillAlpha})`
+      : `rgba(0, 150, 255, ${normalFillAlpha})`;
     glyphStrokeColor = `rgba(255, 255, 255, ${baseAlpha})`;
     glyphTextColor = `rgba(255, 0, 0, ${baseAlpha})`;
   }
@@ -236,7 +243,8 @@ export function renderStaticLayer(
   opacity: number,
   searchTerm?: string,
   searchHitIndex?: number,
-  confidenceThreshold?: number,
+  /** @deprecated Ignored (PCT-048). Kept for call-site compatibility. */
+  _confidenceThreshold?: number,
   showLowConfidenceHighlight?: boolean,
 ): void {
   // 注: 以前は block 単位の offscreen canvas キャッシュ + drawImage 経由で描画していたが、
@@ -254,6 +262,12 @@ export function renderStaticLayer(
   let hitCounter = -1;
   const activeIndex = searchHitIndex ?? 0;
 
+  // PCT-048: Compute problematic block IDs once for the whole page so each
+  // drawStaticBlock call can check membership in O(1).
+  const problematicIds = showLowConfidenceHighlight
+    ? getProblematicBlockIds(textBlocks)
+    : new Set<string>();
+
   for (const block of textBlocks) {
     if (selectedIds.has(block.id)) continue;
     let isActiveHit = false;
@@ -261,6 +275,7 @@ export function renderStaticLayer(
       hitCounter++;
       isActiveHit = hitCounter === activeIndex;
     }
-    drawStaticBlock(context, block, scale, opacity, termLower, isActiveHit, confidenceThreshold, showLowConfidenceHighlight);
+    const isProblematic = problematicIds.has(block.id);
+    drawStaticBlock(context, block, scale, opacity, termLower, isActiveHit, undefined, showLowConfidenceHighlight, isProblematic);
   }
 }
