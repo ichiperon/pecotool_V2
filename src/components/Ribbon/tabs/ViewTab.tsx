@@ -64,14 +64,14 @@ export const ViewTab: React.FC<ViewTabProps> = (props) => {
         </RibbonButton>
       </RibbonGroup>
 
-      <RibbonGroup title="信頼度">
+      <RibbonGroup title="要確認">
         <RibbonButton
           onClick={() => setShowLowConfidenceHighlight(!showLowConfidenceHighlight)}
           className={showLowConfidenceHighlight ? 'active' : ''}
-          title="低信頼ハイライト"
+          title="要確認マーク (空ブロック・重なりブロックをハイライト)"
           aria-pressed={showLowConfidenceHighlight ? 'true' : 'false'}
         >
-          <AlertCircle size={14} /><span>低信頼ハイライト</span>
+          <AlertCircle size={14} /><span>要確認マーク</span>
         </RibbonButton>
       </RibbonGroup>
 

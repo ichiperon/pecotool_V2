@@ -10,12 +10,14 @@ interface SortableOcrCardProps {
   onNavigate?: (direction: 'up' | 'down') => void;
   onExtendSelection?: (direction: 'up' | 'down') => void;
   onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
+  /** PCT-048: Pre-computed problematic block IDs for the current page. */
+  problematicIds?: Set<string>;
 }
 
 // 仮想化リスト内で大量カードがマウントされてもムダな再レンダリングを避けるため memo 化。
 // 親からのコールバックは useCallback で安定化されている前提。
 export const SortableOcrCard = memo(forwardRef<OcrCardHandle, SortableOcrCardProps>(
-  function SortableOcrCard({ block, pageIndex, onNavigate, onExtendSelection, onSelect }, ref) {
+  function SortableOcrCard({ block, pageIndex, onNavigate, onExtendSelection, onSelect, problematicIds }, ref) {
   const {
     attributes,
     listeners,
@@ -43,6 +45,7 @@ export const SortableOcrCard = memo(forwardRef<OcrCardHandle, SortableOcrCardPro
         onNavigate={onNavigate}
         onExtendSelection={onExtendSelection}
         onSelect={onSelect}
+        problematicIds={problematicIds}
       />
     </div>
   );
