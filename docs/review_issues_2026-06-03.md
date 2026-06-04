@@ -53,6 +53,7 @@
 | PCT-037 | P0 | 保存中await後に古い `document.pages` と新しい `pageOrder` が混ざり、別物理ページへdirtyを適用し得る | Save Snapshot Worker / Kepler / Planck | document/pageOrder same-snapshot clone; `useFileOperations.test.ts` 52 tests passed; re-review LGTM |
 | PCT-038 | P1 | 保存後pageOrder正規化で構造履歴だけ消し、古いdisplay indexの `update_page(s)` undoが別ページを上書きし得る | Undo/Redo Worker / Einstein / Planck | non-identity normalize clears undo/redo; `pecoStore.test.ts` 155 tests passed; re-review LGTM |
 | PCT-039 | P1 | 保存中のpost-snapshot編集/構造変更が保存後 `lastSavedActionIndex` / `isDirty` 更新で保存済み扱いになり得る | Save State Worker / Franklin / Ptolemy | savedActionIndex + post-snapshot dirty guard; `useFileOperations.test.ts` 52 tests passed; re-review LGTM |
+| PCT-040 | P2 | `tauriCapabilityIntegrity` の mkdir ガードが、#285 (byte-based OCR) で JS 側 mkdir 撤廃後も「mkdir が使われている前提」で空振り失敗し、広域 `npm test` が赤くなる（test:quality 対象外のため未検出だった。runtime 実害なし） | RC stabilization / えーちゃん | conditional guard: mkdir 未使用なら skip、再導入時のみ capability 必須を検証; `tauriCapabilityIntegrity.test.ts` 6 tests passed |
 
 ## Final Verification
 
@@ -68,3 +69,17 @@
 - `npm run build` passed
 - `npm run test:e2e:ci` passed: 74 passed / 1 skipped
 - `git diff --check` passed (CRLF warnings only)
+
+## RC Stabilization Re-verification (2026-06-04)
+
+post-merge (main @ Merge PR #293) でフル自動ゲートを再走。
+
+- `npx tsc --noEmit` passed
+- `npm run test:critical` passed: PDF acceptance 90 passed / 1 skipped, state acceptance 116 passed
+- `npm run build` passed
+- `npm run test:e2e:ci` passed: 74 passed / 1 skipped（※初回全失敗は port 1420 を握る stale dev サーバが原因。除去後にクリーン緑）
+- `npm run test:pdf:soak` passed: 19 passed（ローカル実 PDF fixture あり）
+- `npm test`（広域 unit/components/integration）: 初回 1 failed（PCT-040: 後述）→ 修正後 1880 passed / 3 skipped / 1 todo
+- `npm run test:tauri`（cargo）passed: 20 tests ok
+
+PCT-040 を修正し、全自動ゲート緑。RC 候補。
