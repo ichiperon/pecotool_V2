@@ -83,3 +83,24 @@ post-merge (main @ Merge PR #293) でフル自動ゲートを再走。
 - `npm run test:tauri`（cargo）passed: 20 tests ok
 
 PCT-040 を修正し、全自動ゲート緑。RC 候補。
+
+## RC Hardening (2026-06-04) — データ損失耐性 & 最小権限
+
+手動受け入れの「自動で潰せる観点」を実装。
+
+- **データ損失耐性（保存原子性）**: `replace_pdf_file`（Rust）の atomic-replace コアを `replace_target_with_temp(_inner)` に抽出し、rename 操作を注入可能化。失敗注入で「**temp→target 移動失敗時に元ファイルが復元される**」「復元失敗時もエラーに backup パスが残る」を検証する cargo テスト4本を追加（cargo 20→24 passed）。behavior-preserving。
+- **最小権限**: dead と確証した `fs:allow-mkdir` capability を削除（#285 で JS 側 mkdir 撤廃済み、Rust は std::fs 直接で plugin 許可に非依存）。`tauriCapabilityIntegrity` 6 passed / tsc 0 error。
+- 検証: `cargo test` 24 passed / `tauriCapabilityIntegrity` 6 passed / `tsc --noEmit` 0 error。
+
+## Backlog (RC 後・P2)
+
+| ID | Priority | Issue | 備考 |
+| --- | --- | --- | --- |
+| PCT-041 | P2 | `$TEMP/**` スコープの最小権限化検討（`fs:allow-write-file`/`write-text-file`/`read-file`/`stat` から除去可能か精査）。前提: dialog `save()` が $TEMP を選び得るか、sidecar/CSV/フォールバックの $TEMP 非依存を最終確証 | dead 確証が取れ次第 tightening。AZKi 提案 |
+| PCT-042 | P2 | `fs:allow-remove` の `$TEMP/**` も PCT-041 と連動して要否判断 | 同上 |
+| PCT-043 | P2 | `replace_pdf_file` の move-away→move-in 間にクラッシュすると target が一時消失（元データは `.pecotool-backup-*.tmp` に残り復元可能）。Windows は `ReplaceFileW`/`MoveFileExW` で真の atomic replace に置換する余地 | 低確率・復元可能のため RC 非ブロッカー |
+
+## 残・手動のみ（自動化不可）
+
+- 実 Acrobat 7 でのテキスト層位置の**目視**確認
+- 実運用 PDF（回転/縦書き/大ページ/スキャン由来/権限付き等）の幅広い実ファイル投入
