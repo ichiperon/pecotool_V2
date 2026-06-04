@@ -400,13 +400,23 @@ export function useOcrEngine(
     try {
       if (!isCurrentDocument(capturedEpoch)) return;
       logger.log(`[OCR] ページ ${pageIdx + 1} OCR実行中...`);
+      // #PCT-046: processAllPages と同様に getPageSize を経由して寸法を取得する。
+      // pageData.width/height が 0 または undefined の場合でも viewport から再取得し、
+      // run_ocr の pageWidth/pageHeight に有効な数値が渡されることを保証する。
+      let size: { pageWidth: number; pageHeight: number };
+      try {
+        size = await getPageSize(ocrPdf, sourcePageIndex, pageData);
+      } catch (e) {
+        showToast(`ページ ${pageIdx + 1} のサイズ取得に失敗しました。OCRを実行できません。`, true);
+        return;
+      }
       const settings = useOcrSettingsStore.getState();
       const { result } = await runOcrForPage(
         ocrPdf,
         doc.filePath,
         sourcePageIndex,
-        pageData.width,
-        pageData.height,
+        size.pageWidth,
+        size.pageHeight,
         settings.ocrLanguage,
       );
       if (cancelTokenRef.current) return;
@@ -813,6 +823,23 @@ export function useOcrEngine(
     setOcrRunning(true);
     const capturedEpoch = useInfraStore.getState().documentEpoch;
     try {
+      // #PCT-046 同根バグ対応: pageData.width/height が 0 の場合は getCachedPageProxy 経由で
+      // viewport から再取得する。runOcrCurrentPage と同じフォールバック方式。
+      let pageWidth = pageData.width;
+      let pageHeight = pageData.height;
+      if (pageWidth === 0 || pageHeight === 0) {
+        try {
+          const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIndex);
+          const page = await getCachedPageProxy(doc.filePath, sourcePageIndex);
+          const viewport = page.getViewport({ scale: 1.0 });
+          pageWidth = viewport.width;
+          pageHeight = viewport.height;
+        } catch (e) {
+          showToast(`ページ ${pageIndex + 1} のサイズ取得に失敗しました。OCRを実行できません。`, true);
+          return;
+        }
+      }
+
       // pdfCanvas からクロップ画像を生成
       const cropCanvas = document.createElement('canvas');
       cropCanvas.width = sw;
@@ -835,8 +862,8 @@ export function useOcrEngine(
       const settings = useOcrSettingsStore.getState();
       const raw = await invoke<string>('run_ocr', {
         imageBytes: Array.from(bytes),
-        pageWidth: pageData.width,
-        pageHeight: pageData.height,
+        pageWidth,
+        pageHeight,
         renderScale: scale,
         languageTag: settings.ocrLanguage ?? null,
       });

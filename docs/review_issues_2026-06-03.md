@@ -14,6 +14,8 @@
 
 | ID | Priority | Issue | Owner | Closed By |
 | --- | --- | --- | --- | --- |
+| PCT-046 | P1 | 単一ページOCR（`runOcrCurrentPage`）が `pageData.width/height` を `getPageSize` フォールバック無しで `run_ocr` に直接渡し、寸法 undefined で `command run_ocr missing required key pageWidth` 失敗。同根の `runOcrOnRegion`（範囲OCR）も width=0 で同様だった。実機手動テストで発覚（自動テスト未到達＝PCT-045 領域） | 手動発見 / ぺこら / マリン | `runOcrCurrentPage`+`runOcrOnRegion` を getPageSize/getCachedPageProxy 経由化。回帰テスト3本追加。ocrEngineFlow+pdfSaver+pdfTextExtractor 80 passed; 広域 npm test 1882 passed; reviewer LGTM |
+| PCT-047 | P1 | 低信頼度ハイライトのトグルが無反応。`block.confidence` が保存メタ(PecoToolBBoxes)に永続化されておらず再オープン後 undefined になり描画条件不成立（PCT-046 で OCR 自体失敗も連動） | 手動発見 / ぺこら / マリン | confidence を bboxMeta に条件付き永続化（保存/読込/型/バリデーション 0..1）。後方互換維持（欠如時 undefined）。reviewer LGTM |
 | PCT-003 | P0 | `Ctrl+0` 実行時にページ寸法未ロードだと `isAutoFit` だけ立ってzoomが更新されない | Ctrl+0 Debugger / Sartre | `usePdfViewerState.test.ts` 3 tests passed |
 | PCT-008 | P0 | `Ctrl+0` が日本語配列/テンキー等で `e.key === '0'` にならずショートカットが発火しない | Copernicus | `useKeyboardShortcuts.test.tsx` 22 tests passed |
 | PCT-009 | P0 | OCR current-page regression test が旧 `imagePath` 契約のままで、現行 `imageBytes` 実装を検証できていない | Hegel | `ocrEngineFlow.test.ts` 24 tests passed |

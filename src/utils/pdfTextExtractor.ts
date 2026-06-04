@@ -10,6 +10,8 @@ type PecoToolBBoxMetaEntry = {
   writingMode: string;
   order: number;
   text: string;
+  /** OCR 信頼度 (0..1)。PCT-047: 永続化・復元のために追加。後方互換のため optional。 */
+  confidence?: number;
 };
 
 type LoadPageOptions = {
@@ -36,6 +38,8 @@ export async function loadPage(
     writingMode: string;
     order: number;
     text: string;
+    /** OCR 信頼度 (0..1)。PCT-047: 後方互換のため optional。 */
+    confidence?: number;
   }>> | null,
   mtime?: number,
   options?: LoadPageOptions,
@@ -91,6 +95,9 @@ export async function loadPage(
         order: meta.order,
         isNew: false,
         isDirty: false,
+        // PCT-047: 永続化された confidence を復元する。
+        // 欠如時 (既存 PDF) は undefined のままにして legacy 扱い（色付けしない）とする。
+        ...(meta.confidence !== undefined ? { confidence: meta.confidence } : {}),
       }));
     } else {
       // Fallback: compute bboxes from pdfjs transform (original OCR text)
