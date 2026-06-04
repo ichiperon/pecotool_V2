@@ -63,6 +63,7 @@ describe('queue management', () => {
   let isPdfReadyRef: { current: boolean }
   let isProcessingRef: { current: boolean }
   let queueRef: { current: number[] }
+  let queueSetRef: { current: Set<number> }
   let epochRef: { current: number }
   let processedItems: number[]
 
@@ -75,6 +76,7 @@ describe('queue management', () => {
       while (queueRef.current.length > 0) {
         if (epochRef.current !== epoch) break
         const item = queueRef.current.shift()!
+        queueSetRef.current.delete(item)
         processedItems.push(item)
       }
     } finally {
@@ -84,8 +86,9 @@ describe('queue management', () => {
 
   /** hook 内の requestThumbnail と同等 */
   function requestThumbnail(pageIndex: number) {
-    if (!queueRef.current.includes(pageIndex)) {
+    if (!queueSetRef.current.has(pageIndex)) {
       queueRef.current.push(pageIndex)
+      queueSetRef.current.add(pageIndex)
     }
   }
 
@@ -93,6 +96,7 @@ describe('queue management', () => {
     isPdfReadyRef = { current: false }
     isProcessingRef = { current: false }
     queueRef = { current: [] }
+    queueSetRef = { current: new Set() }
     epochRef = { current: 1 }
     processedItems = []
   })
@@ -126,6 +130,19 @@ describe('queue management', () => {
     requestThumbnail(5)
     requestThumbnail(5)
     expect(queueRef.current).toEqual([5])
+    expect(queueSetRef.current).toEqual(new Set([5]))
+  })
+
+  it('clears queue Set after dequeue so the same page can be queued again', async () => {
+    isPdfReadyRef.current = true
+    requestThumbnail(5)
+    await processThumbnailQueue(1)
+    expect(queueRef.current).toEqual([])
+    expect(queueSetRef.current.has(5)).toBe(false)
+
+    requestThumbnail(5)
+    expect(queueRef.current).toEqual([5])
+    expect(queueSetRef.current).toEqual(new Set([5]))
   })
 
   it('does not reprocess when already processing (guard)', async () => {
@@ -218,6 +235,7 @@ describe('epoch-based invalidation', () => {
   let isPdfReadyRef: { current: boolean }
   let isProcessingRef: { current: boolean }
   let queueRef: { current: number[] }
+  let queueSetRef: { current: Set<number> }
   let thumbnailsRef: { current: Map<number, string> }
   let itemListenersRef: { current: Map<number, Set<() => void>> }
   let deferredLoadRef: { current: (() => void) | null }
@@ -226,6 +244,7 @@ describe('epoch-based invalidation', () => {
   function simulateFileSwitch() {
     epochRef.current++
     queueRef.current = []
+    queueSetRef.current.clear()
     isProcessingRef.current = false
     isPdfReadyRef.current = false
     deferredLoadRef.current = null
@@ -246,7 +265,9 @@ describe('epoch-based invalidation', () => {
     try {
       while (queueRef.current.length > 0) {
         if (epochRef.current !== epoch) break
-        processed.push(queueRef.current.shift()!)
+        const pageIndex = queueRef.current.shift()!
+        queueSetRef.current.delete(pageIndex)
+        processed.push(pageIndex)
       }
     } finally {
       isProcessingRef.current = false
@@ -259,6 +280,7 @@ describe('epoch-based invalidation', () => {
     isPdfReadyRef = { current: false }
     isProcessingRef = { current: false }
     queueRef = { current: [] }
+    queueSetRef = { current: new Set() }
     thumbnailsRef = { current: new Map() }
     itemListenersRef = { current: new Map() }
     deferredLoadRef = { current: null }
@@ -274,8 +296,10 @@ describe('epoch-based invalidation', () => {
 
   it('clears queue on file switch', () => {
     queueRef.current = [0, 1, 2, 3]
+    queueSetRef.current = new Set([0, 1, 2, 3])
     simulateFileSwitch()
     expect(queueRef.current).toEqual([])
+    expect(queueSetRef.current.size).toBe(0)
   })
 
   it('resets isPdfReady on file switch', () => {
@@ -414,8 +438,9 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     onerror: ((e: any) => void) | null = null
     onmessageerror: ((e: any) => void) | null = null
     listeners: Array<{ type: string; cb: any }> = []
+    messages: any[] = []
     /** GENERATE_THUMBNAIL 受信時に保留した解決関数 */
-    pendingGenerates: Array<{ pageIndex: number; resolve: () => void }> = []
+    pendingGenerates: Array<{ pageIndex: number; sourcePageIndex?: number; requestId?: number; resolve: () => void }> = []
     terminated = false
 
     constructor() {
@@ -423,23 +448,29 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     }
 
     postMessage(req: any, _transfer?: any) {
+      this.messages.push(req)
       if (req?.type === 'LOAD_PDF') {
         // 即座に LOAD_COMPLETE を返す
         queueMicrotask(() => {
-          this.deliver({ type: 'LOAD_COMPLETE', numPages: 10 })
+          this.deliver({ type: 'LOAD_COMPLETE', numPages: 10, requestId: req.requestId })
         })
         return
       }
       if (req?.type === 'GENERATE_THUMBNAIL') {
         const pageIndex = req.pageIndex
+        const sourcePageIndex = req.sourcePageIndex
+        const requestId = req.requestId
         // テスト側で明示的に呼ばれるまで保留する
         this.pendingGenerates.push({
           pageIndex,
+          sourcePageIndex,
+          requestId,
           resolve: () => {
             this.deliver({
               type: 'THUMBNAIL_DONE',
               pageIndex,
               bytes: new Uint8Array([1, 2, 3]),
+              requestId,
             })
           },
         })
@@ -521,10 +552,13 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     // pecoStore を初期化（前テストの状態を引きずらない）
     // issue #29 で originalBytes は store から外れたため setState では渡さない。
     const { usePecoStore } = await import('../../store/pecoStore')
+    const { useInfraStore } = await import('../../store/infraStore')
     usePecoStore.setState({
       document: null,
       currentPageIndex: 0,
+      pageOrder: [],
     })
+    useInfraStore.setState({ documentEpoch: 0 })
   })
 
   afterEach(() => {
@@ -540,7 +574,11 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
   })
 
   /** ストアにダミードキュメントを設定する */
-  async function setDoc(filePath: string, totalPages = 5) {
+  async function setDoc(
+    filePath: string,
+    totalPages = 5,
+    pageOrder = Array.from({ length: totalPages }, (_, i) => i),
+  ) {
     const { usePecoStore } = await import('../../store/pecoStore')
     usePecoStore.setState({
       document: {
@@ -550,6 +588,7 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
         metadata: { title: undefined, author: undefined },
         pages: new Map(),
       } as any,
+      pageOrder,
     })
   }
 
@@ -646,6 +685,202 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     for (const u of retainedUrls) {
       expect(revokedUrls).toContain(u)
     }
+  })
+
+  it('S-07-04: pageOrder remap sends sourcePageIndex and invalidates old display thumbnail', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { usePecoStore } = await import('../../store/pecoStore')
+    await setDoc('/path/A.pdf', 3, [0, 1, 2])
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+    act(() => {
+      createdWorkers.forEach(w => w.flushAllThumbnails())
+    })
+    await flush()
+
+    const oldThumb = result.current.getThumbnail(0)
+    expect(oldThumb).toBeDefined()
+
+    act(() => {
+      usePecoStore.setState({ pageOrder: [2, 0, 1] })
+    })
+    await flush()
+
+    expect(result.current.getThumbnail(0)).toBeUndefined()
+    expect(revokedUrls).toContain(oldThumb!)
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    const latestGenerate = createdWorkers[0].pendingGenerates[createdWorkers[0].pendingGenerates.length - 1]
+    expect(latestGenerate).toMatchObject({
+      pageIndex: 0,
+      sourcePageIndex: 2,
+    })
+
+    act(() => {
+      createdWorkers.forEach(w => w.flushAllThumbnails())
+    })
+    await flush()
+
+    expect(result.current.getThumbnail(0)).toBeDefined()
+    expect(result.current.getThumbnail(2)).toBeUndefined()
+
+    unmount()
+  })
+
+  it('PCT-012: stale response from previous pageOrder does not resolve new pending', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { usePecoStore } = await import('../../store/pecoStore')
+    await setDoc('/path/A.pdf', 3, [0, 1, 2])
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    const w0 = createdWorkers[0]
+    const staleGenerate = w0.pendingGenerates.shift()!
+    expect(staleGenerate).toMatchObject({
+      pageIndex: 0,
+      sourcePageIndex: 0,
+    })
+
+    act(() => {
+      usePecoStore.setState({ pageOrder: [2, 0, 1] })
+    })
+    await flush()
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    expect(w0.pendingGenerates.length).toBe(1)
+    const currentGenerate = w0.pendingGenerates[0]
+    expect(currentGenerate).toMatchObject({
+      pageIndex: 0,
+      sourcePageIndex: 2,
+    })
+    expect(currentGenerate.requestId).not.toBe(staleGenerate.requestId)
+
+    const createdBeforeStale = createdUrls.length
+    act(() => {
+      staleGenerate.resolve()
+    })
+    await flush()
+
+    expect(createdUrls.length).toBe(createdBeforeStale)
+    expect(result.current.getThumbnail(0)).toBeUndefined()
+    expect(w0.pendingGenerates.length).toBe(1)
+
+    act(() => {
+      w0.pendingGenerates.shift()!.resolve()
+    })
+    await flush()
+
+    expect(result.current.getThumbnail(0)).toBeDefined()
+
+    unmount()
+  })
+
+  it('PCT-013: stale response from previous file does not resolve new file pending', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    await setDoc('/path/A.pdf', 5)
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    const w0 = createdWorkers[0]
+    const staleGenerate = w0.pendingGenerates.shift()!
+
+    await setDoc('/path/B.pdf', 5)
+    await flush()
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    expect(w0.pendingGenerates.length).toBe(1)
+    const currentGenerate = w0.pendingGenerates[0]
+    expect(currentGenerate.requestId).not.toBe(staleGenerate.requestId)
+
+    const createdBeforeStale = createdUrls.length
+    act(() => {
+      staleGenerate.resolve()
+    })
+    await flush()
+
+    expect(createdUrls.length).toBe(createdBeforeStale)
+    expect(result.current.getThumbnail(0)).toBeUndefined()
+    expect(w0.pendingGenerates.length).toBe(1)
+
+    act(() => {
+      w0.pendingGenerates.shift()!.resolve()
+    })
+    await flush()
+
+    expect(result.current.getThumbnail(0)).toBeDefined()
+
+    unmount()
+  })
+
+  it('PCT-017: documentEpoch change for same file reloads worker and clears retained thumbnails', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { useInfraStore } = await import('../../store/infraStore')
+    await setDoc('/path/A.pdf', 3)
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    const loadCountBefore = createdWorkers[0].messages.filter((msg) => msg?.type === 'LOAD_PDF').length
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+    act(() => {
+      createdWorkers.forEach(w => w.flushAllThumbnails())
+    })
+    await flush()
+
+    const oldThumb = result.current.getThumbnail(0)
+    expect(oldThumb).toBeDefined()
+
+    act(() => {
+      useInfraStore.setState({ documentEpoch: 1 })
+    })
+    await flush()
+
+    expect(result.current.getThumbnail(0)).toBeUndefined()
+    expect(revokedUrls).toContain(oldThumb!)
+    expect(createdWorkers[0].messages.filter((msg) => msg?.type === 'LOAD_PDF').length).toBe(loadCountBefore + 1)
+
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    expect(createdWorkers[0].pendingGenerates.length).toBe(1)
+
+    unmount()
   })
 
   it('S-07-03: rapid file switch A→B→A does not leak B thumbnails into A view', async () => {

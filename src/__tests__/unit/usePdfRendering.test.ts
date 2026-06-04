@@ -86,6 +86,7 @@ beforeEach(() => {
   getCachedPageProxyMock.mockReset()
   // infraStore の currentPageProxy をリセット（前テストの残留を防ぐ）
   useInfraStore.setState({ currentPageProxy: null, currentPageProxyKey: null, documentEpoch: 0 })
+  usePecoStore.setState({ pageOrder: [] } as any)
 })
 
 describe('S-01-01: ページ切替時、新 proxy 解決まで旧 pdfPage を維持 (チラつき抑止)', () => {
@@ -372,6 +373,37 @@ describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getC
     expect(getCachedPageProxyMock).toHaveBeenCalledWith('file-A.pdf', 0)
     expect(getCachedPageProxyMock).toHaveBeenCalledTimes(1)
   })
+
+  it('非identity pageOrder では stale な共有 proxy を使わず source page を取得する', async () => {
+    const refs = makeRefs()
+    const staleSharedPage = makeFakePage('stale:display:0')
+    const sourcePage = makeFakePage('source:2')
+
+    usePecoStore.setState({ pageOrder: [2, 0, 1] } as any)
+    useInfraStore.setState({
+      currentPageProxy: staleSharedPage as any,
+      currentPageProxyKey: 'file-A.pdf:0',
+    })
+    getCachedPageProxyMock.mockResolvedValue(sourcePage)
+
+    const { result } = renderHook(
+      (props: HookProps) =>
+        usePdfRendering({
+          ...refs,
+          filePath: props.filePath,
+          totalPages: 3,
+          pageIndex: props.pageIndex,
+          zoom: props.zoom,
+          renderOverlaysRef: refs.renderOverlaysRef,
+        }),
+      { initialProps: { filePath: 'file-A.pdf', pageIndex: 0, zoom: 100 } }
+    )
+
+    await waitFor(() => {
+      expect(result.current.pdfPage).toBe(sourcePage)
+    })
+    expect(getCachedPageProxyMock).toHaveBeenCalledWith('file-A.pdf', 2)
+  })
 })
 
 // ── S-01-94: issue #94 zoom 連続変更時の canvas size 乖離回避 ──────
@@ -546,13 +578,13 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
     // bitmap cache が hit する状況を作る: getBitmapCache を真に返すよう mock 上書き
     const cacheModule = await import('../../utils/bitmapCache')
     const bitmap = { close: vi.fn() } as unknown as ImageBitmap
-    // renderCacheKey は filePath:pageIndex:documentEpoch:zoom:dpr の形式。
+    // renderCacheKey は filePath:sourcePageIndex:displayPageIndex:documentEpoch:zoom:dpr の形式。
     // jsdom では window.devicePixelRatio が undefined になるため 1 に固定して dpr=100 にする。
     const origDpr = window.devicePixelRatio
     Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true, writable: true })
     // viewport(scale=1) は 200x100 になる; key の dpr 部分は Math.round(1*100)=100
     vi.mocked(cacheModule.getBitmapCache).mockImplementation((key) => {
-      if (key === 'file-A.pdf:0:0:100:100') {
+      if (key === 'file-A.pdf:0:0:0:100:100') {
         return { bitmap, zoom: 100, width: 200, height: 100 } as any
       }
       return undefined

@@ -12,6 +12,10 @@ type PecoToolBBoxMetaEntry = {
   text: string;
 };
 
+type LoadPageOptions = {
+  displayPageIndex?: number;
+};
+
 function shouldUseSavedMeta(
   savedMeta: PecoToolBBoxMetaEntry[] | undefined,
   textItems: TextItem[],
@@ -33,8 +37,10 @@ export async function loadPage(
     order: number;
     text: string;
   }>> | null,
-  mtime?: number
+  mtime?: number,
+  options?: LoadPageOptions,
 ): Promise<PageData> {
+  const displayPageIndex = options?.displayPageIndex ?? pageIndex;
   // #99: meta 有無でキャッシュキーを分離する。
   // meta なしで pdfjs textItems の transform から bbox を fallback 計算した結果は、
   // meta あり経路 (保存メタの viewport-space bbox) と数学的に別物 (ascent ratio や
@@ -45,7 +51,7 @@ export async function loadPage(
   const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}:${hasMeta ? 'm1' : 'm0'}`;
   const [cached, tempEdited] = await Promise.all([
     getCachedPage(cacheKey),
-    getTemporaryPageData(filePath, pageIndex),
+    getTemporaryPageData(filePath, displayPageIndex),
   ]);
 
   let pageData: PageData;
@@ -190,5 +196,5 @@ export async function loadPage(
     pageData = { ...pageData, ...tempEdited, isDirty: true };
   }
 
-  return pageData;
+  return { ...pageData, pageIndex: displayPageIndex };
 }

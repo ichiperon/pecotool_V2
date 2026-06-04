@@ -53,12 +53,29 @@ import {
   type RepairPageData,
 } from './pdfSaverCore';
 
+function remapBBoxMetaForPageOrder(
+  bboxMeta: Record<string, unknown>,
+  pageOrder: number[] | undefined,
+  isDefaultOrder: boolean,
+): Record<string, unknown> {
+  if (isDefaultOrder || !pageOrder || Object.keys(bboxMeta).length === 0) return bboxMeta;
+  const remapped: Record<string, unknown> = {};
+  for (let displayIndex = 0; displayIndex < pageOrder.length; displayIndex += 1) {
+    const originalIndex = pageOrder[displayIndex];
+    const originalEntry = bboxMeta[String(originalIndex)];
+    if (originalEntry !== undefined) {
+      remapped[String(displayIndex)] = originalEntry;
+    }
+  }
+  return remapped;
+}
 
 async function handleSavePdf(
   originalPdfBytes: Uint8Array,
   documentState: { pages: Record<number, SerializedPageData> },
   fontBytes: ArrayBuffer | undefined,
   fallbackFontBytes: ArrayBuffer[] = [],
+  pageOrder?: number[],
   options?: SaveDialogOptions,
 ): Promise<{ savedBytes: Uint8Array; skippedChars: ReturnType<typeof getSkippedTextChars> }> {
   const originalVersion = extractPdfVersion(originalPdfBytes);
@@ -74,6 +91,23 @@ async function handleSavePdf(
     updateMetadata: false,
   });
   pdfDoc.registerFontkit(fontkit);
+  const originalPdfPageCount = pdfDoc.getPageCount();
+
+  const isDefaultOrder =
+    !pageOrder ||
+    (pageOrder.length === originalPdfPageCount &&
+      pageOrder.every((v, i) => v === i));
+  if (!isDefaultOrder && pageOrder) {
+    const copiedPages = await pdfDoc.copyPages(pdfDoc, pageOrder);
+    for (let i = originalPdfPageCount - 1; i >= 0; i--) {
+      pdfDoc.removePage(i);
+    }
+    for (const page of copiedPages) {
+      pdfDoc.addPage(page);
+    }
+  }
+
+  const pdfPageCount = pdfDoc.getPageCount();
 
   const pagesArray = Object.entries(documentState.pages) as Array<[string, SerializedPageData]>;
   const dirtyPages = pagesArray.filter(([, pageData]) => pageData.isDirty);
@@ -81,19 +115,22 @@ async function handleSavePdf(
   const skippedChars = createSkippedTextCollector();
 
   const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
-  const existingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  const rawExistingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  const existingBBoxMeta = remapBBoxMetaForPageOrder(rawExistingBBoxMeta, pageOrder, isDefaultOrder);
+  const hadExistingBBoxMeta = Object.keys(rawExistingBBoxMeta).length > 0;
 
   // Acrobat dirty-flag 回避 short-circuit (詳細は pdfSaver.ts 側参照)。
   if (
+    isDefaultOrder &&
     dirtyPages.length === 0 &&
     !hadLegacyBBoxMeta &&
-    Object.keys(existingBBoxMeta).length === 0
+    !hadExistingBBoxMeta
   ) {
     return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars) };
   }
 
   const bboxMeta: Record<string, unknown> = { ...existingBBoxMeta };
-  let metaChanged = false;
+  let metaChanged = existingBBoxMeta !== rawExistingBBoxMeta;
   if (sanitizeBBoxMetaTexts(bboxMeta, skippedChars)) {
     metaChanged = true;
   }
@@ -107,7 +144,7 @@ async function handleSavePdf(
   const pagesToWrite = new Map<number, RepairPageData>();
   for (const [pageIndexValue, pageData] of dirtyPages) {
     const pageIndex = asPageIndex(pageIndexValue);
-    if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) continue;
+    if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfPageCount) continue;
     pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
   }
 
@@ -121,7 +158,7 @@ async function handleSavePdf(
   //         により Meiryo subset 群が 1 個の PecoF subset に集約される。
   const BLOAT_DETECTION_FONT_THRESHOLD = 3;
   if (fontBytes) {
-    for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+    for (let pi = 0; pi < pdfPageCount; pi++) {
       if (pagesToWrite.has(pi)) continue;
       const entries = existingBBoxMeta[String(pi)];
       if (!Array.isArray(entries) || entries.length === 0) continue;
@@ -360,7 +397,7 @@ async function handleSavePdf(
     }
   }
 
-  if (metaChanged || Object.keys(existingBBoxMeta).length > 0 || hadLegacyBBoxMeta) {
+  if (metaChanged || hadExistingBBoxMeta || hadLegacyBBoxMeta) {
     writePecoToolBBoxMetaToPdfDoc(pdfDoc, bboxMeta);
   }
 
@@ -368,7 +405,7 @@ async function handleSavePdf(
   // issue #1 (Acrobat 7 TJ 互換 仮修正): BT 外テキスト演算子が漏れているページを strip する。
   // 詳細は pdfSaver.ts 側コメント参照 (同一ロジック)。
   const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
-  for (let pi = 0; pi < pdfDoc.getPageCount(); pi++) {
+  for (let pi = 0; pi < pdfPageCount; pi++) {
     if (dirtyPageIndexSet.has(pi)) continue;
     const page = pdfDoc.getPage(pi);
     // issue #1: BT 外テキスト演算子検出 → strip のみ (再描画なし)
@@ -452,7 +489,7 @@ async function handleSavePdf(
 
   // dev mode セーフティチェック: 平均ページサイズが 2MB を超えた場合に警告。
   if (process.env.NODE_ENV !== 'production') {
-    const pageCount = pdfDoc.getPageCount();
+    const pageCount = pdfPageCount;
     if (pageCount > 0) {
       const avgPerPage = savedBytes.byteLength / pageCount;
       if (avgPerPage > 2 * 1024 * 1024) {
@@ -508,9 +545,9 @@ self.onmessage = async (e: MessageEvent<SavePdfWorkerRequest>) => {
   switch (msg.type) {
     case 'SAVE_PDF': {
       try {
-        const { documentState, fallbackFontBytes, fontBytes, options } = msg.data;
+        const { documentState, fallbackFontBytes, fontBytes, pageOrder, options } = msg.data;
         const originalPdfBytes = await resolvePdfBytes(msg.data);
-        const { savedBytes, skippedChars } = await handleSavePdf(originalPdfBytes, documentState, fontBytes, fallbackFontBytes, options);
+        const { savedBytes, skippedChars } = await handleSavePdf(originalPdfBytes, documentState, fontBytes, fallbackFontBytes, pageOrder, options);
         const response: SavePdfWorkerResponse = { type: 'SAVE_PDF_SUCCESS', data: savedBytes, skippedChars };
         self.postMessage(response, [savedBytes.buffer]);
       } catch (err) {

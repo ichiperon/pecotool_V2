@@ -8,6 +8,7 @@ import {
   getCachedPageProxy,
 } from '../utils/pdfLoader';
 import { perf } from '../utils/perfLogger';
+import { displayToSourcePageIndex } from '../utils/pageOrder';
 import type { BoundingBox } from '../types';
 
 type BBoxMeta = Record<string, Array<{
@@ -47,6 +48,7 @@ export function usePageNavigation({
   const documentEpoch = useInfraStore((s) => s.documentEpoch);
   const documentMtime = usePecoStore((s) => s.document?.mtime);
   const totalPages = usePecoStore((s) => s.document?.totalPages);
+  const currentSourcePageIndex = usePecoStore((s) => displayToSourcePageIndex(s.pageOrder, currentPageIndex));
   // 現在ページの width のみ購読 (未ロード判定用。textBlocks 等には反応しない)
   const currentPageWidth = usePecoStore((s) => s.document?.pages.get(currentPageIndex)?.width);
   const currentPageExists = usePecoStore((s) => s.document?.pages.has(currentPageIndex) ?? false);
@@ -73,6 +75,7 @@ export function usePageNavigation({
 
     const stateAtStart = usePecoStore.getState();
     const doc = stateAtStart.document;
+    const sourcePageIndex = displayToSourcePageIndex(stateAtStart.pageOrder, pageIdx);
     const capturedDocumentEpoch = useInfraStore.getState().documentEpoch;
     if (!doc) return;
     setIsLoadingPageMeta(true);
@@ -131,7 +134,7 @@ export function usePageNavigation({
       // 取得した PDFPageProxy は store に publish して usePdfRendering が
       // 二重 getCachedPageProxy を避けられるようにする。
       perf.mark('nav.pageProxyStart', { page: pageIdx });
-      const qp = await getCachedPageProxy(doc.filePath, pageIdx);
+      const qp = await getCachedPageProxy(doc.filePath, sourcePageIndex);
       perf.mark('nav.pageProxyDone', { page: pageIdx });
       if (signal.aborted) return;
       const qv = qp.getViewport({ scale: 1.0 });
@@ -140,7 +143,12 @@ export function usePageNavigation({
       // currentPageIndex がまだ pageIdx のうちに proxy を共有
       const liveState2 = usePecoStore.getState();
       const liveInfra2 = useInfraStore.getState();
-      if (liveState2.document?.filePath === doc.filePath && liveInfra2.documentEpoch === capturedDocumentEpoch && liveState2.currentPageIndex === pageIdx) {
+      if (
+        liveState2.document?.filePath === doc.filePath &&
+        liveInfra2.documentEpoch === capturedDocumentEpoch &&
+        liveState2.currentPageIndex === pageIdx &&
+        displayToSourcePageIndex(liveState2.pageOrder, pageIdx) === sourcePageIndex
+      ) {
         setCurrentPageProxy(doc.filePath, pageIdx, qp);
       }
 
@@ -175,7 +183,7 @@ export function usePageNavigation({
       // prefetch (±1/±2 ページの proxy 取得・loadPage) は pdfjs worker のタスクキューを
       // 占有して現在ページの描画/テキスト抽出を遅延させるため廃止。現在ページのみロードする。
       perf.mark('text.loadStart', { page: pageIdx });
-      loadPage(pdf, pageIdx, doc.filePath, bboxMetaRef.current, doc.mtime)
+      loadPage(pdf, sourcePageIndex, doc.filePath, bboxMetaRef.current, doc.mtime, { displayPageIndex: pageIdx })
         .then((pageData) => {
           if (signal.aborted) return;
           // ファイル切替チェック（ページ切替は許容: テキストデータは常に保存する）
@@ -183,14 +191,15 @@ export function usePageNavigation({
           const currentDoc = currentState.document;
           if (useInfraStore.getState().documentEpoch !== capturedDocumentEpoch) return;
           if (!currentDoc || currentDoc.filePath !== doc.filePath) return;
+          if (displayToSourcePageIndex(currentState.pageOrder, pageIdx) !== sourcePageIndex) return;
           const existing = currentDoc.pages.get(pageIdx);
           // isDirty だけで保持すると、clearOcrAllPages の stub や width===0 の未ロード
           // ダミーが空 textBlocks を抱えたまま loadPage の実データを破棄してしまう。
           // 実ユーザー編集は textBlocks が非空である前提のため、ここで絞る。
           const hasUserEdits = !!existing && existing.isDirty && (existing.textBlocks.length > 0 || existing.ocrCleared === true);
           const mergedData = hasUserEdits
-            ? { ...pageData, textBlocks: existing!.textBlocks, isDirty: true, isTextExtracted: true }
-            : { ...pageData, isTextExtracted: true };
+            ? { ...pageData, pageIndex: pageIdx, textBlocks: existing!.textBlocks, isDirty: true, isTextExtracted: true }
+            : { ...pageData, pageIndex: pageIdx, isTextExtracted: true };
           perf.mark('text.updateStoreStart', { page: pageIdx, blocks: mergedData.textBlocks?.length ?? 0 });
           updatePageData(pageIdx, mergedData, false);
           perf.mark('text.updateStoreDone', { page: pageIdx });
@@ -245,12 +254,17 @@ export function usePageNavigation({
       // 既存ページの proxy も共有しておく (キャッシュヒットなら即時同期)
       void (async () => {
         try {
-          const qp = await getCachedPageProxy(filePath, currentPageIndex);
+          const qp = await getCachedPageProxy(filePath, currentSourcePageIndex);
           if (cancelled) return;
           // レースチェック: 現在もこのページが選択されているか
           const live = usePecoStore.getState();
           const liveInfra = useInfraStore.getState();
-          if (live.document?.filePath === filePath && liveInfra.documentEpoch === documentEpoch && live.currentPageIndex === currentPageIndex) {
+          if (
+            live.document?.filePath === filePath &&
+            liveInfra.documentEpoch === documentEpoch &&
+            live.currentPageIndex === currentPageIndex &&
+            displayToSourcePageIndex(live.pageOrder, currentPageIndex) === currentSourcePageIndex
+          ) {
             setCurrentPageProxy(filePath, currentPageIndex, qp);
           }
         } catch {
@@ -272,7 +286,7 @@ export function usePageNavigation({
     // documentEpoch を含めることで、同一 filePath/currentPageIndex でも document が
     // 差し替わった (再読込) 場合に loadCurrentPage を再発火できる。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, documentEpoch, currentPageIndex, loadCurrentPage, setCurrentPageProxy]);
+  }, [filePath, documentEpoch, currentPageIndex, currentSourcePageIndex, loadCurrentPage, setCurrentPageProxy]);
 
   const handlePageInputCommit = useCallback(() => {
     if (pageInputValue !== null && filePath && totalPages) {

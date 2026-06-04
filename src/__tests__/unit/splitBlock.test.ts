@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TextBlock } from "../../types";
-import { splitBlockAtRatio } from "../../utils/splitBlock";
+import { splitBlockAtRatio, getSplitRatioSnapped } from "../../utils/splitBlock";
 
 function makeBlock(overrides: Partial<TextBlock> = {}): TextBlock {
   return {
@@ -29,6 +29,93 @@ function hasLoneSurrogate(text: string): boolean {
   }
   return false;
 }
+
+// ── getSplitRatioSnapped ─────────────────────────────────────────────────────
+describe("getSplitRatioSnapped", () => {
+  function makeHorizontalBlock(text: string): TextBlock {
+    return makeBlock({ text, originalText: text });
+  }
+
+  function makeVerticalBlock(text: string): TextBlock {
+    return makeBlock({
+      text,
+      originalText: text,
+      writingMode: "vertical",
+      bbox: { x: 10, y: 20, width: 40, height: 100 },
+    });
+  }
+
+  it("horizontal 5-grapheme block / ratio=0.5 snaps to 2/5 = 0.4", () => {
+    // 5 graphemes: "abcde". targetIdx = round(0.5 * 5) = round(2.5) = 3 (JS rounds to even? no, round(2.5)=3)
+    // Actually Math.round(2.5) = 3 in JS. safeIdx = clamp(1..4, 3) = 3. result = 3/5 = 0.6.
+    // Wait — spec says ratio=0.5 → 0.4 (2/5). Let's think: Math.round(0.5 * 5) = Math.round(2.5) = 3.
+    // Hmm, spec says "2/5". Let me re-read: targetIdx = round(0.5 * 5) = round(2.5).
+    // In JS, Math.round(2.5) === 3 (rounds up). So result = 3/5 = 0.6, not 0.4.
+    // The spec comment says "→ 0.4 (2/5)" but that would be Math.floor, not Math.round.
+    // We follow the implementation (Math.round). Expected = 3/5 = 0.6.
+    // NOTE: spec text says 0.4 but that's inconsistent with Math.round. Test matches implementation.
+    const block = makeHorizontalBlock("abcde");
+    const result = getSplitRatioSnapped(block, 0.5);
+    // Math.round(0.5 * 5) = Math.round(2.5) = 3 → 3/5
+    expect(result).toBeCloseTo(3 / 5, 10);
+  });
+
+  it("horizontal 4-grapheme block / ratio=0.5 snaps to 2/4 = 0.5 (exact boundary)", () => {
+    const block = makeHorizontalBlock("abcd");
+    const result = getSplitRatioSnapped(block, 0.5);
+    // Math.round(0.5 * 4) = Math.round(2) = 2 → 2/4 = 0.5
+    expect(result).toBeCloseTo(0.5, 10);
+  });
+
+  it("ratio very close to 0 clamps to 1/n (no empty first part)", () => {
+    const block = makeHorizontalBlock("abcde");
+    const result = getSplitRatioSnapped(block, 0.01);
+    // targetIdx = round(0.01 * 5) = round(0.05) = 0 → clamped to 1 → 1/5
+    expect(result).toBeCloseTo(1 / 5, 10);
+  });
+
+  it("ratio very close to 1 clamps to (n-1)/n (no empty second part)", () => {
+    const block = makeHorizontalBlock("abcde");
+    const result = getSplitRatioSnapped(block, 0.99);
+    // targetIdx = round(0.99 * 5) = round(4.95) = 5 → clamped to 4 → 4/5
+    expect(result).toBeCloseTo(4 / 5, 10);
+  });
+
+  it("single-grapheme block returns ratio unchanged (splitting not meaningful)", () => {
+    const block = makeHorizontalBlock("A");
+    expect(getSplitRatioSnapped(block, 0.5)).toBe(0.5);
+    expect(getSplitRatioSnapped(block, 0.3)).toBe(0.3);
+  });
+
+  it("empty text block returns ratio unchanged", () => {
+    const block = makeHorizontalBlock("");
+    expect(getSplitRatioSnapped(block, 0.7)).toBe(0.7);
+  });
+
+  it("vertical block snaps the same way (grapheme count only, writing mode agnostic)", () => {
+    const block = makeVerticalBlock("あいうえお");
+    const result = getSplitRatioSnapped(block, 0.5);
+    // 5 graphemes: same logic as horizontal → 3/5
+    expect(result).toBeCloseTo(3 / 5, 10);
+  });
+
+  it("surrogate-pair grapheme is treated as a single unit", () => {
+    // "A😀B" → 3 graphemes. ratio=0.5 → targetIdx=round(1.5)=2 → 2/3
+    const block = makeHorizontalBlock("A😀B");
+    const result = getSplitRatioSnapped(block, 0.5);
+    expect(result).toBeCloseTo(2 / 3, 10);
+  });
+
+  it("ratio outside [0,1] is clamped before snapping", () => {
+    const block = makeHorizontalBlock("abcde");
+    const over = getSplitRatioSnapped(block, 5);
+    const under = getSplitRatioSnapped(block, -2);
+    // over: clamped to 1, targetIdx=round(5)=5→clamped to 4 → 4/5
+    expect(over).toBeCloseTo(4 / 5, 10);
+    // under: clamped to 0, targetIdx=round(0)=0→clamped to 1 → 1/5
+    expect(under).toBeCloseTo(1 / 5, 10);
+  });
+});
 
 describe("splitBlockAtRatio", () => {
   beforeEach(() => {

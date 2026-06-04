@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { PageData, TextBlock } from "../types";
 import { perf } from "../utils/perfLogger";
-import { splitBlockAtRatio } from "../utils/splitBlock";
+import { splitBlockAtRatio, getSplitRatioSnapped } from "../utils/splitBlock";
 
 interface UseCanvasDrawingParams {
   pageIndex: number;
@@ -147,9 +147,10 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
 
         if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) {
           const isVertical = block.writingMode === "vertical";
-          const ratio = isVertical
+          const rawRatio = isVertical
             ? Math.max(1, Math.min(h - 1, pos.y - y)) / h
             : Math.max(1, Math.min(w - 1, pos.x - x)) / w;
+          const ratio = getSplitRatioSnapped(block, rawRatio);
           const split = splitBlockAtRatio(block, ratio);
           if (!split) {
             // Issue #5: 分割不可ブロックは split モードを維持して、別ブロックを再試行できるようにする

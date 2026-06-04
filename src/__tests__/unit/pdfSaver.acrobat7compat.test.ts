@@ -16,8 +16,9 @@ import { describe, it, expect, beforeAll } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { PDFDocument, PDFRawStream, PDFName, PDFArray } from '@cantoo/pdf-lib'
+import fontkit from '@pdf-lib/fontkit'
 import { inflate } from 'pako'
-import { buildPdfDocument } from '../../utils/pdfSaver'
+import { buildPdfDocument, getFontDescentRatio } from '../../utils/pdfSaver'
 import type { PecoDocument, PageData, TextBlock } from '../../types'
 
 const FONT_PATH = path.resolve(
@@ -25,6 +26,15 @@ const FONT_PATH = path.resolve(
   'public/fonts/IPAexGothic.woff2',
 )
 const FONT_EXISTS = fs.existsSync(FONT_PATH)
+const TTF_FONT_PATH = path.resolve(process.cwd(), 'public/fonts/IPAmjMincho.ttf')
+const TTF_FONT_EXISTS = fs.existsSync(TTF_FONT_PATH)
+
+function arrayBufferFromFile(filePath: string): ArrayBuffer {
+  const buf = fs.readFileSync(filePath)
+  const ab = new ArrayBuffer(buf.byteLength)
+  new Uint8Array(ab).set(buf)
+  return ab
+}
 
 /** version 1.6 の最小 PDF を作成する */
 async function makeOriginalV16Pdf(): Promise<Uint8Array> {
@@ -146,6 +156,17 @@ function parseClassicXrefCoverage(pdfText: string): { size: number; covered: Set
     }
   }
   return { size, covered }
+}
+
+function extractCmOperators(content: string): number[][] {
+  const operators: number[][] = []
+  const number = '[-+]?\\d*\\.?\\d+(?:[eE][-+]?\\d+)?'
+  const re = new RegExp(`(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+(${number})\\s+cm\\b`, 'g')
+  let m: RegExpExecArray | null
+  while ((m = re.exec(content)) !== null) {
+    operators.push(m.slice(1, 7).map(Number))
+  }
+  return operators
 }
 
 describe('Acrobat 7.0 compatibility audit for buildPdfDocument', () => {
@@ -282,5 +303,27 @@ describe('Acrobat 7.0 compatibility audit for buildPdfDocument', () => {
     expect(violations).toEqual([])
     expect(allContent).not.toContain('(leaked)')
     expect(allContent).not.toContain('[(array)]')
+  })
+
+  it('(6) 横書きOCR text layer の translate は bbox と font descent から算出した位置に置かれる', async () => {
+    if (!TTF_FONT_EXISTS) return
+    const fontBytes = arrayBufferFromFile(TTF_FONT_PATH)
+    const pdfDoc = await PDFDocument.create()
+    pdfDoc.registerFontkit(fontkit)
+    const font = await pdfDoc.embedFont(fontBytes, { subset: true })
+    const descentRatio = getFontDescentRatio(font, 12)
+
+    const original = await makeOriginalV16Pdf()
+    const pecoDoc = makePecoDoc()
+    const block = pecoDoc.pages.get(0)!.textBlocks[0]
+    const saved = await buildPdfDocument(original, pecoDoc, fontBytes)
+    const allContent = await extractAllContentStreams(saved)
+    const translateCm = extractCmOperators(allContent).find(([a, b, c, d, e]) =>
+      a === 1 && b === 0 && c === 0 && d === 1 && Math.abs(e - block.bbox.x) < 0.001
+    )
+
+    expect(translateCm).toBeDefined()
+    const expectedY = 842 - block.bbox.y - block.bbox.height * (1 - descentRatio)
+    expect(translateCm![5]).toBeCloseTo(expectedY, 3)
   })
 })

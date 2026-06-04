@@ -107,6 +107,23 @@ function extractUrl(source: BuildPdfSource): string | null {
   return source.url ?? null;
 }
 
+function remapBBoxMetaForPageOrder(
+  bboxMeta: Record<string, unknown>,
+  pageOrder: number[] | undefined,
+  isDefaultOrder: boolean,
+): Record<string, unknown> {
+  if (isDefaultOrder || !pageOrder || Object.keys(bboxMeta).length === 0) return bboxMeta;
+  const remapped: Record<string, unknown> = {};
+  for (let displayIndex = 0; displayIndex < pageOrder.length; displayIndex += 1) {
+    const originalIndex = pageOrder[displayIndex];
+    const originalEntry = bboxMeta[String(originalIndex)];
+    if (originalEntry !== undefined) {
+      remapped[String(displayIndex)] = originalEntry;
+    }
+  }
+  return remapped;
+}
+
 export async function buildPdfDocument(
   source: BuildPdfSource,
   documentState: PecoDocument,
@@ -172,7 +189,9 @@ export async function buildPdfDocument(
   const skippedChars = createSkippedTextCollector();
 
   const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
-  const existingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  const rawExistingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  const existingBBoxMeta = remapBBoxMetaForPageOrder(rawExistingBBoxMeta, pageOrder, isDefaultOrder);
+  const hadExistingBBoxMeta = Object.keys(rawExistingBBoxMeta).length > 0;
 
   // Acrobat dirty-flag 回避 short-circuit:
   // 編集なし & PecoTool メタ (旧 Info 形式 / 新 stream 形式) が皆無のとき、
@@ -185,9 +204,10 @@ export async function buildPdfDocument(
   // 短絡前に reachability sweep を実行し、孤児が見つかった場合は通常パスに
   // 進んで全書き換え (= 孤児消去) する。孤児ゼロなら短絡してバイト同一性を維持。
   if (
+    isDefaultOrder &&
     dirtyPages.length === 0 &&
     !hadLegacyBBoxMeta &&
-    Object.keys(existingBBoxMeta).length === 0
+    !hadExistingBBoxMeta
   ) {
     const earlySweep = sweepUnreachableObjects(pdfDoc);
     if (earlySweep.dropped === 0) {
@@ -196,7 +216,7 @@ export async function buildPdfDocument(
   }
 
   const bboxMeta = { ...existingBBoxMeta };
-  let metaChanged = false;
+  let metaChanged = existingBBoxMeta !== rawExistingBBoxMeta;
   if (sanitizeBBoxMetaTexts(bboxMeta, skippedChars)) {
     metaChanged = true;
   }
@@ -590,7 +610,7 @@ export async function buildPdfDocument(
     );
   }
 
-  if (metaChanged || Object.keys(existingBBoxMeta).length > 0 || hadLegacyBBoxMeta) {
+  if (metaChanged || hadExistingBBoxMeta || hadLegacyBBoxMeta) {
     writePecoToolBBoxMetaToPdfDoc(pdfDoc, bboxMeta);
   }
 
@@ -851,6 +871,7 @@ export async function savePDF(
           documentState: { ...documentState, pages: serializedPages },
           fontBytes: fontBytesClone,
           fallbackFontBytes: fallbackFontBytesClone,
+          pageOrder,
           options,
         },
       };

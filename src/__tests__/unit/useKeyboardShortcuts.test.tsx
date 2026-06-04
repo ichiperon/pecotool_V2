@@ -139,6 +139,41 @@ describe('useKeyboardShortcuts: BB操作ショートカット', () => {
   });
 });
 
+describe('useKeyboardShortcuts: fit 表示ショートカット', () => {
+  it("Ctrl+0 key='0' で fitToScreen(false) を実行する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, '0');
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.fitToScreen).toHaveBeenCalledWith(false);
+    expect(actions.fitToScreen).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['Dead', ')'])("Ctrl+0 key='%s' でも code='Digit0' なら fitToScreen(false) を実行する", (key) => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, key, { code: 'Digit0' });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.fitToScreen).toHaveBeenCalledWith(false);
+    expect(actions.fitToScreen).toHaveBeenCalledTimes(1);
+  });
+
+  it("Ctrl+Numpad0 code='Numpad0' で fitToScreen(false) を実行する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, 'Insert', { code: 'Numpad0' });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.fitToScreen).toHaveBeenCalledWith(false);
+    expect(actions.fitToScreen).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('useKeyboardShortcuts: Undo/Redo の編集中ガード', () => {
   it('contentEditable 内で Ctrl+Z 押下時にアプリ undo が呼ばれない', () => {
     const actions = makeActions();

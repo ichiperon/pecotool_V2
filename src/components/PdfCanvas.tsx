@@ -26,6 +26,7 @@ import { useCurveEditor } from "../hooks/useCurveEditor";
 import { isCurveDefinition } from "../utils/curveDefinition";
 import { arcHandlePositions } from "../utils/arcFromThreePoints";
 import { renderStaticLayer, drawStaticBlockCurve } from "../utils/pdfCanvasRender";
+import { getSplitRatioSnapped } from "../utils/splitBlock";
 import type { TextBlock, BoundingBox } from "../types";
 
 // #236: resize/curve handle sizes
@@ -127,6 +128,19 @@ export function PdfCanvas({
     startPos: { x: number; y: number };
     currentPos: { x: number; y: number };
   }>({ isDrawing: false, startPos: { x: 0, y: 0 }, currentPos: { x: 0, y: 0 } });
+
+  // #288: split hover preview — canvas coordinates of the current mouse position
+  // while isSplitMode is active. Stored in a ref to avoid React re-renders on
+  // every mousemove; the overlay RAF loop reads the latest value directly.
+  const splitHoverPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Clear split hover position when leaving split mode so stale coordinates
+  // don't appear if the user re-enters the mode later.
+  useEffect(() => {
+    if (!isSplitMode) {
+      splitHoverPosRef.current = null;
+    }
+  }, [isSplitMode]);
 
   const { pdfPage, loadError, setLoadError, retry } = usePdfRendering({
     pdfCanvasRef,
@@ -304,6 +318,50 @@ export function PdfCanvas({
       if (!context) return;
 
       context.clearRect(0, 0, canvas.width, canvas.height);
+
+      // #288: split mode hover preview guide line
+      if (isSplitMode) {
+        const hoverPos = splitHoverPosRef.current;
+        if (hoverPos && currentTextBlocks) {
+          const scale = zoom / 100;
+          // Hit-test from topmost block downward (same order as trySplit)
+          for (let i = currentTextBlocks.length - 1; i >= 0; i--) {
+            const block = currentTextBlocks[i];
+            const bx = block.bbox.x * scale;
+            const by = block.bbox.y * scale;
+            const bw = block.bbox.width * scale;
+            const bh = block.bbox.height * scale;
+            if (
+              hoverPos.x >= bx && hoverPos.x <= bx + bw &&
+              hoverPos.y >= by && hoverPos.y <= by + bh
+            ) {
+              const isVertical = block.writingMode === "vertical";
+              const rawRatio = isVertical
+                ? Math.max(1, Math.min(bh - 1, hoverPos.y - by)) / bh
+                : Math.max(1, Math.min(bw - 1, hoverPos.x - bx)) / bw;
+              const snappedRatio = getSplitRatioSnapped(block, rawRatio);
+              context.save();
+              context.strokeStyle = "rgba(255, 220, 0, 0.85)";
+              context.lineWidth = 2;
+              context.setLineDash([4, 3]);
+              context.beginPath();
+              if (isVertical) {
+                const lineY = by + snappedRatio * bh;
+                context.moveTo(bx, lineY);
+                context.lineTo(bx + bw, lineY);
+              } else {
+                const lineX = bx + snappedRatio * bw;
+                context.moveTo(lineX, by);
+                context.lineTo(lineX, by + bh);
+              }
+              context.stroke();
+              context.setLineDash([]);
+              context.restore();
+              break;
+            }
+          }
+        }
+      }
 
       const textBlocks = currentTextBlocks;
       if (showOcr && textBlocks && selectedIds.size > 0) {
@@ -638,6 +696,7 @@ export function PdfCanvas({
     drag.isAltDragging,
     drag.altDragStart,
     drag.altDragEnd,
+    isSplitMode,
     isCurveMode,
     curveClickPoints,
     rangeOcrDrag,
@@ -771,6 +830,20 @@ export function PdfCanvas({
     if (curveEditor.handleMouseMoveCurve(pos)) return;
 
     if (drag.updateDragResize(pos)) {
+      return;
+    }
+
+    // #288: split mode hover preview — update ref and schedule RAF redraw
+    if (isSplitMode) {
+      splitHoverPosRef.current = pos;
+      const render = renderOverlaysRef.current;
+      if (render) {
+        if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
+        overlayRafRef.current = requestAnimationFrame(() => {
+          render();
+          overlayRafRef.current = null;
+        });
+      }
       return;
     }
 

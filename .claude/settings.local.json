@@ -25,7 +25,10 @@
       "Bash(echo \"exit: $?\")",
       "PowerShell(Get-Process node -ErrorAction SilentlyContinue)",
       "PowerShell(Stop-Process -Force -Confirm:$false)",
-      "Bash(mkdir -p \"C:\\\\Users\\\\user\\\\Desktop\\\\workspace20\\\\pecotool_v2\\\\.claude\\\\skills\\\\test-design\")"
+      "Bash(mkdir -p \"C:\\\\Users\\\\user\\\\Desktop\\\\workspace20\\\\pecotool_v2\\\\.claude\\\\skills\\\\test-design\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\user\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-user-Desktop-workspace20-pecotool-v2\\\\e60ab35a-fd41-4902-94c3-e84c80be84fe\\\\tasks\\\\bsanjbrt9.output' -Wait | Select-String -Pattern 'test result|FAILED|error\\\\[|warning\\\\[|^error' --line-buffered\")",
+      "Bash(git commit *)",
+      "Bash(rm .git/COMMIT_MSG_TMP.txt)"
     ],
     "additionalDirectories": [
       "C:\\Users\\user\\Desktop\\workspace20\\pecotool_v2\\.claude\\skills"

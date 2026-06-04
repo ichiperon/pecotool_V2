@@ -205,13 +205,15 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     const { result } = renderHook(() => useOcrEngine(showToast));
     await act(async () => { await result.current.runOcrCurrentPage(); });
 
-    // invoke が呼ばれ、writeFile / remove も走っている
+    // invoke が呼ばれ、Tauri fs 経由の一時ファイルは使わない
     expect(h.invokeMock).toHaveBeenCalledWith(
       'run_ocr',
-      expect.objectContaining({ imagePath: expect.any(String) }),
+      expect.objectContaining({ imageBytes: expect.any(Array) }),
     );
-    expect(h.writeFileMock).toHaveBeenCalled();
-    expect(h.removeMock).toHaveBeenCalled();
+    const runOcrArgs = h.invokeMock.mock.calls.find(([cmd]) => cmd === 'run_ocr')?.[1] as Record<string, unknown>;
+    expect(runOcrArgs.imagePath).toBeUndefined();
+    expect(h.writeFileMock).not.toHaveBeenCalled();
+    expect(h.removeMock).not.toHaveBeenCalled();
 
     // store 反映: textBlocks 3 件、全て isDirty=true
     const p0 = usePecoStore.getState().document!.pages.get(0)!;
@@ -222,6 +224,61 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
 
     // 成功トースト
     expect(toasts.some((t) => t.msg.includes('OCR'))).toBe(true);
+  });
+
+  it('issue: currentPageIndex=1 の runOcrCurrentPage は 2 ページ目だけ OCR 更新する', async () => {
+    const pdf = makeMockPdf(3);
+    h.openFreshPdfDocMock.mockResolvedValue(pdf);
+    usePecoStore.getState().setDocument(makeDoc(3));
+    usePecoStore.setState({ currentPageIndex: 1 } as any);
+
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [
+          { text: 'PAGE_2', bbox: { x: 10, y: 10, width: 20, height: 20 }, writingMode: 'horizontal', confidence: 1 },
+        ],
+      });
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    const doc = usePecoStore.getState().document!;
+    expect(doc.pages.get(0)!.textBlocks).toHaveLength(0);
+    expect(doc.pages.get(1)!.textBlocks).toHaveLength(1);
+    expect(doc.pages.get(1)!.textBlocks[0].text).toBe('PAGE_2');
+    expect(doc.pages.get(2)!.textBlocks).toHaveLength(0);
+    expect(pdf.getPage).toHaveBeenCalledWith(2);
+    expect(h.invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('非identity pageOrder では source page をOCRし、display pageへ結果を書き込む', async () => {
+    const pdf = makeMockPdf(3);
+    h.openFreshPdfDocMock.mockResolvedValue(pdf);
+    usePecoStore.getState().setDocument(makeDoc(3));
+    usePecoStore.setState({ currentPageIndex: 0, pageOrder: [2, 0, 1] } as any);
+
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [
+          { text: 'SOURCE_3', bbox: { x: 10, y: 10, width: 20, height: 20 }, writingMode: 'horizontal', confidence: 1 },
+        ],
+      });
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    const doc = usePecoStore.getState().document!;
+    expect(doc.pages.get(0)!.textBlocks).toHaveLength(1);
+    expect(doc.pages.get(0)!.textBlocks[0].text).toBe('SOURCE_3');
+    expect(doc.pages.get(1)!.textBlocks).toHaveLength(0);
+    expect(doc.pages.get(2)!.textBlocks).toHaveLength(0);
+    expect(pdf.getPage).toHaveBeenCalledWith(3);
   });
 
   it('上書き確認: 既存 textBlocks 有り + ask false でキャンセル → invoke 呼ばず', async () => {
@@ -342,6 +399,36 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     expect(toasts.some((t) => t.msg.includes('キャンセル'))).toBe(true);
   });
 
+  it('キャンセル: runOcrForPage 完了後に cancelOcr 済みなら結果を store に反映しない', async () => {
+    usePecoStore.getState().setDocument(makeDoc(1));
+    h.openFreshPdfDocMock.mockResolvedValue(makeMockPdf(1));
+    h.askMock.mockResolvedValue(true);
+
+    let resolveOcr: (raw: string) => void = () => {};
+    const ocrStarted = new Promise<void>((resolve) => {
+      h.invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd !== 'run_ocr') return '';
+        resolve();
+        return await new Promise<string>((r) => { resolveOcr = r; });
+      });
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    const promise = result.current.runOcrAllPages();
+
+    await ocrStarted;
+    act(() => { result.current.cancelOcr(); });
+    resolveOcr(JSON.stringify({
+      status: 'ok',
+      blocks: [{ text: 'CANCELLED', bbox: { x: 0, y: 0, width: 10, height: 10 },
+        writingMode: 'horizontal', confidence: 1 }],
+    }));
+    await act(async () => { await promise; });
+
+    const p0 = usePecoStore.getState().document!.pages.get(0)!;
+    expect(p0.textBlocks).toHaveLength(0);
+  });
+
   it('issue #9: LRU 退避ページに対する runOcrCurrentPage で IDB 既存 textBlocks があれば上書き確認が出る', async () => {
     // 1 ページの doc を作るが、メモリ Map からは pageIndex=0 を削除して LRU 退避状態を模倣
     const doc = makeDoc(1);
@@ -369,6 +456,58 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 0);
     expect(h.askMock).toHaveBeenCalled();
     // ユーザーがキャンセルしたので invoke('run_ocr') は走らない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+  });
+
+  it('PCT-007: runOcrAllPages は IDB 退避ページの既存 textBlocks で上書き確認し、キャンセルなら OCR しない', async () => {
+    const doc = makeDoc(3);
+    doc.pages.delete(1);
+    usePecoStore.getState().setDocument(doc);
+
+    const evictedBlock: TextBlock = {
+      id: 'evicted-all', text: 'EVICTED_ALL', originalText: 'EVICTED_ALL',
+      bbox: { x: 0, y: 0, width: 10, height: 10 },
+      writingMode: 'horizontal', order: 0, isNew: false, isDirty: true,
+    };
+    h.getTemporaryPageDataMock.mockImplementation(async (_filePath: string, pageIndex: number) => (
+      pageIndex === 1
+        ? { pageIndex, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock] }
+        : null
+    ));
+    h.askMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrAllPages(); });
+
+    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 1);
+    expect(h.askMock).toHaveBeenCalledTimes(2);
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+  });
+
+  it('PCT-007: runOcrRange は対象 range の IDB 退避ページだけ確認し、キャンセルなら OCR しない', async () => {
+    const doc = makeDoc(3);
+    doc.pages.delete(1);
+    usePecoStore.getState().setDocument(doc);
+
+    const evictedBlock: TextBlock = {
+      id: 'evicted-range', text: 'EVICTED_RANGE', originalText: 'EVICTED_RANGE',
+      bbox: { x: 0, y: 0, width: 10, height: 10 },
+      writingMode: 'horizontal', order: 0, isNew: false, isDirty: true,
+    };
+    h.getTemporaryPageDataMock.mockImplementation(async (_filePath: string, pageIndex: number) => (
+      pageIndex === 1
+        ? { pageIndex, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock] }
+        : null
+    ));
+    h.askMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => { await result.current.runOcrRange('2'); });
+
+    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 1);
+    expect(h.getTemporaryPageDataMock).not.toHaveBeenCalledWith('/t.pdf', 0);
+    expect(h.getTemporaryPageDataMock).not.toHaveBeenCalledWith('/t.pdf', 2);
+    expect(h.askMock).toHaveBeenCalledTimes(2);
     expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
   });
 
@@ -623,9 +762,11 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
         await result.current.runOcrOnRegion(canvas, { x: 100, y: 200, width: 80, height: 40 }, 0, 100);
       });
 
-      expect(h.invokeMock).toHaveBeenCalledWith('run_ocr', expect.objectContaining({ imagePath: expect.any(String) }));
-      expect(h.writeFileMock).toHaveBeenCalled();
-      expect(h.removeMock).toHaveBeenCalled();
+      expect(h.invokeMock).toHaveBeenCalledWith('run_ocr', expect.objectContaining({ imageBytes: expect.any(Array) }));
+      const runOcrArgs = h.invokeMock.mock.calls.find(([cmd]) => cmd === 'run_ocr')?.[1] as Record<string, unknown>;
+      expect(runOcrArgs.imagePath).toBeUndefined();
+      expect(h.writeFileMock).not.toHaveBeenCalled();
+      expect(h.removeMock).not.toHaveBeenCalled();
 
       const p0 = usePecoStore.getState().document!.pages.get(0)!;
       expect(p0.textBlocks).toHaveLength(1);
@@ -735,6 +876,67 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
       expect(p0.textBlocks[0].text).toBe('existing');
       expect(p0.textBlocks[1].text).toBe('新規');
     });
+
+    it('キャンセル済みなら run_ocr 完了後の範囲指定OCR結果を store に反映しない', async () => {
+      usePecoStore.getState().setDocument(makeDoc(1));
+      usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+      let resolveOcr: (raw: string) => void = () => {};
+      const ocrStarted = new Promise<void>((resolve) => {
+        h.invokeMock.mockImplementation(async (cmd: string) => {
+          if (cmd !== 'run_ocr') return '';
+          resolve();
+          return await new Promise<string>((r) => { resolveOcr = r; });
+        });
+      });
+
+      const { result } = renderHook(() => useOcrEngine(() => {}));
+      const canvas = makeOffscreenCanvas(400, 600);
+      const promise = result.current.runOcrOnRegion(canvas, { x: 0, y: 0, width: 60, height: 30 }, 0, 100);
+
+      await ocrStarted;
+      act(() => { result.current.cancelOcr(); });
+      resolveOcr(JSON.stringify({
+        status: 'ok',
+        blocks: [
+          { text: 'CANCELLED_REGION', bbox: { x: 0, y: 0, width: 30, height: 10 }, writingMode: 'horizontal', confidence: 1 },
+        ],
+      }));
+      await act(async () => { await promise; });
+
+      const p0 = usePecoStore.getState().document!.pages.get(0)!;
+      expect(p0.textBlocks).toHaveLength(0);
+    });
+  });
+
+  it('キャンセル済みなら runOcrCurrentPage の run_ocr 完了後に結果を store に反映しない', async () => {
+    usePecoStore.getState().setDocument(makeDoc(1));
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    let resolveOcr: (raw: string) => void = () => {};
+    const ocrStarted = new Promise<void>((resolve) => {
+      h.invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd !== 'run_ocr') return '';
+        resolve();
+        return await new Promise<string>((r) => { resolveOcr = r; });
+      });
+    });
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    const promise = result.current.runOcrCurrentPage();
+
+    await ocrStarted;
+    act(() => { result.current.cancelOcr(); });
+    resolveOcr(JSON.stringify({
+      status: 'ok',
+      blocks: [
+        { text: 'CANCELLED_CURRENT', bbox: { x: 0, y: 0, width: 10, height: 10 }, writingMode: 'horizontal', confidence: 1 },
+      ],
+    }));
+    await act(async () => { await promise; });
+
+    const p0 = usePecoStore.getState().document!.pages.get(0)!;
+    expect(p0.textBlocks).toHaveLength(0);
   });
 
   it('issue #102: runOcrCurrentPage 中に doc 参照が差し替わったら新 doc に書き込まれない', async () => {

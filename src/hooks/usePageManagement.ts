@@ -1,5 +1,5 @@
-import { useCallback } from 'react';
-import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
+import { useCallback, useRef } from 'react';
+import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../store/pecoStore';
 import { useInfraStore } from '../store/infraStore';
 import {
   deleteTemporaryPageKeys,
@@ -14,13 +14,20 @@ import {
 export function usePageManagement() {
   const deletePages = usePecoStore((s) => s.deletePages);
   const movePage = usePecoStore((s) => s.movePage);
+  const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const enqueuePageOperation = useCallback((operation: () => Promise<void>) => {
+    const queued = operationQueueRef.current.then(operation, operation);
+    operationQueueRef.current = queued.catch(() => {});
+    return queued;
+  }, []);
 
   const handleDeletePages = useCallback(
-    async (displayIndices: number[]) => {
+    (displayIndices: number[]) => enqueuePageOperation(async () => {
       await waitForPendingIdbSaves();
 
       await deletePages(displayIndices, (filePath, deletedOrigIndices, renamedEntries) => {
-        void deleteTemporaryPageKeys(filePath, deletedOrigIndices)
+        const work = deleteTemporaryPageKeys(filePath, deletedOrigIndices)
           .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
           .then(() => {
             useInfraStore.getState().clearLastIdbErrorIfSet();
@@ -30,17 +37,18 @@ export function usePageManagement() {
             console.error('[usePageManagement] deletePages IDB 同期失敗:', err);
             useInfraStore.getState().setLastIdbError(err);
           });
+        trackPendingIdbWork(work);
       });
-    },
-    [deletePages],
+    }),
+    [deletePages, enqueuePageOperation],
   );
 
   const handleMovePage = useCallback(
-    async (fromDisplayIndex: number, toDisplayIndex: number) => {
+    (fromDisplayIndex: number, toDisplayIndex: number) => enqueuePageOperation(async () => {
       await waitForPendingIdbSaves();
 
       await movePage(fromDisplayIndex, toDisplayIndex, (filePath, renamedEntries) => {
-        void renameTemporaryPageKeys(filePath, renamedEntries)
+        const work = renameTemporaryPageKeys(filePath, renamedEntries)
           .then(() => {
             useInfraStore.getState().clearLastIdbErrorIfSet();
           })
@@ -49,9 +57,10 @@ export function usePageManagement() {
             console.error('[usePageManagement] movePage IDB 同期失敗:', err);
             useInfraStore.getState().setLastIdbError(err);
           });
+        trackPendingIdbWork(work);
       });
-    },
-    [movePage],
+    }),
+    [movePage, enqueuePageOperation],
   );
 
   return { handleDeletePages, handleMovePage };

@@ -19,11 +19,13 @@ const m = vi.hoisted(() => {
     drawText:            vi.fn(),
     drawImage:           vi.fn(),
     removePage:          vi.fn(),
+    addPage:             vi.fn(),
     insertPage:          vi.fn(),
     pushOperators:       vi.fn(),
     embedJpg:            vi.fn(),
     save:                vi.fn(),
     embedFont:           vi.fn(),
+    copyPages:           vi.fn(),
     registerFontkit:     vi.fn(),
     pdfLoad:             vi.fn(),
     pdfjsGetDocument:    vi.fn(),
@@ -63,6 +65,7 @@ import {
   __setSaveWorkerFactoryForTest,
   __resetSaveStateForTest,
 } from '../../utils/pdfSaver'
+import { __handleSavePdfForTest } from '../../utils/pdf.worker'
 
 // ── ヘルパー ──────────────────────────────────────────────────
 
@@ -186,8 +189,12 @@ beforeEach(() => {
   }
   defaultMockPage = mockPage
   m.insertPage.mockReturnValue(mockPage)
+  m.addPage.mockReturnValue(mockPage)
   m.embedJpg.mockResolvedValue({ width: 1, height: 1 })
   m.save.mockResolvedValue(new Uint8Array([1, 2, 3]))
+  m.copyPages.mockImplementation((_doc: unknown, order: number[]) =>
+    Promise.resolve(order.map((pageIndex) => ({ copiedPageIndex: pageIndex }))),
+  )
   // heightAtSize(size) は line-height (ascent+descent) を返し、
   // heightAtSize(size, { descender: false }) は ascent のみ (descent を除外) を返す。
   // NotoSansJP では descentRatio ≈ 0.2 なので: 1.448 (full) → 1.448*0.8 = 1.1584 (ascent only).
@@ -206,6 +213,8 @@ beforeEach(() => {
     registerFontkit: m.registerFontkit,
     embedFont:       m.embedFont,
     removePage:      m.removePage,
+    addPage:         m.addPage,
+    copyPages:       m.copyPages,
     insertPage:      m.insertPage,
     getPage:         vi.fn().mockReturnValue(mockPage),
     getPages:        vi.fn().mockReturnValue([mockPage]),
@@ -713,6 +722,85 @@ describe('pdfSaver / savePDF', () => {
       expect(parsed['1']).toBeDefined()
       expect(parsed['1'][0].text).toBe('NewText')
       expect(mockInfoDict.delete).toHaveBeenCalledWith('PecoToolBBoxes')
+    })
+
+    it('pageOrder が非identityなら未dirtyの既存メタを表示indexへremapする', async () => {
+      const existingMeta = {
+        '0': [{ text: 'A', bbox: { x: 0, y: 0, width: 10, height: 10 }, writingMode: 'horizontal', order: 0 }],
+        '1': [{ text: 'B', bbox: { x: 1, y: 1, width: 10, height: 10 }, writingMode: 'horizontal', order: 0 }],
+        '2': [{ text: 'C', bbox: { x: 2, y: 2, width: 10, height: 10 }, writingMode: 'horizontal', order: 0 }],
+      }
+      const mockInfoDict = {
+        get: vi.fn().mockReturnValue({ decodeText: () => JSON.stringify(existingMeta) }),
+        set: vi.fn(),
+        delete: vi.fn(),
+        lookup: vi.fn(),
+      }
+      const mockContext = makeSweepableContext() as any
+      const pages = Array.from({ length: 3 }, () => ({
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }))
+      const mockPdfDoc = {
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        addPage:         m.addPage,
+        copyPages:       m.copyPages,
+        getPage:         vi.fn((index: number) => pages[index]),
+        getPages:        vi.fn().mockReturnValue(pages),
+        getPageCount:    vi.fn().mockReturnValue(3),
+        save:            m.save,
+        context:         mockContext,
+        catalog:         makeCatalogMock(),
+        getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
+      }
+      m.pdfLoad.mockResolvedValue(mockPdfDoc)
+
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'test.pdf', totalPages: 3, metadata: {},
+        pages: new Map(),
+      }
+      await savePDF(new Uint8Array([1, 2, 3]), doc, undefined, [], undefined, [2, 0, 1])
+
+      const parsed = readLastMetadataJson(mockContext)
+      expect(parsed['0'][0].text).toBe('C')
+      expect(parsed['1'][0].text).toBe('A')
+      expect(parsed['2'][0].text).toBe('B')
+      expect(mockInfoDict.delete).toHaveBeenCalledWith('PecoToolBBoxes')
+    })
+
+    it('PCT-035: clean PDF でも非identity pageOrder なら original bytes を返さない', async () => {
+      withPageCount(3)
+      const originalBytes = new Uint8Array([9, 8, 7])
+      const doc: PecoDocument = {
+        filePath: '', fileName: 'test.pdf', totalPages: 3, metadata: {},
+        pages: new Map(),
+      }
+
+      const saved = await savePDF(originalBytes, doc, undefined, [], undefined, [2, 0, 1])
+
+      expect(Array.from(saved)).toEqual([1, 2, 3])
+      expect(Array.from(saved)).not.toEqual(Array.from(originalBytes))
+      expect(m.copyPages).toHaveBeenCalledWith(defaultPdfDocMock, [2, 0, 1])
+      expect(m.removePage.mock.calls.map((call: any[]) => call[0])).toEqual([2, 1, 0])
+      expect(m.addPage.mock.calls.map((call: any[]) => call[0])).toEqual([
+        { copiedPageIndex: 2 },
+        { copiedPageIndex: 0 },
+        { copiedPageIndex: 1 },
+      ])
+      expect(m.save).toHaveBeenCalled()
     })
   })
 
@@ -1411,6 +1499,19 @@ describe('pdfSaver / Worker 経路', () => {
       await p
     })
 
+    it('pageOrder を Worker request payload に含める', async () => {
+      const doc = makeSimpleDoc()
+      const pageOrder = [2, 0, 1]
+      const p = savePDF(new Uint8Array([9, 9, 9]), doc, undefined, [], undefined, pageOrder)
+      const w = ControllableMockWorker.instances[0]
+      const req = w.postedMessages[0]
+      expect(req.type).toBe('SAVE_PDF')
+      expect(req.data.pageOrder).toEqual(pageOrder)
+
+      w.emitSuccess(new Uint8Array([7]))
+      await p
+    })
+
     it('Worker 不在時に {url} を渡すと main thread fallback で fetch が呼ばれる', async () => {
       // Worker factory を null 返却にして main thread fallback を取らせる
       __setSaveWorkerFactoryForTest(() => null)
@@ -1429,6 +1530,161 @@ describe('pdfSaver / Worker 経路', () => {
 
       expect(fetchMock).toHaveBeenCalledWith('blob:main-thread-url')
       expect(result).toBeInstanceOf(Uint8Array)
+    })
+  })
+
+  describe('U-W-06: Worker pageOrder contract', () => {
+    it('Worker 側で pageOrder を反映し dirty page と metadata は表示 index で書く', async () => {
+      const pages = Array.from({ length: 3 }, () => ({
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }))
+      const mockContext = makeSweepableContext() as any
+      const mockPdfDoc = {
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        addPage:         m.addPage,
+        copyPages:       m.copyPages,
+        getPage:         vi.fn((index: number) => pages[index]),
+        getPages:        vi.fn().mockReturnValue(pages),
+        getPageCount:    vi.fn().mockReturnValue(3),
+        save:            m.save,
+        context:         mockContext,
+        catalog:         makeCatalogMock(),
+        getInfoDict:     vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }),
+      }
+      m.pdfLoad.mockResolvedValue(mockPdfDoc)
+
+      const doc = makeSimpleDoc()
+      const page = doc.pages.get(0)!
+      const serializedPage = {
+        ...page,
+        textBlocks: [{
+          id: 'b0',
+          text: 'DisplayZero',
+          originalText: 'DisplayZero',
+          writingMode: 'horizontal' as WritingMode,
+          order: 0,
+          isNew: false,
+          isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+
+      await __handleSavePdfForTest(
+        new Uint8Array([1, 2, 3]),
+        { pages: { 0: serializedPage } },
+        undefined,
+        [],
+        [2, 0, 1],
+      )
+
+      expect(m.copyPages).toHaveBeenCalledWith(mockPdfDoc, [2, 0, 1])
+      expect(m.removePage.mock.calls.map((call: any[]) => call[0])).toEqual([2, 1, 0])
+      expect(m.addPage.mock.calls.map((call: any[]) => call[0])).toEqual([
+        { copiedPageIndex: 2 },
+        { copiedPageIndex: 0 },
+        { copiedPageIndex: 1 },
+      ])
+      expect(mockPdfDoc.getPage).toHaveBeenCalledWith(0)
+      const parsed = readLastMetadataJson(mockContext)
+      expect(parsed['0'][0].text).toBe('DisplayZero')
+      expect(parsed['2']).toBeUndefined()
+    })
+
+    it('Worker 側で未dirtyの既存メタを pageOrder に合わせて表示indexへremapする', async () => {
+      const existingMeta = {
+        '0': [{ text: 'A', bbox: { x: 0, y: 0, width: 10, height: 10 }, writingMode: 'horizontal', order: 0 }],
+        '1': [{ text: 'B', bbox: { x: 1, y: 1, width: 10, height: 10 }, writingMode: 'horizontal', order: 0 }],
+        '2': [{ text: 'C', bbox: { x: 2, y: 2, width: 10, height: 10 }, writingMode: 'horizontal', order: 0 }],
+      }
+      const mockInfoDict = {
+        get: vi.fn().mockReturnValue({ decodeText: () => JSON.stringify(existingMeta) }),
+        set: vi.fn(),
+        delete: vi.fn(),
+        lookup: vi.fn(),
+      }
+      const pages = Array.from({ length: 3 }, () => ({
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }))
+      const mockContext = makeSweepableContext() as any
+      const mockPdfDoc = {
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        addPage:         m.addPage,
+        copyPages:       m.copyPages,
+        getPage:         vi.fn((index: number) => pages[index]),
+        getPages:        vi.fn().mockReturnValue(pages),
+        getPageCount:    vi.fn().mockReturnValue(3),
+        save:            m.save,
+        context:         mockContext,
+        catalog:         makeCatalogMock(),
+        getInfoDict:     vi.fn().mockReturnValue(mockInfoDict),
+      }
+      m.pdfLoad.mockResolvedValue(mockPdfDoc)
+
+      await __handleSavePdfForTest(
+        new Uint8Array([1, 2, 3]),
+        { pages: {} },
+        undefined,
+        [],
+        [2, 0, 1],
+      )
+
+      const parsed = readLastMetadataJson(mockContext)
+      expect(parsed['0'][0].text).toBe('C')
+      expect(parsed['1'][0].text).toBe('A')
+      expect(parsed['2'][0].text).toBe('B')
+      expect(mockInfoDict.delete).toHaveBeenCalledWith('PecoToolBBoxes')
+    })
+
+    it('PCT-035: Worker 側も clean PDF + 非identity pageOrder では original bytes を返さない', async () => {
+      withPageCount(3)
+      const originalBytes = new Uint8Array([9, 8, 7])
+
+      const { savedBytes } = await __handleSavePdfForTest(
+        originalBytes,
+        { pages: {} },
+        undefined,
+        [],
+        [2, 0, 1],
+      )
+
+      expect(Array.from(savedBytes)).toEqual([1, 2, 3])
+      expect(Array.from(savedBytes)).not.toEqual(Array.from(originalBytes))
+      expect(m.copyPages).toHaveBeenCalledWith(defaultPdfDocMock, [2, 0, 1])
+      expect(m.removePage.mock.calls.map((call: any[]) => call[0])).toEqual([2, 1, 0])
+      expect(m.addPage.mock.calls.map((call: any[]) => call[0])).toEqual([
+        { copiedPageIndex: 2 },
+        { copiedPageIndex: 0 },
+        { copiedPageIndex: 1 },
+      ])
+      expect(m.save).toHaveBeenCalled()
     })
   })
 })

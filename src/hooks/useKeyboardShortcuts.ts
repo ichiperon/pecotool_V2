@@ -55,7 +55,7 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
         else ac.undo();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'y' && !isEditing) {
         ac.redo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')) {
         e.preventDefault();
         ac.fitToScreen(false);
       }

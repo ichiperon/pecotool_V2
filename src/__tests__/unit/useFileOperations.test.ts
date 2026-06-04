@@ -1023,7 +1023,14 @@ describe('useFileOperations save-diff: 編集が保存出力に反映される (
         [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [{ id: 'p1', text: 'P1', isDirty: false }], isDirty: false, thumbnail: null } as unknown as PageData],
       ]),
     } as unknown as PecoDocument;
-    usePecoStore.setState({ document: doc, isDirty: true });
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0, 1],
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
     __originalBytesCacheForTest.set('/diff/race.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
 
     // savePDF が解決する前に「別ページ編集」を割り込ませる。
@@ -1052,6 +1059,8 @@ describe('useFileOperations save-diff: 編集が保存出力に反映される (
     expect(usePecoStore.getState().document!.pages.get(1)!.isDirty).toBe(true);
     // 未保存ページが残るのでドキュメントレベル isDirty も true
     expect(usePecoStore.getState().isDirty).toBe(true);
+    expect(usePecoStore.getState().lastSavedActionIndex).toBe(0);
+    expect(usePecoStore.getState().undoStack.length).toBe(1);
 
     // 2 回目の保存: page 1 が dirty フィルタに載り、編集が保存スナップショットに含まれる
     (savePDF as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Uint8Array([7, 8, 9]));
@@ -1062,6 +1071,7 @@ describe('useFileOperations save-diff: 編集が保存出力に反映される (
     // 2 回目スナップショットに page 1 が含まれ、編集後テキストが載っている
     expect(secondSavedDoc.pages.has(1)).toBe(true);
     expect(secondSavedDoc.pages.get(1)!.textBlocks[0].text).toBe('P1_DURING_SAVE');
+    expect(usePecoStore.getState().lastSavedActionIndex).toBe(1);
   });
 });
 
@@ -1198,6 +1208,199 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
     return doc;
   }
 
+  function setupPageOrderDoc(
+    filePath: string,
+    pageOrder: number[],
+    pageTexts: string[],
+    currentPageIndex = 0,
+  ): PecoDocument {
+    const pages = new Map<number, PageData>(
+      pageTexts.map((text, pageIndex) => [
+        pageIndex,
+        {
+          pageIndex,
+          width: 595,
+          height: 842,
+          textBlocks: [{ id: `blk-${pageIndex}`, text, isDirty: true }],
+          isDirty: true,
+          thumbnail: null,
+        } as unknown as PageData,
+      ]),
+    );
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: pageTexts.length,
+      metadata: {},
+      pages,
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      pageOrder,
+      currentPageIndex,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  it('OCR実行中の手動保存はPDF生成に入らずブロックされる', async () => {
+    setupSavableDoc('/ocr/save-blocked.pdf');
+
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true };
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef as any)
+    );
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(clearTemporaryChanges).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      'OCR実行中は保存できません。OCRを中止または完了してから保存してください。',
+      true,
+    );
+  });
+
+  it('フォルダOCR用のbypass指定ではOCR実行中でも保存できる', async () => {
+    setupSavableDoc('/ocr/folder-save.pdf');
+
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true };
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef as any)
+    );
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSave({ bypassOcrGuard: true });
+    });
+
+    expect(ok).toBe(true);
+    expect(savePDF).toHaveBeenCalled();
+  });
+
+  it('フォルダOCR用のbypass指定ではsidecar保存もOCR実行中に実行できる', async () => {
+    setupSavableDoc('/ocr/folder-sidecar.pdf');
+
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true };
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef as any)
+    );
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/ocr/folder-sidecar.peco.pdf', { bypassOcrGuard: true });
+    });
+
+    expect(ok).toBe(true);
+    expect(savePDF).toHaveBeenCalled();
+  });
+
+  it('PCT-034: 非identity pageOrder 保存後は新しい物理PDFに合わせて identity へ正規化する', async () => {
+    const pages = new Map<number, PageData>([
+      [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [{ id: 'p2', text: 'page-2', isDirty: false }], isDirty: false, thumbnail: null } as unknown as PageData],
+      [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [{ id: 'p0', text: 'page-0', isDirty: false }], isDirty: false, thumbnail: null } as unknown as PageData],
+      [2, { pageIndex: 2, width: 595, height: 842, textBlocks: [{ id: 'p1', text: 'page-1', isDirty: false }], isDirty: false, thumbnail: null } as unknown as PageData],
+    ]);
+    const doc: PecoDocument = {
+      filePath: '/reload/reordered.pdf',
+      fileName: 'reordered.pdf',
+      totalPages: 3,
+      metadata: {},
+      pages,
+    };
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [2, 0, 1],
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [
+        { type: 'reorder_pages', beforeOrder: [0, 1, 2], afterOrder: [2, 0, 1] },
+      ],
+      redoStack: [],
+    });
+    __originalBytesCacheForTest.set('/reload/reordered.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    let after = usePecoStore.getState();
+    expect((savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls[0][5]).toEqual([2, 0, 1]);
+    expect(after.pageOrder).toEqual([0, 1, 2]);
+    expect(after.document!.pages.get(0)!.textBlocks[0].text).toBe('page-2');
+    expect(after.undoStack.some((action) => action.type === 'reorder_pages')).toBe(false);
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    after = usePecoStore.getState();
+    expect((savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[5]).toEqual([0, 1, 2]);
+    expect(after.pageOrder).toEqual([0, 1, 2]);
+  });
+
+  it('PCT-037: savePDF 前に pageOrder が変わっても保存開始時の pageOrder を使い、live pageOrder を正規化で潰さない', async () => {
+    const snapshotDoc = setupPageOrderDoc('/pct037/page-order-race.pdf', [2, 0, 1], ['snapshot-2', 'snapshot-0', 'snapshot-1']);
+    const cleanPages = new Map<number, PageData>(
+      [...snapshotDoc.pages.entries()].map(([idx, page]) => [
+        idx,
+        {
+          ...page,
+          textBlocks: page.textBlocks.map((block: any) => ({ ...block, isDirty: false })),
+          isDirty: false,
+        } as unknown as PageData,
+      ]),
+    );
+    usePecoStore.setState({
+      document: { ...snapshotDoc, pages: cleanPages },
+      isDirty: true,
+    });
+
+    (getAllTemporaryPageData as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      usePecoStore.setState({
+        document: {
+          ...usePecoStore.getState().document!,
+          pages: cleanPages,
+        },
+        pageOrder: [1, 0, 2],
+        undoStack: [
+          { type: 'reorder_pages', beforeOrder: [2, 0, 1], afterOrder: [1, 0, 2] },
+        ],
+      });
+      return new Map();
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const savePdfMock = savePDF as unknown as ReturnType<typeof vi.fn>;
+    const [, savedDoc] = savePdfMock.mock.calls[0] as [unknown, PecoDocument];
+    expect(savePdfMock.mock.calls[0][5]).toEqual([2, 0, 1]);
+    expect(savedDoc.pages.size).toBe(0);
+    expect(usePecoStore.getState().pageOrder).toEqual([1, 0, 2]);
+    expect(usePecoStore.getState().undoStack.some((action) => action.type === 'reorder_pages')).toBe(true);
+    expect([...usePecoStore.getState().document!.pages.values()].every((page) => !page.isDirty)).toBe(true);
+    expect(usePecoStore.getState().isDirty).toBe(true);
+    expect(usePecoStore.getState().lastSavedActionIndex).toBe(0);
+  });
+
   it('#118: 上書き保存が成功すると destroySharedPdfProxy が呼ばれ documentEpoch が +1 される', async () => {
     setupSavableDoc('/reload/save.pdf');
     // documentEpoch を既知値にしておき、保存後に +1 されたことを確認する。
@@ -1246,6 +1449,55 @@ describe('useFileOperations 保存後の pdfjs 再 render トリガー (issue #1
     // undo/redo 履歴も保存では消えない。
     expect(after.undoStack).toEqual([]);
     expect(after.redoStack).toEqual([]);
+  });
+
+  it('PCT-034: reordered save normalizes current-session pageOrder and second save uses identity', async () => {
+    setupPageOrderDoc('/pct034/reorder.pdf', [2, 0, 1], ['page-2', 'page-0', 'page-1'], 1);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const savePdfMock = savePDF as unknown as ReturnType<typeof vi.fn>;
+    expect(savePdfMock.mock.calls[0][5]).toEqual([2, 0, 1]);
+    expect(usePecoStore.getState().pageOrder).toEqual([0, 1, 2]);
+    expect(usePecoStore.getState().currentPageIndex).toBe(1);
+    expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe('page-2');
+    expect(usePecoStore.getState().document!.pages.get(1)!.textBlocks[0].text).toBe('page-0');
+    expect(usePecoStore.getState().document!.pages.get(2)!.textBlocks[0].text).toBe('page-1');
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    expect(savePdfMock.mock.calls[1][5]).toEqual([0, 1, 2]);
+  });
+
+  it('PCT-034: deleted save normalizes remaining source mapping before a second save', async () => {
+    setupPageOrderDoc('/pct034/delete.pdf', [0, 2], ['page-0', 'page-2'], 1);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const savePdfMock = savePDF as unknown as ReturnType<typeof vi.fn>;
+    expect(savePdfMock.mock.calls[0][5]).toEqual([0, 2]);
+    expect(usePecoStore.getState().pageOrder).toEqual([0, 1]);
+    expect(usePecoStore.getState().currentPageIndex).toBe(1);
+    expect(usePecoStore.getState().document!.totalPages).toBe(2);
+    expect(usePecoStore.getState().document!.pages.get(1)!.textBlocks[0].text).toBe('page-2');
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    expect(savePdfMock.mock.calls[1][5]).toEqual([0, 1]);
   });
 
   it('#118: 保存が失敗 (writeFileAtomically が reject) した場合は documentEpoch を進めない', async () => {

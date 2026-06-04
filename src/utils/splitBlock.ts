@@ -46,6 +46,23 @@ function getSplitIndex(graphemes: string[], ratio: number): number {
   return Math.max(1, graphemes.length - 1);
 }
 
+/**
+ * Converts a geometric ratio (0-1) to the nearest character boundary ratio.
+ * Snaps to the closest grapheme boundary within 1..length-1 so the caller
+ * can preview and perform splits that land exactly on a character edge.
+ * Returns the original ratio unchanged when the block has 0 or 1 graphemes
+ * (splitting is not meaningful; splitBlockAtRatio will return null for those).
+ */
+export function getSplitRatioSnapped(block: TextBlock, ratio: number): number {
+  const graphemes = splitGraphemes(block.text);
+  if (graphemes.length <= 1) return ratio;
+  const clamped = Math.max(0, Math.min(1, ratio));
+  const targetIdx = Math.round(clamped * graphemes.length);
+  // Clamp to 1..length-1 so neither split part is empty.
+  const safeIdx = Math.max(1, Math.min(graphemes.length - 1, targetIdx));
+  return safeIdx / graphemes.length;
+}
+
 export function splitBlockAtRatio(block: TextBlock, ratio: number): SplitResult | null {
   const graphemes = splitGraphemes(block.text);
   if (graphemes.length < 2) return null;

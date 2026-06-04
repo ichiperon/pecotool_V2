@@ -173,4 +173,43 @@ describe('usePdfViewerState (issue #26)', () => {
 
     document.body.removeChild(container)
   })
+
+  it('寸法が無い状態で fitToScreen(false) を呼んだ後、寸法が入ると zoom が更新される', async () => {
+    usePecoStore.setState({
+      document: makeDoc(new Map([
+        [0, makePage({ width: undefined, height: undefined } as any)],
+      ])),
+      currentPageIndex: 0,
+    } as any)
+
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 800, configurable: true })
+    document.body.appendChild(container)
+
+    const { result } = renderHook(
+      ({ pageIndex, c }: { pageIndex: number; c: HTMLDivElement | null }) =>
+        useWithContainer(pageIndex, c),
+      { initialProps: { pageIndex: 0, c: container } }
+    )
+
+    act(() => {
+      result.current.fitToScreen(false)
+    })
+    expect(useViewerStore.getState().zoom).toBe(100)
+
+    act(() => {
+      usePecoStore.setState({
+        document: makeDoc(new Map([
+          [0, makePage({ width: 595, height: 842 })],
+        ])),
+      } as any)
+    })
+
+    await vi.waitFor(() => {
+      expect(useViewerStore.getState().zoom).toBe(87)
+    })
+
+    document.body.removeChild(container)
+  })
 })

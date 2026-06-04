@@ -27,6 +27,7 @@ vi.mock('../../utils/perfLogger', () => ({
 
 import { loadPage } from '../../utils/pdfTextExtractor';
 import { getCachedPageProxy } from '../../utils/pdfLoader';
+import { getTemporaryPageData } from '../../utils/pdfTemporaryStorage';
 
 // crypto.randomUUID polyfill (Node test env が古い場合のみ)
 if (typeof globalThis.crypto?.randomUUID !== 'function') {
@@ -72,6 +73,7 @@ describe('loadPage bboxMeta vs pdfjs fallback (#99 主因リグレッション)'
   beforeEach(() => {
     vi.clearAllMocks();
     __mockCache.clear();
+    vi.mocked(getTemporaryPageData).mockResolvedValue(null);
   });
 
   it('savedMeta が渡されたとき、pdfjs fallback (ascent*1.16 経路) ではなく meta の bbox.y がそのまま採用される', async () => {
@@ -174,12 +176,55 @@ describe('loadPage bboxMeta vs pdfjs fallback (#99 主因リグレッション)'
     expect(r2.textBlocks[0].bbox.height).toBe(12); // meta の値そのまま
     expect(r2.textBlocks[0].bbox.height).not.toBeCloseTo(fbHeight, 5); // fallback と異なる
   });
+
+  it('PCT-025: source page と display page が異なる場合、IDB 一時変更は display page index で読む', async () => {
+    const viewport: ViewportLike = {
+      width: 595,
+      height: 842,
+      convertToViewportPoint: (x: number, y: number) => [x, 842 - y],
+    };
+    const pageProxy = makeMockPageProxy({
+      viewport,
+      textItems: [
+        { str: 'SOURCE_TEXT', transform: [12, 0, 0, 12, 100, 100], width: 80, height: 12 },
+      ],
+    });
+    vi.mocked(getCachedPageProxy).mockResolvedValue(pageProxy);
+    vi.mocked(getTemporaryPageData).mockImplementation(async (_filePath: string, idx: number) => (
+      idx === 0
+        ? {
+            pageIndex: 0,
+            textBlocks: [{
+              id: 'display-edit',
+              text: 'DISPLAY_EDIT',
+              originalText: 'DISPLAY_EDIT',
+              bbox: { x: 1, y: 2, width: 3, height: 4 },
+              writingMode: 'horizontal',
+              order: 0,
+              isNew: false,
+              isDirty: true,
+            }],
+            isDirty: true,
+            isTextExtracted: true,
+            ocrCleared: false,
+          }
+        : null
+    ));
+
+    const result = await loadPage(null as any, 2, '/tmp/reordered-display-idb.pdf', null, undefined, { displayPageIndex: 0 });
+
+    expect(getCachedPageProxy).toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 2);
+    expect(getTemporaryPageData).toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 0);
+    expect(getTemporaryPageData).not.toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 2);
+    expect(result.textBlocks[0].text).toBe('DISPLAY_EDIT');
+  });
 });
 
 describe('loadPage writing mode detection (#39)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     __mockCache.clear();
+    vi.mocked(getTemporaryPageData).mockResolvedValue(null);
   });
 
   it('回転 270° ページで PDF 上 horizontal な run は horizontal 判定される', async () => {

@@ -207,6 +207,8 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
 interface SaveResult {
   size: number;
   skippedChars: SkippedPdfTextChar[];
+  savedActionIndex: number;
+  hasPostSnapshotChanges: boolean;
   /**
    * issue #115 / #119: 今回の保存スナップショットに含まれたページの
    * pageIndex → PageData オブジェクト参照の Map。保存後の resetDirty に渡すと、
@@ -249,6 +251,14 @@ export interface SaveDialogOptions {
   compression: 'none' | 'compressed' | 'rasterized';
   rasterizeQuality?: number;
 }
+
+type SaveInvocationOptions = {
+  bypassOcrGuard?: boolean;
+};
+
+type ExecuteSaveOptions = {
+  normalizePageOrderForCurrentDocument?: boolean;
+};
 
 export function useFileOperations(
   showToast: (msg: string, isError?: boolean, action?: { label: string; onClick: () => void }) => void,
@@ -473,11 +483,19 @@ export function useFileOperations(
    * 各 await は個別 timeout で囲み、詰まった段階をトースト/コンソールで特定できるようにする。
    * @param targetPath 書き込み先パス。省略時は document.filePath に上書き保存。
    * @param saveOptions 圧縮プリセット等の保存オプション。省略時はデフォルト挙動。
+   * @param executeOptions 保存完了後に現在のセッションへ反映する状態更新オプション。
    * @returns 保存結果。失敗時は null。
    */
-  const _executeSave = async (targetPath?: string, saveOptions?: SaveDialogOptions): Promise<SaveResult | null> => {
-    const { document } = usePecoStore.getState();
+  const _executeSave = async (
+    targetPath?: string,
+    saveOptions?: SaveDialogOptions,
+    executeOptions: ExecuteSaveOptions = {},
+  ): Promise<SaveResult | null> => {
+    const saveSnapshot = usePecoStore.getState();
+    const { document } = saveSnapshot;
     if (!document) return null;
+    const savePageOrder = [...saveSnapshot.pageOrder];
+    const savedActionIndex = saveSnapshot.undoStack.length;
     const sourceFilePath = document.filePath;
 
     // issue #164: 保存ロック画面の進捗ステップ通知。
@@ -534,8 +552,6 @@ export function useFileOperations(
       if (snapshotPage) savedPageSnapshots.set(idx, snapshotPage);
     }
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
-    // issue #209: pageOrder の canonical source は store。保存時点のスナップショットを取得。
-    const savePageOrder = usePecoStore.getState().pageOrder;
     let skippedChars: SkippedPdfTextChar[] = [];
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
       savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; }, savePageOrder, saveOptions);
@@ -573,9 +589,18 @@ export function useFileOperations(
     // 再 render しないため、保存前にレンダリング済みのページ画像はそのまま固着し、
     // 以降の zoom 変更で再ラスタライズされない (issue #118)。
     destroySharedPdfProxy();
-    const liveDoc = usePecoStore.getState().document;
+    const liveStateBeforeNormalize = usePecoStore.getState();
+    const liveDoc = liveStateBeforeNormalize.document;
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
+    }
+    const pageOrderMatchesSnapshot =
+      liveStateBeforeNormalize.pageOrder.length === savePageOrder.length &&
+      liveStateBeforeNormalize.pageOrder.every((sourceIndex, displayIndex) => sourceIndex === savePageOrder[displayIndex]);
+    const hasPostSnapshotChanges =
+      !pageOrderMatchesSnapshot || liveStateBeforeNormalize.undoStack.length > savedActionIndex;
+    if (executeOptions.normalizePageOrderForCurrentDocument !== false) {
+      liveStateBeforeNormalize.normalizePageOrderAfterSave(savePageOrder);
     }
     // issue #118: documentEpoch を +1 して usePageNavigation / usePdfRendering に
     // 「pdfjs proxy を取り直して現在ページ画像を再 render せよ」と通知する。
@@ -595,7 +620,13 @@ export function useFileOperations(
     // オブジェクト参照 (savedPageSnapshots) を返す。呼び出し側は保存後の
     // resetDirty にこれを渡し、保存中に編集された (= 参照が変わった) ページの
     // dirty を巻き込まないようにする。
-    return { size: savedBytes.length, skippedChars, savedPageSnapshots };
+    return {
+      size: savedBytes.length,
+      skippedChars,
+      savedPageSnapshots,
+      savedActionIndex,
+      hasPostSnapshotChanges,
+    };
   };
 
   /**
@@ -605,22 +636,26 @@ export function useFileOperations(
    *
    * フォルダ OCR ループは false を見て即時中止できる。
    */
-  const handleSave = async (): Promise<boolean> => {
+  const handleSave = async (options?: SaveInvocationOptions): Promise<boolean> => {
     // Ctrl+S が届いていることを可視化するため、開始時に必ずトースト表示。
     // リリースビルドでは console.log が見えないため UI で進行状況を確認する。
     console.log('[save] handleSave invoked');
     perf.mark('ui.save');
+    const { document } = usePecoStore.getState();
+    if (!document) {
+      showToast("PDFが開かれていません。", true);
+      return false;
+    }
+    if (isOcrRunningRef?.current && !options?.bypassOcrGuard) {
+      showToast('OCR実行中は保存できません。OCRを中止または完了してから保存してください。', true);
+      return false;
+    }
     // issue #115: store スナップショット前にフォーカス中の OcrCard の未コミット
     // 編集を store へ確定させる。OcrCard のテキスト編集は再レンダリング抑制のため
     // blur-commit 設計になっており、Ctrl+S 時にフォーカス中だと最新編集が store に
     // 無い。flushActiveOcrCardText は focus 中の .ocr-card-content を直接読んで
     // 同期 updatePageData するため、直後の _executeSave スナップショットに載る。
     commitActiveOcrCardEdit();
-    const { document } = usePecoStore.getState();
-    if (!document) {
-      showToast("PDFが開かれていません。", true);
-      return false;
-    }
 
     if (isSavingRef.current) {
       showToast("保存処理が進行中です。");
@@ -659,7 +694,10 @@ export function useFileOperations(
         // 保持され、次回保存の dirty フィルタに正しく載る。
         resetDirty(result.savedPageSnapshots);
         // issue #201: 保存成功時に lastSavedActionIndex を更新する
-        setLastSavedActionIndex(usePecoStore.getState().undoStack.length);
+        setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+        if (result.hasPostSnapshotChanges) {
+          usePecoStore.setState({ isDirty: true });
+        }
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
         void _writeAuditLog(document.filePath).catch((e) => {
@@ -721,9 +759,13 @@ export function useFileOperations(
       showToast('高圧縮 (ラスタライズ) は現在未実装です。通常形式で保存します。', true);
       options = { ...options, compression: 'none' };
     }
-    commitActiveOcrCardEdit();
     const { document } = usePecoStore.getState();
     if (!document) return;
+    if (isOcrRunningRef?.current) {
+      showToast('OCR実行中は保存できません。OCRを中止または完了してから保存してください。', true);
+      return;
+    }
+    commitActiveOcrCardEdit();
     if (isSavingRef.current) {
       showToast("保存処理が進行中です。");
       return;
@@ -750,7 +792,10 @@ export function useFileOperations(
             // ページだけ dirty を下ろす。
             resetDirty(result.savedPageSnapshots);
             // issue #201: 保存成功時に lastSavedActionIndex を更新する
-            setLastSavedActionIndex(usePecoStore.getState().undoStack.length);
+            setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+            if (result.hasPostSnapshotChanges) {
+              usePecoStore.setState({ isDirty: true });
+            }
             showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
             // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
             void _writeAuditLog(path).catch((e) => {
@@ -807,19 +852,28 @@ export function useFileOperations(
    * 取り出す実装とは異なり、OCR レイヤが保持される)。
    * 成功時 true / 失敗時 false を返す。
    */
-  const handleSaveTo = async (targetPath: string): Promise<boolean> => {
+  const handleSaveTo = async (targetPath: string, options?: SaveInvocationOptions): Promise<boolean> => {
     if (isSavingRef.current) {
       showToast('保存処理が進行中です。');
+      return false;
+    }
+    if (isOcrRunningRef?.current && !options?.bypassOcrGuard) {
+      showToast('OCR実行中は保存できません。OCRを中止または完了してから保存してください。', true);
       return false;
     }
     commitActiveOcrCardEdit();
     isSavingRef.current = true;
     setIsSaving?.(true);
     try {
-      const result = await _executeSave(targetPath);
+      const result = await _executeSave(targetPath, undefined, {
+        normalizePageOrderForCurrentDocument: false,
+      });
       if (result !== null) {
         resetDirty(result.savedPageSnapshots);
-        setLastSavedActionIndex(usePecoStore.getState().undoStack.length);
+        setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+        if (result.hasPostSnapshotChanges) {
+          usePecoStore.setState({ isDirty: true });
+        }
         return true;
       }
       return false;

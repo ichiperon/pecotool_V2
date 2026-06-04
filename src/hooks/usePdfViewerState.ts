@@ -40,6 +40,12 @@ export function usePdfViewerState(currentPageIndex: number) {
   useEffect(() => { isAutoFitRef.current = isAutoFit; }, [isAutoFit]);
 
   useEffect(() => {
+    if (isAutoFit && isFileLoaded && viewerRef.current && pageWidth && pageHeight) {
+      fitToScreen(true);
+    }
+  }, [isAutoFit, isFileLoaded, pageWidth, pageHeight, fitToScreen]);
+
+  useEffect(() => {
     if (!isFileLoaded) return;
     const container = viewerRef.current;
     if (!container) return;
