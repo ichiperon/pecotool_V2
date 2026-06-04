@@ -716,8 +716,8 @@ describe('pecoStore', () => {
     })
 
     it('U-PS-50: ロード済みページのみ OCR 消去スタブを撒く (totalPages=5, loaded=2)', () => {
-      // perf(#241): clearOcrAllPages は in-memory に存在するページのみ走査する設計。
-      // LRU 退避済みページ (Map に無いもの) は次回 loadPage 時に textBlocks=[] で生成される。
+      // perf(#241): clearOcrAllPages は in-memory に存在するページのみ走査する。
+      // LRU 退避済みページ (Map に無いもの) は IDB へ空 OCR 状態を書き込む。
       const page0 = makePage({ pageIndex: 0 })
       const page2 = makePage({ pageIndex: 2 })
       const doc: PecoDocument = {
@@ -740,6 +740,37 @@ describe('pecoStore', () => {
       expect(pages.get(0)!.isDirty).toBe(true)
       expect(pages.get(2)!.textBlocks).toHaveLength(0)
       expect(pages.get(2)!.isDirty).toBe(true)
+    })
+
+    it('PCT-026: clearOcrAllPages は IDB 退避ページにも空 OCR 状態を書き込む', async () => {
+      await waitForPendingIdbSaves()
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'memory' })] })
+      const doc: PecoDocument = {
+        filePath: 'test.pdf',
+        fileName: 'test.pdf',
+        totalPages: 3,
+        metadata: {},
+        pages: new Map([[0, page0]]),
+      }
+      usePecoStore.setState({ document: doc })
+
+      usePecoStore.getState().clearOcrAllPages()
+      await waitForPendingIdbSaves()
+
+      const pages = usePecoStore.getState().document!.pages
+      expect(pages.size).toBe(1)
+      expect(pages.get(0)!.textBlocks).toHaveLength(0)
+
+      const entries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls.flatMap((c) => c[0])
+      expect(entries.map((e) => e.pageIndex).sort()).toEqual([0, 1, 2])
+      const evictedEntry = entries.find((e) => e.pageIndex === 1)!
+      expect(evictedEntry.filePath).toBe('test.pdf')
+      expect(evictedEntry.data.textBlocks).toEqual([])
+      expect(evictedEntry.data.isDirty).toBe(true)
+      expect(evictedEntry.data.isTextExtracted).toBe(true)
+      expect(evictedEntry.data.ocrCleared).toBe(true)
     })
 
     it('U-PS-51: clearOcrAllPages で undo/redo スタックがクリアされる', () => {
@@ -950,6 +981,116 @@ describe('pecoStore', () => {
       resolveSave()
       await waitPromise
       expect(resolved).toBe(true)
+    })
+
+    it('PCT-028: clearOcrAllPages の IDB 空OCR書き込みは既存 pending save の後に実行される', async () => {
+      let resolveOldSave!: () => void
+      const oldSave = new Promise<void>((resolve) => { resolveOldSave = resolve })
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch)
+        .mockImplementationOnce(() => oldSave)
+        .mockResolvedValue(undefined)
+
+      try {
+        useInfraStore.setState({
+          pendingRestoration: {
+            '1': {
+              pageIndex: 1,
+              textBlocks: [makeBlock({ text: 'old-ocr' })],
+              isDirty: true,
+            },
+          },
+        })
+        usePecoStore.getState().setDocument({
+          filePath: 'test.pdf',
+          fileName: 'test.pdf',
+          totalPages: 3,
+          metadata: {},
+          pages: new Map([
+            [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'memory' })] })],
+          ]),
+        })
+
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
+
+        usePecoStore.getState().clearOcrAllPages()
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
+
+        resolveOldSave()
+        await waitForPendingIdbSaves()
+
+        expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(2)
+        const clearEntries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls[1][0]
+        expect(clearEntries.map((e) => e.pageIndex).sort()).toEqual([0, 1, 2])
+        expect(clearEntries.find((e) => e.pageIndex === 1)?.data).toMatchObject({
+          textBlocks: [],
+          isDirty: true,
+          isTextExtracted: true,
+          ocrCleared: true,
+        })
+      } finally {
+        resolveOldSave()
+      }
+    })
+
+    it('PCT-030: clearOcrAllPages 後に古い LRU 保存が失敗しても旧OCRを復活させない', async () => {
+      let rejectOldSave!: (err: Error) => void
+      const oldSave = new Promise<void>((_, reject) => { rejectOldSave = reject })
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch)
+        .mockReturnValueOnce(oldSave)
+        .mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockResolvedValue(new Map())
+
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const pages = new Map<number, PageData>()
+        for (let i = 0; i < 50; i++) {
+          pages.set(i, makePage({
+            pageIndex: i,
+            isDirty: true,
+            textBlocks: [makeBlock({ text: `old-ocr-${i}` })],
+          }))
+        }
+        usePecoStore.setState({
+          document: makeDoc(pages),
+          pageOrder: Array.from({ length: 50 }, (_, i) => i),
+          currentPageIndex: 48,
+        })
+        useInfraStore.setState({ pageAccessOrder: Array.from({ length: 50 }, (_, i) => i) })
+
+        usePecoStore.getState().updatePageData(50, makePage({
+          pageIndex: 50,
+          isDirty: true,
+          textBlocks: [makeBlock({ text: 'new-page' })],
+        }), false)
+
+        expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
+        expect(usePecoStore.getState().document!.pages.has(49)).toBe(false)
+
+        usePecoStore.getState().clearOcrAllPages()
+        rejectOldSave(new Error('old save failed'))
+        await waitForPendingIdbSaves()
+
+        const restoredPage = usePecoStore.getState().document!.pages.get(49)
+        expect(restoredPage?.textBlocks).toEqual([])
+        expect(restoredPage?.ocrCleared).toBe(true)
+        expect(restoredPage?.isTextExtracted).toBe(true)
+
+        expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(2)
+        const clearEntries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls[1][0]
+        expect(clearEntries.find((e) => e.pageIndex === 49)?.data).toMatchObject({
+          textBlocks: [],
+          isDirty: true,
+          isTextExtracted: true,
+          ocrCleared: true,
+        })
+      } finally {
+        rejectOldSave(new Error('cleanup'))
+        errorSpy.mockRestore()
+      }
     })
 
     it('S-02-03: IDB 保存失敗時、ロールバック対象 page が新しい同 idx の更新で上書きされていればロールバックしない', async () => {
@@ -1994,14 +2135,14 @@ describe('pecoStore', () => {
   describe('U-ST-#193: deletePages', () => {
     function makeThreePagesDoc() {
       const pages = new Map([
-        [0, makePage({ pageIndex: 0 })],
-        [1, makePage({ pageIndex: 1 })],
-        [2, makePage({ pageIndex: 2 })],
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        [1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p1', text: 'page-1' })] })],
+        [2, makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p2', text: 'page-2' })] })],
       ])
       return makeDoc(pages)
     }
 
-    it('中間ページを削除すると pages が詰め直される', async () => {
+    it('中間ページを削除すると pageOrder は元PDF index を保持し pages が詰め直される', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2016,8 +2157,10 @@ describe('pecoStore', () => {
       const state = usePecoStore.getState()
       expect(state.document!.totalPages).toBe(2)
       expect(state.document!.pages.size).toBe(2)
+      expect(state.pageOrder).toEqual([0, 2])
       expect(state.document!.pages.get(0)?.pageIndex).toBe(0)
       expect(state.document!.pages.get(1)?.pageIndex).toBe(1)
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-2')
       expect(state.isDirty).toBe(true)
     })
 
@@ -2034,7 +2177,7 @@ describe('pecoStore', () => {
       usePecoStore.getState().deletePages([1])
 
       const state = usePecoStore.getState()
-      // ページ1削除後、残り [0, 2] → 再インデックス → [0, 1]
+      // ページ1削除後、pageOrder は [0, 2] のまま
       // currentPageIndex は 1 → 元の position 1 以降の最初の生き残り = 新インデックス 1
       expect(state.currentPageIndex).toBe(1)
     })
@@ -2110,19 +2253,52 @@ describe('pecoStore', () => {
       expect(state.undoStack).toHaveLength(1)
       expect(state.undoStack[0].type).toBe('delete_pages')
     })
+
+    it('非identity pageOrder から削除しても original index 配列として undo/redo できる', async () => {
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p2', text: 'page-2' })] })],
+        [1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        [2, makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p3', text: 'page-3' })] })],
+        [3, makePage({ pageIndex: 3, textBlocks: [makeBlock({ id: 'p1', text: 'page-1' })] })],
+      ])
+      usePecoStore.setState({
+        document: makeDoc(pages),
+        pageOrder: [2, 0, 3, 1],
+        currentPageIndex: 1,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      await usePecoStore.getState().deletePages([1, 3])
+
+      let state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([2, 3])
+      expect(state.document!.pages.get(0)?.textBlocks[0].text).toBe('page-2')
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-3')
+
+      usePecoStore.getState().undo()
+      state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([2, 0, 3, 1])
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-0')
+
+      usePecoStore.getState().redo()
+      state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([2, 3])
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-3')
+    })
   })
 
   describe('U-ST-#193: movePage', () => {
     function makeThreePagesDoc() {
       const pages = new Map([
-        [0, makePage({ pageIndex: 0 })],
-        [1, makePage({ pageIndex: 1 })],
-        [2, makePage({ pageIndex: 2 })],
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        [1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p1', text: 'page-1' })] })],
+        [2, makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p2', text: 'page-2' })] })],
       ])
       return makeDoc(pages)
     }
 
-    it('from=0 to=2 で先頭ページが末尾に移動する', async () => {
+    it('from=0 to=2 で pageOrder と pages が先頭ページを末尾に移動する', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -2135,9 +2311,11 @@ describe('pecoStore', () => {
       await usePecoStore.getState().movePage(0, 2)
 
       const state = usePecoStore.getState()
-      // 元順 [0,1,2] → 0を末尾へ → [1,2,0]
-      // 再インデックス後 pages: 新0=元1, 新1=元2, 新2=元0
+      expect(state.pageOrder).toEqual([1, 2, 0])
       expect(state.document!.pages.size).toBe(3)
+      expect(state.document!.pages.get(0)?.textBlocks[0].text).toBe('page-1')
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-2')
+      expect(state.document!.pages.get(2)?.textBlocks[0].text).toBe('page-0')
       expect(state.isDirty).toBe(true)
     })
 
@@ -2206,8 +2384,161 @@ describe('pecoStore', () => {
 
       const state = usePecoStore.getState()
       expect(state.pageOrder).toEqual([0, 1, 2])
+      expect(state.document!.pages.get(0)?.textBlocks[0].text).toBe('page-0')
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-1')
+      expect(state.document!.pages.get(2)?.textBlocks[0].text).toBe('page-2')
       expect(state.undoStack).toHaveLength(0)
       expect(state.redoStack).toHaveLength(1)
+    })
+
+    it('非identity pageOrder の並べ替えを original index 配列として undo/redo できる', async () => {
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p2', text: 'page-2' })] })],
+        [1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        [2, makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p1', text: 'page-1' })] })],
+      ])
+      usePecoStore.setState({
+        document: makeDoc(pages),
+        pageOrder: [2, 0, 1],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      await usePecoStore.getState().movePage(0, 2)
+
+      let state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([0, 1, 2])
+      expect(state.document!.pages.get(0)?.textBlocks[0].text).toBe('page-0')
+      expect(state.document!.pages.get(2)?.textBlocks[0].text).toBe('page-2')
+
+      usePecoStore.getState().undo()
+      state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([2, 0, 1])
+      expect(state.document!.pages.get(0)?.textBlocks[0].text).toBe('page-2')
+
+      usePecoStore.getState().redo()
+      state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([0, 1, 2])
+      expect(state.document!.pages.get(2)?.textBlocks[0].text).toBe('page-2')
+    })
+  })
+
+  describe('PCT-034: normalizePageOrderAfterSave', () => {
+    it('reordered PDF save normalizes pageOrder to identity without moving display pages', () => {
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p2', text: 'page-2' })] })],
+        [1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        [2, makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p1', text: 'page-1' })] })],
+      ])
+      const doc = makeDoc(pages)
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [2, 0, 1],
+        currentPageIndex: 2,
+        isDirty: true,
+      })
+
+      usePecoStore.getState().normalizePageOrderAfterSave([2, 0, 1])
+
+      const state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([0, 1, 2])
+      expect(state.currentPageIndex).toBe(2)
+      expect(state.document).toBe(doc)
+      expect(state.document!.pages.get(0)?.textBlocks[0].text).toBe('page-2')
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-0')
+      expect(state.document!.pages.get(2)?.textBlocks[0].text).toBe('page-1')
+      expect(state.isDirty).toBe(true)
+    })
+
+    it('deleted PDF save normalizes remaining physical pages to identity', () => {
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        [1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p2', text: 'page-2' })] })],
+      ])
+      usePecoStore.setState({
+        document: makeDoc(pages),
+        pageOrder: [0, 2],
+        currentPageIndex: 1,
+      })
+
+      usePecoStore.getState().normalizePageOrderAfterSave([0, 2])
+
+      const state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([0, 1])
+      expect(state.currentPageIndex).toBe(1)
+      expect(state.document!.totalPages).toBe(2)
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-2')
+    })
+
+    it('non-identity normalize clears update and structural undo/redo history so undo is a no-op', () => {
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p2', text: 'page-2' })] })],
+        [1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        [2, makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p1', text: 'page-1' })] })],
+      ])
+      const updatePageAction: Action = {
+        type: 'update_page',
+        pageIndex: 0,
+        before: makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'stale-update-page-before' })] }),
+        after: makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'stale-update-page-after' })] }),
+      }
+      const updatePagesAction: Action = {
+        type: 'update_pages',
+        entries: [{
+          pageIndex: 1,
+          before: makePage({ pageIndex: 1, textBlocks: [makeBlock({ text: 'stale-update-pages-before' })] }),
+          after: makePage({ pageIndex: 1, textBlocks: [makeBlock({ text: 'stale-update-pages-after' })] }),
+        }],
+      }
+      const deletePagesAction: Action = {
+        type: 'delete_pages',
+        beforePages: pages,
+        afterPages: pages,
+        beforeOrder: [2, 0, 1],
+        afterOrder: [2, 1],
+        beforeCurrentPageIndex: 1,
+        afterCurrentPageIndex: 1,
+        beforeTotalPages: 3,
+        afterTotalPages: 2,
+      }
+      const reorderPagesAction: Action = {
+        type: 'reorder_pages',
+        beforeOrder: [2, 0, 1],
+        afterOrder: [0, 1, 2],
+      }
+      usePecoStore.setState({
+        document: makeDoc(pages),
+        pageOrder: [2, 0, 1],
+        undoStack: [deletePagesAction, reorderPagesAction, updatePageAction, updatePagesAction],
+        redoStack: [updatePagesAction, updatePageAction, reorderPagesAction, deletePagesAction],
+      })
+
+      usePecoStore.getState().normalizePageOrderAfterSave([2, 0, 1])
+      usePecoStore.getState().undo()
+
+      const state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([0, 1, 2])
+      expect(state.undoStack).toHaveLength(0)
+      expect(state.redoStack).toHaveLength(0)
+      expect(state.document!.pages.get(0)?.textBlocks[0].text).toBe('page-2')
+      expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-0')
+      expect(state.document!.pages.get(2)?.textBlocks[0].text).toBe('page-1')
+    })
+
+    it('does not normalize if pageOrder changed after the save snapshot', () => {
+      usePecoStore.setState({
+        document: makeDoc(new Map([
+          [0, makePage({ pageIndex: 0 })],
+          [1, makePage({ pageIndex: 1 })],
+          [2, makePage({ pageIndex: 2 })],
+        ])),
+        pageOrder: [1, 2, 0],
+      })
+
+      usePecoStore.getState().normalizePageOrderAfterSave([2, 0, 1])
+
+      expect(usePecoStore.getState().pageOrder).toEqual([1, 2, 0])
     })
   })
 

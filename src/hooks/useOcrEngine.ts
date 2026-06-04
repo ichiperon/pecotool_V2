@@ -12,6 +12,7 @@ import { logger } from '../utils/logger';
 import { perf } from '../utils/perfLogger';
 import { loadPage } from '../utils/pdfTextExtractor';
 import { parsePageRange } from '../utils/pageRangeParser';
+import { displayToSourcePageIndex } from '../utils/pageOrder';
 
 const RENDER_SCALE = 2.0;
 
@@ -218,6 +219,27 @@ export function useOcrEngine(
     return { pageWidth, pageHeight };
   };
 
+  const hasExistingOcrBlocks = async (
+    doc: PecoDocument,
+    pageIndices: number[],
+  ): Promise<boolean> => {
+    for (const idx of pageIndices) {
+      const page = doc.pages.get(idx);
+      if ((page?.textBlocks?.length ?? 0) > 0) return true;
+    }
+
+    for (const idx of pageIndices) {
+      try {
+        const idbData = await getTemporaryPageData(doc.filePath, idx);
+        if ((idbData?.textBlocks?.length ?? 0) > 0) return true;
+      } catch (e) {
+        console.warn(`[OCR] IDB 退避データの確認に失敗 (page ${idx + 1}):`, e);
+      }
+    }
+
+    return false;
+  };
+
   const processAllPages = async (
     doc: PecoDocument,
     progressForPage?: (pageIndex: number, timing: { startedAt: number; avgMsPerPage: number; estimatedRemainingMs: number }) => OcrProgress,
@@ -232,6 +254,7 @@ export function useOcrEngine(
 
     // #199: 対象ページインデックス一覧。指定がなければ全ページ。
     const targets = pageIndices ?? Array.from({ length: doc.totalPages }, (_, i) => i);
+    const pageOrder = usePecoStore.getState().pageOrder;
     const total = targets.length;
 
     // #200: EMA タイミング変数
@@ -242,6 +265,7 @@ export function useOcrEngine(
     try {
       for (let step = 0; step < targets.length; step++) {
         const i = targets[step];
+        const sourcePageIndex = displayToSourcePageIndex(pageOrder, i);
         if (cancelTokenRef.current) break;
         if (!isCurrentDocument(capturedEpoch)) {
           cancelTokenRef.current = true;
@@ -262,7 +286,7 @@ export function useOcrEngine(
         let size: { pageWidth: number; pageHeight: number };
         try {
           const pageData = usePecoStore.getState().document?.pages.get(i);
-          size = await getPageSize(ocrPdf, i, pageData);
+          size = await getPageSize(ocrPdf, sourcePageIndex, pageData);
         } catch (e) {
           console.warn(`[OCR] ページ ${i + 1}: サイズ取得失敗、スキップします`, e);
           continue;
@@ -273,7 +297,7 @@ export function useOcrEngine(
           const { result } = await runOcrForPage(
             ocrPdf,
             doc.filePath,
-            i,
+            sourcePageIndex,
             size.pageWidth,
             size.pageHeight,
             settings.ocrLanguage,
@@ -287,9 +311,15 @@ export function useOcrEngine(
             avgMsPerPage = 0.3 * pageDurationMs + 0.7 * avgMsPerPage;
           }
 
+          if (cancelTokenRef.current) break;
           if (!isCurrentDocument(capturedEpoch)) {
             cancelTokenRef.current = true;
             showToast('OCRを中止しました（別のPDFが開かれました）。', true);
+            break;
+          }
+          if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, i) !== sourcePageIndex) {
+            cancelTokenRef.current = true;
+            showToast('OCRを中止しました（ページ順序が変更されました）。', true);
             break;
           }
           if (result.status === 'error') {
@@ -324,11 +354,12 @@ export function useOcrEngine(
     const doc = state.document;
     const pageIdx = state.currentPageIndex;
     if (!doc) return;
+    const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIdx);
     let pageData = doc.pages.get(pageIdx);
     if (!pageData) {
       // ページが未ロード（LRU退避済みを含む）の場合はサイズだけ取得してOCRを続行
       try {
-        const page = await getCachedPageProxy(doc.filePath, pageIdx);
+        const page = await getCachedPageProxy(doc.filePath, sourcePageIndex);
         const viewport = page.getViewport({ scale: 1.0 });
         pageData = { pageIndex: pageIdx, width: viewport.width, height: viewport.height, textBlocks: [], isDirty: false, thumbnail: null };
       } catch (e) {
@@ -359,6 +390,7 @@ export function useOcrEngine(
       if (!confirmed) return;
     }
 
+    cancelTokenRef.current = false;
     setOcrRunning(true);
     perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
     // #102: 開始時点の documentEpoch を保持。F5 等で同パスの別 doc に置き換わった際は
@@ -372,13 +404,18 @@ export function useOcrEngine(
       const { result } = await runOcrForPage(
         ocrPdf,
         doc.filePath,
-        pageIdx,
+        sourcePageIndex,
         pageData.width,
         pageData.height,
         settings.ocrLanguage,
       );
+      if (cancelTokenRef.current) return;
       if (!isCurrentDocument(capturedEpoch)) {
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
+        return;
+      }
+      if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIdx) !== sourcePageIndex) {
+        showToast('OCR結果は破棄されました（ページ順序が変更されました）。', true);
         return;
       }
 
@@ -416,8 +453,9 @@ export function useOcrEngine(
     );
     if (!confirmed) return;
 
-    const hasExisting = Array.from(doc.pages.values()).some(
-      (p) => (p.textBlocks?.length ?? 0) > 0
+    const hasExisting = await hasExistingOcrBlocks(
+      doc,
+      Array.from({ length: doc.totalPages }, (_, i) => i),
     );
     if (hasExisting) {
       const overwriteConfirmed = await ask(
@@ -501,10 +539,7 @@ export function useOcrEngine(
     );
     if (!confirmed) return;
 
-    const hasExisting = pageIndices.some((idx) => {
-      const page = doc.pages.get(idx);
-      return (page?.textBlocks?.length ?? 0) > 0;
-    });
+    const hasExisting = await hasExistingOcrBlocks(doc, pageIndices);
     if (hasExisting) {
       const overwriteConfirmed = await ask(
         '指定ページの一部に既存OCRデータがあります。上書きしますか？',
@@ -639,6 +674,7 @@ export function useOcrEngine(
    */
   const importTextLayerAllPages = async (doc: PecoDocument, capturedEpoch: number) => {
     const total = doc.totalPages;
+    const pageOrder = usePecoStore.getState().pageOrder;
     showToast(`テキスト層を取り込み中... (全 ${total} ページ)`);
     logger.log(`[TextLayer] 取り込み開始: ${total} ページ`);
 
@@ -652,20 +688,22 @@ export function useOcrEngine(
       const pageIndices = Array.from({ length: end - start }, (_, i) => start + i);
 
       const pageDataList = await Promise.all(
-        pageIndices.map((i) =>
-          loadPage(
+        pageIndices.map((i) => {
+          const sourcePageIndex = displayToSourcePageIndex(pageOrder, i);
+          return loadPage(
             // loadPage の第 1 引数 (_pdf) は実際は getCachedPageProxy 内で参照するため
             // ダミーの null cast で渡す (既存の呼び出し規約に準ずる)。
             null as unknown as pdfjsLib.PDFDocumentProxy,
-            i,
+            sourcePageIndex,
             doc.filePath,
             null,
             doc.mtime,
+            { displayPageIndex: i },
           ).catch((e) => {
             console.warn(`[TextLayer] ページ ${i + 1} 取り込み失敗:`, e);
             return null;
-          })
-        )
+          });
+        })
       );
 
       if (!isCurrentDocument(capturedEpoch)) {
@@ -677,6 +715,7 @@ export function useOcrEngine(
         const pageIndex = pageIndices[idx];
         const pageData = pageDataList[idx];
         if (!pageData) continue;
+        if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== displayToSourcePageIndex(pageOrder, pageIndex)) continue;
         usePecoStore.getState().updatePageData(pageIndex, {
           textBlocks: pageData.textBlocks,
           isDirty: true,
@@ -770,7 +809,9 @@ export function useOcrEngine(
 
     if (sw < 2 || sh < 2) return;
 
+    cancelTokenRef.current = false;
     setOcrRunning(true);
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
     try {
       // pdfCanvas からクロップ画像を生成
       const cropCanvas = document.createElement('canvas');
@@ -816,6 +857,11 @@ export function useOcrEngine(
       const ocrBlocks = parsed.blocks ?? [];
       if (ocrBlocks.length === 0) {
         showToast('範囲内にテキストが検出されませんでした。');
+        return;
+      }
+      if (cancelTokenRef.current) return;
+      if (!isCurrentDocument(capturedEpoch)) {
+        showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
         return;
       }
 

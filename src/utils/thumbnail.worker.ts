@@ -78,11 +78,11 @@ const MAX_CONCURRENT_RENDERS = 4;
 // destroy が走った後にゴーストで render() が走るのを防ぐ。
 const renderWaitQueue: Array<(cancelled: boolean) => void> = [];
 
-async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
-  // 新しいPDFロード時にセマフォをリセット
+async function handleLoadPdf(source: string | ArrayBuffer, requestId?: number): Promise<void> {
+  // 新しいPDFロード時に待機中のresolverをキャンセルする。
+  // activeRenders は実行中renderのfinallyで戻すため、ここで0へ戻すと負数化する。
   // 待機中の resolver は cancelled=true で起こして、対応する handleGenerateThumbnail
   // が旧 pdfDoc で render を継続しないようにする (issue #140)。
-  activeRenders = 0;
   renderWaitQueue.forEach(r => r(true));
   renderWaitQueue.length = 0;
 
@@ -127,12 +127,12 @@ async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
         return;
       }
       pdfDoc = doc;
-      post({ type: 'LOAD_COMPLETE', numPages: doc.numPages, workerPerfNow: performance.now() });
+      post({ type: 'LOAD_COMPLETE', numPages: doc.numPages, workerPerfNow: performance.now(), requestId });
     }).catch((e) => {
       if (currentLoadingTask === task) {
         currentLoadingTask = null;
         loadPromise = null;
-        post({ type: 'LOAD_ERROR', message: String(e) });
+        post({ type: 'LOAD_ERROR', message: String(e), requestId });
       }
       // 別タスクに差し替え済みの場合はキャンセルによる reject なのでログのみ
       console.error('[thumbnail.worker] PDF load failed:', e);
@@ -140,11 +140,11 @@ async function handleLoadPdf(source: string | ArrayBuffer): Promise<void> {
   } catch (e) {
     console.error('[thumbnail.worker] PDF load exception:', e);
     loadPromise = null;
-    post({ type: 'LOAD_ERROR', message: String(e) });
+    post({ type: 'LOAD_ERROR', message: String(e), requestId });
   }
 }
 
-async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
+async function handleGenerateThumbnail(pageIndex: number, sourcePageIndex?: number, requestId?: number): Promise<void> {
   // セマフォ: 同時レンダリング数が上限に達していたら待機
   // cancelled=true で起こされた場合は LOAD_PDF が走って旧 pdfDoc が destroy 済の
   // 可能性が高いため、activeRenders を増やさずに無音で抜ける (issue #140)。
@@ -153,17 +153,19 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     if (cancelled) return;
   }
   activeRenders++;
+  let renderSlotAcquired = true;
   const workerGenStart = performance.now();
   try {
     // loadPromise が設定されている場合は PDF ロード完了を待つ
     // （LOAD_PDF より先に GENERATE_THUMBNAIL が届いた場合の保護）
     if (loadPromise) await loadPromise;
     if (!pdfDoc) {
-      post({ type: 'THUMBNAIL_ERROR', pageIndex });
+      post({ type: 'THUMBNAIL_ERROR', pageIndex, requestId });
       return;
     }
 
-    const page = await pdfDoc.getPage(pageIndex + 1);
+    const pdfPageIndex = sourcePageIndex ?? pageIndex;
+    const page = await pdfDoc.getPage(pdfPageIndex + 1);
     const unscaled = page.getViewport({ scale: 1.0 });
 
     // ★ 高速化: 120px（表示サイズに一致）で描画 → 150px より ~34% ピクセル減
@@ -199,6 +201,7 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
         bytes: new Uint8Array(buf),
         workerGenStart,
         workerGenDone: performance.now(),
+        requestId,
       },
       [buf],
     );
@@ -206,9 +209,12 @@ async function handleGenerateThumbnail(pageIndex: number): Promise<void> {
     const errMsg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     console.error(`[thumbnail.worker] Page ${pageIndex + 1} failed:`, e);
     // エラー内容をメインスレッドへ伝搬してDevToolsで確認できるようにする
-    post({ type: 'THUMBNAIL_ERROR', pageIndex, error: errMsg });
+    post({ type: 'THUMBNAIL_ERROR', pageIndex, error: errMsg, requestId });
   } finally {
-    activeRenders--;
+    if (renderSlotAcquired) {
+      activeRenders = Math.max(0, activeRenders - 1);
+      renderSlotAcquired = false;
+    }
     // 通常のスロット解放は cancelled=false で次の待機者を起こす
     renderWaitQueue.shift()?.(false);
   }
@@ -219,13 +225,13 @@ self.onmessage = (e: MessageEvent<ThumbnailWorkerRequest>) => {
   if (msg.type === 'LOAD_PDF') {
     // discriminated union で url | bytes を narrow
     if (msg.url !== undefined) {
-      handleLoadPdf(msg.url);
+      handleLoadPdf(msg.url, msg.requestId);
     } else {
-      handleLoadPdf(msg.bytes);
+      handleLoadPdf(msg.bytes, msg.requestId);
     }
   } else if (msg.type === 'GENERATE_THUMBNAIL') {
     // await しない → 複数ページ協調並行処理（内部で loadPromise を await）
-    handleGenerateThumbnail(msg.pageIndex);
+    handleGenerateThumbnail(msg.pageIndex, msg.sourcePageIndex, msg.requestId);
   } else {
     // 網羅性チェック
     const _exhaustive: never = msg;

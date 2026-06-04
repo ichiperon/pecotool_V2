@@ -267,7 +267,7 @@ describe('S-01-06 (#99): loadPage 呼び出し時点で bboxMetaRef が解決済
     })
 
     const firstCall = loadPageMock.mock.calls[0]
-    // loadPage(pdf, pageIdx, filePath, bboxMeta, mtime)
+    // loadPage(pdf, sourcePageIdx, filePath, bboxMeta, mtime, { displayPageIndex })
     expect(firstCall[1]).toBe(0)
     expect(firstCall[3]).toEqual(fakeMeta) // ← meta が解決済みで渡されている
   })
@@ -312,6 +312,55 @@ describe('S-01-06 (#99): loadPage 呼び出し時点で bboxMetaRef が解決済
 
     const firstCall = loadPageMock.mock.calls[0]
     expect(firstCall[3]).toBeNull() // bboxMeta=null で pdfjs fallback 経路に確定的に落ちる
+  })
+
+  it('非identity pageOrder では source page を読み、display page に書き戻す', async () => {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 3,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({
+      document: doc,
+      currentPageIndex: 0,
+      pageOrder: [2, 0, 1],
+    } as any)
+
+    const fakePdf = { numPages: 3 }
+    getSharedPdfProxyMock.mockResolvedValue(fakePdf)
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 300, height: 400 }),
+    })
+    loadPecoToolBBoxMetaMock.mockResolvedValue({ '0': [], '1': [], '2': [] })
+    loadPageMock.mockImplementation((_pdf, idx) =>
+      Promise.resolve(makePage(idx, false, 300))
+    )
+
+    const showToast = vi.fn()
+    const triggerThumbnailLoad = vi.fn()
+
+    renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast,
+        triggerThumbnailLoad,
+      })
+    )
+
+    await waitFor(() => {
+      expect(loadPageMock).toHaveBeenCalledWith(fakePdf, 2, 'test.pdf', expect.anything(), 1234, { displayPageIndex: 0 })
+    })
+    expect(getCachedPageProxyMock).toHaveBeenCalledWith('test.pdf', 2)
+
+    await waitFor(() => {
+      const page = usePecoStore.getState().document!.pages.get(0)!
+      expect(page.pageIndex).toBe(0)
+      expect(page.width).toBe(300)
+      expect(page.isTextExtracted).toBe(true)
+    })
   })
 })
 
@@ -623,7 +672,8 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
         0,
         filePath,
         metaA,
-        1234
+        1234,
+        { displayPageIndex: 0 }
       )
     })
 
@@ -653,7 +703,8 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
         0,
         filePath,
         metaB,
-        1234
+        1234,
+        { displayPageIndex: 0 }
       )
     })
     expect(loadPecoToolBBoxMetaMock).toHaveBeenCalledTimes(2)
@@ -730,7 +781,7 @@ describe('documentEpoch: 同一 filePath / currentPageIndex の再読込', () =>
     resolveSharedB(fakePdfB)
 
     await waitFor(() => {
-      expect(loadPageMock).toHaveBeenCalledWith(fakePdfB, 0, 'b.pdf', metaB, 200)
+      expect(loadPageMock).toHaveBeenCalledWith(fakePdfB, 0, 'b.pdf', metaB, 200, { displayPageIndex: 0 })
     })
     expect(loadPageMock.mock.calls.some((call) => call[2] === 'a.pdf')).toBe(false)
     expect(loadPageMock.mock.calls.some((call) => call[2] === 'b.pdf' && call[3] === metaA)).toBe(false)

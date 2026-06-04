@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { usePecoStore, selectDocument, selectCurrentPageIndex } from '../store/pecoStore';
+import { usePecoStore, selectDocument, selectCurrentPageIndex, selectPageOrder } from '../store/pecoStore';
+import { useInfraStore, selectDocumentEpoch } from '../store/infraStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { logger } from '../utils/logger';
 import { perf } from '../utils/perfLogger';
@@ -25,9 +26,18 @@ function makeKey(epoch: number, pageIndex: number): string {
   return `${epoch}:${pageIndex}`;
 }
 
+type PendingThumbnail = {
+  pageIndex: number;
+  timeout: ReturnType<typeof setTimeout>;
+  resolve: (url: string | null) => void;
+};
+
 export function useThumbnailPanel() {
   const document = usePecoStore(selectDocument);
+  const documentEpoch = useInfraStore(selectDocumentEpoch);
+  const openDocumentEpoch = document ? documentEpoch : 0;
   const currentPageIndex = usePecoStore(selectCurrentPageIndex);
+  const pageOrder = usePecoStore(selectPageOrder);
 
   // サムネイルデータはRefで保持（Reactの外）— 更新時に全アイテム再レンダリングを防ぐ
   // キーは makeKey(epoch, pageIndex) (issue #11)。
@@ -53,16 +63,25 @@ export function useThumbnailPanel() {
 
   // Worker プール
   const workersRef = useRef<Worker[]>([]);
-  // Worker ごとの未完了コールバック map: pageIndex -> resolve
-  const pendingsByWorkerRef = useRef<Array<Map<number, (url: string | null) => void>>>([]);
+  // Worker ごとの未完了コールバック map: requestId -> pending
+  const pendingsByWorkerRef = useRef<Array<Map<number, PendingThumbnail>>>([]);
+  const pendingRequestIdByPageRef = useRef<Map<number, number>>(new Map());
   // Worker ごとの LOAD_COMPLETE 解決用 resolve
   const loadResolvesRef = useRef<Array<((ok: boolean) => void) | null>>(
     new Array(NUM_WORKERS).fill(null)
   );
+  const loadRequestIdsRef = useRef<Array<number | null>>(
+    new Array(NUM_WORKERS).fill(null)
+  );
+  const nextWorkerRequestIdRef = useRef(0);
 
   const epochRef = useRef(0);
+  const thumbnailEpochRef = useRef(0);
+  const pageOrderRef = useRef<number[]>(usePecoStore.getState().pageOrder);
+  const pageOrderKeyRef = useRef(usePecoStore.getState().pageOrder.join(','));
   const isPdfReadyRef = useRef(false);
   const queueRef = useRef<number[]>([]);
+  const queueSetRef = useRef<Set<number>>(new Set());
   const isProcessingRef = useRef(false);
   // (deferred load mode廃止により未使用、削除)
 
@@ -77,7 +96,7 @@ export function useThumbnailPanel() {
     if (entries.length === 0) return;
     for (const [idx, url, batchEpoch] of entries) {
       // epoch 不一致 → 前ファイルの遅延応答。混入させず revoke。
-      if (batchEpoch !== epochRef.current) {
+      if (batchEpoch !== thumbnailEpochRef.current) {
         URL.revokeObjectURL(url);
         continue;
       }
@@ -104,7 +123,7 @@ export function useThumbnailPanel() {
 
   // アイテムが自分のサムネイルデータを取得する
   const getThumbnail = useCallback((index: number) => {
-    return thumbnailsRef.current.get(makeKey(epochRef.current, index));
+    return thumbnailsRef.current.get(makeKey(thumbnailEpochRef.current, index));
   }, []);
 
   // issue #68: アイテムが自分の active 状態を購読する。
@@ -186,20 +205,30 @@ export function useThumbnailPanel() {
       const worker = workers[workerIdx];
       const myPending = pendingsByWorker[workerIdx];
 
-      if (myPending.has(pageIdx)) { resolve(null); return; }
+      if (pendingRequestIdByPageRef.current.has(pageIdx)) { resolve(null); return; }
 
+      const requestId = ++nextWorkerRequestIdRef.current;
       const timeout = setTimeout(() => {
-        if (myPending.has(pageIdx)) {
-          myPending.delete(pageIdx);
+        const pending = myPending.get(requestId);
+        if (pending) {
+          myPending.delete(requestId);
+          if (pendingRequestIdByPageRef.current.get(pageIdx) === requestId) {
+            pendingRequestIdByPageRef.current.delete(pageIdx);
+          }
           resolve(null);
         }
       }, 15000);
 
-      myPending.set(pageIdx, (url: string | null) => {
-        clearTimeout(timeout);
-        resolve(url);
+      myPending.set(requestId, {
+        pageIndex: pageIdx,
+        timeout,
+        resolve,
       });
-      const req: ThumbnailWorkerRequest = { type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx };
+      pendingRequestIdByPageRef.current.set(pageIdx, requestId);
+      const sourcePageIndex = pageOrderRef.current[pageIdx];
+      const req: ThumbnailWorkerRequest = sourcePageIndex === undefined
+        ? { type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx, requestId }
+        : { type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx, sourcePageIndex, requestId };
       perf.mark('thumb.genStart', { page: pageIdx, workerIdx });
       worker.postMessage(req);
     });
@@ -217,16 +246,19 @@ export function useThumbnailPanel() {
 
         const batch: number[] = [];
         while (batch.length < CONCURRENCY && queueRef.current.length > 0) {
-          batch.push(queueRef.current.shift()!);
+          const pageIdx = queueRef.current.shift()!;
+          queueSetRef.current.delete(pageIdx);
+          batch.push(pageIdx);
         }
         if (batch.length === 0) continue;
 
         await Promise.allSettled(
           batch.map(async (pageIdx) => {
+            const thumbEpoch = thumbnailEpochRef.current;
             const url = await generateViaWorker(pageIdx);
             if (!url) return;
-            if (epochRef.current === epoch) {
-              pendingBatchRef.current.push([pageIdx, url, epoch]);
+            if (epochRef.current === epoch && thumbnailEpochRef.current === thumbEpoch) {
+              pendingBatchRef.current.push([pageIdx, url, thumbEpoch]);
               if (!batchTimerRef.current) {
                 batchTimerRef.current = setTimeout(flushBatch, BATCH_FLUSH_MS);
               }
@@ -246,11 +278,11 @@ export function useThumbnailPanel() {
 
   // Worker プール初期化（マウント時1回）
   useEffect(() => {
-    const pendingsByWorker: Array<Map<number, (url: string | null) => void>> = [];
+    const pendingsByWorker: Array<Map<number, PendingThumbnail>> = [];
     const workers: Worker[] = [];
 
     for (let wi = 0; wi < NUM_WORKERS; wi++) {
-      const myPending = new Map<number, (url: string | null) => void>();
+      const myPending = new Map<number, PendingThumbnail>();
       pendingsByWorker.push(myPending);
 
       const worker = new Worker(
@@ -263,6 +295,7 @@ export function useThumbnailPanel() {
         const msg = e.data;
 
         if (msg.type === 'LOAD_COMPLETE' || msg.type === 'LOAD_ERROR') {
+          if (msg.requestId !== loadRequestIdsRef.current[workerIndex]) return;
           if (msg.type === 'LOAD_COMPLETE') {
             perf.mark('thumb.loadComplete', { workerIdx: workerIndex, numPages: msg.numPages, workerPerfNow: msg.workerPerfNow });
           }
@@ -273,6 +306,7 @@ export function useThumbnailPanel() {
           const resolve = loadResolvesRef.current[workerIndex];
           if (resolve) {
             loadResolvesRef.current[workerIndex] = null;
+            loadRequestIdsRef.current[workerIndex] = null;
             resolve(msg.type === 'LOAD_COMPLETE');
           } else {
             console.warn(`[ThumbnailPanel] Worker ${workerIndex} LOAD_COMPLETE but no resolve`);
@@ -281,6 +315,7 @@ export function useThumbnailPanel() {
         }
 
         if (msg.type === 'THUMBNAIL_DONE') {
+          if (msg.requestId === undefined) return;
           perf.mark('thumb.genDone', {
             page: msg.pageIndex,
             workerGenStart: msg.workerGenStart,
@@ -289,26 +324,35 @@ export function useThumbnailPanel() {
               ? Math.round((msg.workerGenDone - msg.workerGenStart) * 1000) / 1000
               : undefined,
           });
-          const resolve = myPending.get(msg.pageIndex);
-          if (!resolve) return;
-          myPending.delete(msg.pageIndex);
+          const pending = myPending.get(msg.requestId);
+          if (!pending) return;
+          myPending.delete(msg.requestId);
+          clearTimeout(pending.timeout);
+          if (pendingRequestIdByPageRef.current.get(pending.pageIndex) === msg.requestId) {
+            pendingRequestIdByPageRef.current.delete(pending.pageIndex);
+          }
 
           if (msg.bytes instanceof Uint8Array) {
             const blob = new Blob([msg.bytes], { type: 'image/jpeg' });
-            resolve(URL.createObjectURL(blob));
+            pending.resolve(URL.createObjectURL(blob));
           } else {
             console.warn(`[ThumbnailPanel] Worker ${workerIndex} THUMBNAIL_DONE without Uint8Array`);
-            resolve(null);
+            pending.resolve(null);
           }
           return;
         }
 
         if (msg.type === 'THUMBNAIL_ERROR') {
-          const resolve = myPending.get(msg.pageIndex);
-          if (!resolve) return;
-          myPending.delete(msg.pageIndex);
+          if (msg.requestId === undefined) return;
+          const pending = myPending.get(msg.requestId);
+          if (!pending) return;
+          myPending.delete(msg.requestId);
+          clearTimeout(pending.timeout);
+          if (pendingRequestIdByPageRef.current.get(pending.pageIndex) === msg.requestId) {
+            pendingRequestIdByPageRef.current.delete(pending.pageIndex);
+          }
           console.error(`[ThumbnailPanel] Worker ${workerIndex} page ${msg.pageIndex + 1} render error:`, msg.error);
-          resolve(null);
+          pending.resolve(null);
           return;
         }
 
@@ -320,13 +364,20 @@ export function useThumbnailPanel() {
       worker.onerror = (ev) => {
         console.error(`[useThumbnailPanel] Worker ${workerIndex} onerror:`, ev);
         // 未完了のサムネイル要求を全て null で解決
-        myPending.forEach(r => r(null));
+        myPending.forEach((p, requestId) => {
+          clearTimeout(p.timeout);
+          if (pendingRequestIdByPageRef.current.get(p.pageIndex) === requestId) {
+            pendingRequestIdByPageRef.current.delete(p.pageIndex);
+          }
+          p.resolve(null);
+        });
         myPending.clear();
         // LOAD_PDF 応答待ちのプロミスも false で解決しないと isPdfReadyRef が
         // 永久に false のまま → 以降全てのサムネイル要求が処理されなくなる。
         const loadResolve = loadResolvesRef.current[workerIndex];
         if (loadResolve) {
           loadResolvesRef.current[workerIndex] = null;
+          loadRequestIdsRef.current[workerIndex] = null;
           loadResolve(false);
         }
       };
@@ -343,10 +394,17 @@ export function useThumbnailPanel() {
     return () => {
       workers.forEach(w => w.terminate());
       workersRef.current = [];
-      pendingsByWorker.forEach(p => { p.forEach(r => r(null)); p.clear(); });
+      pendingsByWorker.forEach(p => {
+        p.forEach(pending => {
+          clearTimeout(pending.timeout);
+          pending.resolve(null);
+        });
+        p.clear();
+      });
       pendingsByWorkerRef.current = [];
+      pendingRequestIdByPageRef.current.clear();
       loadResolvesRef.current.forEach((r, i) => {
-        if (r) { loadResolvesRef.current[i] = null; r(false); }
+        if (r) { loadResolvesRef.current[i] = null; loadRequestIdsRef.current[i] = null; r(false); }
       });
       // バッチタイマー・pending URL も確実に解放
       if (batchTimerRef.current) { clearTimeout(batchTimerRef.current); batchTimerRef.current = null; }
@@ -359,22 +417,35 @@ export function useThumbnailPanel() {
   }, []);
 
   // ファイル切り替え
-  const prevFilePathRef = useRef<string | undefined>(undefined);
+  const prevDocumentIdentityRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (document?.filePath === prevFilePathRef.current) return;
-    prevFilePathRef.current = document?.filePath;
+    const documentIdentity = document?.filePath ? `${document.filePath}:${openDocumentEpoch}` : undefined;
+    if (documentIdentity === prevDocumentIdentityRef.current) return;
+    prevDocumentIdentityRef.current = documentIdentity;
+    const currentPageOrder = usePecoStore.getState().pageOrder;
+    pageOrderRef.current = currentPageOrder;
+    pageOrderKeyRef.current = currentPageOrder.join(',');
 
     epochRef.current++;
+    thumbnailEpochRef.current++;
     const epoch = epochRef.current;
     queueRef.current = [];
+    queueSetRef.current.clear();
     isProcessingRef.current = false;
     isPdfReadyRef.current = false;
 
     // 前のロード resolve をキャンセル
     loadResolvesRef.current.forEach((r, i) => {
-      if (r) { loadResolvesRef.current[i] = null; r(false); }
+      if (r) { loadResolvesRef.current[i] = null; loadRequestIdsRef.current[i] = null; r(false); }
     });
-    pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
+    pendingsByWorkerRef.current.forEach(p => {
+      p.forEach(pending => {
+        clearTimeout(pending.timeout);
+        pending.resolve(null);
+      });
+      p.clear();
+    });
+    pendingRequestIdByPageRef.current.clear();
 
     // バッチタイマーをクリアし、pending URL も revoke
     pendingBatchRef.current.forEach(([, url]) => URL.revokeObjectURL(url));
@@ -392,6 +463,7 @@ export function useThumbnailPanel() {
     if (!document?.filePath || workersRef.current.length === 0) return;
 
     const capturedFilePath = document.filePath;
+    const capturedDocumentIdentity = documentIdentity;
     const capturedEpoch = epoch;
 
     const startWorkerLoad = async () => {
@@ -403,13 +475,15 @@ export function useThumbnailPanel() {
       const url = toAssetUrl(capturedFilePath);
       const perWorkerPromises = workers.map((_, i) =>
         new Promise<boolean>(resolve => {
+          loadRequestIdsRef.current[i] = ++nextWorkerRequestIdRef.current;
           loadResolvesRef.current[i] = resolve;
         })
       );
 
       logger.log('[ThumbnailPanel] Posting LOAD_PDF (URL) to', workers.length, 'worker(s)');
-      workers.forEach(worker => {
-        const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', url };
+      workers.forEach((worker, i) => {
+        const requestId = loadRequestIdsRef.current[i]!;
+        const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', url, requestId };
         worker.postMessage(req);
       });
 
@@ -435,7 +509,7 @@ export function useThumbnailPanel() {
     const g = globalThis as IdleGlobal;
     const kickoff = () => {
       if (epochRef.current !== capturedEpoch) return;
-      if (prevFilePathRef.current !== capturedFilePath) return;
+      if (prevDocumentIdentityRef.current !== capturedDocumentIdentity) return;
       startWorkerLoad();
     };
 
@@ -452,14 +526,47 @@ export function useThumbnailPanel() {
       }
       if (timeoutHandle !== null) clearTimeout(timeoutHandle);
     };
-  }, [document?.filePath, processThumbnailQueue]);
+  }, [document?.filePath, openDocumentEpoch, processThumbnailQueue]);
+
+  useEffect(() => {
+    const pageOrderKey = pageOrder.join(',');
+    if (pageOrderKey === pageOrderKeyRef.current) {
+      pageOrderRef.current = pageOrder;
+      return;
+    }
+
+    pageOrderRef.current = pageOrder;
+    pageOrderKeyRef.current = pageOrderKey;
+    thumbnailEpochRef.current++;
+    queueRef.current = [];
+    queueSetRef.current.clear();
+    isProcessingRef.current = false;
+
+    pendingsByWorkerRef.current.forEach(p => {
+      p.forEach(pending => {
+        clearTimeout(pending.timeout);
+        pending.resolve(null);
+      });
+      p.clear();
+    });
+    pendingRequestIdByPageRef.current.clear();
+    pendingBatchRef.current.forEach(([, url]) => URL.revokeObjectURL(url));
+    pendingBatchRef.current = [];
+    if (batchTimerRef.current) { clearTimeout(batchTimerRef.current); batchTimerRef.current = null; }
+
+    thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
+    thumbnailsRef.current = new Map();
+    itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
+    setLoadEpoch(prev => prev + 1);
+  }, [pageOrder]);
 
   const requestThumbnail = useCallback((pageIndex: number) => {
     // issue #11: 現在 epoch のエントリだけをキャッシュヒットとして扱う。
     // 前ファイルの遺残エントリは無視して新規キューイングする。
-    if (thumbnailsRef.current.has(makeKey(epochRef.current, pageIndex))) return;
-    if (!queueRef.current.includes(pageIndex)) {
+    if (thumbnailsRef.current.has(makeKey(thumbnailEpochRef.current, pageIndex))) return;
+    if (!queueSetRef.current.has(pageIndex) && !pendingRequestIdByPageRef.current.has(pageIndex)) {
       queueRef.current.push(pageIndex);
+      queueSetRef.current.add(pageIndex);
     }
     const epoch = epochRef.current;
     setTimeout(() => processThumbnailQueue(epoch), 0);

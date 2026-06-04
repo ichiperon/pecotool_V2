@@ -19,6 +19,7 @@ export type SavePdfRequestData = {
   documentState: Omit<PecoDocument, 'pages'> & { pages: Record<number, SerializedPageData> };
   fontBytes?: ArrayBuffer;
   fallbackFontBytes?: ArrayBuffer[];
+  pageOrder?: number[];
   options?: SaveDialogOptions;
 } & SavePdfSource;
 

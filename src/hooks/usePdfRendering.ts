@@ -3,7 +3,9 @@ import * as pdfjsLib from "pdfjs-dist";
 import { getCachedPageProxy } from "../utils/pdfLoader";
 import { getBitmapCache, setBitmapCache } from "../utils/bitmapCache";
 import { useInfraStore } from "../store/infraStore";
+import { usePecoStore } from "../store/pecoStore";
 import { perf } from "../utils/perfLogger";
+import { displayToSourcePageIndex, isIdentityPageOrder } from "../utils/pageOrder";
 
 interface UsePdfRenderingParams {
   pdfCanvasRef: RefObject<HTMLCanvasElement | null>;
@@ -37,6 +39,7 @@ interface UsePdfRenderingResult {
 type RenderPageMeta = {
   filePath: string;
   pageIndex: number;
+  sourcePageIndex: number;
   documentEpoch: number;
 };
 
@@ -75,6 +78,8 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   const [pdfPageMeta, setPdfPageMeta] = useState<RenderPageMeta | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  const sourcePageIndex = usePecoStore((s) => displayToSourcePageIndex(s.pageOrder, pageIndex));
+  const canUseSharedProxy = usePecoStore((s) => isIdentityPageOrder(s.pageOrder));
 
   // issue #94: 連続 zoom 変化 (ボタン連打 / Ctrl+wheel / fit-to-screen 切替) で
   // 30ms 以内に effect が再走したとき、cleanup で clearTimeout すると debounce が
@@ -126,14 +131,14 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         const infraState = useInfraStore.getState();
         const expectedKey = `${filePath}:${pageIndex}`;
         let page: pdfjsLib.PDFPageProxy | null = null;
-        if (!shouldBypassSharedProxy && infraState.currentPageProxyKey === expectedKey && infraState.currentPageProxy) {
+        if (canUseSharedProxy && !shouldBypassSharedProxy && infraState.currentPageProxyKey === expectedKey && infraState.currentPageProxy) {
           page = infraState.currentPageProxy;
         } else {
-          page = await getCachedPageProxy(filePath, pageIndex);
+          page = await getCachedPageProxy(filePath, sourcePageIndex);
         }
         if (cancelled) return;
         setLoadError(false);
-        setPdfPageMeta({ filePath, pageIndex, documentEpoch });
+        setPdfPageMeta({ filePath, pageIndex, sourcePageIndex, documentEpoch });
         setPdfPage(page);
       } catch (err) {
         if (!cancelled && !(err instanceof Error && err.message.includes("file switched"))) {
@@ -148,12 +153,12 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     return () => {
       cancelled = true;
     };
-  }, [filePath, pageIndex, documentEpoch, retryCount]);
+  }, [filePath, pageIndex, sourcePageIndex, canUseSharedProxy, documentEpoch, retryCount]);
 
   // infraStore.currentPageProxy の更新を subscribe: usePageNavigation が later に
   // proxy を publish したケース (未ロードページで effect 側が先行した場合など) に対応。
   useEffect(() => {
-    if (!filePath) return;
+    if (!filePath || !canUseSharedProxy) return;
     const expectedKey = `${filePath}:${pageIndex}`;
     const unsubscribe = useInfraStore.subscribe((state, prev) => {
       if (state.documentEpoch !== documentEpoch) return;
@@ -162,11 +167,11 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       if (!state.currentPageProxy) return;
       // 同じ proxy 参照なら skip
       setLoadError(false);
-      setPdfPageMeta({ filePath, pageIndex, documentEpoch });
+      setPdfPageMeta({ filePath, pageIndex, sourcePageIndex, documentEpoch });
       setPdfPage((current) => current === state.currentPageProxy ? current : state.currentPageProxy);
     });
     return () => { unsubscribe(); };
-  }, [filePath, pageIndex, documentEpoch]);
+  }, [filePath, pageIndex, sourcePageIndex, canUseSharedProxy, documentEpoch]);
 
   // unmount 専用 cleanup: 残っている debounce / render task をここで破棄する。
   // effect 再走時の cleanup ではこれをしない (上記 issue #94 の (1))。
@@ -444,7 +449,7 @@ function renderCacheKey(meta: RenderPageMeta, zoom: number): string {
   // 差し替え / ブラウザズーム) 時に同一 zoom でも実 pixel が変わるため、
   // 古い解像度の bitmap を再利用するとボケる。
   const dpr = typeof window !== "undefined" ? Math.round(window.devicePixelRatio * 100) : 100;
-  return `${meta.filePath}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}:${dpr}`;
+  return `${meta.filePath}:${meta.sourcePageIndex}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}:${dpr}`;
 }
 
 // 全 Canvas (pdfCanvas + overlay + 静的 overlay + wrapper) のサイズを

@@ -337,15 +337,13 @@ export async function getAllTemporaryPageData(filePath: string): Promise<Map<num
  */
 export async function deleteTemporaryPageKeys(filePath: string, pageIndices: number[]): Promise<void> {
   if (pageIndices.length === 0) return;
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
-    const store = tx.objectStore(STORE_NAME_DIRTY);
-    for (const pageIndex of pageIndices) {
-      store.delete(`${filePath}:${pageIndex}`);
-    }
-    await waitForTransaction(tx, '[deleteTemporaryPageKeys] tx timeout');
-  } catch { /* ignore */ }
+  const db = await openDB();
+  const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
+  const store = tx.objectStore(STORE_NAME_DIRTY);
+  for (const pageIndex of pageIndices) {
+    store.delete(`${filePath}:${pageIndex}`);
+  }
+  await waitForTransaction(tx, '[deleteTemporaryPageKeys] tx timeout');
 }
 
 /**
@@ -359,41 +357,39 @@ export async function renameTemporaryPageKeys(
   entries: Array<{ oldPageIndex: number; newPageIndex: number }>,
 ): Promise<void> {
   if (entries.length === 0) return;
-  try {
-    const db = await openDB();
-    // 1st pass: 全 old エントリを読み出す
-    const readTx = db.transaction(STORE_NAME_DIRTY, 'readonly');
-    const readStore = readTx.objectStore(STORE_NAME_DIRTY);
-    const reads = entries.map(({ oldPageIndex }) => {
-      const key = `${filePath}:${oldPageIndex}`;
-      return new Promise<{ newPageIndex: number; data: Partial<PageData> | null }>(
-        (resolve) => {
-          const req = readStore.get(key);
-          req.onsuccess = () => resolve({ newPageIndex: entries.find(e => e.oldPageIndex === oldPageIndex)!.newPageIndex, data: req.result || null });
-          req.onerror = () => resolve({ newPageIndex: entries.find(e => e.oldPageIndex === oldPageIndex)!.newPageIndex, data: null });
-        }
-      );
-    });
-    await waitForTransaction(readTx, '[renameTemporaryPageKeys] read tx timeout');
-    const results = await Promise.all(reads);
-
-    // 2nd pass: delete old + put new (ただし data がある場合のみ)
-    const hasData = results.filter(r => r.data !== null);
-    if (hasData.length === 0) return;
-    const writeTx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
-    const writeStore = writeTx.objectStore(STORE_NAME_DIRTY);
-    // delete all old keys first (key の衝突を避けるため先に全削除)
-    for (const { oldPageIndex } of entries) {
-      writeStore.delete(`${filePath}:${oldPageIndex}`);
-    }
-    // put with new keys
-    for (const { newPageIndex, data } of hasData) {
-      if (data) {
-        writeStore.put(data, `${filePath}:${newPageIndex}`);
+  const db = await openDB();
+  // 1st pass: 全 old エントリを読み出す
+  const readTx = db.transaction(STORE_NAME_DIRTY, 'readonly');
+  const readStore = readTx.objectStore(STORE_NAME_DIRTY);
+  const reads = entries.map(({ oldPageIndex }) => {
+    const key = `${filePath}:${oldPageIndex}`;
+    return new Promise<{ newPageIndex: number; data: Partial<PageData> | null }>(
+      (resolve) => {
+        const req = readStore.get(key);
+        req.onsuccess = () => resolve({ newPageIndex: entries.find(e => e.oldPageIndex === oldPageIndex)!.newPageIndex, data: req.result || null });
+        req.onerror = () => resolve({ newPageIndex: entries.find(e => e.oldPageIndex === oldPageIndex)!.newPageIndex, data: null });
       }
+    );
+  });
+  await waitForTransaction(readTx, '[renameTemporaryPageKeys] read tx timeout');
+  const results = await Promise.all(reads);
+
+  // 2nd pass: delete old + put new (ただし data がある場合のみ)
+  const hasData = results.filter(r => r.data !== null);
+  if (hasData.length === 0) return;
+  const writeTx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
+  const writeStore = writeTx.objectStore(STORE_NAME_DIRTY);
+  // delete all old keys first (key の衝突を避けるため先に全削除)
+  for (const { oldPageIndex } of entries) {
+    writeStore.delete(`${filePath}:${oldPageIndex}`);
+  }
+  // put with new keys
+  for (const { newPageIndex, data } of hasData) {
+    if (data) {
+      writeStore.put(data, `${filePath}:${newPageIndex}`);
     }
-    await waitForTransaction(writeTx, '[renameTemporaryPageKeys] write tx timeout');
-  } catch { /* ignore */ }
+  }
+  await waitForTransaction(writeTx, '[renameTemporaryPageKeys] write tx timeout');
 }
 
 export async function getCachedPage(key: string): Promise<PageData | null> {

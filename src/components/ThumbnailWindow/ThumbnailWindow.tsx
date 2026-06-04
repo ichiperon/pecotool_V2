@@ -22,7 +22,21 @@ interface ThumbnailFileOpenedPayload {
   currentPageIndex: number;
   totalPages: number;
   dirtyPages: number[];
+  pageOrder: number[];
 }
+
+interface ThumbnailPageOrderChangedPayload {
+  currentPageIndex: number;
+  totalPages: number;
+  dirtyPages: number[];
+  pageOrder: number[];
+}
+
+type PendingThumbnail = {
+  pageIndex: number;
+  timeout: ReturnType<typeof setTimeout>;
+  resolve: (url: string | null) => void;
+};
 
 // ---- Thumbnail アイテム ----
 const ThumbnailItem = memo(({
@@ -88,13 +102,19 @@ export function ThumbnailWindow() {
   const pageGenerationRef = useRef<Map<number, number>>(new Map());
   // Map に格納した URL の生成番号（新旧どちらが最新か比較用）
   const storedGenerationRef = useRef<Map<number, number>>(new Map());
+  const pageOrderRef = useRef<number[]>([]);
 
   // ★ Worker プール
   const workersRef = useRef<Worker[]>([]);
-  const pendingsByWorkerRef = useRef<Array<Map<number, (url: string | null) => void>>>([]);
+  const pendingsByWorkerRef = useRef<Array<Map<number, PendingThumbnail>>>([]);
+  const pendingRequestIdByPageRef = useRef<Map<number, number>>(new Map());
   const loadResolvesRef = useRef<Array<((ok: boolean) => void) | null>>(
     new Array(NUM_WORKERS).fill(null)
   );
+  const loadRequestIdsRef = useRef<Array<number | null>>(
+    new Array(NUM_WORKERS).fill(null)
+  );
+  const nextWorkerRequestIdRef = useRef(0);
   // ★ 全 Worker が LOAD_COMPLETE するまでキュー処理をブロックするフラグ
   const isPdfReadyRef = useRef(false);
 
@@ -104,6 +124,7 @@ export function ThumbnailWindow() {
   const thumbnailQueueSetRef = useRef<Set<number>>(new Set());
   const isProcessingRef = useRef(false);
   const epochRef = useRef(0);
+  const pdfLoadEpochRef = useRef(0);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
   // バツボタンで閉じず非表示にする
@@ -135,11 +156,11 @@ export function ThumbnailWindow() {
 
   // ---- Worker プール初期化（マウント時1回）----
   useEffect(() => {
-    const pendingsByWorker: Array<Map<number, (url: string | null) => void>> = [];
+    const pendingsByWorker: Array<Map<number, PendingThumbnail>> = [];
     const workers: Worker[] = [];
 
     for (let wi = 0; wi < NUM_WORKERS; wi++) {
-      const myPending = new Map<number, (url: string | null) => void>();
+      const myPending = new Map<number, PendingThumbnail>();
       pendingsByWorker.push(myPending);
 
       const worker = new Worker(
@@ -152,6 +173,7 @@ export function ThumbnailWindow() {
         const msg = e.data;
 
         if (msg.type === 'LOAD_COMPLETE' || msg.type === 'LOAD_ERROR') {
+          if (msg.requestId !== loadRequestIdsRef.current[workerIndex]) return;
           if (msg.type === 'LOAD_ERROR') {
             console.error(`[ThumbnailWindow] Worker ${workerIndex} load error:`, msg.message);
           }
@@ -159,29 +181,40 @@ export function ThumbnailWindow() {
           const resolve = loadResolvesRef.current[workerIndex];
           if (resolve) {
             loadResolvesRef.current[workerIndex] = null;
+            loadRequestIdsRef.current[workerIndex] = null;
             resolve(msg.type === 'LOAD_COMPLETE');
           }
           return;
         }
 
         if (msg.type === 'THUMBNAIL_DONE') {
-          const resolve = myPending.get(msg.pageIndex);
-          if (!resolve) return;
-          myPending.delete(msg.pageIndex);
+          if (msg.requestId === undefined) return;
+          const pending = myPending.get(msg.requestId);
+          if (!pending) return;
+          myPending.delete(msg.requestId);
+          clearTimeout(pending.timeout);
+          if (pendingRequestIdByPageRef.current.get(pending.pageIndex) === msg.requestId) {
+            pendingRequestIdByPageRef.current.delete(pending.pageIndex);
+          }
           if (msg.bytes instanceof Uint8Array) {
             const blob = new Blob([msg.bytes], { type: 'image/jpeg' });
-            resolve(URL.createObjectURL(blob));
+            pending.resolve(URL.createObjectURL(blob));
           } else {
-            resolve(null);
+            pending.resolve(null);
           }
           return;
         }
 
         if (msg.type === 'THUMBNAIL_ERROR') {
-          const resolve = myPending.get(msg.pageIndex);
-          if (!resolve) return;
-          myPending.delete(msg.pageIndex);
-          resolve(null);
+          if (msg.requestId === undefined) return;
+          const pending = myPending.get(msg.requestId);
+          if (!pending) return;
+          myPending.delete(msg.requestId);
+          clearTimeout(pending.timeout);
+          if (pendingRequestIdByPageRef.current.get(pending.pageIndex) === msg.requestId) {
+            pendingRequestIdByPageRef.current.delete(pending.pageIndex);
+          }
+          pending.resolve(null);
           return;
         }
 
@@ -191,8 +224,20 @@ export function ThumbnailWindow() {
       };
 
       worker.onerror = () => {
-        myPending.forEach(r => r(null));
+        myPending.forEach((pending, requestId) => {
+          clearTimeout(pending.timeout);
+          if (pendingRequestIdByPageRef.current.get(pending.pageIndex) === requestId) {
+            pendingRequestIdByPageRef.current.delete(pending.pageIndex);
+          }
+          pending.resolve(null);
+        });
         myPending.clear();
+        const loadResolve = loadResolvesRef.current[workerIndex];
+        if (loadResolve) {
+          loadResolvesRef.current[workerIndex] = null;
+          loadRequestIdsRef.current[workerIndex] = null;
+          loadResolve(false);
+        }
       };
 
       workers.push(worker);
@@ -204,11 +249,20 @@ export function ThumbnailWindow() {
     return () => {
       workers.forEach(w => w.terminate());
       workersRef.current = [];
-      pendingsByWorker.forEach(p => { p.forEach(r => r(null)); p.clear(); });
-      pendingsByWorkerRef.current = [];
-      loadResolvesRef.current.forEach((r, i) => {
-        if (r) { loadResolvesRef.current[i] = null; r(false); }
+      pendingsByWorker.forEach(p => {
+        p.forEach(pending => {
+          clearTimeout(pending.timeout);
+          pending.resolve(null);
+        });
+        p.clear();
       });
+      pendingsByWorkerRef.current = [];
+      pendingRequestIdByPageRef.current.clear();
+      loadResolvesRef.current.forEach((r, i) => {
+        if (r) { loadResolvesRef.current[i] = null; loadRequestIdsRef.current[i] = null; r(false); }
+      });
+      thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
+      thumbnailsRef.current = new Map();
     };
   }, []);
 
@@ -226,20 +280,35 @@ export function ThumbnailWindow() {
       const worker = workers[workerIdx];
       const myPending = pendingsByWorker[workerIdx];
 
-      if (myPending.has(pageIdx)) { resolve({ url: null, generation }); return; }
+      if (pendingRequestIdByPageRef.current.has(pageIdx)) { resolve({ url: null, generation }); return; }
 
+      const requestId = ++nextWorkerRequestIdRef.current;
       const timeout = setTimeout(() => {
-        if (myPending.has(pageIdx)) {
-          myPending.delete(pageIdx);
+        const pending = myPending.get(requestId);
+        if (pending) {
+          myPending.delete(requestId);
+          if (pendingRequestIdByPageRef.current.get(pageIdx) === requestId) {
+            pendingRequestIdByPageRef.current.delete(pageIdx);
+          }
           resolve({ url: null, generation });
         }
       }, 15000);
 
-      myPending.set(pageIdx, (url: string | null) => {
-        clearTimeout(timeout);
-        resolve({ url, generation });
+      myPending.set(requestId, {
+        pageIndex: pageIdx,
+        timeout,
+        resolve: (url: string | null) => {
+          resolve({ url, generation });
+        },
       });
-      const req: ThumbnailWorkerRequest = { type: 'GENERATE_THUMBNAIL', pageIndex: pageIdx };
+      pendingRequestIdByPageRef.current.set(pageIdx, requestId);
+      const sourcePageIndex = pageOrderRef.current[pageIdx] ?? pageIdx;
+      const req: ThumbnailWorkerRequest = {
+        type: 'GENERATE_THUMBNAIL',
+        pageIndex: pageIdx,
+        sourcePageIndex,
+        requestId,
+      };
       worker.postMessage(req);
     });
   }, []);
@@ -310,10 +379,11 @@ export function ThumbnailWindow() {
 
     const setup = async () => {
       unlisteners.push(await listen<ThumbnailFileOpenedPayload>('thumbnail:file-opened', (e) => {
-        const { filePath: fp, currentPageIndex: page, totalPages: total, dirtyPages: dirty } = e.payload;
+        const { filePath: fp, currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder } = e.payload;
 
         epochRef.current++;
-        const epoch = epochRef.current;
+        pdfLoadEpochRef.current++;
+        const pdfLoadEpoch = pdfLoadEpochRef.current;
         thumbnailQueueRef.current = [];
         thumbnailQueueSetRef.current.clear();
         isProcessingRef.current = false;
@@ -321,85 +391,111 @@ export function ThumbnailWindow() {
 
         // 前のロード resolve を全ワーカー分キャンセル
         loadResolvesRef.current.forEach((r, i) => {
-          if (r) { loadResolvesRef.current[i] = null; r(false); }
+          if (r) { loadResolvesRef.current[i] = null; loadRequestIdsRef.current[i] = null; r(false); }
         });
-        pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
+        pendingsByWorkerRef.current.forEach(p => {
+          p.forEach(pending => {
+            clearTimeout(pending.timeout);
+            pending.resolve(null);
+          });
+          p.clear();
+        });
+        pendingRequestIdByPageRef.current.clear();
 
         // サムネイルrefをクリアし、全登録アイテムに通知（プレースホルダー表示へ）
         thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
         thumbnailsRef.current = new Map();
         pageGenerationRef.current = new Map();
         storedGenerationRef.current = new Map();
-        // #79: 通知後に Map を clear。file-close/open を繰り返しても listener Set が
-        // 単調増加しないように。再マウントは無いため明示的に解放する必要がある。
+        pageOrderRef.current = [...pageOrder];
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
-        itemListenersRef.current.clear();
 
         setTotalPages(total);
         setCurrentPageIndex(page);
         setDirtyPages(new Set(dirty));
         setLoadEpoch(prev => prev + 1);
 
-        // ★ 高速化3: メインスレッドで fetch → ArrayBuffer → 全ワーカーに零コピー転送
-        fetch(toAssetUrl(fp))
-          .then(res => {
-            if (epochRef.current !== epoch) return null;
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return res.arrayBuffer();
+        const workers = workersRef.current;
+        const perWorkerPromises = workers.map((_, i) =>
+          new Promise<boolean>(resolve => {
+            loadRequestIdsRef.current[i] = ++nextWorkerRequestIdRef.current;
+            loadResolvesRef.current[i] = resolve;
           })
-          .then(buf => {
-            if (!buf || epochRef.current !== epoch) return;
+        );
+        const url = toAssetUrl(fp);
+        workers.forEach((worker, i) => {
+          const requestId = loadRequestIdsRef.current[i]!;
+          const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', url, requestId };
+          worker.postMessage(req);
+        });
 
-            const workers = workersRef.current;
-
-            const perWorkerPromises = workers.map((_, i) =>
-              new Promise<boolean>(resolve => {
-                loadResolvesRef.current[i] = resolve;
-              })
-            );
-
-            workers.forEach((worker, i) => {
-              const bytes = (i < workers.length - 1) ? buf.slice(0) : buf;
-              const req: ThumbnailWorkerRequest = { type: 'LOAD_PDF', bytes };
-              worker.postMessage(req, [bytes]);
-            });
-
-            // ★ 全 Worker の LOAD_COMPLETE 後に isPdfReady=true→キュー処理
-            Promise.all(perWorkerPromises).then(() => {
-              if (epochRef.current !== epoch) return;
-              isPdfReadyRef.current = true;
-              processThumbnailQueue(epoch);
-            });
-          })
-          .catch(err => {
-            if (epochRef.current === epoch) {
-              console.error('[ThumbnailWindow] Failed to fetch PDF:', err);
-            }
-          });
+        Promise.all(perWorkerPromises).then(() => {
+          if (pdfLoadEpochRef.current !== pdfLoadEpoch) return;
+          isPdfReadyRef.current = true;
+          processThumbnailQueue(epochRef.current);
+        });
       }));
 
       unlisteners.push(await listen('thumbnail:file-closed', () => {
         epochRef.current++;
+        pdfLoadEpochRef.current++;
         thumbnailQueueRef.current = [];
         thumbnailQueueSetRef.current.clear();
         isProcessingRef.current = false;
         isPdfReadyRef.current = false;
         loadResolvesRef.current.forEach((r, i) => {
-          if (r) { loadResolvesRef.current[i] = null; r(false); }
+          if (r) { loadResolvesRef.current[i] = null; loadRequestIdsRef.current[i] = null; r(false); }
         });
-        pendingsByWorkerRef.current.forEach(p => { p.forEach(r => r(null)); p.clear(); });
+        pendingsByWorkerRef.current.forEach(p => {
+          p.forEach(pending => {
+            clearTimeout(pending.timeout);
+            pending.resolve(null);
+          });
+          p.clear();
+        });
+        pendingRequestIdByPageRef.current.clear();
         thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
         thumbnailsRef.current = new Map();
         pageGenerationRef.current = new Map();
         storedGenerationRef.current = new Map();
-        // #79: 通知後に Map を clear。file-close/open を繰り返しても listener Set が
-        // 単調増加しないように。再マウントは無いため明示的に解放する必要がある。
+        pageOrderRef.current = [];
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
-        itemListenersRef.current.clear();
         setTotalPages(0);
         setCurrentPageIndex(0);
         setDirtyPages(new Set());
         setLoadEpoch(prev => prev + 1);
+      }));
+
+      unlisteners.push(await listen<ThumbnailPageOrderChangedPayload>('thumbnail:page-order-changed', (e) => {
+        const { currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder } = e.payload;
+        const nextPageOrder = [...pageOrder];
+
+        epochRef.current++;
+        const epoch = epochRef.current;
+        thumbnailQueueRef.current = [];
+        thumbnailQueueSetRef.current.clear();
+        isProcessingRef.current = false;
+        pendingsByWorkerRef.current.forEach(p => {
+          p.forEach(pending => {
+            clearTimeout(pending.timeout);
+            pending.resolve(null);
+          });
+          p.clear();
+        });
+        pendingRequestIdByPageRef.current.clear();
+        thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
+        thumbnailsRef.current = new Map();
+        pageGenerationRef.current = new Map();
+        storedGenerationRef.current = new Map();
+        pageOrderRef.current = nextPageOrder;
+        itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
+        setTotalPages(total);
+        setCurrentPageIndex(page);
+        setDirtyPages(new Set(dirty));
+        setLoadEpoch(prev => prev + 1);
+        if (isPdfReadyRef.current) {
+          setTimeout(() => processThumbnailQueue(epoch), 0);
+        }
       }));
 
       unlisteners.push(await listen<{ pageIndex: number }>('thumbnail:page-changed', (e) => {

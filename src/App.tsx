@@ -211,16 +211,16 @@ function App() {
   // #102: フォルダ OCR ループ内では openPdf に bypassOcrGuard=true を立てて呼ぶ。
   // これがないと OCR 中の handleOpen ガードに引っかかってループが進まない。
   folderOpenPdfRef.current = (path: string) => handleOpen(path, { bypassOcrGuard: true });
-  folderSavePdfRef.current = handleSave;
+  folderSavePdfRef.current = () => handleSave({ bypassOcrGuard: true });
 
   // #195: バッチジョブ
   const [showBatchJob, setShowBatchJob] = useState(false);
   const { currentJob: batchCurrentJob, isRunning: batchIsRunning, startJob: batchStartJob, cancelJob: batchCancelJob, resumeJob: batchResumeJob, clearJob: batchClearJob } = useBatchJob({
     openPdf: (path) => handleOpen(path, { bypassOcrGuard: true }),
     runOcrAllPagesSilent,
-    savePdf: handleSave,
+    savePdf: () => handleSave({ bypassOcrGuard: true }),
     // issue #243: sidecar save routes through handleSaveTo so OCR data is preserved
-    savePdfAs: handleSaveTo,
+    savePdfAs: (targetPath) => handleSaveTo(targetPath, { bypassOcrGuard: true }),
     // issue #252: provide document snapshot without store direct access in hook
     getDocumentSnapshot: () => usePecoStore.getState().document,
     showToast,

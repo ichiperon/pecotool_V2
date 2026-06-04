@@ -13,16 +13,22 @@
  * 増えないこと」「dirty 集合が変化したときだけ emit が走ること」を検証する。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, cleanup } from '@testing-library/react'
 
 // ── hoisted mocks ──────────────────────────────────────────────
 const m = vi.hoisted(() => {
-  const listen = vi.fn(async (_eventName: string, _cb: any) => {
-    return () => {}
+  const listeners = new Map<string, any[]>()
+  const listen = vi.fn(async (eventName: string, cb: any) => {
+    if (!listeners.has(eventName)) listeners.set(eventName, [])
+    listeners.get(eventName)!.push(cb)
+    return () => {
+      const cbs = listeners.get(eventName) ?? []
+      listeners.set(eventName, cbs.filter((x) => x !== cb))
+    }
   })
   const emit = vi.fn().mockResolvedValue(undefined)
   const getAllWindows = vi.fn().mockResolvedValue([])
-  return { listen, emit, getAllWindows }
+  return { listen, emit, getAllWindows, listeners }
 })
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -46,6 +52,7 @@ vi.mock('../../utils/pdfLoader', () => ({
 
 import { useThumbnailWindow } from '../../hooks/useThumbnailWindow'
 import { usePecoStore } from '../../store/pecoStore'
+import { useInfraStore } from '../../store/infraStore'
 import type { PecoDocument, PageData, TextBlock } from '../../types'
 
 function makeBlock(id: string, text: string, order: number): TextBlock {
@@ -72,10 +79,10 @@ function makePage(pageIndex: number, blocks: TextBlock[], isDirty = false): Page
   }
 }
 
-function makeDoc(pages: PageData[]): PecoDocument {
+function makeDoc(pages: PageData[], filePath = 'test.pdf'): PecoDocument {
   return {
-    filePath: 'test.pdf',
-    fileName: 'test.pdf',
+    filePath,
+    fileName: filePath.split(/[\\/]/).pop() ?? filePath,
     totalPages: pages.length,
     metadata: {},
     pages: new Map<number, PageData>(pages.map((p) => [p.pageIndex, p])),
@@ -88,20 +95,33 @@ function dirtyEmitCount(): number {
   return m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:dirty-update').length
 }
 
+function fileOpenedEmits(): any[] {
+  return m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:file-opened')
+}
+
+async function flushEffects() {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
 describe('useThumbnailWindow', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    m.listeners.clear()
     usePecoStore.setState({
       document: null,
       currentPageIndex: 0,
+      pageOrder: [],
       selectedIds: new Set<string>(),
       undoStack: [],
       redoStack: [],
       isDirty: false,
     } as any)
+    useInfraStore.setState({ documentEpoch: 0 })
   })
 
   afterEach(() => {
+    cleanup()
     vi.restoreAllMocks()
   })
 
@@ -116,8 +136,7 @@ describe('useThumbnailWindow', () => {
       renderHook(() => useThumbnailWindow())
 
       // 初回マウント時の effect / file-opened emit を flush
-      await Promise.resolve()
-      await Promise.resolve()
+      await flushEffects()
 
       const baselineDirtyEmits = dirtyEmitCount()
 
@@ -129,8 +148,7 @@ describe('useThumbnailWindow', () => {
             document: makeDoc([makePage(0, [makeBlock('b1', text, 0)])]),
           } as any)
         })
-        await Promise.resolve()
-        await Promise.resolve()
+        await flushEffects()
       }
 
       // dirty 集合が変わっていないので emit は増えない
@@ -146,8 +164,7 @@ describe('useThumbnailWindow', () => {
 
       renderHook(() => useThumbnailWindow())
 
-      await Promise.resolve()
-      await Promise.resolve()
+      await flushEffects()
       m.emit.mockClear()
 
       // ページを dirty にする
@@ -156,8 +173,7 @@ describe('useThumbnailWindow', () => {
           document: makeDoc([makePage(0, [makeBlock('b1', 'hello', 0)], true)]),
         } as any)
       })
-      await Promise.resolve()
-      await Promise.resolve()
+      await flushEffects()
 
       // dirty 集合が変化したので thumbnail:dirty-update が少なくとも 1 回 emit され、
       // 最新の payload には dirtyPages: [0] が入っている
@@ -181,8 +197,7 @@ describe('useThumbnailWindow', () => {
 
       renderHook(() => useThumbnailWindow())
 
-      await Promise.resolve()
-      await Promise.resolve()
+      await flushEffects()
 
       m.emit.mockClear()
 
@@ -196,14 +211,218 @@ describe('useThumbnailWindow', () => {
           ]),
         } as any)
       })
-      await Promise.resolve()
-      await Promise.resolve()
+      await flushEffects()
 
       const dirtyEmits = m.emit.mock.calls.filter(
         (c) => c[0] === 'thumbnail:dirty-update'
       )
       expect(dirtyEmits.length).toBeGreaterThanOrEqual(1)
       expect(dirtyEmits.at(-1)?.[1]).toEqual({ dirtyPages: [0, 2] })
+    })
+  })
+
+  describe('PCT-010: thumbnail window に pageOrder を転送する', () => {
+    it('thumbnail:file-opened payload に pageOrder を含める', async () => {
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false),
+          makePage(1, [], false),
+          makePage(2, [], false),
+        ]),
+        currentPageIndex: 1,
+        pageOrder: [2, 0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      const fileOpenedEmits = m.emit.mock.calls.filter(
+        (c) => c[0] === 'thumbnail:file-opened'
+      )
+      expect(fileOpenedEmits.at(-1)?.[1]).toMatchObject({
+        documentEpoch: 0,
+        currentPageIndex: 1,
+        totalPages: 3,
+        pageOrder: [2, 0, 1],
+      })
+    })
+
+    it('thumbnail:request-state 応答 payload に pageOrder を含める', async () => {
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false),
+          makePage(1, [], false),
+          makePage(2, [], false),
+        ]),
+        currentPageIndex: 2,
+        pageOrder: [1, 2, 0],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      const requestStateListener = m.listeners.get('thumbnail:request-state')?.[0]
+      expect(requestStateListener).toBeDefined()
+      requestStateListener()
+      await flushEffects()
+
+      expect(m.emit.mock.calls.at(-1)).toEqual([
+        'thumbnail:file-opened',
+        {
+          filePath: 'test.pdf',
+          documentEpoch: 0,
+          currentPageIndex: 2,
+          totalPages: 3,
+          dirtyPages: [],
+          pageOrder: [1, 2, 0],
+        },
+      ])
+    })
+
+    it('pageOrder 変更時に thumbnail:page-order-changed を emit する', async () => {
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false),
+          makePage(1, [], false),
+          makePage(2, [], false),
+        ]),
+        currentPageIndex: 0,
+        pageOrder: [0, 1, 2],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      act(() => {
+        usePecoStore.setState({ pageOrder: [2, 0, 1] } as any)
+      })
+      await flushEffects()
+
+      const pageOrderEmits = m.emit.mock.calls.filter(
+        (c) => c[0] === 'thumbnail:page-order-changed'
+      )
+      expect(pageOrderEmits.at(-1)?.[1]).toEqual({
+        currentPageIndex: 0,
+        totalPages: 3,
+        dirtyPages: [],
+        pageOrder: [2, 0, 1],
+      })
+      expect(fileOpenedEmits()).toHaveLength(0)
+    })
+  })
+
+  describe('PCT-033: document.totalPages 変更を thumbnail window に通知する', () => {
+    it('ページ削除時の pageOrder 変更イベントに新しい totalPages/currentPageIndex を含める', async () => {
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false),
+          makePage(1, [], false),
+          makePage(2, [], false),
+        ]),
+        currentPageIndex: 2,
+        pageOrder: [0, 1, 2],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      act(() => {
+        usePecoStore.setState({
+          document: makeDoc([
+            makePage(0, [], false),
+            makePage(1, [], true),
+          ]),
+          currentPageIndex: 1,
+          pageOrder: [0, 2],
+        } as any)
+      })
+      await flushEffects()
+
+      expect(fileOpenedEmits()).toHaveLength(0)
+      const pageOrderEmits = m.emit.mock.calls.filter(
+        (c) => c[0] === 'thumbnail:page-order-changed'
+      )
+      expect(pageOrderEmits).toHaveLength(1)
+      expect(pageOrderEmits[0][1]).toEqual({
+        currentPageIndex: 1,
+        totalPages: 2,
+        dirtyPages: [1],
+        pageOrder: [0, 2],
+      })
+    })
+  })
+
+  describe('PCT-018: documentEpoch 変更を thumbnail window に通知する', () => {
+    it('同一 filePath の documentEpoch 変更で thumbnail:file-opened を emit する', async () => {
+      useInfraStore.setState({ documentEpoch: 1 })
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false),
+          makePage(1, [], false),
+        ]),
+        currentPageIndex: 1,
+        pageOrder: [0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      act(() => {
+        useInfraStore.setState({ documentEpoch: 2 })
+      })
+      await flushEffects()
+
+      expect(fileOpenedEmits()).toHaveLength(1)
+      expect(fileOpenedEmits().at(-1)?.[1]).toEqual({
+        filePath: 'test.pdf',
+        documentEpoch: 2,
+        currentPageIndex: 1,
+        totalPages: 2,
+        dirtyPages: [],
+        pageOrder: [0, 1],
+      })
+      expect(
+        m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:page-order-changed')
+      ).toHaveLength(0)
+    })
+
+    it('filePath 変更時の thumbnail:file-opened emit を維持する', async () => {
+      useInfraStore.setState({ documentEpoch: 5 })
+      usePecoStore.setState({
+        document: makeDoc([makePage(0, [], false)], 'before.pdf'),
+        currentPageIndex: 0,
+        pageOrder: [0],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      act(() => {
+        usePecoStore.setState({
+          document: makeDoc([
+            makePage(0, [], false),
+            makePage(1, [], true),
+          ], 'after.pdf'),
+          currentPageIndex: 1,
+          pageOrder: [1, 0],
+        } as any)
+      })
+      await flushEffects()
+
+      expect(fileOpenedEmits()).toHaveLength(1)
+      expect(fileOpenedEmits().at(-1)?.[1]).toEqual({
+        filePath: 'after.pdf',
+        documentEpoch: 5,
+        currentPageIndex: 1,
+        totalPages: 2,
+        dirtyPages: [1],
+        pageOrder: [1, 0],
+      })
     })
   })
 })

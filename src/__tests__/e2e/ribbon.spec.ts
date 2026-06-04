@@ -58,12 +58,13 @@ test.describe('Ribbon: タブ切替と各タブのボタン表示', () => {
     await expect(page.locator('input.ocr-opacity-slider').first()).toBeVisible();
   });
 
-  test('[R-05] ヘルプタブに切り替えるとチュートリアルとバージョン情報ボタンが表示される', async ({ page }) => {
+  test('[R-05] ヘルプタブに切り替えるとヘルプ系ボタンが表示される', async ({ page }) => {
     const helpTab = page.locator('[role="tablist"] button', { hasText: 'ヘルプ' });
     await helpTab.click();
     await expect(helpTab).toHaveClass(/active/);
 
-    await expect(page.locator('button', { hasText: 'チュートリアル' })).toBeVisible();
+    await expect(page.locator('button', { hasText: 'ショートカット' })).toBeVisible();
+    await expect(page.locator('button', { hasText: 'ツールの使い方' })).toBeVisible();
     await expect(page.locator('button', { hasText: 'バージョン情報' })).toBeVisible();
   });
 

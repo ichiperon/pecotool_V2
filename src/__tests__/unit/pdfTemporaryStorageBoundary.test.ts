@@ -176,6 +176,17 @@ class FakeDatabase {
   }
 }
 
+class FailingDirtyTransactionDatabase extends FakeDatabase {
+  constructor(private readonly message: string) {
+    super();
+  }
+
+  transaction(name: string): IDBTransaction {
+    if (name === 'temporary_changes') throw new Error(this.message);
+    return super.transaction(name);
+  }
+}
+
 function dispatchCursor(
   entries: Array<[string, unknown]>,
   index: number,
@@ -524,4 +535,28 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     // filter-b.pdf の結果に filter-a.pdf のデータが混入していない
     expect(resultB.has(1)).toBe(false);
   }, 30_000);
+
+  it('deleteTemporaryPageKeys は IDB 失敗を reject する', async () => {
+    vi.resetModules();
+    setupFakeIdb(new FailingDirtyTransactionDatabase('delete transaction failed'));
+    const { deleteTemporaryPageKeys } =
+      await import('../../utils/pdfTemporaryStorage');
+
+    await expect(
+      deleteTemporaryPageKeys('delete-fail.pdf', [0]),
+    ).rejects.toThrow('delete transaction failed');
+  });
+
+  it('renameTemporaryPageKeys は IDB 失敗を reject する', async () => {
+    vi.resetModules();
+    setupFakeIdb(new FailingDirtyTransactionDatabase('rename transaction failed'));
+    const { renameTemporaryPageKeys } =
+      await import('../../utils/pdfTemporaryStorage');
+
+    await expect(
+      renameTemporaryPageKeys('rename-fail.pdf', [
+        { oldPageIndex: 0, newPageIndex: 1 },
+      ]),
+    ).rejects.toThrow('rename transaction failed');
+  });
 });

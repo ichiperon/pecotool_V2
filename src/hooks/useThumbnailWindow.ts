@@ -3,12 +3,16 @@ import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getAllWindows } from '@tauri-apps/api/window';
 import { usePecoStore, selectDocument, selectCurrentPageIndex } from '../store/pecoStore';
+import { useInfraStore, selectDocumentEpoch } from '../store/infraStore';
 import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
 
 export function useThumbnailWindow() {
   const [isThumbnailOpen, setIsThumbnailOpen] = useState(false);
   const document = usePecoStore(selectDocument);
+  const documentEpoch = useInfraStore(selectDocumentEpoch);
+  const openDocumentEpoch = document ? documentEpoch : 0;
   const currentPageIndex = usePecoStore(selectCurrentPageIndex);
+  const pageOrderSerialized = usePecoStore((s) => s.pageOrder.join(','));
   // dirty ページ一覧をシリアライズしたプリミティブのみ購読する。
   // document 全体を購読すると textBlocks 等 dirty に無関係なフィールド更新でも
   // effect が再実行されて Tauri IPC が走るため (issue #35)。
@@ -21,6 +25,7 @@ export function useThumbnailWindow() {
   });
   // Dirty なページインデックス一覧を追跡
   const prevDirtyRef = useRef<string>('');
+  const prevPageOrderRef = useRef<string>('');
 
   const getDirtyPages = useCallback((): number[] => {
     const doc = usePecoStore.getState().document;
@@ -86,13 +91,15 @@ export function useThumbnailWindow() {
     const setup = async () => {
       const u1 = await listen('thumbnail:request-state', () => {
         const doc = usePecoStore.getState().document;
-        const { currentPageIndex: page } = usePecoStore.getState();
+        const { currentPageIndex: page, pageOrder } = usePecoStore.getState();
         if (doc) {
           emit('thumbnail:file-opened', {
             filePath: doc.filePath,
+            documentEpoch: useInfraStore.getState().documentEpoch,
             currentPageIndex: page,
             totalPages: doc.totalPages,
             dirtyPages: getDirtyPages(),
+            pageOrder,
           }).catch(logUnlessTauriWindowNotFound);
         }
       });
@@ -118,17 +125,36 @@ export function useThumbnailWindow() {
   // --- ファイル開閉をサムネイル窓に通知（自動表示は行わず状態転送のみ）---
   useEffect(() => {
     if (document) {
+      const pageOrder = usePecoStore.getState().pageOrder;
       emit('thumbnail:file-opened', {
         filePath: document.filePath,
+        documentEpoch,
         currentPageIndex,
         totalPages: document.totalPages,
         dirtyPages: getDirtyPages(),
+        pageOrder,
       }).catch(logUnlessTauriWindowNotFound);
+      prevPageOrderRef.current = pageOrder.join(',');
     } else {
       emit('thumbnail:file-closed').catch(logUnlessTauriWindowNotFound);
+      prevPageOrderRef.current = '';
     }
     prevDirtyRef.current = '';
-  }, [document?.filePath]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [document?.filePath, openDocumentEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- ページ順変更をサムネイル窓に通知 ---
+  useEffect(() => {
+    if (pageOrderSerialized === prevPageOrderRef.current) return;
+    prevPageOrderRef.current = pageOrderSerialized;
+    const { document: doc, currentPageIndex: page, pageOrder } = usePecoStore.getState();
+    if (!doc) return;
+    emit('thumbnail:page-order-changed', {
+      currentPageIndex: page,
+      totalPages: doc.totalPages,
+      dirtyPages: getDirtyPages(),
+      pageOrder,
+    }).catch(logUnlessTauriWindowNotFound);
+  }, [pageOrderSerialized, getDirtyPages]);
 
   // --- ページ変更をサムネイル窓に通知 ---
   useEffect(() => {
