@@ -314,32 +314,42 @@ async fn get_pdf_page_dimensions(
     .map_err(|e| format!("spawn_blocking error: {}", e))?
 }
 
+/// Scan `dir` and return an alphabetically sorted list of PDF file paths.
+///
+/// Only direct children that are files with a `.pdf` extension (case-insensitive)
+/// are returned.  Sub-directories are skipped.  This is the AppHandle-free core
+/// extracted from `list_pdf_files_in_folder` so it can be unit-tested without
+/// Tauri infrastructure.
+fn list_pdf_files(dir: &std::path::Path) -> Result<Vec<String>, String> {
+    use std::fs;
+
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("read_dir failed: {e}"))? {
+        let entry = entry.map_err(|e| format!("read_dir entry failed: {e}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        {
+            paths.push(path.to_string_lossy().to_string());
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 #[tauri::command]
 async fn list_pdf_files_in_folder(
     app: tauri::AppHandle,
     folder_path: String,
 ) -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
-        use std::fs;
-
         let folder = validate_allowed_directory_path(&app, &folder_path)?;
-        let mut paths = Vec::new();
-        for entry in fs::read_dir(&folder).map_err(|e| format!("read_dir failed: {e}"))? {
-            let entry = entry.map_err(|e| format!("read_dir entry failed: {e}"))?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-            {
-                paths.push(path.to_string_lossy().to_string());
-            }
-        }
-        paths.sort();
-        Ok(paths)
+        list_pdf_files(&folder)
     })
     .await
     .map_err(|e| format!("spawn_blocking error: {}", e))?
@@ -810,9 +820,6 @@ async fn write_pdf_chunk(
     app: tauri::AppHandle,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    use std::fs::OpenOptions;
-    use std::io::{Seek, SeekFrom, Write};
-
     let headers = request.headers();
     let path_raw = headers
         .get("x-path")
@@ -832,32 +839,48 @@ async fn write_pdf_chunk(
         validate_pdf_file_name(&target)?;
         validate_allowed_resolved_path(&app, &target)?;
 
-        // 最初のチャンク (offset==0) は create + truncate、後続は create 無しで open
-        let mut opts = OpenOptions::new();
-        opts.write(true);
-        if offset == 0 {
-            opts.create(true).truncate(true);
-        } else {
-            opts.create(false).truncate(false);
-        }
-        let mut f = opts
-            .open(&path)
-            .map_err(|e| format!("open failed: {} ({})", e, path.to_string_lossy()))?;
-        let current_len = f
-            .metadata()
-            .map_err(|e| format!("metadata failed: {}", e))?
-            .len();
-        validate_pdf_chunk_offset_contiguous(current_len, offset)?;
-        if offset > 0 {
-            f.seek(SeekFrom::Start(offset))
-                .map_err(|e| format!("seek failed: {}", e))?;
-        }
-        f.write_all(&bytes)
-            .map_err(|e| format!("write failed: {}", e))?;
-        Ok(())
+        write_chunk_at(&path, offset, &bytes)
     })
     .await
     .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
+/// Write `bytes` at `offset` in the file at `path`.
+///
+/// This is the AppHandle-free core extracted from `write_pdf_chunk` so it can be
+/// unit-tested without Tauri infrastructure.
+///
+/// - `offset == 0`: create-or-truncate the file, then write from the beginning.
+/// - `offset > 0`: open the existing file, validate contiguity, seek, then write.
+///
+/// All error messages mirror those produced by `write_pdf_chunk` so the external
+/// behaviour of the command is unchanged.
+fn write_chunk_at(path: &std::path::Path, offset: u64, bytes: &[u8]) -> Result<(), String> {
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut opts = OpenOptions::new();
+    opts.write(true);
+    if offset == 0 {
+        opts.create(true).truncate(true);
+    } else {
+        opts.create(false).truncate(false);
+    }
+    let mut f = opts
+        .open(path)
+        .map_err(|e| format!("open failed: {} ({})", e, path.to_string_lossy()))?;
+    let current_len = f
+        .metadata()
+        .map_err(|e| format!("metadata failed: {}", e))?
+        .len();
+    validate_pdf_chunk_offset_contiguous(current_len, offset)?;
+    if offset > 0 {
+        f.seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("seek failed: {}", e))?;
+    }
+    f.write_all(bytes)
+        .map_err(|e| format!("write failed: {}", e))?;
+    Ok(())
 }
 
 /// チャンク書き込み済みの一時 PDF を正式ファイルへ置き換える。
@@ -1447,6 +1470,154 @@ mod tests {
         );
         // backup は復元に使われたので消えているはず (rename で target に戻った)
         assert!(!backup.exists(), "backup must have been renamed back to target");
+    }
+
+    // ── write_chunk_at: AppHandle-free core of write_pdf_chunk ──────────
+
+    /// (a) offset==0 で新規ファイルが作成され、内容が一致すること。
+    #[test]
+    fn write_chunk_at_creates_new_file_on_offset_zero() {
+        let dir = make_replace_test_dir("chunk_a");
+        let path = dir.join("new.pdf.pecotool-1.tmp");
+
+        write_chunk_at(&path, 0, b"hello chunk").unwrap();
+
+        assert!(path.exists(), "file must be created");
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello chunk");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (b) offset==0 は既存ファイルを truncate して上書きする（残骸が残らない）。
+    #[test]
+    fn write_chunk_at_truncates_existing_file_on_offset_zero() {
+        let dir = make_replace_test_dir("chunk_b");
+        let path = dir.join("existing.pdf.pecotool-2.tmp");
+
+        // longer old content
+        std::fs::write(&path, b"old long content here").unwrap();
+
+        write_chunk_at(&path, 0, b"new").unwrap();
+
+        let content = std::fs::read(&path).unwrap();
+        assert_eq!(content, b"new", "only the new content must remain; old residue must be gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (c) 複数チャンク (offset=0, then offset=len) で連結結果が元バイト列と一致すること。
+    #[test]
+    fn write_chunk_at_multi_chunk_concatenates_correctly() {
+        let dir = make_replace_test_dir("chunk_c");
+        let path = dir.join("multi.pdf.pecotool-3.tmp");
+
+        let part1 = b"first chunk ";
+        let part2 = b"second chunk";
+
+        write_chunk_at(&path, 0, part1).unwrap();
+        write_chunk_at(&path, part1.len() as u64, part2).unwrap();
+
+        let content = std::fs::read(&path).unwrap();
+        let expected: Vec<u8> = part1.iter().chain(part2.iter()).copied().collect();
+        assert_eq!(content, expected, "multi-chunk write must concatenate correctly");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (d) offset が現在長と不連続ならエラー（ギャップ拒否）。
+    #[test]
+    fn write_chunk_at_rejects_non_contiguous_offset() {
+        let dir = make_replace_test_dir("chunk_d");
+        let path = dir.join("gap.pdf.pecotool-4.tmp");
+
+        std::fs::write(&path, b"12345678").unwrap(); // len = 8
+
+        // offset 12 は現在長 8 と一致しないのでエラー
+        let err = write_chunk_at(&path, 12, b"oops").unwrap_err();
+        assert!(
+            err.contains("chunk offset mismatch"),
+            "expected contiguity error, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (e) 空 bytes (byteLength 0) + offset==0 で空ファイルが作られること。
+    #[test]
+    fn write_chunk_at_empty_bytes_creates_empty_file() {
+        let dir = make_replace_test_dir("chunk_e");
+        let path = dir.join("empty.pdf.pecotool-5.tmp");
+
+        write_chunk_at(&path, 0, b"").unwrap();
+
+        assert!(path.exists(), "empty file must be created");
+        assert_eq!(std::fs::read(&path).unwrap(), b"", "file must be empty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── list_pdf_files: AppHandle-free core of list_pdf_files_in_folder ──
+
+    /// .pdf のみ返る（大文字 .PDF も拾う）。
+    #[test]
+    fn list_pdf_files_returns_only_pdf_files() {
+        let dir = make_replace_test_dir("list_a");
+        std::fs::write(dir.join("a.pdf"), b"").unwrap();
+        std::fs::write(dir.join("B.PDF"), b"").unwrap();
+        std::fs::write(dir.join("c.txt"), b"").unwrap();
+        std::fs::write(dir.join("d.docx"), b"").unwrap();
+
+        let result = list_pdf_files(&dir).unwrap();
+
+        // 名前でソートされた状態でチェック
+        let names: Vec<&str> = result
+            .iter()
+            .map(|p| std::path::Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(""))
+            .collect();
+        assert!(names.contains(&"a.pdf"), "a.pdf must be included");
+        assert!(names.contains(&"B.PDF"), "B.PDF (uppercase) must be included");
+        assert!(!names.contains(&"c.txt"), "c.txt must be excluded");
+        assert!(!names.contains(&"d.docx"), "d.docx must be excluded");
+        assert_eq!(result.len(), 2, "exactly 2 PDF files expected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 非 PDF ファイルは除外される。
+    #[test]
+    fn list_pdf_files_excludes_non_pdf() {
+        let dir = make_replace_test_dir("list_b");
+        std::fs::write(dir.join("report.txt"), b"").unwrap();
+        std::fs::write(dir.join("image.png"), b"").unwrap();
+
+        let result = list_pdf_files(&dir).unwrap();
+        assert!(result.is_empty(), "no PDFs: result must be empty, got: {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空ディレクトリで空リストが返る。
+    #[test]
+    fn list_pdf_files_empty_dir_returns_empty_vec() {
+        let dir = make_replace_test_dir("list_c");
+
+        let result = list_pdf_files(&dir).unwrap();
+        assert!(result.is_empty(), "empty dir must return empty vec");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 結果がアルファベット順（文字列ソート）で返ること。
+    #[test]
+    fn list_pdf_files_result_is_sorted() {
+        let dir = make_replace_test_dir("list_d");
+        std::fs::write(dir.join("c.pdf"), b"").unwrap();
+        std::fs::write(dir.join("a.pdf"), b"").unwrap();
+        std::fs::write(dir.join("b.pdf"), b"").unwrap();
+
+        let result = list_pdf_files(&dir).unwrap();
+        assert_eq!(result.len(), 3);
+
+        let mut sorted = result.clone();
+        sorted.sort();
+        assert_eq!(result, sorted, "list_pdf_files must return sorted paths");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (d) temp→target も backup→target（復元）も失敗した場合:

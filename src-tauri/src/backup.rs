@@ -257,24 +257,30 @@ pub async fn clear_backup(app: AppHandle, file_path: String) -> Result<(), Strin
     .map_err(|e| format!("スレッドエラー: {e}"))?
 }
 
+/// Read the contents of the backup file at `path` as a UTF-8 string.
+///
+/// This is the AppHandle-free read core extracted from `load_backup` so it can
+/// be unit-tested without Tauri infrastructure.
+pub(crate) fn read_backup_file(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("バックアップ読み込み失敗: {e}"))
+}
+
 /// バックアップファイルの内容をJSON文字列として読み込む。
 #[tauri::command]
 pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, String> {
     let backup_dir = get_backup_dir(&app)?;
     let bpath = readable_backup_file_path(&backup_dir, &file_path);
 
-    tokio::task::spawn_blocking(move || {
-        std::fs::read_to_string(&bpath).map_err(|e| format!("バックアップ読み込み失敗: {e}"))
-    })
-    .await
-    .map_err(|e| format!("スレッドエラー: {e}"))?
+    tokio::task::spawn_blocking(move || read_backup_file(&bpath))
+        .await
+        .map_err(|e| format!("スレッドエラー: {e}"))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         backup_file_path, clear_backup_targets, legacy_backup_file_path, legacy_path_hash,
-        path_hash, write_backup_file_atomically,
+        path_hash, read_backup_file, write_backup_file_atomically,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -414,6 +420,61 @@ mod tests {
         }
 
         assert!(!bpath.exists(), "正規パス経由の削除は動作する");
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
+    // ── save_backup / load_backup roundtrip (AppHandle-free) ─────────────
+
+    /// 書いた JSON 文字列を read_backup_file で読み戻して一致すること。
+    #[test]
+    fn backup_roundtrip_written_content_matches() {
+        let backup_dir = make_backup_dir("roundtrip_read");
+        let bpath = backup_file_path(&backup_dir, "C:\\docs\\sample.pdf");
+        let json = r#"{"version":1,"timestamp":"2026-06-04T00:00:00Z","originalFilePath":"C:\\docs\\sample.pdf","pages":[]}"#;
+
+        write_backup_file_atomically(&bpath, json).unwrap();
+
+        let read_back = read_backup_file(&bpath).unwrap();
+        assert_eq!(read_back, json, "read-back content must match what was written");
+
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
+    /// write_backup_file_atomically で上書きした後、最新内容だけが読める（古い内容が残らない）。
+    #[test]
+    fn backup_roundtrip_overwrite_returns_latest_content() {
+        let backup_dir = make_backup_dir("roundtrip_overwrite");
+        let bpath = backup_file_path(&backup_dir, "C:\\docs\\overwrite.pdf");
+
+        let first = r#"{"version":1,"timestamp":"T1","pages":["p1","p2","p3","p4","p5"]}"#;
+        let second = r#"{"version":1,"timestamp":"T2","pages":[]}"#;
+
+        // first は second より長い; 上書き後に first の残骸が残ってはいけない
+        write_backup_file_atomically(&bpath, first).unwrap();
+        write_backup_file_atomically(&bpath, second).unwrap();
+
+        let read_back = read_backup_file(&bpath).unwrap();
+        assert_eq!(read_back, second, "after overwrite, only latest content must be readable");
+        assert!(
+            !read_back.contains("p1"),
+            "stale content from first write must not appear: {read_back}"
+        );
+
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
+    /// 存在しないパスを read_backup_file に渡すとエラーが返ること。
+    #[test]
+    fn backup_read_nonexistent_returns_error() {
+        let backup_dir = make_backup_dir("roundtrip_missing");
+        let bpath = backup_dir.join("nonexistent.json");
+
+        let err = read_backup_file(&bpath).unwrap_err();
+        assert!(
+            err.contains("バックアップ読み込み失敗"),
+            "error must mention read failure, got: {err}"
+        );
+
         let _ = std::fs::remove_dir_all(&backup_dir);
     }
 }

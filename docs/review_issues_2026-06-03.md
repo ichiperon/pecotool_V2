@@ -92,6 +92,15 @@ PCT-040 を修正し、全自動ゲート緑。RC 候補。
 - **最小権限**: dead と確証した `fs:allow-mkdir` capability を削除（#285 で JS 側 mkdir 撤廃済み、Rust は std::fs 直接で plugin 許可に非依存）。`tauriCapabilityIntegrity` 6 passed / tsc 0 error。
 - 検証: `cargo test` 24 passed / `tauriCapabilityIntegrity` 6 passed / `tsc --noEmit` 0 error。
 
+## Backend Command-Core Tests (2026-06-04)
+
+バックエンド（Rust）の自動カバレッジが「純粋ヘルパー中心」で Tauri コマンドの実書込ロジックが end-to-end 未検証だった点に対応。OS依存（実OCR）/IPC配線は unit 化不可だが、コマンドのコアを抽出して cargo テスト化（behavior-preserving）。
+
+- `write_chunk_at` 抽出（保存の実書込: offset=0 create+truncate / offset>0 append / 連続性検証）+ テスト5本
+- `list_pdf_files` 抽出（バッチOCRの入口: .pdf フィルタ/ソート）+ テスト4本
+- `read_backup_file` 抽出 + `save/load_backup` roundtrip テスト3本
+- `cargo test` **24→36 passed**。検証チェーン（AppHandle 依存の validate_*）はコマンド層に維持。
+
 ## Backlog (RC 後・P2)
 
 | ID | Priority | Issue | 備考 |
@@ -99,6 +108,8 @@ PCT-040 を修正し、全自動ゲート緑。RC 候補。
 | PCT-041 | P2 | `$TEMP/**` スコープの最小権限化検討（`fs:allow-write-file`/`write-text-file`/`read-file`/`stat` から除去可能か精査）。前提: dialog `save()` が $TEMP を選び得るか、sidecar/CSV/フォールバックの $TEMP 非依存を最終確証 | dead 確証が取れ次第 tightening。AZKi 提案 |
 | PCT-042 | P2 | `fs:allow-remove` の `$TEMP/**` も PCT-041 と連動して要否判断 | 同上 |
 | PCT-043 | P2 | `replace_pdf_file` の move-away→move-in 間にクラッシュすると target が一時消失（元データは `.pecotool-backup-*.tmp` に残り復元可能）。Windows は `ReplaceFileW`/`MoveFileExW` で真の atomic replace に置換する余地 | 低確率・復元可能のため RC 非ブロッカー |
+| PCT-044 | P2 | OCR (`run_ocr`→`do_windows_ocr`) の invoke にタイムアウト/中断が無く、in-flight 中はキャンセル無効。理論上ハングし得るが OS の Windows.Media.Ocr 依存で実運用リスク低。真の中断には Rust 側 abortable invoke が必要 | 低リスク。abortable invoke は中規模変更 |
+| PCT-045 | P2 | 実バックエンド E2E が無い（Playwright は Tauri API を全モック）。実 IPC コマンド＋OS OCR を通しで叩く自動テストが存在せず手動受け入れ頼み。`tauri-driver`/WebDriver による実バックエンドE2E＋実OCRスモークが高価値 | コマンドコアは cargo 化済（上記）。残りは IPC＋OS層 |
 
 ## 残・手動のみ（自動化不可）
 
