@@ -321,15 +321,15 @@ describe('Ribbon', () => {
     expect(fileTab.classList.contains('ribbon-tab--active')).toBe(true)
   })
 
-  // ── 表示タブ: 低信頼ハイライトトグル (#192 followup) ─────────
-  it('C-RB-30: 表示タブ: 低信頼ハイライトボタンをクリックすると store state が反転する', () => {
+  // ── 表示タブ: 要確認マークトグル (#192 → PCT-048/#299 でリネーム) ─────────
+  it('C-RB-30: 表示タブ: 要確認マークボタンをクリックすると store state が反転する', () => {
     // store を初期状態 (showLowConfidenceHighlight=true) にリセット
     useOcrSettingsStore.setState({ showLowConfidenceHighlight: true })
 
     renderRibbon()
     fireEvent.click(screen.getByText('表示'))
 
-    const btn = screen.getByTitle('低信頼ハイライト') as HTMLButtonElement
+    const btn = screen.getByTitle('要確認マーク (空ブロック・重なりブロックをハイライト)') as HTMLButtonElement
     // 初期状態 ON → active クラスと aria-pressed=true
     expect(btn.getAttribute('aria-pressed')).toBe('true')
     expect(btn.classList.contains('active')).toBe(true)
