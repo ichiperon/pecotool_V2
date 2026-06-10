@@ -279,16 +279,18 @@ describe('pdfSaver / savePDF', () => {
       const [, y] = m.translateFn.mock.calls[0]
       const heightAtSize = 1.448
       const ascent = heightAtSize * 0.8
-      const descentRatio = (heightAtSize - ascent) / heightAtSize
+      // PCT-092: descent 比はキャップ (0.12) 付き。このモックの生比 0.2 は丸められる。
+      const descentRatio = Math.min((heightAtSize - ascent) / heightAtSize, 0.12)
       const sy = 20 / heightAtSize
       const expectedY = PAGE_HEIGHT - 100 - heightAtSize * sy * (1 - descentRatio)
       expect(y).toBeCloseTo(expectedY, 5)
     })
 
-    it('descentRatio が大きい (=0.3) フォントで baseline が下方向に正しく寄る', async () => {
-      // descent ratio が 30% に増えるフォントでは、bbox 上端基準で baseline が
-      // より下に来る（drawText の glyph origin は baseline なので、ascent ratio が
-      // 小さい=descent ratio が大きい場合、bbox 上端から baseline までの距離も短くなる）。
+    it('descentRatio が大きい (=0.3) フォントは PCT-092 キャップで 0.12 に丸められる', async () => {
+      // 旧仕様は生比 0.3 をそのまま使い baseline を bbox 下端から 30% に置いたが、
+      // スキャン和文活字の実ベースライン (行下端から約 10〜12%) より上に座り、
+      // Acrobat の選択ハイライトが「左上に寄って」見えた (v2.0.15 実機報告)。
+      // PCT-092 で descent 比を 0.12 で打ち切る。
       m.embedFont.mockResolvedValue({
         widthOfTextAtSize: vi.fn().mockReturnValue(10),
         heightAtSize: vi.fn().mockImplementation((_size: number, opts?: { descender?: boolean }) => {
@@ -303,15 +305,12 @@ describe('pdfSaver / savePDF', () => {
 
       const [, y] = m.translateFn.mock.calls[0]
       const heightAtSize = 1.448
-      const ascent = heightAtSize * 0.7
-      const descentRatio = (heightAtSize - ascent) / heightAtSize // 0.3
+      const descentRatio = 0.12 // 生比 0.3 はキャップに丸められる
       const sy = 20 / heightAtSize
       const expectedY = PAGE_HEIGHT - 100 - heightAtSize * sy * (1 - descentRatio)
-      // 0.8 ハードコードのままなら expectedY = 842-100-16 = 726 となるはず。
-      // 動的計算では 842 - 100 - heightAtSize*sy*0.7 = 842 - 100 - 14 = 728。
-      // 旧式と異なる値であることを確認 → 動的計算が効いていることの保証。
       expect(y).toBeCloseTo(expectedY, 5)
-      expect(y).not.toBeCloseTo(PAGE_HEIGHT - 100 - heightAtSize * sy * 0.8, 1)
+      // キャップ不在 (生比 0.3 のまま) なら 842 - 100 - 20*0.7 = 728 になるはず。
+      expect(y).not.toBeCloseTo(PAGE_HEIGHT - 100 - heightAtSize * sy * 0.7, 1)
     })
   })
 
