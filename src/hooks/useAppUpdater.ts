@@ -2,11 +2,12 @@ import { useCallback, useRef, useState } from 'react';
 
 /**
  * 自動更新機能の有効フラグ。
- * 初回リリース (v2.0.15) では updater 署名鍵 (pubkey) 未設定のため無効にする。
  * 起動時チェックと「アップデート確認」ボタンの両方がこのフラグに従う。
- * 有効化する場合は docs/UPDATER.md の手順で鍵を生成・設定してから true にする。
+ * v2.0.15 で署名鍵 (pubkey) を設定し、配布専用 public リポジトリ
+ * (abroadcrew02-spec/pecotool-releases) を endpoint として有効化した。
+ * リリース手順は docs/UPDATER.md を参照。
  */
-export const UPDATER_ENABLED = false;
+export const UPDATER_ENABLED = true;
 
 export interface AppUpdateState {
   isChecking: boolean;
