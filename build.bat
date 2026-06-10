@@ -41,7 +41,11 @@ if exist "src-tauri\target\release\bundle\nsis\*.exe" (
 
 :: MANUALをコピー
 echo Copying Manual...
-copy "MANUAL.md" "dist-bin\README_MANUAL.md" /Y >nul
+if exist "docs\MANUAL.md" (
+    copy "docs\MANUAL.md" "dist-bin\README_MANUAL.md" /Y >nul
+) else (
+    echo [WARNING] docs\MANUAL.md not found. Manual not included in dist-bin.
+)
 
 :: 5. Success
 echo ========================================
@@ -49,6 +53,4 @@ echo BUILD SUCCESSFUL!
 echo Output: dist-bin\
 dir /b "dist-bin"
 echo ========================================
-echo さあ一味！今度こそ「dist-bin」フォルダの中を見なさい！
-echo お宝がいっぱい詰まってるはずよ！
 pause

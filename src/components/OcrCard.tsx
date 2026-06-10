@@ -172,10 +172,20 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
 
   const handleCompositionStart = () => {
     isComposingRef.current = true;
+    // PCT-051: flushActiveOcrCardText が IME 変換中かどうかを DOM 属性で判定できるようにする。
+    // Ctrl+S 時に flush 側から contentRef を経由せず activeElement を直接見るため、
+    // ref ではなく DOM 属性を使う。
+    if (contentRef.current) {
+      contentRef.current.dataset.composing = 'true';
+    }
   };
 
   const handleCompositionEnd = () => {
     isComposingRef.current = false;
+    // PCT-051: 変換確定後に composing フラグを除去する。
+    if (contentRef.current) {
+      delete contentRef.current.dataset.composing;
+    }
     // compositionend では onInput より先にこのハンドラが走る環境があるため、
     // 確定後の textContent を明示的にミラーへ反映しておく (取りこぼし防止)。
     pendingTextRef.current = contentRef.current?.textContent ?? "";

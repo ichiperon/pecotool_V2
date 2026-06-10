@@ -505,7 +505,8 @@ export function useFileOperations(
       showToast("保存用にファイルを読み込み中...");
       const fetched = await withStep('readFile', 90_000, () => ensurePrefetchOriginalBytes(sourceFilePath));
       if (!fetched) {
-        showToast("元 PDF の読み込みに失敗しました。", true);
+        // R04D-3: 原因の仮説と次アクションを案内する。
+        showToast("元のPDFファイルが移動または削除された可能性があります。ファイルを再度開き直してください。", true);
         return null;
       }
       cachedBytes = fetched;
@@ -613,6 +614,11 @@ export function useFileOperations(
     // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
     // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
     setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
+    // PCT-050: savePDF の実行中にユーザーが別ページを編集すると、LRU パージで
+    // 新たな saveTemporaryPageDataBatch が pendingIdbSaves へ追加される場合がある。
+    // clearTemporaryChanges の直前に再度待機し、それらの書き込みが完了してからクリアする。
+    await withStep('waitIdbSavesBeforeClear', 15_000, () => waitForPendingIdbSaves())
+      .catch((e) => { console.warn('[save] waitIdbSavesBeforeClear failed (ignored):', e); });
     // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
     await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
@@ -715,8 +721,11 @@ export function useFileOperations(
       // sharing violation で書き込み失敗する。この場合は別名で保存する以外に
       // ユーザーの取れる手段が無いため、フォールバックの導線をトーストに直接出す。
       if (isWriteAccessError(msg)) {
+        // R04D-2: OS エラー文字列 (msg) をトーストに生展開しない。
+        // デバッグ用の元メッセージは console.error で既にログ済み。
+        console.warn('[save] write access error detail:', msg);
         showToast(
-          `保存先のファイルを開けません (別プロセスがロック中の可能性): ${msg}`,
+          '他のアプリでこの PDF が開かれている可能性があります。閉じてから再度保存してください。',
           true,
           {
             label: '別名で保存',

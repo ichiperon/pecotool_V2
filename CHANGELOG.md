@@ -5,6 +5,51 @@
 
 ---
 
+## [2.0.15] - 2026-06-10
+
+### Fixed
+
+#### 保存の整合性（PCT-050, PCT-051）
+- 保存完了処理の `clearTemporaryChanges` が `savePDF` 実行中に発生した新規 LRU 退避の IDB 書込を待たずにエントリを消去する競合を修正（`waitIdbSavesBeforeClear` を `clearIdbDirty` 直前に追加）(PCT-050)
+- IME 変換中の Ctrl+S で `flushActiveOcrCardText` が未確定文字を含む `textContent` をストアにコミットしうる問題を修正（`compositionstart`/`compositionend` で `data-composing` 属性を設定し、flush 側でスキップ）(PCT-051)
+
+#### OCR 信頼度・回転の保存往復（PCT-052, PCT-053）
+- `pdf.worker.ts` の bboxMeta 書込で `confidence` フィールドが欠落し、Worker 経路で保存した場合に「要確認マーク」が復元されない問題を修正（`pdfSaver.ts` との実装齟齬を解消）(PCT-052)
+- `pdf.worker.ts` の `page.getRotation().angle` に optional chaining がなく、エッジケースで例外が発生し当該ページの OCR 描画がスキップされる可能性を修正（`page.getRotation?.().angle ?? 0` に統一）(PCT-053)
+
+#### サムネイル生成（PCT-054）
+- サムネイル Worker 起動の `requestIdleCallback` timeout を 1500ms → 3000ms に延長（重量 PDF の初回レンダリングと起動タイミングが重なり帯域競合しうる問題を緩和。idle 時の挙動は従来どおり即起動）(PCT-054)
+
+#### バックアップ・ウィンドウ閉じ（PCT-055）
+- 自動バックアップ完了がユーザーに見えない問題を修正：完了時に「自動保存しました（HH:MM）」トーストを表示 (PCT-055)
+- バックアップ書込中にウィンドウを閉じられるとデータが破損しうる問題を修正：`isBackingUpRef` を `useTauriCloseGuard` に連動して書込中の閉じ操作を抑止 (PCT-055)
+
+#### バッチ処理（PCT-056）
+- バッチ実行中にダイアログ外クリックで進捗ダイアログが閉じ、進捗が確認できなくなる問題を修正（`!isRunning` ガード追加）(PCT-056)
+
+#### UI 文言・ダイアログ（PCT-057, PCT-058）
+- バックアップ復元ダイアログのタイトル「未保存の内容があります」が通常の保存し忘れ警告と誤読される問題を修正（「前回の作業バックアップが見つかりました」へ変更）(PCT-057)
+- OCR 未実行ページの空状態「OCRテキストなし」に次アクションの導線がない問題を修正（「このページに OCR テキストがありません」＋「リボンの「OCR 実行」でテキストを読み取れます」の 2 行構成へ変更）(PCT-058)
+
+#### エラーメッセージ（R04D-2, R04D-3）
+- 書込失敗トーストに OS エラー文字列（"os error 32" 等）が業務ユーザー向けにそのまま表示される問題を修正（「他のアプリでこの PDF が開かれている可能性があります。閉じてから再度保存してください。」へ変更。元の文字列は `console.warn` で保全）(R04D-2)
+- 読込失敗トースト「元 PDF の読み込みに失敗しました。」に次アクション案内がない問題を修正（「元の PDF ファイルが移動または削除された可能性があります。ファイルを再度開き直してください。」へ変更）(R04D-3)
+
+### Changed
+
+#### 自動更新（updater）
+- 自動更新機能（`tauri-plugin-updater`）を `UPDATER_ENABLED = false` フラグで無効化して出荷（署名公開鍵 pubkey 未設定のため）。起動時の更新チェックと「アップデート確認」ボタンを無効化済み。pubkey 設定後の将来バージョンで有効化予定。なお 2.0.14 RC の「リリース前提条件: pubkey 必須」はこの方針変更により解消
+
+#### UI・視覚フィードバック（R04D-1）
+- 編集中（フォーカス中・未コミット）の OCR カードに amber 枠＋影を追加し、確定済みカードと視覚的に区別できるように変更（`.ocr-card:focus-within` スタイル。選択中の青枠が詳細度で優先される序列をコメントで明示）(R04D-1)
+
+### Build
+
+- `build.bat` のマニュアル同梱処理の不備を修正
+- `package-lock.json` と `package.json` の不整合を修復（`@tauri-apps/plugin-updater` が lock 未登録・バージョン不一致により CI の `npm ci` が失敗する問題）
+
+---
+
 ## [2.0.14] - 2026-06-04
 
 > **Release Candidate (RC)**
@@ -148,4 +193,5 @@
 
 [Keep a Changelog]: https://keepachangelog.com/ja/1.1.0/
 [Semantic Versioning]: https://semver.org/lang/ja/
+[2.0.15]: https://github.com/Ryo_Jonishi/pecotool_v2/compare/v2.0.14...v2.0.15
 [2.0.14]: https://github.com/Ryo_Jonishi/pecotool_v2/compare/v1.6.3...v2.0.14

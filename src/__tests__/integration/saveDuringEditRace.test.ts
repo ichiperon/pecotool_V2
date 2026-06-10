@@ -425,3 +425,46 @@ describe('C1: save-during-edit race (resetDirty が新編集を巻き込まな�
     expect(usePecoStore.getState().isDirty).toBe(false);
   });
 });
+
+// ── PCT-050: clearTemporaryChanges 前の waitForPendingIdbSaves 再呼び出し ──
+
+describe('PCT-050: _executeSave は clearTemporaryChanges 直前に waitForPendingIdbSaves を再呼び出しする', () => {
+  it('clearTemporaryChanges が呼ばれる前に waitForPendingIdbSaves が 2 回呼ばれる (スナップショット前 + clear 前)', async () => {
+    // pecoStore の waitForPendingIdbSaves をスパイして呼び出し順序を検証する。
+    const pecoStoreModule = await import('../../store/pecoStore');
+    const waitSpy = vi.spyOn(pecoStoreModule, 'waitForPendingIdbSaves').mockResolvedValue(undefined);
+
+    const doc: PecoDocument = {
+      filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 1, metadata: {},
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0', text: 'T' })], isDirty: true, thumbnail: null }],
+      ]),
+    };
+    usePecoStore.setState({
+      document: doc,
+      originalBytes: new Uint8Array([1, 2, 3]),
+      currentPageIndex: 0,
+      isDirty: true,
+    } as any);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const saved = await result.current.handleSave();
+    expect(saved).toBe(true);
+
+    // waitForPendingIdbSaves は _executeSave 内で 2 回呼ばれる:
+    //   1. waitIdbSaves ステップ (getAllTemporaryPageData の前)
+    //   2. waitIdbSavesBeforeClear ステップ (PCT-050: clearTemporaryChanges の直前)
+    const callCount = waitSpy.mock.calls.length;
+    expect(callCount).toBeGreaterThanOrEqual(2);
+
+    // clearTemporaryChanges は waitForPendingIdbSaves の後に呼ばれる
+    const waitOrder = waitSpy.mock.invocationCallOrder;
+    const clearOrder = (mocks.clearTemporaryChanges as ReturnType<typeof vi.fn>).mock.invocationCallOrder;
+    // clearTemporaryChanges が呼ばれた時点では少なくとも 2 回の wait が完了している
+    expect(waitOrder[waitOrder.length - 1]).toBeLessThan(clearOrder[0]);
+
+    waitSpy.mockRestore();
+  });
+});

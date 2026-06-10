@@ -19,11 +19,17 @@ export function useBackupManagement({ showToast, handleOpen, externalIsSavingRef
   const [pendingBackups, setPendingBackups] = useState<PendingBackup[]>([]);
   const [processingBackupPath, setProcessingBackupPath] = useState<string | null>(null);
 
-  const { clearBackup, loadBackupData } = useAutoBackup(
+  // PCT-055 (R04U-1): バックアップ完了時に控えめなトーストで通知する
+  const handleBackupComplete = (timeLabel: string) => {
+    showToast(`自動保存しました（${timeLabel}）`);
+  };
+
+  const { clearBackup, loadBackupData, isBackingUpRef } = useAutoBackup(
     (backups) => setPendingBackups(backups),
     undefined,
     undefined,
     externalIsSavingRef,
+    handleBackupComplete,
   );
 
   const handleRestoreBackup = async (backup: PendingBackup) => {
@@ -67,5 +73,7 @@ export function useBackupManagement({ showToast, handleOpen, externalIsSavingRef
     processingBackupPath,
     handleRestoreBackup,
     handleDiscardBackup,
+    /** PCT-055 (R04U-2): バックアップ中フラグ。useTauriCloseGuard に渡して close 抑止に使う */
+    isBackingUpRef,
   };
 }

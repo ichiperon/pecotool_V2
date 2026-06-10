@@ -196,7 +196,8 @@ describe('useFileOperations _executeSave finally リセット (wave 4)', () => {
     );
     expect(errorCalls.length).toBeGreaterThan(0);
     const lastError = errorCalls[errorCalls.length - 1] as unknown[];
-    expect(lastError[0]).toMatch(/別プロセスがロック中|保存先のファイル/);
+    // R04D-2: OS エラー文字列は除去し、ユーザー向けメッセージに変更済み
+    expect(lastError[0]).toMatch(/他のアプリ|開かれている/);
     expect(lastError[2]).toBeDefined();
     expect((lastError[2] as { label?: string }).label).toBe('別名で保存');
   });

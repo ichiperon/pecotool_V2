@@ -303,13 +303,14 @@ describe('OcrEditor', () => {
   })
 
   describe('C-ED-05: 空状態 - テキストブロックが0件', () => {
-    it('textBlocks=[] → "OCRテキストなし" が表示される', () => {
+    it('textBlocks=[] → OCRなし表示と導線ヒントが表示される (PCT-058)', () => {
       const doc = makeDoc([])
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
       render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
-      expect(screen.getByText('OCRテキストなし')).toBeTruthy()
+      expect(screen.getByText('このページにOCRテキストがありません')).toBeTruthy()
+      expect(screen.getByText('リボンの「OCR実行」でテキストを読み取れます')).toBeTruthy()
     })
   })
 
@@ -323,8 +324,8 @@ describe('OcrEditor', () => {
       expect(screen.getByText('テキスト抽出中...')).toBeTruthy()
       // プレースホルダ要素が存在する
       expect(container.querySelector('.ocr-loading-placeholder')).not.toBeNull()
-      // 「OCRテキストなし」は出ない（isTextExtracted=true でのみ出る）
-      expect(screen.queryByText('OCRテキストなし')).toBeNull()
+      // 「OCRなし」表示は出ない（isTextExtracted=true でのみ出る）
+      expect(screen.queryByText('このページにOCRテキストがありません')).toBeNull()
       // ブロックは描画されない
       expect(container.querySelectorAll('.ocr-card-content').length).toBe(0)
     })
@@ -339,13 +340,14 @@ describe('OcrEditor', () => {
       expect(container.querySelectorAll('.ocr-card-content').length).toBe(0)
     })
 
-    it('isTextExtracted=true で textBlocks=[] → "OCRテキストなし" が出る（従来挙動）', () => {
+    it('isTextExtracted=true で textBlocks=[] → OCRなし表示と導線ヒントが出る (PCT-058)', () => {
       const doc = makeDoc([], { isTextExtracted: true })
       usePecoStore.setState({ document: doc, currentPageIndex: 0, selectedIds: new Set() } as any)
       const searchInputRef = { current: null }
       render(<OcrEditor width={350} searchInputRef={searchInputRef as any} />)
 
-      expect(screen.getByText('OCRテキストなし')).toBeTruthy()
+      expect(screen.getByText('このページにOCRテキストがありません')).toBeTruthy()
+      expect(screen.getByText('リボンの「OCR実行」でテキストを読み取れます')).toBeTruthy()
       expect(screen.queryByText('テキスト抽出中...')).toBeNull()
     })
 

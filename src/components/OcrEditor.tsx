@@ -512,7 +512,11 @@ export function OcrEditor({
             <div className="loading-message">テキスト抽出中...</div>
           </div>
         ) : currentPage.textBlocks.length === 0 ? (
-          <div className="placeholder placeholder--no-ocr">OCRテキストなし</div>
+          // PCT-058: 初見ユーザーが次の操作に迷わないよう、OCR 実行への導線を表示する
+          <div className="placeholder placeholder--no-ocr">
+            <div>このページにOCRテキストがありません</div>
+            <div className="placeholder--no-ocr-hint">リボンの「OCR実行」でテキストを読み取れます</div>
+          </div>
         ) : (
           <DndContext
             sensors={sensors}

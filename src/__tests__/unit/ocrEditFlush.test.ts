@@ -299,3 +299,109 @@ describe('flushActiveOcrCardText — DOM 異常系', () => {
     }
   });
 });
+
+// ── PCT-051: IME 変換中の flush スキップ ────────────────────────
+
+describe('PCT-051: flushActiveOcrCardText — IME 変換中は flush しない', () => {
+  /**
+   * data-composing="true" が設定された要素でフォーカスされている場合、
+   * flush をスキップして false を返す（未確定文字列を store に commit しない）。
+   */
+  it('data-composing="true" の場合 updatePageData は呼ばれない', () => {
+    const blockId = 'block-ime-01';
+    const originalText = '確定済みテキスト';
+    // DOM の textContent には未確定候補文字が混入している想定
+    const textWithComposing = '確定済みテキストあ';
+
+    const block = makeBlock(blockId, originalText);
+    const page = makePage(0, [block]);
+    const doc = makeDoc(new Map([[0, page]]));
+
+    const div = document.createElement('div');
+    div.className = 'ocr-card-content';
+    div.dataset.pageIndex = '0';
+    div.dataset.blockId = blockId;
+    div.dataset.composing = 'true'; // compositionstart で設定されるフラグ
+    div.textContent = textWithComposing;
+    div.setAttribute('tabindex', '0');
+    document.body.appendChild(div);
+    div.focus();
+
+    try {
+      const updatePageData = vi.fn();
+      const result = flushActiveOcrCardText(updatePageData, doc);
+
+      // composing 中は flush をスキップ
+      expect(result).toBe(false);
+      expect(updatePageData).not.toHaveBeenCalled();
+    } finally {
+      document.body.removeChild(div);
+    }
+  });
+
+  it('data-composing 属性がない場合は通常通り flush する', () => {
+    const blockId = 'block-ime-02';
+    const originalText = '元のテキスト';
+    const newText = '確定後テキスト';
+
+    const block = makeBlock(blockId, originalText);
+    const page = makePage(0, [block]);
+    const doc = makeDoc(new Map([[0, page]]));
+
+    const div = document.createElement('div');
+    div.className = 'ocr-card-content';
+    div.dataset.pageIndex = '0';
+    div.dataset.blockId = blockId;
+    // data-composing は設定しない (compositionend で削除済みの状態)
+    div.textContent = newText;
+    div.setAttribute('tabindex', '0');
+    document.body.appendChild(div);
+    div.focus();
+
+    try {
+      const updatePageData = vi.fn();
+      const result = flushActiveOcrCardText(updatePageData, doc);
+
+      // composing 中でなければ通常通り flush される
+      expect(result).toBe(true);
+      expect(updatePageData).toHaveBeenCalledOnce();
+      const [, calledData] = updatePageData.mock.calls[0];
+      const updatedBlock = (calledData.textBlocks as ReturnType<typeof makeBlock>[]).find(
+        (b) => b.id === blockId
+      );
+      expect(updatedBlock?.text).toBe(newText);
+    } finally {
+      document.body.removeChild(div);
+    }
+  });
+
+  it('data-composing="false" (非 "true") の場合は通常通り flush する', () => {
+    const blockId = 'block-ime-03';
+    const originalText = '旧テキスト';
+    const newText = '新テキスト';
+
+    const block = makeBlock(blockId, originalText);
+    const page = makePage(0, [block]);
+    const doc = makeDoc(new Map([[0, page]]));
+
+    const div = document.createElement('div');
+    div.className = 'ocr-card-content';
+    div.dataset.pageIndex = '0';
+    div.dataset.blockId = blockId;
+    div.dataset.composing = 'false'; // "true" でなければスキップしない
+    div.textContent = newText;
+    div.setAttribute('tabindex', '0');
+    document.body.appendChild(div);
+    div.focus();
+
+    try {
+      const updatePageData = vi.fn();
+      const result = flushActiveOcrCardText(updatePageData, doc);
+
+      expect(result).toBe(true);
+      expect(updatePageData).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeChild(div);
+    }
+  });
+});

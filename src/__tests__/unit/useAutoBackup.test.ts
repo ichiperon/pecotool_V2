@@ -730,3 +730,53 @@ describe('useAutoBackup isSavingRef 排他ロック (Wave-3 issue #137)', () => 
     nowSpy.mockRestore();
   });
 });
+
+// ── PCT-055 退行修正: onBackupComplete の ref 安定性 ────────────────────────────
+
+/**
+ * PCT-055 の退行バグ修正の検証:
+ * onBackupComplete に毎レンダーで新しい関数参照を渡しても、setInterval が
+ * clear → 再作成されない (= タイマーが安定している) ことを確認する。
+ *
+ * 検証方法: setInterval/clearInterval をスパイし、rerender 後も
+ * clearInterval の追加呼び出しが発生しないことを確認する。
+ */
+describe('PCT-055 退行修正: onBackupComplete が毎回新参照でも setInterval が安定している', () => {
+  beforeEach(() => {
+    resetStore();
+    vi.mocked(getAllTemporaryPageData).mockReset().mockResolvedValue(new Map());
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_pending_backups') return [];
+      return undefined;
+    });
+  });
+
+  it('S-PCT055-01: rerender で onBackupComplete の参照が変わっても clearInterval が追加で呼ばれない', () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+
+    // 初回レンダー: onBackupComplete に関数を渡す
+    const { rerender } = renderHook(
+      ({ cb }: { cb: (t: string) => void }) =>
+        useAutoBackup(() => {}, 5 * 60 * 1000, 60_000, undefined, cb),
+      { initialProps: { cb: (_t: string) => {} } },
+    );
+
+    // この時点での setInterval / clearInterval 呼び出し回数を記録する
+    const setIntervalAfterMount = setIntervalSpy.mock.calls.length;
+    const clearIntervalAfterMount = clearIntervalSpy.mock.calls.length;
+
+    // 毎回異なる参照の関数を渡してリレンダーを複数回行う
+    rerender({ cb: (_t: string) => {} });
+    rerender({ cb: (_t: string) => {} });
+    rerender({ cb: (_t: string) => {} });
+
+    // setInterval / clearInterval がリレンダー前後で増えていないこと
+    // (タイマーが clear → 再作成されていないこと)
+    expect(setIntervalSpy.mock.calls.length).toBe(setIntervalAfterMount);
+    expect(clearIntervalSpy.mock.calls.length).toBe(clearIntervalAfterMount);
+
+    setIntervalSpy.mockRestore();
+    clearIntervalSpy.mockRestore();
+  });
+});

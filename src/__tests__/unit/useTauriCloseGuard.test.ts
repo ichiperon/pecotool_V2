@@ -192,4 +192,46 @@ describe('useTauriCloseGuard', () => {
       expect(m.destroyWindow).not.toHaveBeenCalled()
     })
   })
+
+  describe('PCT-055 (R04U-2): バックアップ中の close ガード', () => {
+    it('isBackingUpRef=true 中は close 要求を suppress し main destroy は呼ばれない', async () => {
+      pecoStoreModule.usePecoStore.setState({ isDirty: false, document: null })
+
+      const isBackingUpRef = { current: true }
+      renderHook(() => useTauriCloseGuard({ isBackingUpRef }))
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      const closeHandler = m.onCloseRequested.mock.calls[0]?.[0]
+      expect(typeof closeHandler).toBe('function')
+
+      const fakeEvent = { preventDefault: vi.fn() }
+      await (closeHandler as any)(fakeEvent)
+
+      // バックアップ中は suppress → ask も destroy も呼ばれない
+      expect(m.ask).not.toHaveBeenCalled()
+      expect(m.destroyWindow).not.toHaveBeenCalled()
+    })
+
+    it('isBackingUpRef=false のときは通常フローで close が進む', async () => {
+      pecoStoreModule.usePecoStore.setState({ isDirty: false, document: null })
+
+      const isBackingUpRef = { current: false }
+      renderHook(() => useTauriCloseGuard({ isBackingUpRef }))
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      const closeHandler = m.onCloseRequested.mock.calls[0]?.[0]
+      expect(typeof closeHandler).toBe('function')
+
+      const fakeEvent = { preventDefault: vi.fn() }
+      await (closeHandler as any)(fakeEvent)
+
+      // バックアップ中でなく isDirty=false → confirm なしで destroy が呼ばれる
+      expect(m.ask).not.toHaveBeenCalled()
+      expect(m.destroyWindow).toHaveBeenCalled()
+    })
+  })
 })
