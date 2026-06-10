@@ -418,15 +418,16 @@ describe('S-03-04 (#99): 横書き bbox の保存→再読込でラウンドト�
     await savePDF(new Uint8Array(10), doc)
 
     // translate の最後の呼び出し引数 (cm push 順序: rotation cm → translate → scale)
-    // モック heightAtSize: full=1.448, ascent=1.158 (=0.8倍) → descentRatio=0.2
-    // baselineY = vh - bbox.y - textHeight * sy * (1 - 0.2)
-    //          = 842 - 200 - 1.448 * (30 / 1.448) * 0.8
-    //          = 842 - 200 - 24 = 618
+    // モック heightAtSize: full=1.448, ascent=1.158 (=0.8倍) → 生 descentRatio=0.2
+    // PCT-092: descent 比はキャップ (0.12) 付きのため 0.2 → 0.12 に丸められる。
+    // baselineY = vh - bbox.y - textHeight * sy * (1 - 0.12)
+    //          = 842 - 200 - 1.448 * (30 / 1.448) * 0.88
+    //          = 842 - 200 - 26.4 = 615.6
     expect(m.translateFn).toHaveBeenCalled()
     // 最後の translate (cm 内 translate) を取る
     const lastTranslate = m.translateFn.mock.calls[m.translateFn.mock.calls.length - 1]
     const [, y] = lastTranslate
-    expect(y).toBeCloseTo(842 - 200 - 1.448 * (30 / 1.448) * 0.8, 5)
+    expect(y).toBeCloseTo(842 - 200 - 1.448 * (30 / 1.448) * (1 - 0.12), 5)
   })
 })
 

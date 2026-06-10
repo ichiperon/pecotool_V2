@@ -692,20 +692,31 @@ export function measureRuns(runs: FontRun[], size: number): { width: number; hei
  * 生メトリクス (ascent/descent) から直接算出して回避する。比なので unitsPerEm
  * には依存しない。
  */
+// PCT-092: descent 比の上限。
+// 本ツールは「フォント論理ボックス (ascent〜descent) を OCR bbox にフィット」させて
+// baseline を bbox 下端から descent 比の高さに置くが、Meiryo の hhea メトリクスは
+// 行間設計込みで descent 比 ≈ 0.293 と深く、スキャン原稿の和文活字の実ベースライン
+// (行下端から約 10〜12%。IPAmjMincho の実測も 0.1201) より大きい。比が大きいほど
+// テキスト論理位置が画像の文字より上 (縦書きでは左) に座り、Acrobat の選択
+// ハイライトが「左上に寄って」見える (v2.0.15 実機報告・実測で確認)。
+// 明朝系実測に合わせ 0.12 で打ち切る。0.12 以下のフォントは実値のまま。
+const DESCENT_RATIO_CAP = 0.12;
+
 export function getFontDescentRatio(font: PDFFont, fontSize: number): number {
   const fk = (font as unknown as {
     embedder?: { font?: { ascent?: number; descent?: number } };
   }).embedder?.font;
   if (fk && typeof fk.ascent === 'number' && typeof fk.descent === 'number') {
     const span = fk.ascent - fk.descent; // ascent + |descent| (descent は負値)
-    if (span > 0) return Math.abs(fk.descent) / span;
+    if (span > 0) return Math.min(Math.abs(fk.descent) / span, DESCENT_RATIO_CAP);
   }
   // フォールバック: embedder 非公開時 (テストのモックフォント等)。
   const full = font.heightAtSize(fontSize);
   if (full > 0) {
-    return (full - font.heightAtSize(fontSize, { descender: false })) / full;
+    // PCT-092: フォールバック経路にも同じキャップを適用する。
+    return Math.min((full - font.heightAtSize(fontSize, { descender: false })) / full, DESCENT_RATIO_CAP);
   }
-  return 0.2;
+  return DESCENT_RATIO_CAP;
 }
 
 // ---------------------------------------------------------------------------

@@ -60,3 +60,25 @@ describe('pdfSaver issue #99: getFontDescentRatio (unitsPerEm-aware descent 比)
     expect(ratio).toBeLessThan(0.18);
   });
 });
+
+describe('PCT-092: descent 比の上限キャップ (0.12)', () => {
+  // 背景: Meiryo の hhea メトリクスは行間設計込みで descent 比 ≈ 0.293 と深く、
+  // baseline が bbox 下端から 29.3% に置かれてスキャン和文活字の実位置
+  // (行下端から約 10〜12%) より上にずれ、Acrobat の選択ハイライトが
+  // 「左上に寄って」見えた (v2.0.15 実機報告)。0.12 で打ち切る。
+  const mockFont = (ascent: number, descent: number) =>
+    ({ embedder: { font: { ascent, descent } } }) as unknown as Parameters<typeof getFontDescentRatio>[0];
+
+  it('Meiryo 相当 (ascent=1060, descent=-440, 生比≈0.293) は 0.12 に丸められる', () => {
+    expect(getFontDescentRatio(mockFont(1060, -440), 12)).toBe(0.12);
+  });
+
+  it('descent の浅いフォント (生比≈0.0526) は実値のまま返る', () => {
+    expect(getFontDescentRatio(mockFont(1800, -100), 12)).toBeCloseTo(100 / 1900, 4);
+  });
+
+  it('メトリクス欠如時のフォールバック既定値もキャップ値に揃う', () => {
+    const broken = { embedder: {}, heightAtSize: () => 0 } as unknown as Parameters<typeof getFontDescentRatio>[0];
+    expect(getFontDescentRatio(broken, 12)).toBe(0.12);
+  });
+});
