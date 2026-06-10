@@ -1115,3 +1115,69 @@ describe('PCT-046 regression: runOcrCurrentPage が pageWidth/pageHeight に有�
     expect(capturedRunOcrArgs!.pageHeight).toBe(600);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// PCT-076 (HUNT-C5): runOcrAllPages の多重起動ガード。
+// checkAndPromptOcrZero の ask() 待機中にバッチジョブ等の OCR が開始した後、
+// ユーザーが古いダイアログで「はい」を押すと runOcrAllPages が二本目として
+// 起動し、同一ページ群へ並行 updatePageData して OCR 結果が混在していた。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('PCT-076: OCR 実行中の runOcrAllPages 多重起動ガード', () => {
+  it('別経路の OCR 実行中は確認ダイアログを出さずに即 return する', async () => {
+    usePecoStore.getState().setDocument(makeDoc(2));
+
+    // openFreshPdfDoc を deferred 化してサイレント OCR (バッチ相当) を
+    // 「実行中」のまま停止させる
+    let releaseOpen!: (pdf: unknown) => void;
+    h.openFreshPdfDocMock.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseOpen = resolve; }),
+    );
+    h.askMock.mockResolvedValue(true);
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() =>
+      useOcrEngine((msg: string, err?: boolean) => toasts.push({ msg, err })),
+    );
+
+    // バッチジョブ相当のサイレント OCR を開始 (isOcrRunningRef が立つ)
+    let silentDone!: Promise<boolean>;
+    act(() => {
+      silentDone = result.current.runOcrAllPagesSilent();
+    });
+
+    // 実行中に runOcrAllPages (checkAndPromptOcrZero の「はい」相当) を呼ぶ
+    await act(async () => {
+      await result.current.runOcrAllPages();
+    });
+
+    // 修正前: ask('全ページOCRを実行します...') が表示されて二本目が起動する。
+    // 修正後: 入口ガードで弾かれ、確認ダイアログは一度も出ない。
+    expect(h.askMock).not.toHaveBeenCalled();
+    expect(toasts.some((t) => t.err === true && /OCR実行中/.test(t.msg))).toBe(true);
+
+    // 後片付け: サイレント OCR をキャンセルして完走させる
+    await act(async () => {
+      result.current.cancelOcr();
+      releaseOpen(makeMockPdf(2));
+      await silentDone;
+    });
+  });
+
+  it('OCR 非実行時の runOcrAllPages は従来通り確認ダイアログから始まる (後方互換)', async () => {
+    usePecoStore.getState().setDocument(makeDoc(1));
+
+    // 最初の確認ダイアログでキャンセル → OCR は走らず終了する
+    h.askMock.mockResolvedValueOnce(false);
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => {
+      await result.current.runOcrAllPages();
+    });
+
+    // 入口ガードに弾かれず ask まで到達している
+    expect(h.askMock).toHaveBeenCalledTimes(1);
+    // キャンセルしたので OCR (run_ocr invoke) は呼ばれない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+  });
+});

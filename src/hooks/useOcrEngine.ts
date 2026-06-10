@@ -453,6 +453,14 @@ export function useOcrEngine(
   };
 
   const runOcrAllPages = async () => {
+    // PCT-076: 多重起動ガード。checkAndPromptOcrZero の ask() 待機中などに
+    // 別経路 (バッチジョブ / フォルダ OCR) の OCR が開始していた場合、
+    // ここから二本目を起動すると同一ページ群へ並行 updatePageData して
+    // OCR 結果が混在するため入口で拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     // 最新状態を取得（checkAndPromptOcrZero から呼ばれた場合もstaleにならないよう）
     const doc = usePecoStore.getState().document;
     if (!doc) return;

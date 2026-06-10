@@ -210,18 +210,9 @@ export async function saveTemporaryPageDataBatch(
     const { thumbnail: _thumbnail, ...cleanData } = data;
     store.put(cleanData, key);
   }
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const done = (err?: unknown) => {
-      if (settled) return;
-      settled = true;
-      if (err !== undefined) reject(err); else resolve();
-    };
-    tx.oncomplete = () => done();
-    tx.onerror = () => done(tx.error);
-    tx.onabort = () => done(tx.error);
-    setTimeout(() => done(new Error('[saveTemporaryPageDataBatch] tx timeout')), 10_000);
-  });
+  // PCT-071: 自前のタイムアウト Promise は完了後も setTimeout が残留していた。
+  // clearTimeout 済みの waitForTransaction に置き換える (挙動は等価)。
+  await waitForTransaction(tx, '[saveTemporaryPageDataBatch] tx timeout');
 }
 
 export async function clearTemporaryChanges(filePath: string) {
@@ -255,6 +246,16 @@ export async function clearTemporaryChanges(filePath: string) {
       tx.onabort = () => resolve();
     });
   } catch { /* ignore */ }
+}
+
+/**
+ * PCT-070: 指定ページの一時退避エントリのみ削除する。
+ * 保存完了後のクリア用。保存スナップショットに載らなかったページの未保存編集を
+ * 巻き込まないよう、ファイル単位の clearTemporaryChanges ではなく
+ * 「保存で実際に回収したページ」に限定して削除する。
+ */
+export async function clearTemporaryChangesForPages(filePath: string, pageIndexes: number[]): Promise<void> {
+  await deleteTemporaryPageKeys(filePath, pageIndexes);
 }
 
 export async function clearCachedPages(filePath: string) {

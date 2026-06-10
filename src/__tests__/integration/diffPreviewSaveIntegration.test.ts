@@ -12,7 +12,9 @@
  *   - diff preview 表示中に onRequestDiffPreview から false → 保存 cancel / isDirty 変化なし
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 
 // ── 依存 mock ────────────────────────────────────────────────────────────
 
@@ -46,6 +48,7 @@ vi.mock('../../utils/pdfLoader', () => ({
   }),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  clearTemporaryChangesForPages: vi.fn().mockResolvedValue(undefined),
   clearCachedPages: vi.fn().mockResolvedValue(undefined),
   destroySharedPdfProxy: vi.fn(),
   getSharedPdfProxy: vi.fn().mockResolvedValue({}),
@@ -64,6 +67,7 @@ vi.mock('../../hooks/useFontLoader', () => ({
 }));
 
 import { useFileOperations, __originalBytesCacheForTest } from '../../hooks/useFileOperations';
+import { requestDiffPreview, type DiffPreviewResolverRef } from '../../utils/diffPreviewRequest';
 import { savePDF } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
 import { invoke } from '@tauri-apps/api/core';
@@ -457,5 +461,162 @@ describe('DiffPreview + useFileOperations integration (wave 7)', () => {
       expect(s.changedPages).toContain(0);
       expect(s.changedPages).toContain(1);
     }
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// PCT-075 (HUNT-C4): 保存 diff プレビュー / 別名保存ダイアログの await 後に
+// isSavingRef を再チェックする + resolver 上書きによるゾンビ Promise の解消。
+// プレビューモーダルは Esc/Tab しか捕捉せず、表示中も Ctrl+S / Ctrl+Shift+S が
+// window リスナーへ届くため、await 中に別の保存が並走開始しうる。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('PCT-075: プレビュー/ダイアログ await 後の isSavingRef 再チェック', () => {
+  it('プレビュー await 中に別の保存が開始されたら confirmed=true でも _executeSave に進まない', async () => {
+    const filePath = '/pct075/preview-race.pdf';
+    setupDirtyDoc(filePath);
+    pushTextEditAction(filePath, 'blk-1', 'ORIGINAL', 'EDITED');
+
+    let resolvePreview!: (confirmed: boolean) => void;
+    const onRequestDiffPreview = vi.fn().mockImplementation(
+      () => new Promise<boolean>((resolve) => { resolvePreview = resolve; }),
+    );
+    const showToast = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(
+        showToast,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        onRequestDiffPreview,
+      ),
+    );
+
+    const savePromise = result.current.handleSave();
+    await waitFor(() => expect(onRequestDiffPreview).toHaveBeenCalledTimes(1));
+
+    // プレビュー表示中に別経路 (Ctrl+Shift+S の別名保存等) で保存が開始された状況を再現
+    result.current.isSavingRef.current = true;
+    resolvePreview(true);
+
+    // 修正前: confirmed=true で isSavingRef を握り直して _executeSave 二本目が走る。
+    // 修正後: 再チェックで中断して false。
+    await expect(savePromise).resolves.toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/別の保存処理が進行中/),
+    );
+
+    result.current.isSavingRef.current = false;
+  });
+
+  it('別名保存ダイアログ await 中に別の保存が開始されたら executeSaveAs は中断する', async () => {
+    const filePath = '/pct075/saveas-race.pdf';
+    setupDirtyDoc(filePath);
+
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    let resolveDialog!: (path: string) => void;
+    (save as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveDialog = resolve; }),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const saveAsPromise = result.current.executeSaveAs();
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+
+    // ダイアログ操作中に別の保存処理が開始された状況を再現
+    result.current.isSavingRef.current = true;
+    resolveDialog('/pct075/other-name.pdf');
+
+    await saveAsPromise;
+
+    // 修正前: isSavingRef を握り直して二本目の _executeSave が走る。修正後: 中断。
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/別の保存処理が進行中/),
+    );
+
+    result.current.isSavingRef.current = false;
+  });
+});
+
+describe('PCT-075: requestDiffPreview の resolver 二重設定ガード (ゾンビ Promise 解消)', () => {
+  it('resolver 二重設定時は旧 Promise が false で解決される', async () => {
+    const resolverRef: DiffPreviewResolverRef = { current: null };
+    const shown: SaveDiffSummary[] = [];
+    const summaryA = { entries: [], changedPages: [], timestamp: 1 } as unknown as SaveDiffSummary;
+    const summaryB = { entries: [], changedPages: [], timestamp: 2 } as unknown as SaveDiffSummary;
+
+    const first = requestDiffPreview(resolverRef, (s) => shown.push(s), summaryA);
+    const second = requestDiffPreview(resolverRef, (s) => shown.push(s), summaryB);
+
+    // 修正前: 1 本目の resolver が上書きで失われ、first は永久 pending (ゾンビ)。
+    // 修正後: 差し替え時に false で解決される。
+    await expect(first).resolves.toBe(false);
+
+    // 2 本目はユーザー操作 (確定) で通常通り解決する
+    resolverRef.current?.(true);
+    await expect(second).resolves.toBe(true);
+    expect(shown).toEqual([summaryA, summaryB]);
+  });
+
+  it('プレビュー表示中の再保存要求では 1 本目がキャンセル扱いになり 2 本目だけ保存される', async () => {
+    const filePath = '/pct075/double-save.pdf';
+    setupDirtyDoc(filePath);
+    pushTextEditAction(filePath, 'blk-1', 'ORIGINAL', 'EDITED');
+
+    // App.tsx と同じ配線: onRequestDiffPreview → requestDiffPreview(resolverRef, ...)
+    const resolverRef: DiffPreviewResolverRef = { current: null };
+    const onRequestDiffPreview = (summary: SaveDiffSummary) =>
+      requestDiffPreview(resolverRef, () => {}, summary);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(
+        showToast,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        onRequestDiffPreview,
+      ),
+    );
+
+    // 1 本目の保存要求 → プレビュー待ちで停止
+    const first = result.current.handleSave();
+    await waitFor(() => expect(resolverRef.current).not.toBeNull());
+    const firstResolver = resolverRef.current;
+
+    // プレビュー表示中に 2 本目の保存要求 (モーダル表示中の再 Ctrl+S)
+    const second = result.current.handleSave();
+
+    // 1 本目は resolver 差し替え時に false 解決され、保存せず静かに終了する
+    await expect(first).resolves.toBe(false);
+
+    // 2 本目のプレビューをユーザーが確定 → 2 本目だけが保存される
+    await waitFor(() => {
+      expect(resolverRef.current).not.toBeNull();
+      expect(resolverRef.current).not.toBe(firstResolver);
+    });
+    resolverRef.current!(true);
+    await expect(second).resolves.toBe(true);
+    expect(savePDF).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PCT-075: App.tsx の resolver ガード配線 (静的検証)', () => {
+  it('App.tsx は onRequestDiffPreview を requestDiffPreview (resolver ガード付き) 経由で配線している', () => {
+    const appSource = readFileSync(resolvePath(process.cwd(), 'src/App.tsx'), 'utf8');
+    // 旧実装 (resolver 無条件上書き) へ戻すとこの配線が消えて fail する
+    expect(appSource).toContain(
+      'requestDiffPreview(diffPreviewResolveRef, setDiffPreviewSummary, summary)',
+    );
   });
 });

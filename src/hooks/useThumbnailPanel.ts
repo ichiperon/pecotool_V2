@@ -460,7 +460,18 @@ export function useThumbnailPanel() {
     // loadEpoch を増加させてアイテムの再リクエストを促す
     setLoadEpoch(prev => prev + 1);
 
-    if (!document?.filePath || workersRef.current.length === 0) return;
+    if (!document?.filePath) {
+      // PCT-073: ファイルクローズ時は worker が保持する PDF リソース
+      // （pdfDoc / 進行中の loadingTask）を明示解放する。旧実装は UI 状態の
+      // クリアのみで worker へ何も送らず、次の LOAD_PDF まで閉じた PDF の
+      // 解析構造が worker メモリに残留していた。
+      // CLOSE_PDF 後に届く旧応答は、上で実施済みの epoch++ / pending クリア /
+      // loadRequestIds クリアにより既存機構で無視される。
+      const closeReq: ThumbnailWorkerRequest = { type: 'CLOSE_PDF' };
+      workersRef.current.forEach(w => w.postMessage(closeReq));
+      return;
+    }
+    if (workersRef.current.length === 0) return;
 
     const capturedFilePath = document.filePath;
     const capturedDocumentIdentity = documentIdentity;

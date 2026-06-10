@@ -454,6 +454,13 @@ export function ThumbnailWindow() {
           p.clear();
         });
         pendingRequestIdByPageRef.current.clear();
+        // PCT-073: worker が保持する PDF リソース（pdfDoc / 進行中の loadingTask）を
+        // 明示解放する。旧実装は UI 状態のクリアのみで、次の LOAD_PDF まで閉じた
+        // PDF の解析構造が worker メモリ（最大3体分）に残留していた。
+        // CLOSE_PDF 後に届く旧応答は、上で実施済みの epoch++ / pending クリア /
+        // loadRequestIds クリアにより既存機構で無視される。
+        const closeReq: ThumbnailWorkerRequest = { type: 'CLOSE_PDF' };
+        workersRef.current.forEach(w => w.postMessage(closeReq));
         thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
         thumbnailsRef.current = new Map();
         pageGenerationRef.current = new Map();

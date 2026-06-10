@@ -38,7 +38,7 @@ import {
   replacePageTextContentStreams,
   pageHasTextOperatorDamage,
   sanitizeBBoxMetaTexts,
-  stripEmptyQBlocksOnPage,
+  sweepNonDirtyPage,
   getRotationCm,
   normalizeRotation,
   getViewportSize,
@@ -404,36 +404,22 @@ async function handleSavePdf(
     writePecoToolBBoxMetaToPdfDoc(pdfDoc, bboxMeta);
   }
 
-  // issue #96 要件2: 未編集ページにも空 q-Q ラッパー除去のみ適用 (詳細は pdfSaver.ts 側参照)。
-  // issue #1 (Acrobat 7 TJ 互換 仮修正): BT 外テキスト演算子が漏れているページを strip する。
-  // 詳細は pdfSaver.ts 側コメント参照 (同一ロジック)。
+  // 未編集ページのスイープ: issue #96 要件2 (空 q-Q ラッパー除去) + issue #1
+  // (Acrobat 7 TJ 互換 仮修正: BT 外テキスト演算子の strip)。経緯の詳細と
+  // PCT-059 の decode 共有最適化は sweepNonDirtyPage の JSDoc を参照。
   const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
   for (let pi = 0; pi < pdfPageCount; pi++) {
     if (dirtyPageIndexSet.has(pi)) continue;
     const page = pdfDoc.getPage(pi);
-    // issue #1: BT 外テキスト演算子検出 → strip のみ (再描画なし)
-    if (pageHasTextOperatorDamage(
-      page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
-      pdfDoc.context,
-    )) {
-      replacePageTextContentStreams(
-        page.node as unknown as {
-          get?: (key: PDFName) => PDFObject | undefined;
-          Contents?: () => PDFObject | undefined;
-          set: (key: PDFName, value: PDFObject) => void;
-        },
-        pdfDoc.context,
-        contentRefCounts,
-        '[pdf.worker#1]',
-      );
-    }
-    stripEmptyQBlocksOnPage(
+    sweepNonDirtyPage(
       page.node as unknown as {
         get?: (key: PDFName) => PDFObject | undefined;
         Contents?: () => PDFObject | undefined;
         set: (key: PDFName, value: PDFObject) => void;
       },
       pdfDoc.context,
+      contentRefCounts,
+      '[pdf.worker#1]',
     );
   }
 
