@@ -174,6 +174,56 @@ describe('useKeyboardShortcuts: fit 表示ショートカット', () => {
   });
 });
 
+describe('useKeyboardShortcuts: Ctrl+0 isEditing ガード (PCT-095)', () => {
+  it('contentEditable フォーカス中の Ctrl+0 は fitToScreen を呼ばない', () => {
+    const actions = makeActions();
+    const content = document.createElement('div');
+    content.setAttribute('contenteditable', 'true');
+    document.body.appendChild(content);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    content.focus();
+
+    // contentEditable フォーカス中は isEditing=true → Ctrl+0 がスルーされる
+    press(content, '0');
+    expect(actions.fitToScreen).not.toHaveBeenCalled();
+  });
+
+  it('OCR カード (contenteditable=true) フォーカス中の Ctrl+0 は fitToScreen を呼ばない', () => {
+    const actions = makeActions();
+    const card = document.createElement('div');
+    card.className = 'ocr-card-content';
+    card.setAttribute('contenteditable', 'true');
+    document.body.appendChild(card);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    card.focus();
+
+    press(card, '0');
+    expect(actions.fitToScreen).not.toHaveBeenCalled();
+  });
+
+  it('INPUT フォーカス中の Ctrl+0 は fitToScreen を呼ばない', () => {
+    const actions = makeActions();
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(input, '0');
+    expect(actions.fitToScreen).not.toHaveBeenCalled();
+  });
+
+  it('編集中でない場合の Ctrl+0 は fitToScreen(false) を呼ぶ（既存動作の維持確認）', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, '0');
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.fitToScreen).toHaveBeenCalledWith(false);
+    expect(actions.fitToScreen).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('useKeyboardShortcuts: Undo/Redo の編集中ガード', () => {
   it('contentEditable 内で Ctrl+Z 押下時にアプリ undo が呼ばれない', () => {
     const actions = makeActions();

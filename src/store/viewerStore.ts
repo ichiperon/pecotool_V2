@@ -55,8 +55,10 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   isRangeOcrMode: false,
   dragPreviewBboxes: null,
 
-  // issue #138: ツールバーボタン連打で zoom が暴走しないよう 25%-500% にクランプ
-  setZoom: (zoom) => set({ zoom: Math.min(500, Math.max(25, zoom)) }),
+  // issue #138: ツールバーボタン連打で zoom が暴走しないよう 10%-500% にクランプ
+  // PCT-095: フィット計算が 25% 未満になる狭いウィンドウでも正しくフィット表示できるよう下限を 10 に変更。
+  // 手動ズームはホイール側 (useKeyboardShortcuts) で 25% ガードを維持する。
+  setZoom: (zoom) => set({ zoom: Math.min(500, Math.max(10, zoom)) }),
 
   toggleShowOcr: () => set((state) => ({ showOcr: !state.showOcr })),
 
