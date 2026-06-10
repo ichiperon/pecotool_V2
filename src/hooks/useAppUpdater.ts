@@ -49,11 +49,14 @@ const INITIAL_STATE: AppUpdateState = {
   error: null,
 };
 
+/** PCT-093: checkForUpdate の結果種別。手動チェック時のフィードバック表示に使う。 */
+export type UpdateCheckResult = 'available' | 'latest' | 'error';
+
 export function useAppUpdater(
   checkAdapter: () => Promise<UpdaterUpdate | null> = checkForUpdateAdapter
 ): {
   state: AppUpdateState;
-  checkForUpdate: () => Promise<void>;
+  checkForUpdate: () => Promise<UpdateCheckResult>;
   downloadAndInstall: () => Promise<void>;
 } {
   const [state, setState] = useState<AppUpdateState>(INITIAL_STATE);
@@ -64,7 +67,7 @@ export function useAppUpdater(
   const adapterRef = useRef(checkAdapter);
   adapterRef.current = checkAdapter;
 
-  const checkForUpdate = useCallback(async () => {
+  const checkForUpdate = useCallback(async (): Promise<UpdateCheckResult> => {
     setState(s => ({ ...s, isChecking: true, error: null }));
     try {
       const update = await adapterRef.current();
@@ -75,13 +78,19 @@ export function useAppUpdater(
           isChecking: false,
           available: { version: update.version, notes: update.body ?? undefined },
         }));
+        return 'available';
       } else {
         updateRef.current = null;
         setState(s => ({ ...s, isChecking: false, available: null }));
+        return 'latest';
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // PCT-093: silent 握りつぶしを廃止。エラーは console にも残す
+      // (updater capability 欠如が無反応として隠蔽されていた実例があるため)。
+      console.error('[updater] check failed:', message);
       setState(s => ({ ...s, isChecking: false, error: message }));
+      return 'error';
     }
   }, []);
 
