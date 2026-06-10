@@ -305,6 +305,9 @@ test.describe('PCT-095 Regression: Ctrl+0 フィット表示', () => {
     // 実測値: viewport 800x600 では pdf-viewer-panel が w=172 h=458 に縮む。
     // ratioW=(172-64)/600=0.18=18% → PCT-095 修正後は 18% が viewerStore 下限 10 でクランプされ 18% になる。
     // 旧仕様の Math.max(25,18)=25% クランプが解消され、実際のコンテナ幅に合ったフィット倍率になる。
+    // レビュー指摘 (いろは): 旧仕様の 25% も 10-500 の範囲内に収まり素通しするため、
+    // 「25% クランプが解消された」ことを直接ピン留めする (実測 18% なので余裕あり)。
+    expect(zoomAfter).toBeLessThan(25);
 
     // viewport を元に戻す
     await page.setViewportSize({ width: 1200, height: 800 });
