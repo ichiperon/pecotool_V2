@@ -5,6 +5,7 @@ import { ask, open } from '@tauri-apps/plugin-dialog';
 import { usePecoStore, selectHasDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { useInfraStore } from '../store/infraStore';
 import { getCachedPageProxy, getSharedPdfProxy, openFreshPdfDoc, getTemporaryPageData } from '../utils/pdfLoader';
+import { loadPecoToolBBoxMeta } from '../utils/pdfMetadataLoader';
 import { TextBlock, OcrResult, OcrResultBlock, PecoDocument } from '../types';
 import { useOcrSettingsStore, OcrSortSettings } from '../store/ocrSettingsStore';
 import { sortOcrBlocks } from '../utils/ocrSort';
@@ -697,6 +698,29 @@ export function useOcrEngine(
     showToast(`テキスト層を取り込み中... (全 ${total} ページ)`);
     logger.log(`[TextLayer] 取り込み開始: ${total} ページ`);
 
+    // PCT-094 (防御): メタが取得できた場合は loadPage に渡し、fallback 経由での
+    // bbox 高さ劣化（descent 欠落で約 71% に縮む）を防ぐ。
+    // 修正1のスキップにより、メタあり PDF はここへ到達しないはずだが、
+    // 将来の呼び出し経路の混入に備えた安全策として維持する。
+    let importBBoxMeta: Record<string, Array<{
+      bbox: { x: number; y: number; width: number; height: number };
+      writingMode: string;
+      order: number;
+      text: string;
+      confidence?: number;
+    }>> | null = null;
+    try {
+      const pdf = await getSharedPdfProxy(doc.filePath);
+      importBBoxMeta = await loadPecoToolBBoxMeta(pdf, {
+        loadBytes: async () => {
+          const { readFile } = await import('@tauri-apps/plugin-fs');
+          return readFile(doc.filePath);
+        },
+      });
+    } catch {
+      // メタロード失敗は無視して従来どおり null (fallback) で続行する
+    }
+
     const BATCH = 10;
     for (let start = 0; start < total; start += BATCH) {
       if (!isCurrentDocument(capturedEpoch)) {
@@ -715,7 +739,9 @@ export function useOcrEngine(
             null as unknown as pdfjsLib.PDFDocumentProxy,
             sourcePageIndex,
             doc.filePath,
-            null,
+            // PCT-094: メタあり時はメタを渡してメタ経路で解決させる（null 固定解除）。
+            // メタなし PDF の場合は引き続き null → fallback (pdfjs transform 再構成)。
+            importBBoxMeta,
             doc.mtime,
             { displayPageIndex: i },
           ).catch((e) => {
@@ -758,6 +784,31 @@ export function useOcrEngine(
     // 同 filePath で再ロードされた別 doc に対しても OCR を実行していた)。
     const capturedEpoch = useInfraStore.getState().documentEpoch;
     try {
+      // PCT-094: PecoToolBBoxes メタを持つ PDF はここでスキップする。
+      // メタあり = PecoTool 管理下の保存済み PDF。通常ページロード経路
+      // (usePageNavigation → loadPage) が既にメタ経由で正確に bbox を復元済みのため、
+      // テキスト層取り込みは不要かつ有害 (importTextLayerAllPages が loadPage を
+      // bboxMeta=null で呼ぶ fallback 経路に落ち、descent 欠落で bbox 高さが約 71% に
+      // 縮み、isDirty:true で保存されると劣化が累積する)。
+      // テキスト層取り込みは「メタを持たない外部 PDF」専用。
+      // メタロードの失敗（例外）は「メタなし」として従来フローへ（安全側）。
+      try {
+        const pdf = await getSharedPdfProxy(doc.filePath);
+        const meta = await loadPecoToolBBoxMeta(pdf, {
+          loadBytes: async () => {
+            const { readFile } = await import('@tauri-apps/plugin-fs');
+            return readFile(doc.filePath);
+          },
+        });
+        if (meta !== null && Object.keys(meta).length > 0) {
+          // メタあり: 何もせず return
+          return;
+        }
+      } catch {
+        // メタロード失敗は「メタなし」扱いで通常フローへ
+      }
+      if (!isCurrentDocument(capturedEpoch)) return;
+
       // #204: 3 点サンプリングでテキスト層の有無を判定する。
       const layerResult = await detectTextLayerSamplesForDoc(doc);
 
