@@ -39,7 +39,7 @@
         "https://github.com/ichiperon/pecotool_V2/releases/latest/download/latest.json"
       ],
       "dialog": false,
-      "pubkey": "TODO: replace with actual Tauri updater public key (see docs/UPDATER.md)",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBRjYzQjE3MERCRDk5MEIKUldRTG1iME5GenYyK3NaTUZNVndTS25XL3RFTjcybU1wRHdPNURvcEI0a1RoUDJaQ1NEeEtPTDgK",
       "windows": {
         "installMode": "passive"
       }
