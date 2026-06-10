@@ -78,6 +78,56 @@ function schedulePendingIdbWrite(
   trackPendingIdbWork(work);
 }
 
+/**
+ * PCT-069: undo/redo によるページ構造変更 (delete_pages / reorder_pages) を
+ * IDB 一時退避 (temporary_changes) と同期させる共通ヘルパ。
+ * 1. deletePageIndices のエントリ削除 (redo での削除再適用)
+ * 2. renames のキー移行 (undo は逆方向 / redo は順方向)
+ * 3. contentEntries の内容書き込み (メモリ snapshot との強制同期)
+ * を 1 本の Promise として直列実行し、trackPendingIdbWork で保存経路と同期する。
+ * rename を先・内容書き込みを後にする順序が重要 (逆順だと書き込んだ内容を
+ * rename が再移動して別ページへ混入する)。
+ * 進行中の IDB 書き込みとキーが競合しないよう、開始前に待機する (#215 と同じ理由)。
+ */
+function scheduleStructuralUndoRedoIdbSync(
+  filePath: string,
+  options: {
+    deletePageIndices?: number[];
+    renames?: Array<{ oldPageIndex: number; newPageIndex: number }>;
+    contentEntries?: Array<{ pageIndex: number; data: Partial<PageData> }>;
+  },
+): void {
+  const deletes = options.deletePageIndices ?? [];
+  const renames = options.renames ?? [];
+  const contents = options.contentEntries ?? [];
+  if (deletes.length === 0 && renames.length === 0 && contents.length === 0) return;
+  const work = waitForPendingIdbSaves()
+    .then(() => (deletes.length > 0 ? deleteTemporaryPageKeys(filePath, deletes) : undefined))
+    .then(() => (renames.length > 0 ? renameTemporaryPageKeys(filePath, renames) : undefined))
+    .then(() => (contents.length > 0
+      ? saveTemporaryPageDataBatch(contents.map(({ pageIndex, data }) => ({ filePath, pageIndex, data })))
+      : undefined))
+    .then(() => {
+      useInfraStore.getState().clearLastIdbErrorIfSet();
+    })
+    .catch((e: unknown) => {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.error('[Store] scheduleStructuralUndoRedoIdbSync 失敗:', err);
+      useInfraStore.getState().setLastIdbError(err);
+    });
+  trackPendingIdbWork(work);
+}
+
+/** PCT-069: renameTemporaryPageKeys のマッピングを逆方向 (new→old) に変換する。 */
+function reverseRenamedEntries(
+  entries: Array<{ oldPageIndex: number; newPageIndex: number }> | undefined,
+): Array<{ oldPageIndex: number; newPageIndex: number }> {
+  return (entries ?? []).map(({ oldPageIndex, newPageIndex }) => ({
+    oldPageIndex: newPageIndex,
+    newPageIndex: oldPageIndex,
+  }));
+}
+
 function scheduleClearOcrAllPagesIdbWrite(filePath: string, totalPages: number): void {
   const pendingBeforeWrite = waitForPendingIdbSaves();
   const work = pendingBeforeWrite
@@ -323,6 +373,20 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     const afterTotalPages = afterOrder.length;
 
+    // IDB キー操作の対象: 削除されたページのエントリと、残るページの key 移行。
+    // PCT-069: undo/redo で逆適用/再適用できるよう Action にも記録するため、
+    // set() の前に計算する。
+    const filePath = state.document.filePath;
+    const deletedPageIndices = beforeOrder.map((_, di) => di).filter((di) => deleteDisplaySet.has(di));
+    const renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }> = [];
+    beforeOrder.forEach((origPageIndex, oldDisplayIndex) => {
+      if (deleteDisplaySet.has(oldDisplayIndex)) return;
+      const newIdx = afterOrder.indexOf(origPageIndex);
+      if (oldDisplayIndex !== newIdx) {
+        renamedEntries.push({ oldPageIndex: oldDisplayIndex, newPageIndex: newIdx });
+      }
+    });
+
     // Store を更新
     set({
       document: {
@@ -343,20 +407,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         afterCurrentPageIndex,
         beforeTotalPages,
         afterTotalPages,
+        deletedPageIndices,
+        renamedEntries,
       }].slice(-100),
       redoStack: [],
-    });
-
-    // IDB: 削除されたページのエントリを削除し、残るページの key を新 pageIndex で更新
-    const filePath = state.document.filePath;
-    const deletedPageIndices = beforeOrder.map((_, di) => di).filter((di) => deleteDisplaySet.has(di));
-    const renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }> = [];
-    beforeOrder.forEach((origPageIndex, oldDisplayIndex) => {
-      if (deleteDisplaySet.has(oldDisplayIndex)) return;
-      const newIdx = afterOrder.indexOf(origPageIndex);
-      if (oldDisplayIndex !== newIdx) {
-        renamedEntries.push({ oldPageIndex: oldDisplayIndex, newPageIndex: newIdx });
-      }
     });
 
     if (onIdbWork) {
@@ -429,6 +483,18 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     const afterOrder = newOrder;
 
+    // IDB: 並べ替えに応じた key 移行のマッピング。
+    // PCT-069: undo/redo で逆適用/再適用できるよう Action にも記録するため、
+    // set() の前に計算する。
+    const filePath = state.document.filePath;
+    const renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }> = [];
+    newOrder.forEach((origPageIndex, newIdx) => {
+      const oldDisplayIndex = beforeOrder.indexOf(origPageIndex);
+      if (oldDisplayIndex !== newIdx) {
+        renamedEntries.push({ oldPageIndex: oldDisplayIndex, newPageIndex: newIdx });
+      }
+    });
+
     set({
       document: {
         ...state.document,
@@ -441,18 +507,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         type: 'reorder_pages' as const,
         beforeOrder,
         afterOrder,
+        renamedEntries,
       }].slice(-100),
       redoStack: [],
-    });
-
-    // IDB: 並べ替えに応じて key を更新
-    const filePath = state.document.filePath;
-    const renamedEntries: Array<{ oldPageIndex: number; newPageIndex: number }> = [];
-    newOrder.forEach((origPageIndex, newIdx) => {
-      const oldDisplayIndex = beforeOrder.indexOf(origPageIndex);
-      if (oldDisplayIndex !== newIdx) {
-        renamedEntries.push({ oldPageIndex: oldDisplayIndex, newPageIndex: newIdx });
-      }
     });
 
     if (onIdbWork) {
@@ -893,15 +950,17 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         redoStack: newRedo,
         isDirty: true,
       });
-      // IDB は afterPages -> beforePages への逆変換が複雑なため、
-      // beforePages の全ページを IDB に書き込んで強制同期する
-      schedulePendingIdbWrite(
-        Array.from(action.beforePages.entries()).map(([pi, page]) => ({
-          filePath: document.filePath,
+      // PCT-069: 削除時の IDB キー rename を逆方向に巻き戻してから、
+      // beforePages の内容を書き込んで強制同期する (順序が逆だと、書き込んだ
+      // 内容を rename が再移動して別ページへ混入する)。削除済みエントリ自体の
+      // 復元はメモリ snapshot (beforePages) の書き込みで賄う。
+      scheduleStructuralUndoRedoIdbSync(document.filePath, {
+        renames: reverseRenamedEntries(action.renamedEntries),
+        contentEntries: Array.from(action.beforePages.entries()).map(([pi, page]) => ({
           pageIndex: pi,
           data: page,
         })),
-      );
+      });
     } else if (action.type === 'reorder_pages') {
       // issue #193: ページ並べ替えを巻き戻す
       // beforeOrder から pages を再構築
@@ -917,6 +976,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true,
+      });
+      // PCT-069: 並べ替え時の IDB キー rename を逆方向に巻き戻す。
+      // メモリに無い LRU 退避ページのエントリが rename されたままだと、
+      // 保存時に旧 index へ別ページの内容が混入する。
+      scheduleStructuralUndoRedoIdbSync(document.filePath, {
+        renames: reverseRenamedEntries(action.renamedEntries),
       });
     } else if (action.type === 'rotate_pages') {
       // issue #207: ページ回転を巻き戻す (before の角度に戻す)
@@ -985,13 +1050,16 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         redoStack: newRedo,
         isDirty: true,
       });
-      schedulePendingIdbWrite(
-        Array.from(action.afterPages.entries()).map(([pi, page]) => ({
-          filePath: document.filePath,
+      // PCT-069: 削除時と同じ IDB キー操作 (delete → rename) を再適用してから
+      // afterPages の内容で強制同期する。
+      scheduleStructuralUndoRedoIdbSync(document.filePath, {
+        deletePageIndices: action.deletedPageIndices,
+        renames: action.renamedEntries,
+        contentEntries: Array.from(action.afterPages.entries()).map(([pi, page]) => ({
           pageIndex: pi,
           data: page,
         })),
-      );
+      });
     } else if (action.type === 'reorder_pages') {
       // issue #193: ページ並べ替えをやり直す
       const restoredPages = new Map<number, PageData>();
@@ -1006,6 +1074,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true,
+      });
+      // PCT-069: 並べ替え時と同じ IDB キー rename を順方向に再適用する。
+      scheduleStructuralUndoRedoIdbSync(document.filePath, {
+        renames: action.renamedEntries,
       });
     } else if (action.type === 'rotate_pages') {
       // issue #207: ページ回転をやり直す (after の角度に進める)

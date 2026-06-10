@@ -126,12 +126,29 @@ export async function loadPDF(filePath: string): Promise<PecoDocument> {
   // 後続の getSharedPdfProxy が2回目の getDocument を呼ばないようにする
   destroySharedPdfProxy();
   const loadId = ++globalLoadId;
-  const promise = getDocumentTask(url).promise;
-  globalSharedPdfProxy = { filePath, promise, loadId };
+  // PCT-072: loadingTask を proxy に保持し、進行中ロードを destroySharedPdfProxy()
+  // から loadingTask.destroy() で即時中断できるようにする
+  const task = getDocumentTask(url);
+  const promise = task.promise;
+  globalSharedPdfProxy = { filePath, promise, loadId, task };
 
   // stat と getDocument を並列実行（statは通常先に完了する）
   const statPromise = stat(filePath);
-  const pdf = await promise;
+  // ロード失敗時に statPromise が orphan のまま reject して
+  // unhandled rejection にならないようにする（成功経路の await には影響しない）
+  statPromise.catch(() => {});
+  let pdf: pdfjsLib.PDFDocumentProxy;
+  try {
+    pdf = await promise;
+  } catch (e) {
+    // PCT-072: 進行中に destroySharedPdfProxy() が走ると loadingTask.destroy() に
+    // より promise が reject される。新ロード開始によるキャンセルの場合は
+    // 従来の cancelled エラーへ正規化して呼び出し元の挙動を変えない。
+    if (globalLoadId !== loadId) {
+      throw new Error('[loadPDF] cancelled: newer file load started');
+    }
+    throw e;
+  }
 
   // ファイルが切り替わっていた場合は破棄
   if (globalLoadId !== loadId) {
@@ -197,7 +214,16 @@ export async function openFreshPdfDoc(filePath: string): Promise<pdfjsLib.PDFDoc
 }
 
 // ページプロキシのメモリキャッシュ（ページ切り替えをゼロ秒にするため）
-let globalSharedPdfProxy: { filePath: string, promise: Promise<pdfjsLib.PDFDocumentProxy>, loadId: number } | null = null;
+// PCT-072: getDocument の loadingTask も保持する。promise だけ持つ旧実装では
+// ロード進行中に destroySharedPdfProxy() を呼んでも「解決後に destroy」しか
+// できず、大型 PDF ロード中のファイル切替で旧ロードが完走するまでリソースを
+// 保持し続けた（ハングしたロードは恒久リーク）。task を持てば即時中断できる。
+let globalSharedPdfProxy: {
+  filePath: string,
+  promise: Promise<pdfjsLib.PDFDocumentProxy>,
+  loadId: number,
+  task: pdfjsLib.PDFDocumentLoadingTask,
+} | null = null;
 // 単調増加カウンタ：ファイル切り替え時に古い非同期処理を識別して無視するために使う
 let globalLoadId = 0;
 
@@ -229,8 +255,10 @@ export async function getSharedPdfProxy(filePath: string): Promise<pdfjsLib.PDFD
   if (url.startsWith('asset.localhost')) {
     url = 'http://' + url;
   }
-  const promise = getDocumentTask(url).promise;
-  globalSharedPdfProxy = { filePath, promise, loadId };
+  // PCT-072: loadPDF と同様に loadingTask を保持して進行中ロードを中断可能にする
+  const task = getDocumentTask(url);
+  const promise = task.promise;
+  globalSharedPdfProxy = { filePath, promise, loadId, task };
   return promise;
 }
 
@@ -264,23 +292,46 @@ export function destroySharedPdfProxy() {
   if (globalSharedPdfProxy) {
     const proxy = globalSharedPdfProxy;
     globalSharedPdfProxy = null; // 先にnullにして後続のgetSharedPdfProxy呼び出しをブロックしない
-    proxy.promise.then(p => {
-      // pdfjs-dist の PDFDocumentProxy は destroy() を持つが、
-      // テストモックや中間プロキシなど一部のオブジェクトは持たない。
-      // silent catch ではなく事前チェック + 警告ログで観測可能にする。
-      if (typeof p?.destroy !== 'function') {
-        logger.warn('[pdfLoader] destroySharedPdfProxy: proxy.destroy is not a function', {
-          type: typeof p,
-          keys: p ? Object.keys(p) : null,
+    if (typeof proxy.task?.destroy === 'function') {
+      // PCT-072: loadingTask.destroy() はロード進行中なら fetch/parse を即時中断し、
+      // 解決済みなら PDFDocumentProxy.destroy() と同等に transport を破棄する
+      // (pdfjs の PDFDocumentProxy.destroy() は内部的に loadingTask.destroy() を呼ぶ)。
+      // 旧実装の「promise 解決後に destroy」では進行中ロードを中断できなかった。
+      //
+      // destroy() により task.promise は reject され得るため、先に catch を登録して
+      // 「誰も await していない proxy」が unhandled rejection にならないようにする。
+      // await 中の呼び出し元には reject が伝播するが、loadPDF は cancelled エラーへ
+      // 正規化し、getSharedPdfProxy / getCachedPageProxy の各呼び出し元は
+      // try/catch 済み（usePageNavigation / usePdfRendering / useOcrEngine）。
+      proxy.promise.catch(() => {});
+      try {
+        Promise.resolve(proxy.task.destroy()).catch((e) => {
+          logger.warn('[pdfLoader] loadingTask.destroy() 失敗:', e);
         });
-        return;
+      } catch (e) {
+        logger.warn('[pdfLoader] loadingTask.destroy() 失敗:', e);
       }
-      try { p.destroy(); } catch (e) {
-        logger.warn('[pdfLoader] PDFDocumentProxy.destroy() 失敗:', e);
-      }
-    }).catch((e) => {
-      logger.warn('[pdfLoader] destroySharedPdfProxy: Promiseエラー:', e);
-    });
+    } else {
+      // loadingTask が destroy() を持たない場合（テストモック等）は
+      // 従来どおり promise 解決後に PDFDocumentProxy.destroy() する。
+      proxy.promise.then(p => {
+        // pdfjs-dist の PDFDocumentProxy は destroy() を持つが、
+        // テストモックや中間プロキシなど一部のオブジェクトは持たない。
+        // silent catch ではなく事前チェック + 警告ログで観測可能にする。
+        if (typeof p?.destroy !== 'function') {
+          logger.warn('[pdfLoader] destroySharedPdfProxy: proxy.destroy is not a function', {
+            type: typeof p,
+            keys: p ? Object.keys(p) : null,
+          });
+          return;
+        }
+        try { p.destroy(); } catch (e) {
+          logger.warn('[pdfLoader] PDFDocumentProxy.destroy() 失敗:', e);
+        }
+      }).catch((e) => {
+        logger.warn('[pdfLoader] destroySharedPdfProxy: Promiseエラー:', e);
+      });
+    }
   }
   // pageProxyCacheのページも明示的にcleanupする
   for (const page of pageProxyCache.values()) {
@@ -297,6 +348,7 @@ export {
   saveTemporaryPageData,
   saveTemporaryPageDataBatch,
   clearTemporaryChanges,
+  clearTemporaryChangesForPages,
   clearCachedPages,
   getAllTemporaryPageData,
   deleteTemporaryPageKeys,

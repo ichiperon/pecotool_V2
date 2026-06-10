@@ -45,10 +45,15 @@ describe('App batch/folder OCR save wiring (PCT-036)', () => {
     expect(propertyText(config, 'savePdf')).toBe('() => handleSave({ bypassOcrGuard: true })');
   });
 
-  it('batch open callback keeps the existing OCR-running guard bypass', () => {
+  it('batch open callback bypasses the OCR guard and suppresses the OCR-zero prompt (PCT-076)', () => {
     const config = findUseBatchJobConfig();
 
-    expect(propertyText(config, 'openPdf')).toBe('(path) => handleOpen(path, { bypassOcrGuard: true })');
+    // PCT-076: suppressOcrZeroPrompt が無いと、バッチの open 直後に
+    // checkAndPromptOcrZero の ask() がポップし、バッチ OCR 実行中の
+    // テキスト層取り込み並行書き込み (混在保存) を誘発する。
+    expect(propertyText(config, 'openPdf')).toBe(
+      '(path) => handleOpen(path, { bypassOcrGuard: true, suppressOcrZeroPrompt: true })',
+    );
   });
 
   it('folder OCR save callback also bypasses the OCR-running guard', () => {

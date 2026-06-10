@@ -18,7 +18,7 @@ vi.mock('../../utils/bitmapCache', () => ({
   clearBitmapCache: vi.fn(),
 }))
 
-import { loadPage, destroySharedPdfProxy, getSharedPdfProxy } from '../../utils/pdfLoader'
+import { loadPage, destroySharedPdfProxy, getSharedPdfProxy, loadPDF } from '../../utils/pdfLoader'
 
 // ── ヘルパー ──────────────────────────────────────────────────
 
@@ -397,6 +397,92 @@ describe('pdfLoader / loadPage', () => {
       } else {
         expect(result).not.toBeNull()
       }
+    })
+  })
+
+  // ── PCT-072: loadingTask 保持と進行中ロードの即時中断 ──────────────────
+
+  describe('PCT-072: destroySharedPdfProxy が進行中の loadingTask を中断する', () => {
+    it('未解決ロード中の destroySharedPdfProxy は loadingTask.destroy() を即時呼ぶ', () => {
+      const taskDestroy = vi.fn().mockResolvedValue(undefined)
+      ;(getDocument as ReturnType<typeof vi.fn>).mockReturnValue({
+        promise: new Promise(() => {}), // 永遠に未解決（進行中ロードを模擬）
+        destroy: taskDestroy,
+      })
+      void getSharedPdfProxy('pending.pdf')
+      expect(taskDestroy).not.toHaveBeenCalled()
+
+      destroySharedPdfProxy()
+      // 旧実装は promise 解決後にしか destroy できず、未解決ロードは恒久リークだった
+      expect(taskDestroy).toHaveBeenCalledTimes(1)
+    })
+
+    it('解決済みロードも loadingTask.destroy() 経由で破棄される', async () => {
+      const taskDestroy = vi.fn().mockResolvedValue(undefined)
+      ;(getDocument as ReturnType<typeof vi.fn>).mockReturnValue({
+        promise: Promise.resolve({ numPages: 1 }),
+        destroy: taskDestroy,
+      })
+      await getSharedPdfProxy('resolved.pdf')
+
+      destroySharedPdfProxy()
+      // pdfjs では PDFDocumentProxy.destroy() === loadingTask.destroy() のため
+      // 解決済みでも task 経由の destroy で同等のリソース解放になる
+      expect(taskDestroy).toHaveBeenCalledTimes(1)
+    })
+
+    it('destroy() が promise を reject させても unhandled rejection にならない', async () => {
+      let rejectPromise: (e: Error) => void = () => {}
+      const promise = new Promise<never>((_, rej) => { rejectPromise = rej })
+      // 実 pdfjs と同様、destroy() 呼び出しで loadingTask.promise を reject させる
+      const taskDestroy = vi.fn(() => {
+        rejectPromise(new Error('Loading aborted'))
+        return Promise.resolve()
+      })
+      ;(getDocument as ReturnType<typeof vi.fn>).mockReturnValue({ promise, destroy: taskDestroy })
+      // 呼び出し元として catch を付けて reject の伝播も検証する
+      const callerPromise = getSharedPdfProxy('aborted.pdf')
+      const callerRejection = expect(callerPromise).rejects.toThrow('Loading aborted')
+
+      destroySharedPdfProxy()
+      expect(taskDestroy).toHaveBeenCalledTimes(1)
+      await callerRejection
+      // microtask / macrotask を掃いて dangling rejection を顕在化させる。
+      // destroySharedPdfProxy が proxy.promise.catch を登録していなければ
+      // vitest が unhandled rejection としてこのテストを fail させる。
+      await new Promise(r => setTimeout(r, 0))
+    })
+
+    it('loadingTask が destroy() を持たない場合は従来の解決後 destroy 経路を使う', async () => {
+      const pdfDestroy = vi.fn()
+      ;(getDocument as ReturnType<typeof vi.fn>).mockReturnValue({
+        promise: Promise.resolve({ destroy: pdfDestroy, getPage: vi.fn() }),
+      })
+      await getSharedPdfProxy('legacy.pdf')
+
+      destroySharedPdfProxy()
+      await new Promise(r => setTimeout(r, 0))
+      expect(pdfDestroy).toHaveBeenCalledTimes(1)
+    })
+
+    it('ロード進行中に別ロードが始まると旧 loadPDF は cancelled エラーに正規化して reject する', async () => {
+      let rejectFirst: (e: Error) => void = () => {}
+      const firstPromise = new Promise<never>((_, rej) => { rejectFirst = rej })
+      const firstDestroy = vi.fn(() => {
+        rejectFirst(new Error('Worker was destroyed'))
+        return Promise.resolve()
+      })
+      ;(getDocument as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce({ promise: firstPromise, destroy: firstDestroy })
+        .mockReturnValueOnce({ promise: new Promise(() => {}), destroy: vi.fn() })
+
+      const first = loadPDF('first.pdf')
+      // 2 つ目のロード開始 → destroySharedPdfProxy → 1 つ目の task.destroy → reject
+      void getSharedPdfProxy('second.pdf')
+
+      // destroy 由来の生エラーではなく従来どおりの cancelled エラーで届く
+      await expect(first).rejects.toThrow('[loadPDF] cancelled: newer file load started')
+      expect(firstDestroy).toHaveBeenCalledTimes(1)
     })
   })
 

@@ -478,6 +478,38 @@ describe('ThumbnailWindow', () => {
     )
   })
 
+  it('PCT-073: thumbnail:file-closed で全 worker に CLOSE_PDF を post する', async () => {
+    render(<ThumbnailWindow />)
+
+    await waitFor(() => expect(m.listeners.get('thumbnail:file-closed')?.[0]).toBeDefined())
+
+    act(() => {
+      m.listeners.get('thumbnail:file-opened')![0]({
+        payload: {
+          filePath: 'test.pdf',
+          currentPageIndex: 0,
+          totalPages: 3,
+          dirtyPages: [],
+          pageOrder: [0, 1, 2],
+        },
+      })
+    })
+    await flushEffects()
+    // ファイルを開いている間は CLOSE_PDF は送られない
+    expect(workerMessages('CLOSE_PDF')).toHaveLength(0)
+
+    act(() => {
+      m.listeners.get('thumbnail:file-closed')![0]({})
+    })
+    await flushEffects()
+
+    // 全 worker (NUM_WORKERS=3) に 1 通ずつ届く（worker 内の pdfDoc 残留リーク防止）
+    expect(workerMessages('CLOSE_PDF')).toHaveLength(3)
+    for (const worker of MockThumbnailWorker.instances) {
+      expect(worker.messages.filter((msg) => msg?.type === 'CLOSE_PDF')).toHaveLength(1)
+    }
+  })
+
   it('PCT-033: ページ削除時に表示件数を縮め、削除済みdisplay indexを再要求しない', async () => {
     render(<ThumbnailWindow />)
 

@@ -883,6 +883,47 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     unmount()
   })
 
+  it('PCT-073: file close (document → null) posts CLOSE_PDF to all workers', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { usePecoStore } = await import('../../store/pecoStore')
+    await setDoc('/path/A.pdf', 5)
+
+    const { unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+    expect(createdWorkers.length).toBeGreaterThan(0)
+    // ファイルを開いている間は CLOSE_PDF は送られない
+    expect(
+      createdWorkers.some(w => w.messages.some((msg: any) => msg?.type === 'CLOSE_PDF'))
+    ).toBe(false)
+
+    // ファイルクローズ（document を null へ）
+    act(() => {
+      usePecoStore.setState({ document: null, pageOrder: [] })
+    })
+    await flush()
+
+    // 全 worker に CLOSE_PDF が 1 通ずつ届く（worker 内の pdfDoc 残留リーク防止）
+    for (const w of createdWorkers) {
+      expect(w.messages.filter((msg: any) => msg?.type === 'CLOSE_PDF')).toHaveLength(1)
+    }
+
+    unmount()
+  })
+
+  it('PCT-073: mount without document does not post CLOSE_PDF', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    // beforeEach で document: null 済み（ファイルを一度も開いていない状態）
+    const { unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+    expect(createdWorkers.length).toBeGreaterThan(0)
+
+    for (const w of createdWorkers) {
+      expect(w.messages.some((msg: any) => msg?.type === 'CLOSE_PDF')).toBe(false)
+    }
+
+    unmount()
+  })
+
   it('S-07-03: rapid file switch A→B→A does not leak B thumbnails into A view', async () => {
     const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
     await setDoc('/path/A.pdf', 5)

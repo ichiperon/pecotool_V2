@@ -22,9 +22,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T, label: str
 interface UseTauriCloseGuardOptions {
   /**
    * issue #74 / 保存中ガード用の ref。
-   * 保存中 (replace_pdf_file の rename 進行中) に window.destroy を許すと
-   * 元 PDF が `.pecotool-backup-<stamp>.tmp` に退避されたまま target が消える
-   * リスクがあるため、close 要求自体を suppress する。
+   * 保存中 (チャンク書込〜replace_pdf_file の rename 進行中) に window.destroy を
+   * 許すと書込が中途で打ち切られるリスクがあるため、close 要求自体を suppress する。
+   * (PCT-077 で置換は単一 atomic rename になり target 消失窓は解消済みだが、
+   *  書込フェーズ全体の保護としてガードは引き続き必要)
    * 省略可 (旧 API 互換)。
    */
   isSavingRef?: React.RefObject<boolean>;

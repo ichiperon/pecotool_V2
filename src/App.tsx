@@ -32,6 +32,7 @@ import { perf } from "./utils/perfLogger";
 
 // Hooks
 import { useFileOperations, type SaveStep, type SaveDialogOptions } from "./hooks/useFileOperations";
+import { requestDiffPreview } from "./utils/diffPreviewRequest";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useConsoleLogs } from "./hooks/useConsoleLogs";
 import { usePreviewWindow } from "./hooks/usePreviewWindow";
@@ -203,10 +204,9 @@ function App() {
     setSaveStep,
     () => { setShowSaveDialogRef.current(true); },
     // issue #201: diff プレビュー要求コールバック
-    (summary) => new Promise<boolean>((resolve) => {
-      diffPreviewResolveRef.current = resolve;
-      setDiffPreviewSummary(summary);
-    }),
+    // PCT-075: 未解決の旧 resolver を resolve(false) で打ち切ってから差し替える
+    // (プレビュー表示中の再 Ctrl+S で旧 handleSave が永久 pending になるのを防ぐ)。
+    (summary) => requestDiffPreview(diffPreviewResolveRef, setDiffPreviewSummary, summary),
   );
   // #102: フォルダ OCR ループ内では openPdf に bypassOcrGuard=true を立てて呼ぶ。
   // これがないと OCR 中の handleOpen ガードに引っかかってループが進まない。
@@ -216,7 +216,9 @@ function App() {
   // #195: バッチジョブ
   const [showBatchJob, setShowBatchJob] = useState(false);
   const { currentJob: batchCurrentJob, isRunning: batchIsRunning, startJob: batchStartJob, cancelJob: batchCancelJob, resumeJob: batchResumeJob, clearJob: batchClearJob } = useBatchJob({
-    openPdf: (path) => handleOpen(path, { bypassOcrGuard: true }),
+    // PCT-076: suppressOcrZeroPrompt — バッチの機械的オープンで OCR ゼロ検出
+    // ダイアログを出さない (バッチ OCR とテキスト層取り込みの並行書き込み防止)。
+    openPdf: (path) => handleOpen(path, { bypassOcrGuard: true, suppressOcrZeroPrompt: true }),
     runOcrAllPagesSilent,
     savePdf: () => handleSave({ bypassOcrGuard: true }),
     // issue #243: sidecar save routes through handleSaveTo so OCR data is preserved

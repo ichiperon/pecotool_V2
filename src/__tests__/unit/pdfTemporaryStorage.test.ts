@@ -202,4 +202,45 @@ describe('pdfTemporaryStorage page cache GC', () => {
     expect(await getCachedPage('doc.pdf:1:1:m1')).toBeNull()
     expect(await getCachedPage('doc.pdf:800:1:m1')).toMatchObject({ pageIndex: 800, thumbnail: null })
   })
+
+  // ── PCT-070: 保存完了後のページ限定クリア ─────────────────────────
+
+  it('PCT-070: clearTemporaryChangesForPages は指定ページのキーのみ削除する', async () => {
+    const { saveTemporaryPageDataBatch, clearTemporaryChangesForPages } =
+      await import('../../utils/pdfTemporaryStorage')
+
+    await saveTemporaryPageDataBatch([
+      { filePath: 'a.pdf', pageIndex: 0, data: makePage(0) },
+      { filePath: 'a.pdf', pageIndex: 1, data: makePage(1) },
+      { filePath: 'a.pdf', pageIndex: 2, data: makePage(2) },
+      { filePath: 'b.pdf', pageIndex: 0, data: makePage(0) },
+    ])
+
+    await clearTemporaryChangesForPages('a.pdf', [0, 2])
+
+    const dirtyStore = fakeDb.stores.get('temporary_changes')!
+    // 保存で回収した a.pdf の 0, 2 だけが消え、未回収の 1 と別ファイルは残る
+    expect(dirtyStore.has('a.pdf:0')).toBe(false)
+    expect(dirtyStore.has('a.pdf:2')).toBe(false)
+    expect(dirtyStore.has('a.pdf:1')).toBe(true)
+    expect(dirtyStore.has('b.pdf:0')).toBe(true)
+  })
+
+  // ── PCT-071: saveTemporaryPageDataBatch のタイマー残留解消 ──────────
+
+  it('PCT-071: saveTemporaryPageDataBatch 完了後にタイムアウトタイマーが残留しない', async () => {
+    const { saveTemporaryPageDataBatch } = await import('../../utils/pdfTemporaryStorage')
+
+    vi.useFakeTimers()
+    try {
+      await saveTemporaryPageDataBatch([
+        { filePath: 'a.pdf', pageIndex: 0, data: makePage(0) },
+      ])
+      // waitForTransaction が clearTimeout 済みのため、タイマーは残らない
+      // (旧実装は自前 setTimeout を clear せず 10 秒間残留していた)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

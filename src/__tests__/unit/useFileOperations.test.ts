@@ -39,6 +39,7 @@ vi.mock('../../utils/pdfLoader', () => ({
   }),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
+  clearTemporaryChangesForPages: vi.fn().mockResolvedValue(undefined),
   clearCachedPages: vi.fn().mockResolvedValue(undefined),
   destroySharedPdfProxy: vi.fn(),
   getSharedPdfProxy: vi.fn().mockResolvedValue({}),
@@ -1771,5 +1772,208 @@ describe('useFileOperations executeSaveAs — cancel / error paths (wave 2)', ()
     // onClick を呼ぶと onRequestSaveDialog が起動される
     actionObj!.onClick();
     expect(onRequestSaveDialog).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// PCT-074 (HUNT-C3): handleOpen の loadPDF await 後に isSavingRef を再チェックする。
+// loadPDF は大型 PDF で数秒〜数十秒かかり、その間に開始された保存処理と
+// clearTemporaryChanges / setDocument が交差すると退避 dirty ページが欠落した
+// まま上書き保存される。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('PCT-074: loadPDF await 中に保存が開始された場合の競合ガード', () => {
+  it('loadPDF 解決時に保存中なら clearTemporaryChanges を呼ばず document も差し替えない', async () => {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    } as PageData;
+    const currentDoc = {
+      filePath: '/pct074/current.pdf',
+      fileName: 'current.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as PecoDocument;
+    usePecoStore.setState({ document: currentDoc, isDirty: true });
+    (ask as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
+
+    // loadPDF を deferred 化して「ロード中」を再現する
+    let resolveLoad!: (doc: unknown) => void;
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => { resolveLoad = resolve; }),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const openPromise = result.current.handleOpen('/pct074/next.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct074/next.pdf'));
+
+    // loadPDF の await 中に別経路 (executeSaveAs 等) で保存が開始された状況を再現
+    result.current.isSavingRef.current = true;
+
+    resolveLoad({
+      filePath: '/pct074/next.pdf',
+      fileName: 'next.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map(),
+    });
+
+    // 修正前: clearTemporaryChanges('/pct074/current.pdf') → setDocument が走り true を返す。
+    // 修正後: 再チェックで中断して false。
+    await expect(openPromise).resolves.toBe(false);
+    expect(clearTemporaryChanges).not.toHaveBeenCalled();
+    expect(usePecoStore.getState().document).toBe(currentDoc);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存中のため読み込みを中止/),
+    );
+
+    result.current.isSavingRef.current = false;
+  });
+
+  it('ファイル読込中 (loadPDF await 中) の handleSave は拒否されて savePDF を呼ばない', async () => {
+    const cleanPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: false,
+      thumbnail: null,
+    } as PageData;
+    const currentDoc = {
+      filePath: '/pct074/loaded.pdf',
+      fileName: 'loaded.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, cleanPage]]),
+    } as PecoDocument;
+    usePecoStore.setState({ document: currentDoc, isDirty: false });
+    __originalBytesCacheForTest.set('/pct074/loaded.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    let resolveLoad!: (doc: unknown) => void;
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => { resolveLoad = resolve; }),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const openPromise = result.current.handleOpen('/pct074/incoming.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct074/incoming.pdf'));
+
+    // ロード中の Ctrl+S 相当 (読込中オーバーレイはビューア区画のみでキーは素通りする)
+    let saved = true;
+    await act(async () => {
+      saved = await result.current.handleSave();
+    });
+
+    // 修正前: 保存が開始されて savePDF が呼ばれる。修正後: ガードで拒否。
+    expect(saved).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/読み込み中は保存できません/),
+    );
+
+    // 後片付け: ロードを完走させる
+    await act(async () => {
+      resolveLoad({
+        filePath: '/pct074/incoming.pdf',
+        fileName: 'incoming.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map(),
+      });
+      await openPromise;
+    });
+  });
+
+  it('読込完了後の handleSave は通常通り保存できる (ガードが解除される)', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleOpen('/pct074/after-load.pdf');
+    });
+
+    // 開いた doc を dirty にして保存可能な状態を作る
+    const loadedDoc = usePecoStore.getState().document!;
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    } as PageData;
+    usePecoStore.setState({
+      document: { ...loadedDoc, pages: new Map([[0, dirtyPage]]) } as PecoDocument,
+      isDirty: true,
+    });
+    __originalBytesCacheForTest.set(loadedDoc.filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    let saved = false;
+    await act(async () => {
+      saved = await result.current.handleSave();
+    });
+
+    expect(saved).toBe(true);
+    expect(savePDF).toHaveBeenCalled();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// PCT-076 (HUNT-C5): suppressOcrZeroPrompt オプション。
+// バッチジョブの機械的なオープンでは onOpenComplete (App 側で
+// checkAndPromptOcrZero に配線) を発火させない。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('PCT-076: handleOpen suppressOcrZeroPrompt オプション', () => {
+  it('suppressOcrZeroPrompt 指定時は onOpenComplete が呼ばれない', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const onOpenComplete = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, onOpenComplete),
+    );
+
+    let opened = false;
+    await act(async () => {
+      opened = await result.current.handleOpen('/pct076/batch.pdf', {
+        bypassOcrGuard: true,
+        suppressOcrZeroPrompt: true,
+      });
+    });
+
+    // 読み込み自体は成功するが、OCR ゼロ検出プロンプトへの配線は発火しない
+    expect(opened).toBe(true);
+    expect(onOpenComplete).not.toHaveBeenCalled();
+  });
+
+  it('オプション未指定時は従来通り onOpenComplete が doc 付きで呼ばれる (後方互換)', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    const showToast = vi.fn();
+    const onOpenComplete = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, onOpenComplete),
+    );
+
+    let opened = false;
+    await act(async () => {
+      opened = await result.current.handleOpen('/pct076/manual.pdf');
+    });
+
+    expect(opened).toBe(true);
+    expect(onOpenComplete).toHaveBeenCalledTimes(1);
+    expect(onOpenComplete.mock.calls[0][0]).toMatchObject({ filePath: '/fixed/path.pdf' });
   });
 });

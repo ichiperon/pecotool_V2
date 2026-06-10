@@ -78,27 +78,38 @@ const MAX_CONCURRENT_RENDERS = 4;
 // destroy が走った後にゴーストで render() が走るのを防ぐ。
 const renderWaitQueue: Array<(cancelled: boolean) => void> = [];
 
-async function handleLoadPdf(source: string | ArrayBuffer, requestId?: number): Promise<void> {
-  // 新しいPDFロード時に待機中のresolverをキャンセルする。
-  // activeRenders は実行中renderのfinallyで戻すため、ここで0へ戻すと負数化する。
+// PCT-073: 保持中の PDF リソース（進行中の loadingTask / pdfDoc）を破棄して
+// 初期状態へ戻す。LOAD_PDF 冒頭（旧リソースの解放）と CLOSE_PDF
+// （ファイルクローズ時の明示解放）で共用する。
+async function releaseCurrentPdf(): Promise<void> {
   // 待機中の resolver は cancelled=true で起こして、対応する handleGenerateThumbnail
   // が旧 pdfDoc で render を継続しないようにする (issue #140)。
+  // activeRenders は実行中renderのfinallyで戻すため、ここで0へ戻すと負数化する。
   renderWaitQueue.forEach(r => r(true));
   renderWaitQueue.length = 0;
 
-  // 進行中の getDocument タスクがあれば先に destroy() して未解決 promise を確実に
+  // 参照を先に切り離してから await する。destroy() の await 中に後続メッセージ
+  // （LOAD_PDF / GENERATE_THUMBNAIL）が処理されても、旧リソースが見えない状態にする。
+  const task = currentLoadingTask;
+  currentLoadingTask = null;
+  const doc = pdfDoc;
+  pdfDoc = null;
+  loadPromise = null;
+
+  // 進行中の getDocument タスクがあれば destroy() して未解決 promise を確実に
   // 終端化する（destroy 後の .promise は reject される）。そうしないと、前回の
   // loadPromise が後から resolve して古い pdfDoc を代入し race になる。
-  if (currentLoadingTask) {
-    try { await currentLoadingTask.destroy(); } catch { /* ignore */ }
-    currentLoadingTask = null;
+  if (task) {
+    try { await task.destroy(); } catch { /* ignore */ }
   }
-  if (pdfDoc) {
-    // 既存のドキュメントが完全に破棄されてから新規ロードへ（race 防止）
-    try { await pdfDoc.destroy(); } catch { /* ignore */ }
-    pdfDoc = null;
+  if (doc) {
+    // 既存のドキュメントが完全に破棄されてから次の処理へ（race 防止）
+    try { await doc.destroy(); } catch { /* ignore */ }
   }
-  loadPromise = null;
+}
+
+async function handleLoadPdf(source: string | ArrayBuffer, requestId?: number): Promise<void> {
+  await releaseCurrentPdf();
 
   try {
     // Worker コンテキストでは self.location.origin で絶対 URL を構築
@@ -232,6 +243,14 @@ self.onmessage = (e: MessageEvent<ThumbnailWorkerRequest>) => {
   } else if (msg.type === 'GENERATE_THUMBNAIL') {
     // await しない → 複数ページ協調並行処理（内部で loadPromise を await）
     handleGenerateThumbnail(msg.pageIndex, msg.sourcePageIndex, msg.requestId);
+  } else if (msg.type === 'CLOSE_PDF') {
+    // PCT-073: ファイルクローズ時にメインスレッドから明示的にリソースを解放する。
+    // 旧実装は「次の LOAD_PDF」が pdfDoc.destroy() の唯一のトリガで、閉じた PDF の
+    // 解析構造（100MB級で数十MB/worker）が次のファイルを開くまで残留していた。
+    // 応答は返さない（fire-and-forget）。解放後に届く GENERATE_THUMBNAIL は
+    // pdfDoc=null により THUMBNAIL_ERROR となり、メイン側で requestId 不一致として
+    // 無視される。
+    releaseCurrentPdf();
   } else {
     // 網羅性チェック
     const _exhaustive: never = msg;

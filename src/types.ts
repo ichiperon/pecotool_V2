@@ -135,6 +135,16 @@ export interface DeletePagesAction {
   afterCurrentPageIndex: number;
   beforeTotalPages: number;
   afterTotalPages: number;
+  /**
+   * PCT-069: 削除時に deleteTemporaryPageKeys で消した IDB キー (旧 pageIndex)。
+   * redo 時に同じ削除を再適用するために記録する。後方互換のため optional。
+   */
+  deletedPageIndices?: number[];
+  /**
+   * PCT-069: 削除時に renameTemporaryPageKeys で移行した IDB キーのマッピング。
+   * undo 時は逆方向、redo 時は順方向の rename を適用する。後方互換のため optional。
+   */
+  renamedEntries?: Array<{ oldPageIndex: number; newPageIndex: number }>;
 }
 
 /**
@@ -144,6 +154,11 @@ export interface ReorderPagesAction {
   type: 'reorder_pages';
   beforeOrder: number[];
   afterOrder: number[];
+  /**
+   * PCT-069: 並べ替え時に renameTemporaryPageKeys で移行した IDB キーのマッピング。
+   * undo 時は逆方向、redo 時は順方向の rename を適用する。後方互換のため optional。
+   */
+  renamedEntries?: Array<{ oldPageIndex: number; newPageIndex: number }>;
 }
 
 /**

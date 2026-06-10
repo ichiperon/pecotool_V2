@@ -446,6 +446,82 @@ export function stripEmptyQBlocksOnPage(
 }
 
 // ---------------------------------------------------------------------------
+// sweepNonDirtyPage
+// ---------------------------------------------------------------------------
+
+/**
+ * 未編集 (non-dirty) ページの 1 パススイープ (PCT-059)。
+ *
+ * 適用する 2 つの処理 (従来は pdfSaver.ts / pdf.worker.ts の保存ループが個別に呼んでいた):
+ *  - issue #96 要件2: 「空 q-Q ラッパー除去」。フルパス (pruneStalePecoToolResources +
+ *    replacePageTextContentStreams + drawText 再描画) と異なり、BT...ET には触れず
+ *    フォント辞書も触らないため、原本 OCR レイヤーは保持される。過去の保存で累積した
+ *    空 q-Q ブロックを安全に除去でき、再読み込み→保存だけで容量が縮む。
+ *  - issue #1 (Acrobat 7 TJ 互換 仮修正): BT 外にテキスト演算子が漏れているページに対し、
+ *    replacePageTextContentStreams で BT...ET ブロックを strip する。再描画は行わない
+ *    （フォント辞書・existingBBoxMeta には触れない）ため、原本 OCR テキストレイヤーは
+ *    消去される。bloat detection と異なり fontBytes 有無に依存しない。実機検証
+ *    (Acrobat 7.0) が完了するまでは仮修正として維持する。
+ *
+ * PCT-059 (性能): 従来は pageHasTextOperatorDamage → (損傷時) replacePageTextContentStreams →
+ * stripEmptyQBlocksOnPage が同一 content stream を各々 decode しており、
+ * 損傷なしページでも stream あたり 2 回の pako.inflate が走っていた。
+ * 本関数は decode 結果を共有して 1 回に削減する。挙動は従来経路と完全等価:
+ *  - 損傷判定は pageHasTextOperatorDamage と同一 (stream 順 / 判定条件 / early-exit)
+ *  - 損傷ありページは従来どおり replacePageTextContentStreams + stripEmptyQBlocksOnPage
+ *    へ委譲する（decode 回数も従来と同一）。replacePageTextContentStreams は Contents を
+ *    差し替えるため、その後の空 q-Q strip は置換後 stream の再 decode が必要 —
+ *    ここは共有してはならない
+ *  - 損傷なしページの空 q-Q strip は stripEmptyQBlocksOnPage 本体と同一の
+ *    書き戻しロジック (bytesEqual ガード / Filter 再設定 / DecodeParms 削除)
+ */
+export function sweepNonDirtyPage(
+  pageNode: {
+    get?: (key: PDFName) => PDFObject | undefined;
+    Contents?: () => PDFObject | undefined;
+    set: (key: PDFName, value: PDFObject) => void;
+  },
+  context: typeof PDFDocument.prototype.context,
+  contentRefCounts: Map<string, number>,
+  logPrefix = '[pdfSaverCore]',
+): void {
+  const contentsKey = PDFName.of('Contents');
+  const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
+  if (!rawContents) return;
+
+  const resolved = context.lookup(rawContents);
+  const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+
+  // 1パス目: decode しながら issue #1 損傷 (BT 外テキスト演算子) を検査する。
+  // stream の列挙・skip 条件 (非 PDFRawStream / decode 不能) ・early-exit は
+  // pageHasTextOperatorDamage と同一。
+  const decodedEntries: Array<{ stream: PDFRawStream; decoded: Uint8Array }> = [];
+  for (const streamRef of streams) {
+    const stream = context.lookup(streamRef);
+    if (!(stream instanceof PDFRawStream)) continue;
+    const decoded = decodeStreamContents(stream);
+    if (decoded === null) continue;
+    if (hasTextOperatorsOutsideTextObjects(decoded)) {
+      // 損傷あり: 従来 2 関数へ委譲。replacePageTextContentStreams が Contents を
+      // 差し替える可能性があるため、ここまでの decode 結果は再利用できない。
+      replacePageTextContentStreams(pageNode, context, contentRefCounts, logPrefix);
+      stripEmptyQBlocksOnPage(pageNode, context);
+      return;
+    }
+    decodedEntries.push({ stream, decoded });
+  }
+
+  // 損傷なし: decode 済みバイト列を再利用して空 q-Q ラッパーのみ除去する (issue #96 要件2)。
+  for (const { stream, decoded } of decodedEntries) {
+    const cleaned = stripEmptyGraphicsStateBlocksOnly(decoded);
+    if (bytesEqual(cleaned, decoded)) continue;
+    stream.updateContents(deflate(cleaned));
+    stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+    stream.dict.delete(PDFName.of('DecodeParms'));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // getRotationCm
 // ---------------------------------------------------------------------------
 

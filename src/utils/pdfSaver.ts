@@ -20,7 +20,7 @@ import {
   replacePageTextContentStreams,
   pageHasTextOperatorDamage,
   sanitizeBBoxMetaTexts,
-  stripEmptyQBlocksOnPage,
+  sweepNonDirtyPage,
   getRotationCm,
   normalizeRotation,
   getViewportSize,
@@ -575,43 +575,22 @@ export async function buildPdfDocument(
     }
   }
 
-  // issue #96 要件2: dirty で無いページにも「空 q-Q ラッパー除去」だけは適用する。
-  // フルパス (pruneStalePecoToolResources + replacePageTextContentStreams + drawText 再描画)
-  // と異なり、BT...ET には触れずフォント辞書も触らないため、原本 OCR レイヤーは保持される。
-  // 過去の保存で累積した空 q-Q ブロックを安全に除去でき、再読み込み→保存だけで容量が縮む。
-  //
-  // issue #1 (Acrobat 7 TJ 互換 仮修正): BT 外にテキスト演算子が漏れているページに対し、
-  // replacePageTextContentStreams で BT...ET ブロックを strip する。
-  // 再描画は行わない（フォント辞書・existingBBoxMeta には触れない）ため、
-  // 原本 OCR テキストレイヤーは消去される。bloat detection と異なり fontBytes 有無に
-  // 依存しない。実機検証 (Acrobat 7.0) が完了するまでは仮修正として維持する。
+  // 未編集ページのスイープ: issue #96 要件2 (空 q-Q ラッパー除去) + issue #1
+  // (Acrobat 7 TJ 互換 仮修正: BT 外テキスト演算子の strip)。経緯の詳細と
+  // PCT-059 の decode 共有最適化は sweepNonDirtyPage の JSDoc を参照。
   const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
   for (let pi = 0; pi < pdfPageCount; pi++) {
     if (dirtyPageIndexSet.has(pi)) continue;
     const page = pdfDoc.getPage(pi);
-    // issue #1: BT 外テキスト演算子検出 → strip のみ (再描画なし)
-    if (pageHasTextOperatorDamage(
-      page.node as unknown as { get?: (key: PDFName) => PDFObject | undefined; Contents?: () => PDFObject | undefined },
-      pdfDoc.context,
-    )) {
-      replacePageTextContentStreams(
-        page.node as unknown as {
-          get?: (key: PDFName) => PDFObject | undefined;
-          Contents?: () => PDFObject | undefined;
-          set: (key: PDFName, value: PDFObject) => void;
-        },
-        pdfDoc.context,
-        contentRefCounts,
-        '[pdfSaver#1]',
-      );
-    }
-    stripEmptyQBlocksOnPage(
+    sweepNonDirtyPage(
       page.node as unknown as {
         get?: (key: PDFName) => PDFObject | undefined;
         Contents?: () => PDFObject | undefined;
         set: (key: PDFName, value: PDFObject) => void;
       },
       pdfDoc.context,
+      contentRefCounts,
+      '[pdfSaver#1]',
     );
   }
 

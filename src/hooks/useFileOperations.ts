@@ -11,6 +11,7 @@ import {
   loadPDF,
   getAllTemporaryPageData,
   clearTemporaryChanges,
+  clearTemporaryChangesForPages,
   clearCachedPages,
   destroySharedPdfProxy,
 } from '../utils/pdfLoader';
@@ -294,6 +295,10 @@ export function useFileOperations(
   const resetDirty = usePecoStore((s) => s.resetDirty);
   const setLastSavedActionIndex = usePecoStore((s) => s.setLastSavedActionIndex);
   const isSavingRef = useRef(false);
+  // PCT-074: handleOpen のファイル読込中フラグ。App 側の isLoadingFile state は
+  // setIsLoadingFile callback で更新するだけでこの hook からは読めないため、
+  // handleSave の「読込中は保存拒否」ガード用に ref でも保持する。
+  const isLoadingFileRef = useRef(false);
   // executeSaveAs は下で定義されるため、_executeSave / handleSave から参照できるよう
   // ref で間接化する。issue #53: writeFileAtomically が EACCES/EBUSY で失敗したときに
   // showToast の action ボタンから「別名で保存」へフォールバックさせるのに使う。
@@ -348,7 +353,16 @@ export function useFileOperations(
 
   const handleOpen = async (
     explicitPath?: string,
-    opts?: { bypassOcrGuard?: boolean },
+    opts?: {
+      bypassOcrGuard?: boolean;
+      /**
+       * PCT-076: true のとき、読み込み完了後の onOpenComplete (App 側で
+       * checkAndPromptOcrZero に配線) を呼ばない。バッチジョブの機械的な
+       * オープンで OCR ゼロ検出ダイアログが出ると、バッチ OCR 実行中に
+       * テキスト層取り込みが同一ページ群へ並行書き込みして混在保存になるため。
+       */
+      suppressOcrZeroPrompt?: boolean;
+    },
   ): Promise<boolean> => {
     perf.mark('open.start', { explicit: !!explicitPath });
     try {
@@ -392,6 +406,7 @@ export function useFileOperations(
           showToast("保存中はPDFを開けません。");
           return false;
         }
+        isLoadingFileRef.current = true;
         setIsLoadingFile?.(true);
 
         try {
@@ -403,6 +418,18 @@ export function useFileOperations(
           perf.mark('open.loadPdfStart');
           const doc = await loadPDF(selected);
           perf.mark('open.loadPdfDone', { totalPages: doc.totalPages });
+          // PCT-074: loadPDF の await 中 (大型 PDF では数秒〜数十秒) に保存が開始
+          // されていたら読み込みを中止する。このまま続行すると、直後の
+          // clearTemporaryChanges / setDocument が保存処理の IDB 回収 (readIdbDirty)
+          // や状態反映と交差し、退避 dirty ページが欠落したまま上書き保存される。
+          // 保存完了を待つ手段 (保存完了 Promise の追跡) は無いため安全側で中断する。
+          // 中断後も store の document は旧ファイルのままなので表示は壊れない
+          // (共有 pdfjs proxy は次の描画要求時に旧ファイルで再取得される。
+          //  これは直下の「未保存変更を破棄できませんでした」失敗経路と同じ扱い)。
+          if (isSavingRef.current) {
+            showToast('保存中のため読み込みを中止しました。保存完了後に再度開いてください。');
+            return false;
+          }
           if (discardTemporaryChangesFilePath) {
             try {
               await waitForPendingIdbSaves();
@@ -417,8 +444,13 @@ export function useFileOperations(
           setDocument(doc);
           perf.mark('open.setDoc');
           addToRecent(selected);
-          onOpenComplete?.(doc);
+          // PCT-076: バッチジョブ等の機械的なオープンでは OCR ゼロ検出プロンプト
+          // (onOpenComplete 経由の checkAndPromptOcrZero) を発火させない。
+          if (!opts?.suppressOcrZeroPrompt) {
+            onOpenComplete?.(doc);
+          }
         } finally {
+          isLoadingFileRef.current = false;
           setIsLoadingFile?.(false);
         }
 
@@ -452,6 +484,7 @@ export function useFileOperations(
         }
       }
       showToast("ファイルの読み込みに失敗しました。", true);
+      isLoadingFileRef.current = false;
       setIsLoadingFile?.(false);
       return false;
     }
@@ -534,10 +567,17 @@ export function useFileOperations(
       () => getAllTemporaryPageData(sourceFilePath),
     );
 
+    // PCT-068: メモリ在ページは IDB エントリで上書きしない (メモリ優先)。
+    // loadPage は LRU 退避ページを復元しても IDB エントリを消さないため、
+    // 「退避 → 復元 → 再編集 → 保存」で古い IDB エントリが新しい編集を
+    // 巻き戻す事故が起きていた。IDB へ書く全経路 (LRU 退避 / undo・redo
+    // write-through / clearOcrAllPages) は「メモリと同値」か「メモリから
+    // 消えたページのみ」を書くため、メモリ在ページは常にメモリが最新。
     const mergedPages = new Map<number, PageData>(document.pages);
     for (const [idx, data] of tempDirtyPages.entries()) {
-      const existing = mergedPages.get(idx);
-      mergedPages.set(idx, existing ? { ...existing, ...data } : (data as PageData));
+      if (!mergedPages.has(idx)) {
+        mergedPages.set(idx, data as PageData);
+      }
     }
 
     // Dirty ページのみを Worker に渡すことで postMessage の structured clone コストを
@@ -616,11 +656,14 @@ export function useFileOperations(
     setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
     // PCT-050: savePDF の実行中にユーザーが別ページを編集すると、LRU パージで
     // 新たな saveTemporaryPageDataBatch が pendingIdbSaves へ追加される場合がある。
-    // clearTemporaryChanges の直前に再度待機し、それらの書き込みが完了してからクリアする。
+    // IDB クリアの直前に再度待機し、それらの書き込みが完了してからクリアする。
     await withStep('waitIdbSavesBeforeClear', 15_000, () => waitForPendingIdbSaves())
       .catch((e) => { console.warn('[save] waitIdbSavesBeforeClear failed (ignored):', e); });
-    // LRU退避ページの IDB エントリも保存完了済みとしてクリア。失敗しても保存は成功扱い。
-    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChanges(sourceFilePath))
+    // PCT-070: 保存スナップショットで実際に回収したページ (dirtyOnlyPages) の
+    // IDB エントリのみクリアする。ファイル単位の全削除 (clearTemporaryChanges) だと、
+    // スナップショット後に退避された別ページの未保存編集まで巻き込んで消えるため。
+    // 失敗しても保存は成功扱い。
+    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChangesForPages(sourceFilePath, [...dirtyOnlyPages.keys()]))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
     // issue #115 / #119: 保存スナップショットに載った各ページの PageData
     // オブジェクト参照 (savedPageSnapshots) を返す。呼び出し側は保存後の
@@ -650,6 +693,14 @@ export function useFileOperations(
     const { document } = usePecoStore.getState();
     if (!document) {
       showToast("PDFが開かれていません。", true);
+      return false;
+    }
+    // PCT-074: ファイル読込中の保存は拒否する (handleOpen 側の再チェックと対称の
+    // ガード)。読込中オーバーレイはビューア区画のみで Ctrl+S は window リスナーに
+    // 素通りするため、ここで止めないと読込完了時の clearTemporaryChanges /
+    // setDocument と保存処理が交差して部分保存になる。
+    if (isLoadingFileRef.current) {
+      showToast('PDFの読み込み中は保存できません。読み込みが完了してから再度お試しください。');
       return false;
     }
     if (isOcrRunningRef?.current && !options?.bypassOcrGuard) {
@@ -686,6 +737,14 @@ export function useFileOperations(
           return false;
         }
         if (!confirmed) return false;
+        // PCT-075: onRequestDiffPreview の await はユーザーがモーダルを操作する
+        // まで無期限に保留される。その間に別経路 (Ctrl+Shift+S の別名保存等) で
+        // 保存が開始していたら、続行すると _executeSave が二本並走して
+        // clearTemporaryChangesForPages と readIdbDirty が交差するため中断する。
+        if (isSavingRef.current) {
+          showToast('別の保存処理が進行中です。完了してから再度お試しください。');
+          return false;
+        }
       }
     }
 
@@ -786,6 +845,13 @@ export function useFileOperations(
         defaultPath: document.fileName
       });
       if (path && typeof path === 'string') {
+        // PCT-075: ネイティブ保存ダイアログの await 中 (ユーザーがパスを選ぶまで
+        // 無期限) に別の保存処理が開始していたら中断する。冒頭の isSavingRef
+        // チェックはダイアログ表示前の値しか見ていない。
+        if (isSavingRef.current) {
+          showToast('別の保存処理が進行中です。完了してから再度お試しください。');
+          return;
+        }
         isSavingRef.current = true;
         setIsSaving?.(true);
         try {

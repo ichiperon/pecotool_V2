@@ -69,6 +69,9 @@ vi.mock('../../utils/pdfTemporaryStorage', () => ({
       if (key.startsWith(prefix)) fakeIdb.delete(key);
     }
   }),
+  clearTemporaryChangesForPages: vi.fn(async (filePath: string, pageIndexes: number[]) => {
+    for (const pageIndex of pageIndexes) fakeIdb.delete(`${filePath}:${pageIndex}`);
+  }),
   getCachedPage: vi.fn(async () => null),
   setCachedPage: vi.fn(),
 }));
@@ -224,15 +227,12 @@ describe.skipIf(!hasRealPdf)('A3: LRU + IDB 経由の save', () => {
     const tempPages = await getAllTemporaryPageData(REAL_PDF_PATH);
     console.log(`[A3] getAllTemporaryPageData returned: ${tempPages.size} pages`);
 
+    // PCT-068: 実装と同じくメモリ在ページは IDB エントリで上書きしない (メモリ優先)
     const merged = new Map<number, PageData>(afterEditState.document!.pages);
     for (const [idx, data] of tempPages.entries()) {
-      const existing = merged.get(idx);
-      merged.set(
-        idx,
-        existing
-          ? ({ ...existing, ...(data as Partial<PageData>) } as PageData)
-          : (data as PageData),
-      );
+      if (!merged.has(idx)) {
+        merged.set(idx, data as PageData);
+      }
     }
     const dirtyOnly = new Map<number, PageData>(
       [...merged.entries()].filter(([, p]) => p.isDirty),

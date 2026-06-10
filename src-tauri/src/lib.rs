@@ -651,6 +651,14 @@ fn do_windows_ocr(image_path: &str, render_scale: f64, language_tag: &str) -> Re
         Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
     };
 
+    // PCT-079: render_scale は bbox 座標変換の除算分母に使うため、0 以下・非有限値を
+    // COM 初期化前に拒否する（正規 UI からは到達しないが防御的に検証）。
+    if !render_scale.is_finite() || render_scale <= 0.0 {
+        return Err(format!(
+            "render_scaleが不正です (0より大きい有限値が必要): {render_scale}"
+        ));
+    }
+
     // このスレッドの COM 初期化
     // S_OK (0)      = 初期化成功 → 関数終了時に CoUninitialize が必要
     // S_FALSE (1)   = 既に初期化済みだが、この呼び出しに対応する CoUninitialize が必要
@@ -884,8 +892,19 @@ fn write_chunk_at(path: &std::path::Path, offset: u64, bytes: &[u8]) -> Result<(
 }
 
 /// チャンク書き込み済みの一時 PDF を正式ファイルへ置き換える。
-/// Windows では `rename(temp, target)` が既存ファイルを上書きできないため、
-/// 既存 target を同一ディレクトリのバックアップへ退避してから temp を target に移動する。
+///
+/// PCT-077: 旧実装は「Windows では rename が既存ファイルを上書きできない」という
+/// 誤った前提で「① target→backup 退避 → ② temp→target」の2段階 rename を行っており、
+/// ①と②の間でプロセス強制終了・電源断が起きると target のファイル名が消失する窓が
+/// あった。実際には `std::fs::rename` は Windows でも
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` を使うため、既存ファイルを単一の
+/// アトミック操作で置き換えられる（テスト `std_fs_rename_overwrites_existing_target`
+/// で実測確認済み）。backup 退避を廃止した単一 rename 方式により、どの時点で
+/// クラッシュしても target 名は常に旧内容か新内容のどちらか完全な方を指す。
+///
+/// PCT-078: `write_pdf_chunk` (write_chunk_at) は性能上チャンク毎の fsync を
+/// 行わないため、rename 直前にここで一度だけ temp を sync し、rename 直後の
+/// 電源断で不完全な内容が target に昇格することを防ぐ。
 #[tauri::command]
 async fn replace_pdf_file(
     app: tauri::AppHandle,
@@ -894,7 +913,6 @@ async fn replace_pdf_file(
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         use std::fs;
-        use std::time::{SystemTime, UNIX_EPOCH};
 
         let temp = normalize_child_path(&temp_path)?;
         let target = validate_allowed_pdf_target_path(&app, &target_path)?;
@@ -912,75 +930,57 @@ async fn replace_pdf_file(
             return Err("temp file is empty".to_string());
         }
 
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let backup = target.with_extension(format!("pecotool-backup-{}.tmp", stamp));
-
-        replace_target_with_temp(&temp, &target, &backup)
+        replace_target_with_temp(&temp, &target)
     })
     .await
     .map_err(|e| format!("spawn_blocking error: {}", e))?
 }
 
-/// target が存在しない場合は temp を target に移動する。
-/// target が存在する場合は backup に退避してから temp を target に移動する。
-/// temp→target の移動が失敗した場合は backup を target に復元してエラーを返す。
+/// temp を target へ単一 rename で移動する（target 既存なら上書き）。
+/// rename 前に temp を fsync し、書き込み済みチャンクを物理ディスクへ確定させる
+/// (PCT-078)。
 ///
 /// この関数は `AppHandle` に依存せず、テスト可能な純粋なファイル操作のみを行う。
 fn replace_target_with_temp(
     temp: &std::path::Path,
     target: &std::path::Path,
-    backup: &std::path::Path,
 ) -> Result<(), String> {
-    replace_target_with_temp_inner(temp, target, backup, |src, dst| std::fs::rename(src, dst))
+    sync_file_to_disk(temp)?;
+    replace_target_with_temp_inner(temp, target, |src, dst| std::fs::rename(src, dst))
+}
+
+/// PCT-078: rename 直前に呼び、ファイル内容を OS バッファからディスクへ flush する。
+/// Windows の FlushFileBuffers は書き込みアクセス権を要求するため write モードで
+/// 開く（truncate しないので内容は不変）。
+fn sync_file_to_disk(path: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("open for sync failed: {e} ({})", path.to_string_lossy()))?;
+    file.sync_all()
+        .map_err(|e| format!("sync_all failed: {e} ({})", path.to_string_lossy()))?;
+    Ok(())
 }
 
 /// rename 操作を注入可能にした内部実装。テストで失敗注入に使う。
 ///
-/// - `rename_fn(src, dst)` — すべての rename 操作に使われる
-/// - target が存在しない場合: `rename_fn(temp, target)` のみ実行
-/// - target が存在する場合:
-///   1. `rename_fn(target, backup)` で退避
-///   2. `rename_fn(temp, target)` で上書き。失敗時は `rename_fn(backup, target)` で復元
+/// PCT-077: target の既存有無によらず `rename_fn(temp, target)` を1回だけ実行する
+/// （`std::fs::rename` は Windows でも既存 target をアトミックに置き換える）。
+/// 旧実装の backup 退避（2段階 rename）は廃止: クラッシュ時に target 名が消失する
+/// 窓と backup ファイル残留の両方を除去した。rename が失敗した場合は target に
+/// 一切触れていないため「target 無傷・temp 残存」が成立する（temp はユーザー
+/// データ救済のため削除しない）。
 fn replace_target_with_temp_inner(
     temp: &std::path::Path,
     target: &std::path::Path,
-    backup: &std::path::Path,
     rename_fn: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    if !target.exists() {
-        rename_fn(temp, target)
-            .map_err(|e| format!("rename temp->target failed: {e}"))?;
-        return Ok(());
-    }
-
-    rename_fn(target, backup)
-        .map_err(|e| format!("rename target->backup failed: {e}"))?;
-
-    match rename_fn(temp, target) {
-        Ok(()) => {
-            if let Err(e) = std::fs::remove_file(backup) {
-                eprintln!(
-                    "replace_pdf_file succeeded, but stale backup cleanup failed: {e}; cleanup target: {}",
-                    backup.to_string_lossy()
-                );
-            }
-            Ok(())
-        }
-        Err(e) => {
-            let restore_result = rename_fn(backup, target);
-            let _ = std::fs::remove_file(temp);
-            match restore_result {
-                Ok(()) => Err(format!("rename temp->target failed, original restored: {e}")),
-                Err(restore_err) => Err(format!(
-                    "rename temp->target failed ({e}); restore failed ({restore_err}); backup: {}",
-                    backup.to_string_lossy()
-                )),
-            }
-        }
-    }
+    rename_fn(temp, target).map_err(|e| {
+        format!(
+            "rename temp->target failed: {e}; temp file kept at: {}",
+            temp.to_string_lossy()
+        )
+    })
 }
 
 fn normalize_child_path(path: &str) -> Result<std::path::PathBuf, String> {
@@ -1396,80 +1396,121 @@ mod tests {
         dir
     }
 
+    /// PCT-077 検証: `std::fs::rename(temp, target)` は target が既存でも
+    /// (a) Err にならない (b) target の内容が temp のものになる (c) temp が消える。
+    ///
+    /// Windows の `std::fs::rename` は内部で
+    /// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` を使うため、既存ファイルを
+    /// 単一のアトミック操作で置き換えられる。この性質が
+    /// `replace_target_with_temp_inner` の単一 rename 方式の前提なので、
+    /// プラットフォーム回帰検知としてテストで固定する。
+    #[test]
+    fn std_fs_rename_overwrites_existing_target() {
+        let dir = make_replace_test_dir("rename_verify");
+        let temp = dir.join("verify.pdf.pecotool-1.tmp");
+        let target = dir.join("verify.pdf");
+
+        std::fs::write(&temp, b"temp content").unwrap();
+        std::fs::write(&target, b"old target content").unwrap();
+
+        let result = std::fs::rename(&temp, &target);
+
+        assert!(
+            result.is_ok(),
+            "rename over existing target must succeed, got: {:?}",
+            result.err()
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"temp content",
+            "target must contain temp's content after rename"
+        );
+        assert!(!temp.exists(), "temp must be gone after rename");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// (a) target が存在しない場合: temp の内容が target に移動される。
     #[test]
     fn replace_inner_no_existing_target_moves_temp_to_target() {
         let dir = make_replace_test_dir("a");
         let temp = dir.join("sample.pdf.pecotool-12345.tmp");
         let target = dir.join("sample.pdf");
-        let backup = dir.join("sample.pecotool-backup-0.tmp");
 
         std::fs::write(&temp, b"new content").unwrap();
 
-        replace_target_with_temp_inner(&temp, &target, &backup, |src, dst| std::fs::rename(src, dst)).unwrap();
+        replace_target_with_temp_inner(&temp, &target, |src, dst| std::fs::rename(src, dst)).unwrap();
 
         assert!(target.exists(), "target must exist after replace");
         assert!(!temp.exists(), "temp must be gone after replace");
-        assert!(!backup.exists(), "backup must not be created when target did not exist");
         assert_eq!(std::fs::read(&target).unwrap(), b"new content");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// (b) target が存在する場合: 置換成功後に target が新内容になり、backup が削除される。
+    /// (b) target が存在する場合: 単一 rename で target が新内容になり、
+    /// backup ファイル等の残骸が一切作られない (PCT-077)。
     #[test]
-    fn replace_inner_existing_target_replaced_and_backup_cleaned_up() {
+    fn replace_inner_existing_target_replaced_without_residue() {
         let dir = make_replace_test_dir("b");
         let temp = dir.join("doc.pdf.pecotool-99999.tmp");
         let target = dir.join("doc.pdf");
-        let backup = dir.join("doc.pecotool-backup-1.tmp");
 
         std::fs::write(&temp, b"new version").unwrap();
         std::fs::write(&target, b"old version").unwrap();
 
-        replace_target_with_temp_inner(&temp, &target, &backup, |src, dst| std::fs::rename(src, dst)).unwrap();
+        replace_target_with_temp_inner(&temp, &target, |src, dst| std::fs::rename(src, dst)).unwrap();
 
         assert!(target.exists(), "target must exist after replace");
         assert!(!temp.exists(), "temp must be gone after replace");
-        assert!(!backup.exists(), "backup must be removed after successful replace");
         assert_eq!(std::fs::read(&target).unwrap(), b"new version");
+
+        // ディレクトリには target 1つだけが残る（backup 残骸ゼロ）
+        let entries: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec!["doc.pdf".to_string()],
+            "no residue files must remain after replace"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// (c) temp→target の rename が失敗した場合: 元の target の内容が復元される。
-    /// これが最重要: データ損失耐性の中核保証。
+    /// (c) rename が失敗した場合: target は無傷（元の内容のまま）で temp が残存する。
+    /// これが最重要: データ損失耐性の中核保証 (PCT-077)。
+    /// 単一 rename は失敗しても target に触れないため、旧実装のような復元処理は不要。
     #[test]
-    fn replace_inner_temp_to_target_failure_restores_original() {
+    fn replace_inner_rename_failure_leaves_target_intact_and_temp_present() {
         let dir = make_replace_test_dir("c");
         let temp = dir.join("restore.pdf.pecotool-77777.tmp");
         let target = dir.join("restore.pdf");
-        let backup = dir.join("restore.pecotool-backup-2.tmp");
 
         std::fs::write(&temp, b"new content").unwrap();
         std::fs::write(&target, b"original content").unwrap();
 
-        // rename_fn: target->backup は成功、temp->target は失敗、backup->target は成功
-        let fail_temp_to_target = |src: &std::path::Path, dst: &std::path::Path| -> std::io::Result<()> {
-            if src == temp && dst == target {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected failure"));
-            }
-            std::fs::rename(src, dst)
+        let fail_rename = |_src: &std::path::Path, _dst: &std::path::Path| -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected failure"))
         };
 
-        let err = replace_target_with_temp_inner(&temp, &target, &backup, fail_temp_to_target)
-            .unwrap_err();
+        let err = replace_target_with_temp_inner(&temp, &target, fail_rename).unwrap_err();
 
-        // エラーメッセージに "original restored" が含まれること
         assert!(
-            err.contains("original restored"),
-            "error must indicate restore succeeded, got: {err}"
+            err.contains("rename temp->target failed"),
+            "error must mention the failed rename, got: {err}"
         );
-        // target が元の内容で復元されていること
-        assert!(target.exists(), "target must be restored after temp->target failure");
+        // target が元の内容のまま無傷であること
         assert_eq!(
             std::fs::read(&target).unwrap(),
             b"original content",
-            "target must contain original content after restore"
+            "target must be untouched after rename failure"
         );
-        // backup は復元に使われたので消えているはず (rename で target に戻った)
-        assert!(!backup.exists(), "backup must have been renamed back to target");
+        // temp はデータ救済のため残存していること
+        assert_eq!(
+            std::fs::read(&temp).unwrap(),
+            b"new content",
+            "temp must remain for data recovery after rename failure"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── write_chunk_at: AppHandle-free core of write_pdf_chunk ──────────
@@ -1620,44 +1661,112 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// (d) temp→target も backup→target（復元）も失敗した場合:
-    /// エラーメッセージに backup パスが含まれ、情報欠落しないこと。
+    /// (d) rename 失敗時のエラーメッセージに temp パスが含まれ、
+    /// 手動復旧（残存 temp からのデータ救済）に必要な情報が欠落しないこと (PCT-077)。
     #[test]
-    fn replace_inner_restore_failure_error_contains_backup_path() {
+    fn replace_inner_rename_failure_error_contains_temp_path() {
         let dir = make_replace_test_dir("d");
         let temp = dir.join("critical.pdf.pecotool-55555.tmp");
         let target = dir.join("critical.pdf");
-        let backup = dir.join("critical.pecotool-backup-3.tmp");
 
         std::fs::write(&temp, b"new data").unwrap();
         std::fs::write(&target, b"original data").unwrap();
 
-        // rename_fn: target->backup は成功、temp->target も backup->target も失敗
-        let fail_both = |src: &std::path::Path, dst: &std::path::Path| -> std::io::Result<()> {
-            if dst == target && src != &*dir {
-                // temp->target および backup->target の両方を失敗させる
-                // ただし target->backup（1回目）は成功させたいので src=target の呼び出しのみ通す
-                if src == target {
-                    return std::fs::rename(src, dst);
-                }
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected failure"));
-            }
-            std::fs::rename(src, dst)
+        let fail_rename = |_src: &std::path::Path, _dst: &std::path::Path| -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected failure"))
         };
 
-        let err = replace_target_with_temp_inner(&temp, &target, &backup, fail_both)
-            .unwrap_err();
+        let err = replace_target_with_temp_inner(&temp, &target, fail_rename).unwrap_err();
 
-        // エラーメッセージに backup パスが含まれること
-        let backup_str = backup.to_string_lossy();
+        let temp_str = temp.to_string_lossy();
         assert!(
-            err.contains(backup_str.as_ref()),
-            "error must contain backup path so operator can recover manually, got: {err}"
+            err.contains(temp_str.as_ref()),
+            "error must contain temp path so operator can recover manually, got: {err}"
         );
-        // "restore failed" という語も含まれること
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── sync_file_to_disk (PCT-078) ──────────────────────────────────────
+
+    /// 既存ファイルへの sync は成功し、内容を変更しない。
+    #[test]
+    fn sync_file_to_disk_succeeds_and_preserves_content() {
+        let dir = make_replace_test_dir("sync_a");
+        let path = dir.join("data.pdf.pecotool-1.tmp");
+        std::fs::write(&path, b"chunk data").unwrap();
+
+        sync_file_to_disk(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"chunk data",
+            "sync must not alter file content"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 存在しないファイルへの sync は open 失敗エラーを返す。
+    #[test]
+    fn sync_file_to_disk_missing_file_returns_error() {
+        let dir = make_replace_test_dir("sync_b");
+        let path = dir.join("missing.pdf.pecotool-2.tmp");
+
+        let err = sync_file_to_disk(&path).unwrap_err();
         assert!(
-            err.contains("restore failed"),
-            "error must mention restore failure, got: {err}"
+            err.contains("open for sync failed"),
+            "expected open error, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// replace_target_with_temp（実運用経路）は sync + 単一 rename で
+    /// 既存 target を新内容に置き換える。sync が経路に含まれることは
+    /// 関数本体（sync_file_to_disk → inner）で構造的に保証されるため、
+    /// ここでは経路全体が実ファイルで成功することを固定する (PCT-078)。
+    #[test]
+    fn replace_target_with_temp_full_path_replaces_existing_target() {
+        let dir = make_replace_test_dir("sync_c");
+        let temp = dir.join("full.pdf.pecotool-3.tmp");
+        let target = dir.join("full.pdf");
+        std::fs::write(&temp, b"synced new content").unwrap();
+        std::fs::write(&target, b"old content").unwrap();
+
+        replace_target_with_temp(&temp, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"synced new content");
+        assert!(!temp.exists(), "temp must be gone after replace");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── do_windows_ocr render_scale guard (PCT-079) ──────────────────────
+
+    /// render_scale == 0 は COM 初期化・ファイルアクセス前に拒否される（ゼロ除算防止）。
+    #[test]
+    fn do_windows_ocr_rejects_zero_render_scale() {
+        let err = do_windows_ocr("unused.png", 0.0, "ja").unwrap_err();
+        assert!(
+            err.contains("render_scale"),
+            "error must mention render_scale, got: {err}"
+        );
+    }
+
+    /// 負の render_scale も拒否される。
+    #[test]
+    fn do_windows_ocr_rejects_negative_render_scale() {
+        let err = do_windows_ocr("unused.png", -1.5, "ja").unwrap_err();
+        assert!(
+            err.contains("render_scale"),
+            "error must mention render_scale, got: {err}"
+        );
+    }
+
+    /// 非有限値（NaN）も拒否される（serde_json 経由では通常到達しないが防御的に）。
+    #[test]
+    fn do_windows_ocr_rejects_nan_render_scale() {
+        let err = do_windows_ocr("unused.png", f64::NAN, "ja").unwrap_err();
+        assert!(
+            err.contains("render_scale"),
+            "error must mention render_scale, got: {err}"
         );
     }
 }
