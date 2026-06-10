@@ -773,9 +773,12 @@ export function useOcrEngine(
         if (importConfirmed) {
           await importTextLayerAllPages(doc, capturedEpoch);
         } else {
+          // PCT-090: 既存テキスト層がある PDF への再 OCR は「置き換え」であることを明示する。
+          // 実機で「無編集のつもりが全ページ再 OCR されて文字が変わった」事例が出たため、
+          // 影響（元の文字と変わりうる）を文言で警告する。
           const ocrConfirmed = await ask(
-            '全ページ OCR を実行しますか？',
-            { title: 'OCR実行の提案', kind: 'info' }
+            'このPDFの既存テキスト層を Windows OCR の認識結果で置き換えます。\n元の文字と異なる結果になる場合があります（記号・旧字などは特に変わりやすい）。\n\n全ページ OCR を実行しますか？',
+            { title: 'OCR実行の確認（テキスト層の置き換え）', kind: 'warning' }
           );
           if (ocrConfirmed && isCurrentDocument(capturedEpoch)) await runOcrAllPages();
         }
