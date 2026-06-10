@@ -27,6 +27,8 @@ const h = vi.hoisted(() => ({
   getCachedPageProxyMock: vi.fn(),
   openFreshPdfDocMock: vi.fn(),
   getTemporaryPageDataMock: vi.fn(),
+  // PCT-094: pdfMetadataLoader のモック
+  loadPecoToolBBoxMetaMock: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: h.invokeMock, convertFileSrc: (p: string) => p }));
@@ -135,6 +137,11 @@ vi.mock('../../utils/bitmapCache', () => ({ clearBitmapCache: vi.fn() }));
 vi.mock('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDocument: vi.fn() }));
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
 
+// PCT-094: pdfMetadataLoader モック
+vi.mock('../../utils/pdfMetadataLoader', () => ({
+  loadPecoToolBBoxMeta: h.loadPecoToolBBoxMetaMock,
+}));
+
 // target import (mock 後)
 import { useOcrEngine } from '../../hooks/useOcrEngine';
 import { usePecoStore } from '../../store/pecoStore';
@@ -170,6 +177,8 @@ beforeEach(() => {
   h.getCachedPageProxyMock.mockReset().mockResolvedValue(makeMockPage());
   h.openFreshPdfDocMock.mockReset().mockResolvedValue(makeMockPdf(3));
   h.getTemporaryPageDataMock.mockReset().mockResolvedValue(null);
+  // PCT-094: デフォルトはメタなし (null) = 外部 PDF を想定した既存テストに影響しない
+  h.loadPecoToolBBoxMetaMock.mockReset().mockResolvedValue(null);
 
   usePecoStore.setState({
     document: null,
@@ -1239,5 +1248,87 @@ describe('PCT-091: checkAndPromptOcrZero はテキスト層検出時にダイア
     expect(h.askMock).toHaveBeenCalledTimes(1);
     expect(String(h.askMock.mock.calls[0][0])).toContain('OCRデータが含まれていません');
     expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+  });
+});
+
+// PCT-094: PecoToolBBoxes メタを持つ PDF では checkAndPromptOcrZero が何もしない
+// =====================================================================
+// 背景: PecoTool 保存済み PDF には不可視テキスト層 + PecoToolBBoxes メタがある。
+// 開くと checkAndPromptOcrZero が「テキスト層あり」と検知し importTextLayerAllPages を
+// 呼ぶが、その内部で loadPage が bboxMeta=null で実行 (fallback 経路) されるため
+// descent 欠落で bbox 高さが約 71% に縮み、isDirty:true で保存されると劣化が累積する。
+// 修正: メタあり時は checkAndPromptOcrZero の冒頭でスキップし、ask も取り込みも行わない。
+describe('PCT-094: checkAndPromptOcrZero は PecoToolBBoxes メタあり PDF を無処理でスキップする', () => {
+  const makeTextLayerPdf = (totalPages: number, items: Array<{ str: string }>) => ({
+    numPages: totalPages,
+    getPage: vi.fn(async () => ({
+      ...makeMockPage(),
+      getTextContent: vi.fn(async () => ({ items })),
+    })),
+    destroy: vi.fn(async () => {}),
+    cleanup: vi.fn(async () => {}),
+  });
+
+  it('メタあり PDF: ask も取り込みトーストも発火しない（何もしない）', async () => {
+    const doc = makeDoc(2);
+    usePecoStore.getState().setDocument(doc);
+    // テキスト層あり (PCT-091 が自動取り込みを試みるはずのケース)
+    vi.mocked(pdfLoaderModule.getSharedPdfProxy).mockResolvedValue(
+      makeTextLayerPdf(2, [{ str: 'テキスト' }]) as never,
+    );
+    // PCT-094: メタあり = PecoTool 保存済み PDF
+    h.loadPecoToolBBoxMetaMock.mockResolvedValue({
+      '0': [{ bbox: { x: 0, y: 0, width: 10, height: 10 }, writingMode: 'horizontal', order: 0, text: 'a' }],
+    });
+
+    const toasts: string[] = [];
+    const { result } = renderHook(() => useOcrEngine((msg: string) => toasts.push(msg)));
+    await act(async () => {
+      await result.current.checkAndPromptOcrZero(doc);
+    });
+
+    // メタあり → スキップ: ask は呼ばれない
+    expect(h.askMock).not.toHaveBeenCalled();
+    // 取り込みトーストも発火しない
+    expect(toasts.some((m) => m.includes('テキスト層を取り込み中'))).toBe(false);
+    // run_ocr invoke も走らない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+    // [High] source 引数の契約断言: private stream を読める形で呼んでいることを保証する。
+    // source なし（第2引数なし）で呼ぶと catalog private stream を読む経路がスキップされ、
+    // 旧 Info 辞書しか見ないため現行版 PecoTool 保存済み PDF でメタが null になる。
+    // メタあり = スキップで importTextLayerAllPages に到達しないため呼び出しは 1 回のみ。
+    expect(h.loadPecoToolBBoxMetaMock).toHaveBeenCalledTimes(1);
+    for (const call of h.loadPecoToolBBoxMetaMock.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ loadBytes: expect.any(Function) }));
+    }
+  });
+
+  it('メタなし + テキスト層あり: 従来どおり自動取り込みを開始する（PCT-091 後方互換）', async () => {
+    const doc = makeDoc(2);
+    usePecoStore.getState().setDocument(doc);
+    vi.mocked(pdfLoaderModule.getSharedPdfProxy).mockResolvedValue(
+      makeTextLayerPdf(2, [{ str: 'テキスト' }]) as never,
+    );
+    // PCT-094: メタなし = 外部 PDF
+    h.loadPecoToolBBoxMetaMock.mockResolvedValue(null);
+
+    const toasts: string[] = [];
+    const { result } = renderHook(() => useOcrEngine((msg: string) => toasts.push(msg)));
+    await act(async () => {
+      await result.current.checkAndPromptOcrZero(doc);
+    });
+
+    // メタなし → PCT-091 の自動取り込みが走る (ask は呼ばれない)
+    expect(h.askMock).not.toHaveBeenCalled();
+    expect(toasts.some((m) => m.includes('テキスト層を取り込み中'))).toBe(true);
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+    // [High] source 引数の契約断言: private stream を読める形で呼んでいることを保証する。
+    // メタなしでは checkAndPromptOcrZero と importTextLayerAllPages で計 2 回呼ばれる。
+    // toHaveBeenCalledWith は any-call マッチのため 2 回目の source 欠落を素通しする
+    // (再レビューのミューテーションで実証)。全呼び出しを走査して契約をピン留めする。
+    expect(h.loadPecoToolBBoxMetaMock).toHaveBeenCalledTimes(2);
+    for (const call of h.loadPecoToolBBoxMetaMock.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ loadBytes: expect.any(Function) }));
+    }
   });
 });
