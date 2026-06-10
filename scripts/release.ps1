@@ -1,4 +1,4 @@
-# PecoTool v2 リリーススクリプト
+﻿# PecoTool v2 リリーススクリプト
 #
 # 署名付きビルド → latest.json 生成 → 配布リポジトリ (pecotool-releases) への
 # GitHub Release 公開までを 1 コマンドで行う。
@@ -36,7 +36,10 @@ Write-Host "[1/6] バージョン: $version"
 
 # --- 2. 署名付きビルド -----------------------------------------------------
 Write-Host '[2/6] 署名付きビルドを実行 (数分〜15分)...'
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH = $keyPath
+# Tauri v2 の build は TAURI_SIGNING_PRIVATE_KEY (鍵の中身) のみを参照する。
+# _PATH 変数は signer generate のヘルプに載っているが build では読まれない
+# (v2.0.15 リリース時に実測確認)。
+$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $keyPath -Raw).Trim()
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
 npm run tauri build
 if ($LASTEXITCODE -ne 0) { Write-Error 'tauri build が失敗しました' }
