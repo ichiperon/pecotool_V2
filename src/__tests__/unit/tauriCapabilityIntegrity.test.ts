@@ -252,6 +252,22 @@ describe('Tauri capability vs source integrity', () => {
     ).toBe(true);
   });
 
+  it('plugin-updater usage has updater:default in capabilities (PCT-093 regression guard)', () => {
+    // PCT-093 (v2.0.16 regression): @tauri-apps/plugin-updater の check() を
+    // 呼んでいるのに capabilities に updater 系 permission が無く、
+    // チェックが即エラー → UI は silent のため「アップデート確認を押しても
+    // 何も起きない」として隠蔽されていた。
+    const usesUpdater = sourceFiles.some((f) =>
+      nodeFs.readFileSync(f, 'utf-8').includes("@tauri-apps/plugin-updater"),
+    );
+    if (!usesUpdater) return;
+    const hasUpdaterPermission = [...granted].some((p) => p.startsWith('updater:'));
+    expect(
+      hasUpdaterPermission,
+      'updater permission (updater:default 等) is missing from capabilities/default.json but @tauri-apps/plugin-updater is used in source',
+    ).toBe(true);
+  });
+
   it('scope-aware: code using appLocalDataDir() has $APPLOCALDATA scope in at least one fs capability', () => {
     const usesAppLocalDataDir = sourceFiles.some((f) => {
       const content = nodeFs.readFileSync(f, 'utf-8');

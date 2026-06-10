@@ -600,6 +600,20 @@ function App() {
     );
   }, [updateState.available, downloadAndInstall, showToast]);
 
+  // PCT-093: 手動の「アップデート確認」は結果を必ずフィードバックする。
+  // 旧実装は成功 (最新版) でも失敗でも無反応で、updater capability 欠如による
+  // チェック失敗が「押しても何も起きない」として隠蔽されていた。
+  // available の場合のトーストは上の useEffect が出すためここでは出さない。
+  const handleManualCheckUpdate = useCallback(async () => {
+    showToast('更新を確認しています...');
+    const result = await checkForUpdate();
+    if (result === 'latest') {
+      showToast('お使いのバージョンは最新です。');
+    } else if (result === 'error') {
+      showToast('更新の確認に失敗しました。ネットワーク接続をご確認ください。', true);
+    }
+  }, [checkForUpdate, showToast]);
+
   // issue #74 / CloseGuard: isSaving の最新値を ref に同期。
   // useTauriCloseGuard と F5 ガードに渡す前に宣言する必要がある (TDZ 回避)。
   const isSavingRef = useRef(isSaving);
@@ -863,7 +877,7 @@ function App() {
         onShowVersion={() => setHelpModal('version')}
         onShowOcrSettings={() => setShowOcrSettings(true)}
         onOpenLogFolder={handleOpenLogFolder}
-        onCheckUpdate={checkForUpdate}
+        onCheckUpdate={handleManualCheckUpdate}
       />
 
       <main className="main-content">

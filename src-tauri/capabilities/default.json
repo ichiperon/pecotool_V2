@@ -15,6 +15,7 @@
     "core:webview:allow-create-webview-window",
     "opener:default",
     "dialog:default",
+    "updater:default",
     {
       "identifier": "fs:allow-write-file",
       "allow": [
