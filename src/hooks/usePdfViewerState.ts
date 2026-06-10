@@ -26,7 +26,9 @@ export function usePdfViewerState(currentPageIndex: number) {
       const ratioH = (container.clientHeight - margin) / pageHeight;
       const ratioW = (container.clientWidth - margin) / pageWidth;
       const newZoom = Math.floor(Math.min(ratioH, ratioW) * 100);
-      setZoom(Math.max(25, newZoom));
+      // PCT-095: フィット計算経由では 25% フロアを適用しない（0除けのみ）。
+      // 下限クランプは viewerStore.setZoom 側（10%）で一元管理する。
+      setZoom(Math.max(1, newZoom));
     }
   }, [pageWidth, pageHeight, setZoom]);
 

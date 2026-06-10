@@ -173,38 +173,50 @@ describe('viewerStore', () => {
 
   // ── zoom clamp ─────────────────────────────────────────────────
 
-  describe('U-VS-10: zoom clamps at minimum (25)', () => {
-    it('zoom=0.1 is clamped to 25', () => {
+  // PCT-095: 下限を 25→10 に変更。フィット計算が狭いウィンドウで 25% 未満になっても
+  // setZoom で再クランプされずに正しいフィット倍率を保持できるようにした。
+  describe('U-VS-10: zoom clamps at minimum (10)', () => {
+    it('zoom=0.1 is clamped to 10', () => {
       useViewerStore.getState().setZoom(0.1)
-      expect(useViewerStore.getState().zoom).toBe(25)
+      expect(useViewerStore.getState().zoom).toBe(10)
     })
 
-    it('zoom=0 is clamped to 25', () => {
+    it('zoom=0 is clamped to 10', () => {
       useViewerStore.getState().setZoom(0)
-      expect(useViewerStore.getState().zoom).toBe(25)
+      expect(useViewerStore.getState().zoom).toBe(10)
     })
 
-    it('zoom=-100 is clamped to 25', () => {
+    it('zoom=-100 is clamped to 10', () => {
       useViewerStore.getState().setZoom(-100)
-      expect(useViewerStore.getState().zoom).toBe(25)
+      expect(useViewerStore.getState().zoom).toBe(10)
     })
 
-    it('zoom=25 is accepted as-is (boundary)', () => {
+    it('zoom=10 is accepted as-is (boundary)', () => {
+      useViewerStore.getState().setZoom(10)
+      expect(useViewerStore.getState().zoom).toBe(10)
+    })
+
+    it('zoom=11 is accepted without clamping', () => {
+      useViewerStore.getState().setZoom(11)
+      expect(useViewerStore.getState().zoom).toBe(11)
+    })
+
+    it('zoom=25 is accepted as-is (former boundary, now mid-range)', () => {
       useViewerStore.getState().setZoom(25)
       expect(useViewerStore.getState().zoom).toBe(25)
     })
 
-    it('zoom=26 is accepted without clamping', () => {
-      useViewerStore.getState().setZoom(26)
-      expect(useViewerStore.getState().zoom).toBe(26)
+    it('zoom=9 is clamped to 10 (below new floor)', () => {
+      useViewerStore.getState().setZoom(9)
+      expect(useViewerStore.getState().zoom).toBe(10)
     })
   })
 
   describe('U-VS-11: zoom clamps at maximum (500)', () => {
-    it('zoom=5.0 is a valid percentage value (5%) clamped to 25', () => {
-      // Note: zoom is stored as percentage integer (25-500), not as decimal
+    it('zoom=5 is clamped to 10 (PCT-095: new floor)', () => {
+      // Note: zoom is stored as percentage integer (10-500), not as decimal
       useViewerStore.getState().setZoom(5)
-      expect(useViewerStore.getState().zoom).toBe(25)
+      expect(useViewerStore.getState().zoom).toBe(10)
     })
 
     it('zoom=500 is accepted as-is (boundary)', () => {
