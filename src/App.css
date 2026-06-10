@@ -603,14 +603,18 @@ body, #root {
   margin-left: 4px;
 }
 
-/* #192: OCR 低信頼バッジ */
+/* #192: OCR 低信頼バッジ
+   PCT-089: PCT-048 でバッジ文言が「空」「重なり」の可変長になったが width:16px
+   固定のままだったため「重なり」が中央 1 文字（な）しか見えなかった。
+   min-width + padding の可変幅に変更（1 文字でも従来サイズを維持）。 */
 .ocr-confidence-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
+  min-width: 16px;
   height: 16px;
-  border-radius: 50%;
+  padding: 0 5px;
+  border-radius: 8px;
   background-color: #dc2626;
   color: #ffffff;
   font-size: 10px;
@@ -618,6 +622,7 @@ body, #root {
   margin-left: 4px;
   cursor: default;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .ocr-card-drag-handle {

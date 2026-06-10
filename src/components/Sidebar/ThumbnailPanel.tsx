@@ -41,7 +41,7 @@ interface SortableThumbnailWrapperProps {
   children: React.ReactNode;
 }
 
-const SortableThumbnailWrapper: React.FC<SortableThumbnailWrapperProps> = ({ displayIndex, children }) => {
+export const SortableThumbnailWrapper: React.FC<SortableThumbnailWrapperProps> = ({ displayIndex, children }) => {
   const {
     attributes,
     listeners,
@@ -79,6 +79,12 @@ const SortableThumbnailWrapper: React.FC<SortableThumbnailWrapperProps> = ({ dis
       className={`thumbnail-sortable-wrapper thumbnail-grab-handle${isDragging ? ' thumbnail-sortable-wrapper--dragging' : ''}`}
       {...attributes}
       {...safeListeners}
+      // PCT-088: dnd-kit の attributes に含まれる tabIndex=0 を上書きする。
+      // KeyboardSensor 不使用のためキーボードソートには影響しない (role 等の aria 属性は維持)。
+      // tabIndex=0 のままだとクリックしたサムネイルがフォーカスを保持し、ページ移動で
+      // 仮想化リストからアンマウントされた時点でフォーカスが body に落ち、
+      // .scroll-content の onKeyDown (矢印キーページ移動) が効かなくなる。
+      tabIndex={-1}
     >
       {children}
     </div>
@@ -135,6 +141,23 @@ export const ThumbnailItemNode = React.memo(({
   }, [index, thumbnailData, onRequest, loadEpoch]);
 
   const ariaLabel = `ページ ${index + 1}${isDirty ? ' (未保存)' : ''}`;
+
+  // PCT-088: クリック時にフォーカスを安定要素 (.scroll-content) へ明示的に移す。
+  // サムネイル自身がフォーカスを持つと、矢印キーのページ移動で要素が
+  // 仮想化ウィンドウ外へアンマウントされた時点でフォーカスが body に落ち、
+  // 以降の矢印キーがブラウザ標準スクロールになる。
+  // preventScroll: フォーカス移動による意図しないスクロールジャンプを防ぐ。
+  const handleClick = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>) => {
+      const scrollContent = e.currentTarget.closest('.scroll-content');
+      if (scrollContent instanceof HTMLElement) {
+        scrollContent.focus({ preventScroll: true });
+      }
+      onSelect(index);
+    },
+    [index, onSelect],
+  );
+
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -169,7 +192,7 @@ export const ThumbnailItemNode = React.memo(({
       <button
         type="button"
         className="thumbnail-item active"
-        onClick={() => onSelect(index)}
+        onClick={handleClick}
         onContextMenu={handleContextMenu}
         aria-current="page"
         aria-label={ariaLabel}
@@ -182,7 +205,7 @@ export const ThumbnailItemNode = React.memo(({
     <button
       type="button"
       className="thumbnail-item"
-      onClick={() => onSelect(index)}
+      onClick={handleClick}
       onContextMenu={handleContextMenu}
       aria-label={ariaLabel}
     >

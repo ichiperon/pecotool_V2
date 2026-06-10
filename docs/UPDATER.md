@@ -2,6 +2,13 @@
 
 Peco uses `tauri-plugin-updater` (Tauri 2.x) for automatic update notifications.
 
+> **2026-06-10 更新（v2.0.15）**: 署名鍵を生成・設定し、updater を有効化した。
+> - 秘密鍵: `C:\Users\user\.tauri\pecotool_v2.key`（バックアップ: リポジトリ直下 `keys/`・git 管理外）
+> - 配布チャネル: **配布専用 public リポジトリ `abroadcrew02-spec/pecotool-releases`**（ソース本体は private のまま。本体 public 化は履歴に検証用 PDF・内部リンクが含まれるため不採用）
+> - endpoint: `https://github.com/abroadcrew02-spec/pecotool-releases/releases/latest/download/latest.json`
+> - **リリースは `scripts\release.ps1` で 1 コマンド化済み**（署名ビルド → latest.json 生成 → Release 公開 → dist-bin コピー）。以下の手動手順は仕組みの理解・トラブルシュート用として残す。
+> - Tauri 2.x の Windows updater アーティファクトは `*-setup.exe` + `*-setup.exe.sig`（v1 時代の `.nsis.zip` 形式の記述は読み替えること）
+
 ## How it works
 
 1. On startup, the app calls `check()` against the updater endpoint.

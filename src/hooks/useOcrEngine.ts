@@ -476,8 +476,9 @@ export function useOcrEngine(
       Array.from({ length: doc.totalPages }, (_, i) => i),
     );
     if (hasExisting) {
+      // PCT-090: 上書きが「テキストの置き換え」であり元の文字と変わりうることを明示する。
       const overwriteConfirmed = await ask(
-        '一部のページに既存OCRデータがあります。全て上書きしますか？',
+        '一部のページに既存のテキストがあります。Windows OCR の認識結果で上書きすると、元の文字と異なる結果になる場合があります（記号・旧字などは特に変わりやすい）。\n\n全て上書きしますか？',
         { title: '上書き確認', kind: 'warning' }
       );
       if (!overwriteConfirmed) return;
@@ -761,24 +762,14 @@ export function useOcrEngine(
       const layerResult = await detectTextLayerSamplesForDoc(doc);
 
       if (layerResult === 'has_text') {
-        // テキスト層あり: 取り込むか OCR するかユーザーに問う。
-        // @tauri-apps/plugin-dialog の ask() は yes/no のみ。ここでは:
-        //   「はい」→ テキスト層を取り込む
-        //   「いいえ」→ OCR を実行するか再確認
-        const importConfirmed = await ask(
-          'このPDFにはテキスト層があります。OCRを実行せず既存のテキスト層を取り込みますか？\n\n「はい」→ テキスト層を取り込む\n「いいえ」→ OCR を実行するか確認します',
-          { title: 'テキスト層の検出', kind: 'info' }
-        );
+        // PCT-091: テキスト層がある PDF は確認ダイアログなしで自動取り込みする。
+        // 旧実装は「取り込む？」→（いいえ）→「OCR を実行する？」の連続ネイティブ
+        // ダイアログで、同位置に連続表示されるため意図せず再 OCR（テキスト層の
+        // 置き換え）へ入る誤操作が実機で発生した。既存テキストの保全を既定とし、
+        // 再 OCR はリボンの OCR 実行からの明示操作（上書き確認つき・PCT-090 文言）に
+        // 限定する。
         if (!isCurrentDocument(capturedEpoch)) return;
-        if (importConfirmed) {
-          await importTextLayerAllPages(doc, capturedEpoch);
-        } else {
-          const ocrConfirmed = await ask(
-            '全ページ OCR を実行しますか？',
-            { title: 'OCR実行の提案', kind: 'info' }
-          );
-          if (ocrConfirmed && isCurrentDocument(capturedEpoch)) await runOcrAllPages();
-        }
+        await importTextLayerAllPages(doc, capturedEpoch);
       } else {
         // テキスト層なし: 既存挙動 (OCR を促す)
         const confirmed = await ask(

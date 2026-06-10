@@ -14,7 +14,9 @@
 import React from 'react';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, cleanup, act, fireEvent } from '@testing-library/react';
-import { ThumbnailPanel, ThumbnailItemNode } from '../../components/Sidebar/ThumbnailPanel';
+import { DndContext } from '@dnd-kit/core';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { ThumbnailPanel, ThumbnailItemNode, SortableThumbnailWrapper } from '../../components/Sidebar/ThumbnailPanel';
 
 afterEach(() => cleanup());
 
@@ -442,5 +444,98 @@ describe('Issue #286: コンテキストメニュー表示', () => {
 
     safeOnPointerDown({ button: 0 }); // 左クリック
     expect(pointerDownSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── PCT-088 リグレッション ──────────────────────────────────────────────────
+
+describe('PCT-088: 矢印キーページ移動のフォーカス維持', () => {
+  // バグ: クリックしたサムネイル (dnd-kit wrapper, tabIndex=0) がフォーカスを保持し、
+  // 矢印キーでページが進むと仮想化リストからアンマウント → フォーカスが body に落ち、
+  // .scroll-content の onKeyDown が発火しなくなり矢印キーがスクロールに化ける。
+
+  it('SortableThumbnailWrapper の tabIndex は -1 (dnd-kit attributes の tabIndex=0 を上書き)', () => {
+    // 実物の useSortable を使い、attributes 展開後の上書きが効いていることを検証する。
+    // KeyboardSensor 不使用のため tabIndex=0 はフォーカスを奪うだけで利点がない。
+    const { container } = render(
+      <DndContext>
+        <SortableContext items={[0]} strategy={verticalListSortingStrategy}>
+          <SortableThumbnailWrapper displayIndex={0}>
+            <div>thumb</div>
+          </SortableThumbnailWrapper>
+        </SortableContext>
+      </DndContext>,
+    );
+
+    const wrapper = container.querySelector('.thumbnail-sortable-wrapper');
+    expect(wrapper).not.toBeNull();
+    expect(wrapper!.getAttribute('tabindex')).toBe('-1');
+    // aria 属性 (role 等) は維持されること (attributes 展開自体は消さない)
+    expect(wrapper!.getAttribute('role')).toBe('button');
+  });
+
+  it('サムネイルクリックで .scroll-content にフォーカスが移り onSelect が呼ばれる', () => {
+    const fake = makeFakePanel();
+    const { container } = render(
+      <div className="scroll-content" tabIndex={0}>
+        <ThumbnailItemNode
+          index={1}
+          loadEpoch={0}
+          onSelect={fake.onSelectPage}
+          onRequest={fake.onRequestThumbnail}
+          onSubscribeThumbnail={fake.subscribeThumbnail}
+          onGetThumbnail={fake.getThumbnail}
+          onSubscribeActivePage={fake.subscribeActivePage}
+          onGetIsActivePage={fake.getIsActivePage}
+          onSubscribeDirtyPage={fake.subscribeDirtyPage}
+          onGetIsDirtyPage={fake.getIsDirtyPage}
+          onGetRotation={fake.getRotation}
+          onContextMenu={() => {}}
+        />
+      </div>,
+    );
+
+    const scrollContent = container.querySelector('.scroll-content') as HTMLElement;
+    const btn = container.querySelector('button.thumbnail-item')!;
+
+    fireEvent.click(btn);
+
+    // フォーカスホルダーは安定要素 (.scroll-content)。クリック要素が後で
+    // 仮想化ウィンドウからアンマウントされても矢印キーのページ移動が継続する。
+    expect(document.activeElement).toBe(scrollContent);
+    expect(fake.onSelectPage).toHaveBeenCalledTimes(1);
+    expect(fake.onSelectPage).toHaveBeenCalledWith(1);
+  });
+
+  it('アクティブなサムネイルのクリックでも .scroll-content にフォーカスが移る', () => {
+    // active 分岐 (aria-current="page" の button) も同じ handleClick を通ることを確認
+    const fake = makeFakePanel();
+    const { container } = render(
+      <div className="scroll-content" tabIndex={0}>
+        <ThumbnailItemNode
+          index={0}
+          loadEpoch={0}
+          onSelect={fake.onSelectPage}
+          onRequest={fake.onRequestThumbnail}
+          onSubscribeThumbnail={fake.subscribeThumbnail}
+          onGetThumbnail={fake.getThumbnail}
+          onSubscribeActivePage={fake.subscribeActivePage}
+          onGetIsActivePage={fake.getIsActivePage}
+          onSubscribeDirtyPage={fake.subscribeDirtyPage}
+          onGetIsDirtyPage={fake.getIsDirtyPage}
+          onGetRotation={fake.getRotation}
+          onContextMenu={() => {}}
+        />
+      </div>,
+    );
+
+    const scrollContent = container.querySelector('.scroll-content') as HTMLElement;
+    const btn = container.querySelector('button.thumbnail-item.active')!;
+    expect(btn).not.toBeNull();
+
+    fireEvent.click(btn);
+
+    expect(document.activeElement).toBe(scrollContent);
+    expect(fake.onSelectPage).toHaveBeenCalledWith(0);
   });
 });

@@ -138,6 +138,8 @@ vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
 // target import (mock 後)
 import { useOcrEngine } from '../../hooks/useOcrEngine';
 import { usePecoStore } from '../../store/pecoStore';
+// PCT-091: getSharedPdfProxy モックの実装をテスト内で差し替えるために参照する
+import * as pdfLoaderModule from '../../utils/pdfLoader';
 import type { PecoDocument, PageData, TextBlock } from '../../types';
 
 // Helpers ---------------------------------------------------------
@@ -1178,6 +1180,64 @@ describe('PCT-076: OCR 実行中の runOcrAllPages 多重起動ガード', () =>
     // 入口ガードに弾かれず ask まで到達している
     expect(h.askMock).toHaveBeenCalledTimes(1);
     // キャンセルしたので OCR (run_ocr invoke) は呼ばれない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+  });
+});
+
+// =====================================================================
+// PCT-091: テキスト層がある PDF はダイアログを出さず自動でテキスト層を取り込む
+// （旧: 「取り込む？」→（いいえ）→「OCR 実行？」の連続ダイアログで、
+//   意図せず再 OCR に入りテキスト層が置き換わる誤操作が実機で発生した）
+// =====================================================================
+describe('PCT-091: checkAndPromptOcrZero はテキスト層検出時にダイアログなしで自動取り込みする', () => {
+  // detectTextLayerSamples は getSharedPdfProxy(doc.filePath) の getPage().getTextContent()
+  // を 3 点サンプリングする。テキスト項目の有無で has_text / all_empty を制御する。
+  const makeTextLayerPdf = (totalPages: number, items: Array<{ str: string }>) => ({
+    numPages: totalPages,
+    getPage: vi.fn(async () => ({
+      ...makeMockPage(),
+      getTextContent: vi.fn(async () => ({ items })),
+    })),
+    destroy: vi.fn(async () => {}),
+    cleanup: vi.fn(async () => {}),
+  });
+
+  it('テキスト層あり: ask を一度も出さず、自動でテキスト層取り込みを開始する', async () => {
+    const doc = makeDoc(2);
+    usePecoStore.getState().setDocument(doc);
+    vi.mocked(pdfLoaderModule.getSharedPdfProxy).mockResolvedValue(
+      makeTextLayerPdf(2, [{ str: 'テキスト' }]) as never,
+    );
+
+    const toasts: string[] = [];
+    const { result } = renderHook(() => useOcrEngine((msg: string) => toasts.push(msg)));
+    await act(async () => {
+      await result.current.checkAndPromptOcrZero(doc);
+    });
+
+    // 旧実装ではここで ask が 1〜2 回呼ばれていた（取り込み確認 → OCR 確認）
+    expect(h.askMock).not.toHaveBeenCalled();
+    // importTextLayerAllPages が開始されている（開始トースト）
+    expect(toasts.some((m) => m.includes('テキスト層を取り込み中'))).toBe(true);
+    // 再 OCR（run_ocr invoke）は走らない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+  });
+
+  it('テキスト層なし: 従来どおり OCR 実行の確認ダイアログを出す（後方互換）', async () => {
+    const doc = makeDoc(2);
+    usePecoStore.getState().setDocument(doc);
+    vi.mocked(pdfLoaderModule.getSharedPdfProxy).mockResolvedValue(
+      makeTextLayerPdf(2, []) as never,
+    );
+    h.askMock.mockResolvedValue(false); // 「いいえ」→ 何も実行しない
+
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => {
+      await result.current.checkAndPromptOcrZero(doc);
+    });
+
+    expect(h.askMock).toHaveBeenCalledTimes(1);
+    expect(String(h.askMock.mock.calls[0][0])).toContain('OCRデータが含まれていません');
     expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
   });
 });
