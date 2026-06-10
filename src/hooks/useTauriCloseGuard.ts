@@ -28,10 +28,17 @@ interface UseTauriCloseGuardOptions {
    * 省略可 (旧 API 互換)。
    */
   isSavingRef?: React.RefObject<boolean>;
+  /**
+   * PCT-055 (R04U-2): 自動バックアップ実行中フラグ。
+   * バックアップ書き込み中に window.destroy を許すとバックアップファイルが
+   * 破損する可能性があるため、isSavingRef と同様に close 要求を suppress する。
+   * 省略可。
+   */
+  isBackingUpRef?: React.RefObject<boolean>;
 }
 
 export function useTauriCloseGuard(options: UseTauriCloseGuardOptions = {}) {
-  const { isSavingRef } = options;
+  const { isSavingRef, isBackingUpRef } = options;
   useEffect(() => {
     if (window.location.hash === '#preview') return;
     const currentWindow = getCurrentWindow();
@@ -45,6 +52,11 @@ export function useTauriCloseGuard(options: UseTauriCloseGuardOptions = {}) {
         // target が消失する可能性があるため。
         if (isSavingRef?.current) {
           console.warn('[useTauriCloseGuard] close suppressed: save in progress');
+          return;
+        }
+        // PCT-055 (R04U-2): バックアップ書き込み中も close を suppress する
+        if (isBackingUpRef?.current) {
+          console.warn('[useTauriCloseGuard] close suppressed: backup in progress');
           return;
         }
         // 「ユーザーが明示的にキャンセル」した場合のみ true。

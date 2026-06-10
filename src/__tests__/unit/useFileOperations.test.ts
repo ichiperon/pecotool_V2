@@ -542,7 +542,8 @@ describe('useFileOperations writeFileAtomically EACCES フォールバック (is
     const errorCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] === true);
     expect(errorCalls.length).toBeGreaterThan(0);
     const lastErrorCall = errorCalls[errorCalls.length - 1];
-    expect(lastErrorCall[0]).toMatch(/別プロセスがロック中|保存先のファイル/);
+    // R04D-2: OS エラー文字列は除去し、ユーザー向けメッセージに変更済み
+    expect(lastErrorCall[0]).toMatch(/他のアプリ|開かれている/);
     expect(lastErrorCall[2]).toBeDefined();
     expect(lastErrorCall[2].label).toBe('別名で保存');
     expect(typeof lastErrorCall[2].onClick).toBe('function');

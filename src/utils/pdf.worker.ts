@@ -247,6 +247,9 @@ async function handleSavePdf(
         text: b.text,
       };
       if (b.curve) entry.curve = b.curve;
+      // PCT-052: pdfSaver.ts と同様に confidence を永続化する。
+      // undefined でない場合のみキーを書き込む（後方互換: 欠如時は undefined 扱いのまま）。
+      if (b.confidence !== undefined) entry.confidence = b.confidence;
       return entry;
     });
     metaChanged = true;
@@ -254,7 +257,7 @@ async function handleSavePdf(
     const page = pdfDoc.getPage(pageIndex);
     const { width: pageW, height: pageH } = page.getSize();
     // #71: 詳細コメントは pdfSaver.ts 側参照。viewport-space bbox を rotation 別 cm で描画する。
-    const rotation = normalizeRotation(page.getRotation().angle);
+    const rotation = normalizeRotation(page.getRotation?.().angle ?? 0); // PCT-053: pdfSaver.ts と同様に optional chaining で統一
     const { vh } = getViewportSize(rotation, pageW, pageH);
     const rotationCm = getRotationCm(rotation, pageW, pageH);
 

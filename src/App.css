@@ -661,6 +661,16 @@ body, #root {
   background-color: #fffbeb;
 }
 
+/* R04D-1: contentEditable 編集中のカード枠を視覚的に区別する。
+   dirty-dot はストアコミット済みの変更を示すが、フォーカス中の未確定打鍵は
+   視覚的に同一のため、:focus-within で枠色と影を追加して編集中状態を示す。
+   .ocr-card.selected (詳細度 0,2,0) と同時成立した場合は selected の枠色が
+   優先される (こちらは 0,1,1)。意図的な序列なので詳細度を上げないこと。 */
+.ocr-card:focus-within {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25);
+}
+
 .scroll-content {
   flex: 1;
   overflow-y: auto;
@@ -680,6 +690,16 @@ body, #root {
 
 .placeholder--no-ocr {
   color: #f59e0b;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.placeholder--no-ocr-hint {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
 }
 
 .ocr-loading-placeholder {

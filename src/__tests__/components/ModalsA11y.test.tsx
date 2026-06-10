@@ -123,7 +123,8 @@ describe('BackupRestoreDialog (#40): A11y / Esc', () => {
     const dialog = screen.getByRole('dialog');
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     const titleEl = document.getElementById(dialog.getAttribute('aria-labelledby')!);
-    expect(titleEl?.textContent?.includes('未保存の内容があります')).toBe(true);
+    // PCT-057: タイトルを時制が明確な表現に変更
+    expect(titleEl?.textContent?.includes('前回の作業バックアップが見つかりました')).toBe(true);
   });
 
   it('処理中でないとき Esc で onClose が呼ばれる', () => {

@@ -74,7 +74,7 @@ export function BackupRestoreDialog({
         }}>
           <div id={titleId} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 600 }}>
             <span style={{ fontSize: '16px' }}>⚠️</span>
-            未保存の内容があります
+            前回の作業バックアップが見つかりました
           </div>
           <button
             onClick={() => {

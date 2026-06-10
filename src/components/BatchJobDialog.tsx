@@ -97,7 +97,8 @@ export const BatchJobDialog: React.FC<BatchJobDialogProps> = ({
       aria-modal="true"
       aria-label="フォルダ一括バッチ処理"
       className="batch-job-dialog-backdrop"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      // PCT-056: バッチ実行中はバックドロップクリックでダイアログを閉じない
+      onClick={(e) => { if (e.target === e.currentTarget && !isRunning) onClose(); }}
     >
       <div
         className="batch-job-dialog-panel"

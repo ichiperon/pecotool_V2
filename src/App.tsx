@@ -45,7 +45,7 @@ import { useLayoutPanels } from "./hooks/useLayoutPanels";
 import { useViewerPan } from "./hooks/useViewerPan";
 import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
 import { useRecentFiles } from "./hooks/useRecentFiles";
-import { useAppUpdater } from "./hooks/useAppUpdater";
+import { useAppUpdater, UPDATER_ENABLED } from "./hooks/useAppUpdater";
 import { usePageExtraction } from "./hooks/usePageExtraction";
 import { useBatchJob } from "./hooks/useBatchJob";
 import { usePageManagement } from "./hooks/usePageManagement";
@@ -232,6 +232,7 @@ function App() {
     processingBackupPath,
     handleRestoreBackup,
     handleDiscardBackup,
+    isBackingUpRef,
   } = useBackupManagement({ showToast, handleOpen, externalIsSavingRef: fileOpsIsSavingRef });
 
   const {
@@ -577,8 +578,9 @@ function App() {
   }, [isOcrRunning, cancelOcr]);
 
   // Feature #202: 起動時アップデートチェック (1回のみ)
+  // UPDATER_ENABLED=false の間 (初回リリース・pubkey 未設定) はチェックしない。
   useEffect(() => {
-    checkForUpdate();
+    if (UPDATER_ENABLED) checkForUpdate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -602,8 +604,8 @@ function App() {
   isSavingRef.current = isSaving;
 
   // --- Effects ---
-  // CloseGuard: 保存中の close を suppress するため isSavingRef を渡す (Critical: rename race のデータロス回避)。
-  useTauriCloseGuard({ isSavingRef });
+  // CloseGuard: 保存中 / バックアップ中の close を suppress する (PCT-055: rename race・バックアップ破損回避)。
+  useTauriCloseGuard({ isSavingRef, isBackingUpRef });
 
   useEffect(() => {
     const handleF5 = (e: KeyboardEvent) => {

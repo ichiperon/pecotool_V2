@@ -502,6 +502,8 @@ export function useThumbnailPanel() {
     // requestIdleCallback でメイン render の山が落ち着く idle 時間まで
     // 遅延させて起動する。未対応環境 (jsdom / 旧 WebView) では 800ms の
     // setTimeout フォールバックで同等の遅延を与える。
+    // PCT-054: timeout は重量 PDF の初回 render (実測 ~1.5s) より長く取る。
+    // idle になれば timeout より前に即起動するため通常 PDF の挙動は不変。
     type IdleGlobal = typeof globalThis & {
       requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
       cancelIdleCallback?: (handle: number) => void;
@@ -516,7 +518,7 @@ export function useThumbnailPanel() {
     let idleHandle: number | null = null;
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     if (typeof g.requestIdleCallback === 'function') {
-      idleHandle = g.requestIdleCallback(kickoff, { timeout: 1500 });
+      idleHandle = g.requestIdleCallback(kickoff, { timeout: 3000 });
     } else {
       timeoutHandle = setTimeout(kickoff, 800);
     }

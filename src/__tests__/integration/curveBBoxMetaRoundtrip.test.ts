@@ -87,6 +87,78 @@ describe('curve BBoxMeta roundtrip (#186)', () => {
     expect(entries[0].curve).toEqual(polyline);
   }, 30_000);
 
+  // PCT-052: confidence フィールドが bboxMeta に永続化されることを確認する。
+  // pdf.worker.ts は pdfSaver.ts と同一ロジックで entry を生成する必要があるため
+  // ここでは pdfSaver.ts 経路を基準として round-trip 保証を記録する。
+  it('confidence を持つ TextBlock を保存して再読込すると confidence が復元される', async () => {
+    const input = await makeMinimalPdfWithId();
+    const block: TextBlock = {
+      id: 'b0',
+      text: 'OCR',
+      originalText: '',
+      bbox: { x: 20, y: 80, width: 160, height: 40 },
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: true,
+      isDirty: true,
+      confidence: 0.75,
+    };
+    const page: PageData = {
+      pageIndex: 0,
+      width: 200,
+      height: 200,
+      textBlocks: [block],
+      isDirty: true,
+      thumbnail: null,
+    };
+    const doc: PecoDocument = {
+      filePath: 'in-memory.pdf',
+      fileName: 'in-memory.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, page]]),
+    };
+
+    const saved = await buildPdfDocument(input, doc);
+    const meta = await readPecoToolBBoxMetaFromBytes(saved);
+    const entries = meta['0'] as Array<Record<string, unknown>>;
+    expect(entries[0].confidence).toBe(0.75);
+  }, 30_000);
+
+  it('confidence が undefined の TextBlock を保存すると JSON に confidence フィールドが現れない (後方互換)', async () => {
+    const input = await makeMinimalPdfWithId();
+    const block: TextBlock = {
+      id: 'b0',
+      text: 'NoConf',
+      originalText: '',
+      bbox: { x: 20, y: 80, width: 160, height: 40 },
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: true,
+      isDirty: true,
+    };
+    const page: PageData = {
+      pageIndex: 0,
+      width: 200,
+      height: 200,
+      textBlocks: [block],
+      isDirty: true,
+      thumbnail: null,
+    };
+    const doc: PecoDocument = {
+      filePath: 'in-memory.pdf',
+      fileName: 'in-memory.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, page]]),
+    };
+
+    const saved = await buildPdfDocument(input, doc);
+    const meta = await readPecoToolBBoxMetaFromBytes(saved);
+    const entries = meta['0'] as Array<Record<string, unknown>>;
+    expect(entries[0]).not.toHaveProperty('confidence');
+  }, 30_000);
+
   it('curve なしの TextBlock を保存すると JSON に curve フィールドが現れない (後方互換)', async () => {
     const input = await makeMinimalPdfWithId();
     const block: TextBlock = {

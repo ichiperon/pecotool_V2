@@ -26,12 +26,26 @@ const mockClearBackup = vi.fn<(path: string) => Promise<void>>();
 const mockLoadBackupData = vi.fn<(path: string) => Promise<BackupData | null>>();
 const mockPerformBackup = vi.fn<() => Promise<void>>();
 
+const mockIsBackingUpRef = { current: false };
+// PCT-055: テストから onBackupComplete を直接呼び出せるよう capturedOnBackupComplete に保持する
+let capturedOnBackupComplete: ((t: string) => void) | undefined;
+
 vi.mock('../../hooks/useAutoBackup', () => ({
-  useAutoBackup: (_onBackupsFound: unknown, _interval?: unknown, _quiet?: unknown, _savingRef?: unknown) => ({
-    clearBackup: mockClearBackup,
-    loadBackupData: mockLoadBackupData,
-    performBackup: mockPerformBackup,
-  }),
+  useAutoBackup: (
+    _onBackupsFound: unknown,
+    _interval?: unknown,
+    _quiet?: unknown,
+    _savingRef?: unknown,
+    onBackupComplete?: (timeLabel: string) => void,
+  ) => {
+    capturedOnBackupComplete = onBackupComplete;
+    return {
+      clearBackup: mockClearBackup,
+      loadBackupData: mockLoadBackupData,
+      performBackup: mockPerformBackup,
+      isBackingUpRef: mockIsBackingUpRef,
+    };
+  },
 }));
 
 import { useBackupManagement } from '../../hooks/useBackupManagement';
@@ -327,5 +341,33 @@ describe('U-BK-03: handleRestoreBackup — データなし時は no-op', () => {
 
     expect(mockClearBackup).toHaveBeenCalledTimes(1);
     expect(mockClearBackup).toHaveBeenCalledWith(backup1.file_path);
+  });
+});
+
+// ── PCT-055: バックアップ完了通知 + isBackingUpRef の公開 ──────────
+
+describe('PCT-055 (R04U-1+2): バックアップ完了通知と isBackingUpRef 公開', () => {
+  it('onBackupComplete が呼ばれると showToast に "自動保存しました" メッセージが渡る', () => {
+    const showToast = vi.fn();
+    const handleOpen = vi.fn();
+
+    renderHook(() => useBackupManagement({ showToast, handleOpen }));
+
+    // useAutoBackup に渡された onBackupComplete を手動で発火
+    act(() => {
+      capturedOnBackupComplete?.('14:30');
+    });
+
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('自動保存しました'));
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('14:30'));
+  });
+
+  it('isBackingUpRef が公開されている', () => {
+    const showToast = vi.fn();
+    const handleOpen = vi.fn();
+
+    const { result } = renderHook(() => useBackupManagement({ showToast, handleOpen }));
+
+    expect(result.current.isBackingUpRef).toBe(mockIsBackingUpRef);
   });
 });

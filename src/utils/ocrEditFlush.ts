@@ -18,6 +18,11 @@ export function flushActiveOcrCardText(
   const content = active.closest<HTMLElement>('.ocr-card-content[data-page-index][data-block-id]');
   if (!content) return false;
 
+  // PCT-051: IME 変換中の場合、未確定文字列が textContent に含まれる可能性がある。
+  // OcrCard の compositionstart/end ハンドラが data-composing 属性を設定するため、
+  // それが残っている間は flush をスキップし、直前の確定済み store 値を保存に使う。
+  if (content.dataset.composing === 'true') return false;
+
   const pageIndex = Number(content.dataset.pageIndex);
   const blockId = content.dataset.blockId;
   if (!Number.isInteger(pageIndex) || !blockId) return false;

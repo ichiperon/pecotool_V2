@@ -122,14 +122,28 @@ export function useAutoBackup(
    * 冒頭でガードする。未指定時は従来挙動 (auto backup のみのローカルガード)。
    */
   externalIsSavingRef?: RefObject<boolean>,
+  /**
+   * PCT-055: バックアップ完了時に呼ばれるコールバック。
+   * 完了日時 (HH:MM 形式) を引数に取る。通知 UI の実装は呼び出し元に委ねる。
+   */
+  onBackupComplete?: (timeLabel: string) => void,
 ) {
   const isSavingRef = useRef(false);
+  /**
+   * PCT-055 (R04U-2): バックアップ実行中フラグ。
+   * useTauriCloseGuard に渡してバックアップ中の window close を抑止する。
+   */
+  const isBackingUpRef = useRef(false);
   // 直近編集時刻 (epoch ms)。store の document.pages 参照が変わったタイミングで更新する。
   // 0 のときは「まだ編集なし」を意味し、performBackup はスキップする。
   const lastEditTimeRef = useRef(0);
   // コールバックを ref に保持して Effect の依存配列の問題を回避する
   const onBackupsFoundRef = useRef(onBackupsFound);
   onBackupsFoundRef.current = onBackupsFound;
+  // PCT-055: onBackupComplete を ref に保持して performBackup の依存配列を安定させる。
+  // 呼び出し元が useCallback を省略しても setInterval がリセットされない。
+  const onBackupCompleteRef = useRef(onBackupComplete);
+  onBackupCompleteRef.current = onBackupComplete;
 
   // 起動時: 未処理バックアップをチェック
   useEffect(() => {
@@ -180,6 +194,8 @@ export function useAutoBackup(
     if (lastEdit === 0 || Date.now() - lastEdit < quietPeriodMs) return;
 
     isSavingRef.current = true;
+    // PCT-055 (R04U-2): バックアップ中フラグを立てて close guard に通知する
+    isBackingUpRef.current = true;
     try {
       // LRU 退避の IDB 書き込みが完了してから読み込む
       await waitForPendingIdbSaves();
@@ -217,10 +233,19 @@ export function useAutoBackup(
       });
 
       logger.log(`[AutoBackup] バックアップ完了 (${Object.keys(dirtyPages).length}ページ): ${timestamp}`);
+
+      // PCT-055 (R04U-1): バックアップ完了を呼び出し元に通知する
+      if (onBackupCompleteRef.current) {
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        onBackupCompleteRef.current(`${hh}:${mm}`);
+      }
     } catch (e) {
       console.warn('[AutoBackup] バックアップ失敗:', e);
     } finally {
       isSavingRef.current = false;
+      isBackingUpRef.current = false;
     }
   }, [quietPeriodMs, externalIsSavingRef]);
 
@@ -267,5 +292,5 @@ export function useAutoBackup(
     }
   }, []);
 
-  return { clearBackup, loadBackupData, performBackup };
+  return { clearBackup, loadBackupData, performBackup, isBackingUpRef };
 }
