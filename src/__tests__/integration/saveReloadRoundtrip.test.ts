@@ -435,8 +435,10 @@ describe('S-03-04 (#99): 横書き bbox の保存→再読込でラウンドト�
 describe('S-03-03: backup JSON ラウンドトリップ (setPendingRestoration → setDocument)', () => {
   it('pendingRestoration を経由した setDocument で IDB 復元＋ isDirty=true が反映される', async () => {
     // 編集前のオリジナル document
+    // PCT-104: pageId を付与しておくことで setDocument が複製しないため参照同一性が保たれる
+    // (setDocument は全ページに pageId が既に付いている場合は doc をそのまま使う)
     const originalBlock = makeBlock({ id: 'orig-1', text: 'original', isDirty: false })
-    const baseDoc = makeDoc(new Map([[0, makePage([originalBlock], 0, false)]]))
+    const baseDoc = makeDoc(new Map([[0, { ...makePage([originalBlock], 0, false), pageId: 'src:0' }]]))
 
     // 「バックアップから復元したいページ」（保存前の編集スナップショット）
     const editedBlock = makeBlock({

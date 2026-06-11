@@ -13,7 +13,7 @@ import { logger } from '../utils/logger';
 import { perf } from '../utils/perfLogger';
 import { loadPage } from '../utils/pdfTextExtractor';
 import { parsePageRange } from '../utils/pageRangeParser';
-import { displayToSourcePageIndex } from '../utils/pageOrder';
+import { displayToSourcePageIndex, resolvePageId } from '../utils/pageOrder';
 
 const RENDER_SCALE = 2.0;
 
@@ -235,9 +235,12 @@ export function useOcrEngine(
       if ((page?.textBlocks?.length ?? 0) > 0) return true;
     }
 
+    const pageOrder = usePecoStore.getState().pageOrder;
     for (const idx of pageIndices) {
       try {
-        const idbData = await getTemporaryPageData(doc.filePath, idx);
+        // PCT-104 (A-lite 段階2): displayIndex -> pageId 変換して IDB を読む
+        const pageId = resolvePageId(pageOrder, idx);
+        const idbData = await getTemporaryPageData(doc.filePath, pageId);
         if ((idbData?.textBlocks?.length ?? 0) > 0) return true;
       } catch (e) {
         console.warn(`[OCR] IDB 退避データの確認に失敗 (page ${idx + 1}):`, e);
@@ -380,7 +383,10 @@ export function useOcrEngine(
     let hasExistingBlocks = (pageData.textBlocks?.length ?? 0) > 0;
     if (!hasExistingBlocks) {
       try {
-        const idbData = await getTemporaryPageData(doc.filePath, pageIdx);
+        // PCT-104 (A-lite 段階2): displayIndex -> pageId 変換して IDB を読む
+        const ocrPageOrder = usePecoStore.getState().pageOrder;
+        const ocrPageId = resolvePageId(ocrPageOrder, pageIdx);
+        const idbData = await getTemporaryPageData(doc.filePath, ocrPageId);
         if ((idbData?.textBlocks?.length ?? 0) > 0) {
           hasExistingBlocks = true;
         }

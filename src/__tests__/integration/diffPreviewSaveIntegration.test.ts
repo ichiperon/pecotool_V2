@@ -49,6 +49,7 @@ vi.mock('../../utils/pdfLoader', () => ({
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
   clearTemporaryChangesForPages: vi.fn().mockResolvedValue(undefined),
+  remapTemporaryPageEntries: vi.fn().mockResolvedValue(undefined),
   clearCachedPages: vi.fn().mockResolvedValue(undefined),
   destroySharedPdfProxy: vi.fn(),
   getSharedPdfProxy: vi.fn().mockResolvedValue({}),

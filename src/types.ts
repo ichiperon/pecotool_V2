@@ -54,6 +54,13 @@ export interface TextBlock {
 
 export interface PageData {
   pageIndex: number;
+  /**
+   * PCT-104 (A-lite): ページの安定ID。値は `"src:" + 初期 source index`。
+   * move / delete / rotate / undo / redo を通じて不変。
+   * IDB temporary_changes キーの `filePath:pageId` 化（段階2）で rename 同期を全廃するための基盤。
+   * optional: 段階0 は型宣言のみで既存エントリには存在しない。
+   */
+  pageId?: string;
   width: number;
   height: number;
   textBlocks: TextBlock[];
@@ -136,29 +143,20 @@ export interface DeletePagesAction {
   beforeTotalPages: number;
   afterTotalPages: number;
   /**
-   * PCT-069: 削除時に deleteTemporaryPageKeys で消した IDB キー (旧 pageIndex)。
-   * redo 時に同じ削除を再適用するために記録する。後方互換のため optional。
+   * PCT-069 / PCT-104 (A-lite 段階2): 削除された displayIndex の配列。
+   * redo 時に pageId 変換して deleteTemporaryPageKeys を呼ぶために記録する。後方互換のため optional。
    */
   deletedPageIndices?: number[];
-  /**
-   * PCT-069: 削除時に renameTemporaryPageKeys で移行した IDB キーのマッピング。
-   * undo 時は逆方向、redo 時は順方向の rename を適用する。後方互換のため optional。
-   */
-  renamedEntries?: Array<{ oldPageIndex: number; newPageIndex: number }>;
 }
 
 /**
  * ページ並べ替え操作を表す Action (issue #193)。
+ * PCT-104 (A-lite 段階3): renamedEntries は pageId 安定化により不要になったため削除。
  */
 export interface ReorderPagesAction {
   type: 'reorder_pages';
   beforeOrder: number[];
   afterOrder: number[];
-  /**
-   * PCT-069: 並べ替え時に renameTemporaryPageKeys で移行した IDB キーのマッピング。
-   * undo 時は逆方向、redo 時は順方向の rename を適用する。後方互換のため optional。
-   */
-  renamedEntries?: Array<{ oldPageIndex: number; newPageIndex: number }>;
 }
 
 /**

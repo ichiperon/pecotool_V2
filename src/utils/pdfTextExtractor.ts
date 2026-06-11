@@ -53,9 +53,12 @@ export async function loadPage(
   // savedMeta の有無 (`m1` / `m0`) を mix-in して分離する。
   const hasMeta = !!(bboxMeta && bboxMeta[String(pageIndex)] && bboxMeta[String(pageIndex)].length > 0);
   const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}:${hasMeta ? 'm1' : 'm0'}`;
+  // PCT-104 (A-lite 段階2): pageId = "src:" + sourceIndex (pageIndex)。
+  // IDB temporary_changes は pageId キーで読む。displayPageIndex ではなく pageIndex を使う。
+  const pageIdForIdb = `src:${pageIndex}`;
   const [cached, tempEdited] = await Promise.all([
     getCachedPage(cacheKey),
-    getTemporaryPageData(filePath, displayPageIndex),
+    getTemporaryPageData(filePath, pageIdForIdb),
   ]);
 
   let pageData: PageData;
@@ -203,5 +206,10 @@ export async function loadPage(
     pageData = { ...pageData, ...tempEdited, isDirty: true };
   }
 
-  return { ...pageData, pageIndex: displayPageIndex };
+  // PCT-104 (A-lite 段階0): pageId を付与する。
+  // 値は "src:" + 初期 source index (pageIndex)。move/delete/rotate/undo/redo を通じて不変。
+  // tempEdited に pageId が入っている場合はそちらを優先する（段階2以降で IDB から復元される）。
+  const pageId = pageData.pageId ?? `src:${pageIndex}`;
+
+  return { ...pageData, pageIndex: displayPageIndex, pageId };
 }

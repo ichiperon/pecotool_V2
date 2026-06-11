@@ -40,6 +40,7 @@ vi.mock('../../utils/pdfLoader', () => ({
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
   clearTemporaryChangesForPages: vi.fn().mockResolvedValue(undefined),
+  remapTemporaryPageEntries: vi.fn().mockResolvedValue(undefined),
   clearCachedPages: vi.fn().mockResolvedValue(undefined),
   destroySharedPdfProxy: vi.fn(),
   getSharedPdfProxy: vi.fn().mockResolvedValue({}),
@@ -64,7 +65,7 @@ vi.mock('../../utils/pdfMetadataLoader', () => ({
 // pecoStore は本物を使うが、必要最小限の状態だけ。
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
 import { useFileOperations, __originalBytesCacheForTest, isWriteAccessError } from '../../hooks/useFileOperations';
-import { getAllTemporaryPageData, loadPDF, loadPage, clearTemporaryChanges } from '../../utils/pdfLoader';
+import { getAllTemporaryPageData, loadPDF, loadPage, clearTemporaryChanges, remapTemporaryPageEntries } from '../../utils/pdfLoader';
 import { savePDF } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
 import { useInfraStore } from '../../store/infraStore';
@@ -2045,5 +2046,101 @@ describe('PCT-101/C1: 保存成功パスが invalidateBBoxMetaCache を呼ぶ', 
     expect(ok).toBe(false);
     // 失敗パスではキャッシュ破棄しない（ディスクが書き換わっていないため）
     expect(invalidateBBoxMetaCache).not.toHaveBeenCalled();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// PCT-104 差し戻し R1: remap ターゲット順序ゲーティング
+// normalize が成立しない経路（handleSaveTo）では remap の normalizedPageOrder 引数が
+// savePageOrder と同一になり、全エントリ newKey==oldKey で不動点退化することを検証する。
+// ────────────────────────────────────────────────────────────────────────
+describe('PCT-104 R1: remap ターゲット順序ゲーティング', () => {
+  function setupSavableDocWithPageOrder(
+    filePath: string,
+    pageOrder: number[],
+  ): PecoDocument {
+    const pages = new Map<number, PageData>(
+      pageOrder.map((sourceIndex, displayIndex) => [
+        displayIndex,
+        {
+          pageIndex: displayIndex,
+          width: 595,
+          height: 842,
+          textBlocks: [{ id: `blk-${sourceIndex}`, text: `text-${sourceIndex}`, isDirty: true }],
+          isDirty: true,
+          thumbnail: null,
+        } as unknown as PageData,
+      ]),
+    );
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: pageOrder.length,
+      metadata: {},
+      pages,
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      pageOrder,
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  it('R1: normalizePageOrderForCurrentDocument=false (handleSaveTo 経路) のとき remap の normalizedPageOrder が savePageOrder になる', async () => {
+    // savePageOrder = [1, 0, 2]（move 後）
+    // normalizePageOrderForCurrentDocument=false なので normalize は呼ばれない
+    // → remap 第3引数（normalizedPageOrder）は savePageOrder=[1,0,2] でなければならない
+    const savePageOrder = [1, 0, 2];
+    setupSavableDocWithPageOrder('/pct104r1/saveto.pdf', savePageOrder);
+
+    const remapMock = remapTemporaryPageEntries as unknown as ReturnType<typeof vi.fn>;
+    remapMock.mockClear();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/pct104r1/saveto.pdf');
+    });
+
+    expect(ok).toBe(true);
+    expect(remapMock).toHaveBeenCalled();
+    const [, remapOldOrder, remapNormalizedOrder] = remapMock.mock.calls[0] as [string, number[], number[], string[]];
+    // 第2引数 (oldPageOrder) は savePageOrder
+    expect(remapOldOrder).toEqual(savePageOrder);
+    // 第3引数 (normalizedPageOrder) も savePageOrder（ゲーティングにより不動点退化）
+    expect(remapNormalizedOrder).toEqual(savePageOrder);
+  });
+
+  it('R1: 通常保存（normalizePageOrderForCurrentDocument=true 且つ pageOrderMatchesSnapshot）のとき remap の normalizedPageOrder は store の identity order になる', async () => {
+    // savePageOrder = [0, 1, 2]（identity）
+    // 保存中の move なし（pageOrderMatchesSnapshot=true）
+    // normalize 後の pageOrder も [0,1,2]
+    const savePageOrder = [0, 1, 2];
+    setupSavableDocWithPageOrder('/pct104r1/normal.pdf', savePageOrder);
+
+    const remapMock = remapTemporaryPageEntries as unknown as ReturnType<typeof vi.fn>;
+    remapMock.mockClear();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(true);
+    expect(remapMock).toHaveBeenCalled();
+    const [, , remapNormalizedOrder] = remapMock.mock.calls[0] as [string, number[], number[], string[]];
+    // 通常経路では normalizedPageOrder は post-normalize 順（この場合 identity）
+    expect(remapNormalizedOrder).toEqual([0, 1, 2]);
   });
 });

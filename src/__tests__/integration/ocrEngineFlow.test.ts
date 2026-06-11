@@ -468,7 +468,8 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     await act(async () => { await result.current.runOcrCurrentPage(); });
 
     // 上書き確認 ask() が呼ばれ、IDB 退避済み textBlocks がチェックされている
-    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 0);
+    // PCT-104: useOcrEngine は resolvePageId(pageOrder, idx) で 'src:N' 形式に変換して呼ぶ
+    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 'src:0');
     expect(h.askMock).toHaveBeenCalled();
     // ユーザーがキャンセルしたので invoke('run_ocr') は走らない
     expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
@@ -484,9 +485,10 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
       bbox: { x: 0, y: 0, width: 10, height: 10 },
       writingMode: 'horizontal', order: 0, isNew: false, isDirty: true,
     };
-    h.getTemporaryPageDataMock.mockImplementation(async (_filePath: string, pageIndex: number) => (
-      pageIndex === 1
-        ? { pageIndex, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock] }
+    // PCT-104: pageId 形式 'src:N' で受け取るように mock を更新
+    h.getTemporaryPageDataMock.mockImplementation(async (_filePath: string, pageId: string) => (
+      pageId === 'src:1'
+        ? { pageIndex: 1, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock] }
         : null
     ));
     h.askMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
@@ -494,7 +496,8 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     const { result } = renderHook(() => useOcrEngine(() => {}));
     await act(async () => { await result.current.runOcrAllPages(); });
 
-    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 1);
+    // PCT-104: pageId 形式で呼ばれることを確認
+    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 'src:1');
     expect(h.askMock).toHaveBeenCalledTimes(2);
     expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
   });
@@ -509,9 +512,10 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
       bbox: { x: 0, y: 0, width: 10, height: 10 },
       writingMode: 'horizontal', order: 0, isNew: false, isDirty: true,
     };
-    h.getTemporaryPageDataMock.mockImplementation(async (_filePath: string, pageIndex: number) => (
-      pageIndex === 1
-        ? { pageIndex, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock] }
+    // PCT-104: pageId 形式 'src:N' で受け取るように mock を更新
+    h.getTemporaryPageDataMock.mockImplementation(async (_filePath: string, pageId: string) => (
+      pageId === 'src:1'
+        ? { pageIndex: 1, width: 595, height: 842, isDirty: true, textBlocks: [evictedBlock] }
         : null
     ));
     h.askMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
@@ -519,9 +523,10 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     const { result } = renderHook(() => useOcrEngine(() => {}));
     await act(async () => { await result.current.runOcrRange('2'); });
 
-    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 1);
-    expect(h.getTemporaryPageDataMock).not.toHaveBeenCalledWith('/t.pdf', 0);
-    expect(h.getTemporaryPageDataMock).not.toHaveBeenCalledWith('/t.pdf', 2);
+    // PCT-104: pageId 形式で呼ばれることを確認
+    expect(h.getTemporaryPageDataMock).toHaveBeenCalledWith('/t.pdf', 'src:1');
+    expect(h.getTemporaryPageDataMock).not.toHaveBeenCalledWith('/t.pdf', 'src:0');
+    expect(h.getTemporaryPageDataMock).not.toHaveBeenCalledWith('/t.pdf', 'src:2');
     expect(h.askMock).toHaveBeenCalledTimes(2);
     expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
   });

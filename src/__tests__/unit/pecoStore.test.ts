@@ -18,7 +18,6 @@ vi.mock('../../utils/pdfLoader', () => ({
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   // issue #193: ページ操作で使う IDB ヘルパのモック
   deleteTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
-  renameTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
 }))
 
 // ── ヘルパー ──────────────────────────────────────────────────
@@ -763,9 +762,10 @@ describe('pecoStore', () => {
       expect(pages.size).toBe(1)
       expect(pages.get(0)!.textBlocks).toHaveLength(0)
 
+      // PCT-104 (段階2): エントリは {filePath, pageId, data} 形式
       const entries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls.flatMap((c) => c[0])
-      expect(entries.map((e) => e.pageIndex).sort()).toEqual([0, 1, 2])
-      const evictedEntry = entries.find((e) => e.pageIndex === 1)!
+      expect(entries.map((e) => e.pageId).sort()).toEqual(['src:0', 'src:1', 'src:2'])
+      const evictedEntry = entries.find((e) => e.pageId === 'src:1')!
       expect(evictedEntry.filePath).toBe('test.pdf')
       expect(evictedEntry.data.textBlocks).toEqual([])
       expect(evictedEntry.data.isDirty).toBe(true)
@@ -1024,8 +1024,9 @@ describe('pecoStore', () => {
 
         expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(2)
         const clearEntries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls[1][0]
-        expect(clearEntries.map((e) => e.pageIndex).sort()).toEqual([0, 1, 2])
-        expect(clearEntries.find((e) => e.pageIndex === 1)?.data).toMatchObject({
+        // PCT-104 (段階2): pageId キー形式
+        expect(clearEntries.map((e) => e.pageId).sort()).toEqual(['src:0', 'src:1', 'src:2'])
+        expect(clearEntries.find((e) => e.pageId === 'src:1')?.data).toMatchObject({
           textBlocks: [],
           isDirty: true,
           isTextExtracted: true,
@@ -1081,7 +1082,8 @@ describe('pecoStore', () => {
 
         expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(2)
         const clearEntries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls[1][0]
-        expect(clearEntries.find((e) => e.pageIndex === 49)?.data).toMatchObject({
+        // PCT-104 (段階2): エントリは {filePath, pageId, data} 形式。pageOrder=[0..49] の初期状態なので displayIndex 49 → pageId "src:49"
+        expect(clearEntries.find((e) => e.pageId === 'src:49')?.data).toMatchObject({
           textBlocks: [],
           isDirty: true,
           isTextExtracted: true,
@@ -1209,9 +1211,10 @@ describe('pecoStore', () => {
       // メモリ Map は巻き戻されている
       expect(usePecoStore.getState().document!.pages.get(0)).toEqual(beforePage)
       // IDB にも before が書き込まれている (LRU 退避フローと対称)
+      // PCT-104 (段階2): エントリは {filePath, pageId, data} 形式。pageOrder=[0] なので pageId="src:0"
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
-      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageIndex === 0)
+      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
       expect(matched!.data).toEqual(beforePage)
     })
@@ -1230,7 +1233,7 @@ describe('pecoStore', () => {
       expect(usePecoStore.getState().document!.pages.get(0)).toEqual(afterPage)
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
-      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageIndex === 0)
+      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
       expect(matched!.data).toEqual(afterPage)
     })
@@ -1248,9 +1251,10 @@ describe('pecoStore', () => {
       await waitForPendingIdbSaves()
 
       // IDB へ before が書き込まれている (save 時のマージで before が反映される)
+      // PCT-104 (段階2): pageId キー形式
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
-      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageIndex === 0)
+      const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
       expect(matched!.data).toEqual(beforePage)
     })
@@ -1258,7 +1262,7 @@ describe('pecoStore', () => {
 
   // ── PCT-069: undo/redo が IDB キー rename を巻き戻す/再適用する ───
 
-  describe('PCT-069: ページ移動/削除の undo/redo が IDB キー rename を同期する', () => {
+  describe('PCT-104 (A-lite 段階3): pageId 安定化 — movePage/deletePages で rename が発生しない', () => {
     function makeThreePagesDoc() {
       const pages = new Map([
         [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
@@ -1272,10 +1276,9 @@ describe('pecoStore', () => {
       await waitForPendingIdbSaves()
       vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
       vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined)
-      vi.mocked(pdfLoader.renameTemporaryPageKeys).mockReset().mockResolvedValue(undefined)
     })
 
-    it('movePage は reorder_pages action に renamedEntries を記録する', async () => {
+    it('movePage は reorder_pages action に renamedEntries を記録しない (段階3)', async () => {
       usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
 
       await usePecoStore.getState().movePage(0, 2)
@@ -1283,87 +1286,66 @@ describe('pecoStore', () => {
 
       const action = usePecoStore.getState().undoStack[0]
       expect(action.type).toBe('reorder_pages')
-      expect((action as { renamedEntries?: unknown }).renamedEntries).toEqual([
-        { oldPageIndex: 1, newPageIndex: 0 },
-        { oldPageIndex: 2, newPageIndex: 1 },
-        { oldPageIndex: 0, newPageIndex: 2 },
-      ])
+      // 段階3: renamedEntries は action に含まれない
+      expect((action as Record<string, unknown>).renamedEntries).toBeUndefined()
     })
 
-    it('reorder undo は逆方向、redo は順方向の renameTemporaryPageKeys を呼ぶ', async () => {
+    it('movePage の undo/redo で IDB キー操作は不要（pageId 不変）', async () => {
       usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
       await usePecoStore.getState().movePage(0, 2)
       await waitForPendingIdbSaves()
-      vi.mocked(pdfLoader.renameTemporaryPageKeys).mockClear()
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockClear()
+      vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockClear()
 
+      // undo
       usePecoStore.getState().undo()
       await waitForPendingIdbSaves()
-      expect(pdfLoader.renameTemporaryPageKeys).toHaveBeenCalledTimes(1)
-      expect(pdfLoader.renameTemporaryPageKeys).toHaveBeenCalledWith('test.pdf', [
-        { oldPageIndex: 0, newPageIndex: 1 },
-        { oldPageIndex: 1, newPageIndex: 2 },
-        { oldPageIndex: 2, newPageIndex: 0 },
-      ])
+      // pageId 不変 → rename なし。rename 系関数は存在しない。
+      expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled()
 
+      // redo
       usePecoStore.getState().redo()
       await waitForPendingIdbSaves()
-      expect(pdfLoader.renameTemporaryPageKeys).toHaveBeenCalledTimes(2)
-      expect(pdfLoader.renameTemporaryPageKeys).toHaveBeenLastCalledWith('test.pdf', [
-        { oldPageIndex: 1, newPageIndex: 0 },
-        { oldPageIndex: 2, newPageIndex: 1 },
-        { oldPageIndex: 0, newPageIndex: 2 },
-      ])
+      expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled()
     })
 
-    it('delete_pages undo は逆 rename → beforePages 内容書き込みの順で実行する', async () => {
+    it('delete_pages undo は beforePages 内容を saveTemporaryPageDataBatch で書き込む (rename なし)', async () => {
       usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
       await usePecoStore.getState().deletePages([0])
       await waitForPendingIdbSaves()
-      vi.mocked(pdfLoader.renameTemporaryPageKeys).mockClear()
       vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockClear()
 
       usePecoStore.getState().undo()
       await waitForPendingIdbSaves()
 
-      // 削除時の rename ({1→0}, {2→1}) の逆 ({0→1}, {1→2}) が適用される
-      expect(pdfLoader.renameTemporaryPageKeys).toHaveBeenCalledWith('test.pdf', [
-        { oldPageIndex: 0, newPageIndex: 1 },
-        { oldPageIndex: 1, newPageIndex: 2 },
-      ])
-      // beforePages の内容書き込みは rename の後 (逆順だと rename が内容を再移動する)
-      const renameOrder = vi.mocked(pdfLoader.renameTemporaryPageKeys).mock.invocationCallOrder[0]
-      const batchOrder = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.invocationCallOrder[0]
-      expect(renameOrder).toBeLessThan(batchOrder)
+      // rename なし。beforePages の内容が pageId キーで書き込まれる。
+      expect(vi.mocked(pdfLoader.saveTemporaryPageDataBatch)).toHaveBeenCalledTimes(1)
       const entries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls[0][0]
-      expect(entries.map((e) => e.pageIndex).sort()).toEqual([0, 1, 2])
+      // 3 ページの pageId (src:0, src:1, src:2) が書き込まれる
+      expect(entries.map((e) => e.pageId).sort()).toEqual(['src:0', 'src:1', 'src:2'])
     })
 
-    it('delete_pages redo は delete → rename → afterPages 書き込みを再適用する', async () => {
+    it('delete_pages redo は deletePageIds (pageId 形式) で deleteTemporaryPageKeys を呼ぶ', async () => {
       usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
       await usePecoStore.getState().deletePages([0])
       await waitForPendingIdbSaves()
       usePecoStore.getState().undo()
       await waitForPendingIdbSaves()
       vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockClear()
-      vi.mocked(pdfLoader.renameTemporaryPageKeys).mockClear()
       vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockClear()
 
       usePecoStore.getState().redo()
       await waitForPendingIdbSaves()
 
-      expect(pdfLoader.deleteTemporaryPageKeys).toHaveBeenCalledWith('test.pdf', [0])
-      expect(pdfLoader.renameTemporaryPageKeys).toHaveBeenCalledWith('test.pdf', [
-        { oldPageIndex: 1, newPageIndex: 0 },
-        { oldPageIndex: 2, newPageIndex: 1 },
-      ])
+      // 段階3: deleteTemporaryPageKeys は pageId 形式の配列で呼ばれる
+      expect(pdfLoader.deleteTemporaryPageKeys).toHaveBeenCalledWith('test.pdf', ['src:0'])
+      // delete → afterPages 書き込みの順序
       const deleteOrder = vi.mocked(pdfLoader.deleteTemporaryPageKeys).mock.invocationCallOrder[0]
-      const renameOrder = vi.mocked(pdfLoader.renameTemporaryPageKeys).mock.invocationCallOrder[0]
       const batchOrder = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.invocationCallOrder[0]
-      expect(deleteOrder).toBeLessThan(renameOrder)
-      expect(renameOrder).toBeLessThan(batchOrder)
+      expect(deleteOrder).toBeLessThan(batchOrder)
     })
 
-    it('【後方互換】renamedEntries の無い旧 reorder_pages action の undo は rename を発火しない', async () => {
+    it('reorder_pages action の undo は pageOrder を戻すだけで IDB 操作なし', async () => {
       const doc = makeThreePagesDoc()
       usePecoStore.setState({
         document: doc,
@@ -1377,7 +1359,9 @@ describe('pecoStore', () => {
       await waitForPendingIdbSaves()
 
       expect(usePecoStore.getState().pageOrder).toEqual([0, 1, 2])
-      expect(pdfLoader.renameTemporaryPageKeys).not.toHaveBeenCalled()
+      // rename 系呼び出しなし
+      expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled()
+      expect(pdfLoader.saveTemporaryPageDataBatch).not.toHaveBeenCalled()
     })
   })
 
@@ -1775,9 +1759,11 @@ describe('pecoStore', () => {
       // in-memory には page 0 だけ。page 1 は LRU 退避済み (IDB に textBlocks 持ち)
       const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo on memory' })] })
       const evictedBlock = makeBlock({ id: 'p1b', text: 'foo on idb' })
+      // PCT-104 (段階2): getAllTemporaryPageData は Map<pageId, Partial<PageData>> を返す
+      // pageOrder = [0, 1] なので displayIndex 1 → pageId = 'src:1'
       vi.mocked(pdfLoader.getAllTemporaryPageData).mockResolvedValueOnce(
-        new Map<number, Partial<PageData>>([
-          [1, {
+        new Map<string, Partial<PageData>>([
+          ['src:1', {
             pageIndex: 1,
             width: 595,
             height: 842,
@@ -1796,6 +1782,7 @@ describe('pecoStore', () => {
           metadata: {},
           pages: new Map([[0, page0]]),
         },
+        pageOrder: [0, 1],
         currentPageIndex: 0,
         undoStack: [],
         redoStack: [],
@@ -1821,17 +1808,19 @@ describe('pecoStore', () => {
       await waitForPendingIdbSaves()
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
-      const pageIndices = new Set(allEntries.map((e) => e.pageIndex))
-      expect(pageIndices.has(0)).toBe(true)
-      expect(pageIndices.has(1)).toBe(true)
+      // PCT-104 (段階2): pageId キー形式で確認
+      const pageIds = new Set(allEntries.map((e) => e.pageId))
+      expect(pageIds.has('src:0')).toBe(true)
+      expect(pageIds.has('src:1')).toBe(true)
     })
 
     it('U-FR-10: undo / redo で IDB 退避ページも巻き戻る (update_pages entries が IDB ページ含む)', async () => {
       const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo' })] })
       const evictedBlock = makeBlock({ id: 'p1b', text: 'foo' })
+      // PCT-104 (段階2): pageId キー形式
       vi.mocked(pdfLoader.getAllTemporaryPageData).mockResolvedValueOnce(
-        new Map<number, Partial<PageData>>([
-          [1, {
+        new Map<string, Partial<PageData>>([
+          ['src:1', {
             pageIndex: 1,
             width: 595,
             height: 842,
@@ -1849,6 +1838,7 @@ describe('pecoStore', () => {
           metadata: {},
           pages: new Map([[0, page0]]),
         },
+        pageOrder: [0, 1],
         currentPageIndex: 0,
         undoStack: [],
         redoStack: [],
@@ -1883,10 +1873,11 @@ describe('pecoStore', () => {
       expect(s.document!.pages.get(1)!.textBlocks[0].text).toBe('X')
 
       // IDB にも before/after が書き戻されている (undo / redo それぞれ呼ばれる)
+      // PCT-104 (段階2): pageId キー形式で確認
       await waitForPendingIdbSaves()
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
-      expect(allEntries.some((e) => e.pageIndex === 1)).toBe(true)
+      expect(allEntries.some((e) => e.pageId === 'src:1')).toBe(true)
     })
 
     it('U-FR-11: scope=current では IDB を読まない (getAllTemporaryPageData が呼ばれない)', async () => {

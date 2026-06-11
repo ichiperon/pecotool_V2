@@ -20,13 +20,11 @@ vi.mock('../../utils/pdfLoader', () => ({
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   deleteTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
-  renameTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
 }));
 
 import {
   saveTemporaryPageDataBatch,
   deleteTemporaryPageKeys,
-  renameTemporaryPageKeys,
 } from '../../utils/pdfLoader';
 
 import { usePecoStore, waitForPendingIdbSaves } from '../../store/pecoStore';
@@ -98,7 +96,6 @@ const INITIAL_INFRA_STATE = {
 beforeEach(() => {
   vi.mocked(saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined);
   vi.mocked(deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined);
-  vi.mocked(renameTemporaryPageKeys).mockReset().mockResolvedValue(undefined);
   usePecoStore.setState({ ...INITIAL_PECO_STATE });
   useInfraStore.setState({ ...INITIAL_INFRA_STATE });
 });
@@ -292,9 +289,6 @@ describe('IDB 保存中 reload — waitForPendingIdbSaves が完了を待機す�
     });
     vi.mocked(deleteTemporaryPageKeys).mockImplementation(async () => {
       callOrder.push('delete-keys');
-    });
-    vi.mocked(renameTemporaryPageKeys).mockImplementation(async () => {
-      callOrder.push('rename-keys');
     });
 
     const doc = makeDoc(3);

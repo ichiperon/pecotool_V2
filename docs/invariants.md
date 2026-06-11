@@ -34,8 +34,8 @@ dirty ページがなくても `isDefaultOrder` が false なら元 PDF bytes �
 **S-08 — rename 直前 fsync**
 rename の直前に `sync_file_to_disk` を 1 回呼ぶ（PCT-078）。呼ばないと rename 直後の電源断で不完全な内容が target に昇格する。毎チャンク fsync は性能劣化のため不採用。
 
-**S-09 — undo/redo は IDB キー rename を巻き戻す**
-ページ移動・削除の IDB キー rename を undo/redo で逆順 rename する（PCT-069）。巻き戻さないと、移動 → undo → 保存で別ページのテキストが混入した PDF が生成される。
+**S-09 — IDB キー rename は廃止（pageId 不変による）**
+PCT-104 A-lite（段階3）で `renameTemporaryPageKeys` を全廃した。pageId は初期ソースインデックス固定（`"src:" + initialSourceIndex`）のため、ページ移動・削除・undo/redo のいずれでも IDB キーは変化しない。PCT-069 で実装した undo/redo の逆順 rename も不要となり削除済み。reorder_pages の undo/redo は IDB 操作なし、delete_pages の undo/redo は `deletePageIds`（pageId 形式）の delete のみで完結する。
 
 **S-10 — 保存中の並走防止**
 `handleOpen` の `loadPDF` await 後に `isSavingRef` を再チェックする（PCT-074）。保存中の読込開始は中断してトーストを出す。diff プレビューと SaveAs の await 後も同様（PCT-075）。
@@ -78,8 +78,8 @@ bbox → PDF 座標変換は viewport 寸法（`vw/vh`）と `getRotationCm` を
 
 ## 3. 状態同期・競合
 
-**ST-01 — source/display pageIndex の分離**
-`currentPageIndex`（display）、`pageOrder`、元 pdfDoc ページインデックス（source）は三者を混同しない（PCT-001）。IDB 一時変更の読み書き、OCR 対象、保存対象のそれぞれで正しい index を使う。`displayToSourcePageIndex` を経由する。
+**ST-01 — source/display pageIndex の分離と pageId による安定参照**
+`currentPageIndex`（display）、`pageOrder`、元 pdfDoc ページインデックス（source）は三者を混同しない（PCT-001）。IDB 一時変更の読み書き、OCR 対象、保存対象のそれぞれで正しい index を使う。PCT-104 A-lite 以降、IDB `temporary_changes` のキーは displayIndex でなく **pageId**（`"src:" + initialSourceIndex`）を使う。displayIndex → pageId の変換は `resolvePageId(pageOrder, displayIndex)`、pageId → 現在の displayIndex の変換は `resolveDisplayIndex(pageOrder, pageId)` を経由する。
 
 **ST-02 — Thumbnail requestId ガード**
 サムネイル Worker 応答は requestId と file epoch の両方でガードする（PCT-012〜016）。古い応答が新ファイルや pageOrder 変更後の pending を解決することを防ぐ。
@@ -98,6 +98,18 @@ LRU 保存失敗ロールバックは generation counter で照合する（PCT-0
 
 **ST-07 — IME 変換中の flush スキップ**
 `compositionstart/end` で `data-composing` 属性を立て、Ctrl+S による `flushActiveOcrCardText` は composing 中はスキップする（PCT-051）。スキップしないと未確定文字がストアにコミットされる。blur 経路（PCT-067）は WebView2 実機での compositionend 発火順確認待ちで別途対応が必要。
+
+**ST-08 — pageId は不変（PCT-104 A-lite）**
+pageId は `"src:" + initialSourceIndex`（ファイルを開いた時点のソースインデックス）で確定し、以後の move/delete/rotate/undo/redo を通じて変化しない。IDB キー `filePath:pageId` はページの物理的な移動・削除操作で変化しない。
+
+単一保存サイクル内では pageId は不変。保存完了時に normalizePageOrderAfterSave 連動で remap を実行し、IDB 残存エントリのキーを normalize 後の pageOrder に追従させる。IDB を読む側（LRU 復元・replaceText all スコープ等）は常に現在の pageOrder で resolveDisplayIndex して displayIndex に変換する（IDB キーは pageId のまま変化しないが、displayIndex は pageOrder 変化で変わる）。
+
+保存中はライブ pageOrder を読まず、保存スナップショット時点の savePageOrder を使うこと（M1）。
+
+pageId を変える操作（例: ページの新規追加で別ソースインデックスを割り当てる）を設計する場合は、IDB キー衝突の可能性を精査すること。
+
+**ST-09 — IDB 旧キー（filePath:N）は移行期間中フォールバック読込する**
+PCT-104 A-lite 以前に保存されたデータには `filePath:pageIndex`（数値インデックス）形式のキーが残存する可能性がある。`getTemporaryPageData` / `getAllTemporaryPageData` は新キー（`filePath:src:N`）を優先しつつ旧キー（`filePath:N`）もフォールバックとして読み込む。`deleteTemporaryPageKeys` は両キーを同時に削除する。移行完了後（十分なバージョンが普及した段階）にフォールバックロジックを除去できる。
 
 ---
 
@@ -229,4 +241,4 @@ Worker 内での `fetch()` は Tauri のファイルシステムにアクセス�
 
 ---
 
-*最終更新: 2026-06-11 / PCT-100 時点*
+*最終更新: 2026-06-11 / PCT-104 A-lite 段階4 時点*

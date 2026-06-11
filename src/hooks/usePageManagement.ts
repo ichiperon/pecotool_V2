@@ -3,13 +3,13 @@ import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../st
 import { useInfraStore } from '../store/infraStore';
 import {
   deleteTemporaryPageKeys,
-  renameTemporaryPageKeys,
 } from '../utils/pdfTemporaryStorage';
 
 /**
  * #254: ページ削除・並べ替えの IDB I/O を hook 層で担うカスタムフック。
  * pecoStore の deletePages / movePage action は pure state 変換のみを行い、
  * IDB 側副作用はこの hook が責任を持つ。
+ * PCT-104 (A-lite 段階3): pageId が不変なため movePage の IDB rename は完全に不要。
  */
 export function usePageManagement() {
   const deletePages = usePecoStore((s) => s.deletePages);
@@ -26,9 +26,9 @@ export function usePageManagement() {
     (displayIndices: number[]) => enqueuePageOperation(async () => {
       await waitForPendingIdbSaves();
 
-      await deletePages(displayIndices, (filePath, deletedOrigIndices, renamedEntries) => {
-        const work = deleteTemporaryPageKeys(filePath, deletedOrigIndices)
-          .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
+      // PCT-104 (A-lite 段階3): deletedPageIds は pageId 文字列配列。rename は不要。
+      await deletePages(displayIndices, (filePath, deletedPageIds) => {
+        const work = deleteTemporaryPageKeys(filePath, deletedPageIds)
           .then(() => {
             useInfraStore.getState().clearLastIdbErrorIfSet();
           })
@@ -47,17 +47,10 @@ export function usePageManagement() {
     (fromDisplayIndex: number, toDisplayIndex: number) => enqueuePageOperation(async () => {
       await waitForPendingIdbSaves();
 
-      await movePage(fromDisplayIndex, toDisplayIndex, (filePath, renamedEntries) => {
-        const work = renameTemporaryPageKeys(filePath, renamedEntries)
-          .then(() => {
-            useInfraStore.getState().clearLastIdbErrorIfSet();
-          })
-          .catch((e: unknown) => {
-            const err = e instanceof Error ? e : new Error(String(e));
-            console.error('[usePageManagement] movePage IDB 同期失敗:', err);
-            useInfraStore.getState().setLastIdbError(err);
-          });
-        trackPendingIdbWork(work);
+      // PCT-104 (A-lite 段階3): movePage は IDB キー操作不要（pageId 不変）。
+      // onIdbWork コールバックは no-op として渡す。
+      await movePage(fromDisplayIndex, toDisplayIndex, (_filePath) => {
+        // pageId ベースのため rename 不要
       });
     }),
     [movePage, enqueuePageOperation],
