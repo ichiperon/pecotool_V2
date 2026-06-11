@@ -300,17 +300,19 @@ describe('pdfTemporaryStorage page cache GC', () => {
 
   it('PCT-104 B1: remapTemporaryPageEntries — move後のLRU退避ページが新キーに移動する', async () => {
     // シナリオ: 3ページPDF、move(0→1)後に pageOrder=[1,0,2]。
-    //   page 2 は LRU 退避済み（IDB に 'src:2' キーで書き込み済み、保存対象外）。
-    //   page 0 はメモリにあり dirty（保存対象 = dirtyPageIds に含まれる）。
+    //   source index 0 のページ (src:0) は LRU 退避済み（IDB に 'src:0' キーで書き込み済み、
+    //   clean、保存対象外）。
+    //   保存完了後の normalizePageOrderAfterSave([1,0,2]) → [0,1,2]。
+    //   remap(oldPageOrder=[1,0,2], normalizedPageOrder=[0,1,2], dirtyPageIds=[])
     //
-    // 保存完了後:
-    //   normalizePageOrderAfterSave([1,0,2]) → [0,1,2]
-    //   remap(oldPageOrder=[1,0,2], normalizedPageOrder=[0,1,2], dirtyPageIds=['src:1'])
+    //   src:0 のマッピング: oldPageOrder=[1,0,2] で src:0 は displayIdx=1
+    //   → normalizedPageOrder=[0,1,2] の displayIdx=1 → 新 pageId = src:1
+    //   → キー移動: put(remap.pdf:src:1, src0_data), delete(remap.pdf:src:0)
     //
     // 期待:
-    //   - 'src:1'（dirty page、保存済み）は削除される
-    //   - 'src:2'（LRU退避クリーンページ）: oldPageOrder=[1,0,2]でのdisplayIdx=2、
-    //     normalizedPageOrder=[0,1,2]でdisplayIdx=2 → 'src:2'のまま（同一キーはスキップ）
+    //   - 'src:0'（LRU退避クリーンページ）は 'src:1' に移動 → src:0 消滅
+    //   - 'src:1' に移動後の内容に src:0 のデータが入る
+    //   - 'src:2'（LRU退避ページ）: displayIdx=2→2 で同一キー → スキップ（そのまま存在）
     const { remapTemporaryPageEntries, saveTemporaryPageDataBatch, getAllTemporaryPageData } =
       await import('../../utils/pdfTemporaryStorage')
 
@@ -318,26 +320,31 @@ describe('pdfTemporaryStorage page cache GC', () => {
     await saveTemporaryPageDataBatch([
       {
         filePath: 'remap.pdf',
-        pageId: 'src:2',  // LRU退避ページ
-        data: { ...makePage(2), isDirty: false, textBlocks: [{ id: 'b2', text: 'LRU_PAGE2', originalText: '', bbox: { x: 0, y: 0, width: 50, height: 20 }, writingMode: 'horizontal', order: 0, isNew: false, isDirty: false }] },
+        pageId: 'src:0',  // LRU退避ページ（move で display 0 から display 1 へ）
+        data: { ...makePage(0), isDirty: false, textBlocks: [{ id: 'b0', text: 'LRU_PAGE0', originalText: '', bbox: { x: 0, y: 0, width: 50, height: 20 }, writingMode: 'horizontal', order: 0, isNew: false, isDirty: false }] },
       },
       {
         filePath: 'remap.pdf',
-        pageId: 'src:1',  // dirty page (move後、保存対象)
-        data: { ...makePage(1), isDirty: true, textBlocks: [{ id: 'b1', text: 'DIRTY_PAGE', originalText: '', bbox: { x: 0, y: 0, width: 50, height: 20 }, writingMode: 'horizontal', order: 0, isNew: false, isDirty: true }] },
+        pageId: 'src:2',  // LRU退避ページ（不動点）
+        data: { ...makePage(2), isDirty: false, textBlocks: [{ id: 'b2', text: 'LRU_PAGE2', originalText: '', bbox: { x: 0, y: 0, width: 50, height: 20 }, writingMode: 'horizontal', order: 0, isNew: false, isDirty: false }] },
       },
     ])
 
     const oldPageOrder = [1, 0, 2]  // move後
     const normalizedPageOrder = [0, 1, 2]  // normalize後
-    const dirtyPageIds = ['src:1']  // 保存で回収したページ
+    // dirty エントリなし（src:1 はメモリにあり保存されたが、IDB に LRU エントリは存在しない）
+    const dirtyPageIds: string[] = []
 
     await remapTemporaryPageEntries('remap.pdf', oldPageOrder, normalizedPageOrder, dirtyPageIds)
 
     const afterRemap = await getAllTemporaryPageData('remap.pdf')
-    // dirty ページ ('src:1') は保存済みとして削除
-    expect(afterRemap.has('src:1')).toBe(false)
-    // LRU退避ページ ('src:2') は同一キーなのでスキップ（そのまま存在する）
+    // src:0（LRU退避クリーン）は src:1 へキー移動 → src:0 消滅
+    expect(afterRemap.has('src:0')).toBe(false)
+    // src:1 に移動後の内容は LRU_PAGE0 のデータ
+    expect(afterRemap.has('src:1')).toBe(true)
+    const movedData = afterRemap.get('src:1') as { textBlocks: Array<{ text: string }> }
+    expect(movedData.textBlocks[0].text).toBe('LRU_PAGE0')
+    // src:2（不動点）はそのまま存在する
     expect(afterRemap.has('src:2')).toBe(true)
     const lruData = afterRemap.get('src:2') as { textBlocks: Array<{ text: string }> }
     expect(lruData.textBlocks[0].text).toBe('LRU_PAGE2')
@@ -370,5 +377,63 @@ describe('pdfTemporaryStorage page cache GC', () => {
     expect(result.has('src:1')).toBe(true)
     // 正規化後に 'src:0' を期待しても存在しない
     expect(result.has('src:0')).toBe(false)
+  })
+
+  // ── PCT-104 R2: real-remap 統合テスト（remap を mock しない）──────────────
+  //
+  // ミューテーション B 検収基準:
+  //   remapTemporaryPageEntries の put/delete ロジックを削除すると、
+  //   キー移動が起きず src:0 が残り src:1 が出現しないため、このテストが fail する。
+  //   テストを復元（リバート）すれば再び green になることで不動点性を実証する。
+
+  it('PCT-104 R2: real-remap — LRU退避キー移動後に normalize 済み pageId でデータが取得できる', async () => {
+    // シナリオ:
+    //   3ページPDF。ユーザーが move(0→1) を実行 → pageOrder=[1,0,2]。
+    //   source index 0 のページ (src:0) が LRU 退避されて IDB に存在する（clean）。
+    //
+    //   保存完了後:
+    //     remap(oldPageOrder=[1,0,2], normalizedPageOrder=[0,1,2], dirtyPageIds=[])
+    //     src:0 → displayIdx=1(oldPageOrder) → newPageId=src:1 → キー移動
+    //
+    //   正規化後のアプリコードは src:1 でこのページを探す。
+    //   remap 後は src:1 に存在するため replaceText scope='all' 等でヒットする（ヒット数=1）。
+    //   remap なし（ミューテーション B）だと src:0 のままで src:1 を探してヒット数=0。
+    const { remapTemporaryPageEntries, saveTemporaryPageDataBatch, getAllTemporaryPageData } =
+      await import('../../utils/pdfTemporaryStorage')
+
+    const lruText = 'SCOPE_ALL_SHOULD_HIT'
+
+    // LRU 退避: source index 0 のページが src:0 キーで IDB に書かれている
+    await saveTemporaryPageDataBatch([
+      {
+        filePath: 'realremap.pdf',
+        pageId: 'src:0',
+        data: {
+          ...makePage(0),
+          isDirty: false,
+          textBlocks: [{ id: 'r0', text: lruText, originalText: '', bbox: { x: 0, y: 0, width: 50, height: 20 }, writingMode: 'horizontal', order: 0, isNew: false, isDirty: false }],
+        },
+      },
+    ])
+
+    // move(0→1) 後の remap を実行（real 実装を呼ぶ）
+    await remapTemporaryPageEntries(
+      'realremap.pdf',
+      [1, 0, 2],   // oldPageOrder (move後)
+      [0, 1, 2],   // normalizedPageOrder
+      [],          // dirtyPageIds (なし)
+    )
+
+    // 正規化後のアプリコードは src:1 でページを取得する
+    const afterRemap = await getAllTemporaryPageData('realremap.pdf')
+
+    // remap 後: src:1 にデータが移動している（ヒット数=1 を確認）
+    const hitCount = afterRemap.has('src:1') ? 1 : 0
+    expect(hitCount).toBe(1)
+    const hitData = afterRemap.get('src:1') as { textBlocks: Array<{ text: string }> }
+    expect(hitData.textBlocks[0].text).toBe(lruText)
+
+    // remap 後: src:0 は消滅している（キー移動完了）
+    expect(afterRemap.has('src:0')).toBe(false)
   })
 })

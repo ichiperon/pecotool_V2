@@ -673,8 +673,21 @@ export function useFileOperations(
     //    - 旧体系キー全読み出し → 解決不能・dirtyOnlyPages 該当（保存済み）を破棄
     //    - 残りを normalize 後の新キーで再構築（旧キー削除）
     //    - put（新キー書込）→ delete（旧キー削除）の順（原子性: クラッシュ時も旧キーが残る安全側）
+    //
+    // PCT-104 差し戻し R1: ターゲット順序ゲーティング
+    //   normalizePageOrderForCurrentDocument=false（handleSaveTo 経路）、または
+    //   保存中の move で pageOrderMatchesSnapshot=false になった場合（normalize が no-op）は、
+    //   ライブ pageOrder をターゲットにすると保存スナップショット外の順序でキーが生成され
+    //   IDB 層でページ間混線が起きる（保証ライン①違反）。
+    //   その経路では normalizedPageOrder=savePageOrder を渡すことで、remap は
+    //   newKey==oldKey の全エントリに対してスキップし、dirty 破棄＋旧形式移行のみに退化する
+    //   （旧 clearIdbDirty と同等の不動点）。
     {
-      const normalizedPageOrder = usePecoStore.getState().pageOrder;
+      const normalizeActive =
+        executeOptions.normalizePageOrderForCurrentDocument !== false && pageOrderMatchesSnapshot;
+      const normalizedPageOrder = normalizeActive
+        ? usePecoStore.getState().pageOrder
+        : savePageOrder;
       const dirtyPageIds = [...dirtyOnlyPages.keys()].map((di) => resolvePageId(savePageOrder, di));
       trackPendingIdbWork(
         remapTemporaryPageEntries(sourceFilePath, savePageOrder, normalizedPageOrder, dirtyPageIds)
