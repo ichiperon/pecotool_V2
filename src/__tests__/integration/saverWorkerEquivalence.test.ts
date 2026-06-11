@@ -305,6 +305,9 @@ describe('PCT-097: pdfSaver / Worker 出力等価性', () => {
 
       // D-after: 両経路ともに同じ判断をしている（孤児ありなら両方全書換、孤児なしなら両方 short-circuit）
       expect(mainSameAsInput).toBe(workerSameAsInput);
+      // レビュー指摘: 「両経路一致」だけでは core から earlySweep が消える回帰で
+      // 両方 short-circuit して素通りする。孤児ありなら全書換 (=入力と不一致) を直接ピン留めする (A-06)。
+      expect(mainSameAsInput).toBe(false);
 
       // 両経路の出力サイズが近い値であること（同一 core ロジックの証明）
       const sizeDiff = Math.abs(mainBytes.byteLength - workerBytes.byteLength);
