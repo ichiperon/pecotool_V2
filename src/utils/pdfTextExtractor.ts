@@ -18,7 +18,7 @@ type LoadPageOptions = {
   displayPageIndex?: number;
 };
 
-function shouldUseSavedMeta(
+export function shouldUseSavedMeta(
   savedMeta: PecoToolBBoxMetaEntry[] | undefined,
   textItems: TextItem[],
 ): savedMeta is PecoToolBBoxMetaEntry[] {
