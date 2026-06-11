@@ -19,7 +19,6 @@ vi.mock('../../utils/pdfLoader', () => ({
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   deleteTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
-  renameTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
 }));
 
 const mockClearBackup = vi.fn<(path: string) => Promise<void>>();

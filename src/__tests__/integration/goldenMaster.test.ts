@@ -33,7 +33,6 @@ vi.mock('../../utils/pdfLoader', () => ({
   clearTemporaryChanges: vi.fn(),
   clearTemporaryChangesForPages: vi.fn(),
   deleteTemporaryPageKeys: vi.fn(),
-  renameTemporaryPageKeys: vi.fn(),
   clearCachedPages: vi.fn(),
 }));
 

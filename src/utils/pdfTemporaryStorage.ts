@@ -309,56 +309,6 @@ export async function deleteTemporaryPageKeys(filePath: string, pageIds: string[
   await waitForTransaction(tx, '[deleteTemporaryPageKeys] tx timeout');
 }
 
-/**
- * PCT-069 (段階3廃止予定): ページ並べ替え/削除後の再インデックスに合わせて、
- * IDB エントリの key を旧 pageIndex から新 pageIndex に移行する。
- * 同一トランザクション内で old を delete して new に put する (atomic)。
- * entries: oldPageIndex -> newPageIndex のマッピング配列。
- * PCT-104 (A-lite): 旧キー (filePath:N) のみに作用する。新キー (filePath:src:N) は
- * pageId が不変なので rename 不要。段階3でこの関数は削除される。
- */
-export async function renameTemporaryPageKeys(
-  filePath: string,
-  entries: Array<{ oldPageIndex: number; newPageIndex: number }>,
-): Promise<void> {
-  if (entries.length === 0) return;
-  const db = await openDB();
-  // 1st pass: 全 old エントリを読み出す
-  // PCT-102: O(N) lookup map を事前構築して entries.find() O(N²) を回避する
-  const oldToNewMap = new Map<number, number>(entries.map(e => [e.oldPageIndex, e.newPageIndex]));
-  const readTx = db.transaction(STORE_NAME_DIRTY, 'readonly');
-  const readStore = readTx.objectStore(STORE_NAME_DIRTY);
-  const reads = entries.map(({ oldPageIndex }) => {
-    const key = `${filePath}:${oldPageIndex}`;
-    return new Promise<{ newPageIndex: number; data: Partial<PageData> | null }>(
-      (resolve) => {
-        const newPageIndex = oldToNewMap.get(oldPageIndex)!;
-        const req = readStore.get(key);
-        req.onsuccess = () => resolve({ newPageIndex, data: req.result || null });
-        req.onerror = () => resolve({ newPageIndex, data: null });
-      }
-    );
-  });
-  await waitForTransaction(readTx, '[renameTemporaryPageKeys] read tx timeout');
-  const results = await Promise.all(reads);
-
-  // 2nd pass: delete old + put new (ただし data がある場合のみ)
-  const hasData = results.filter(r => r.data !== null);
-  if (hasData.length === 0) return;
-  const writeTx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
-  const writeStore = writeTx.objectStore(STORE_NAME_DIRTY);
-  // delete all old keys first (key の衝突を避けるため先に全削除)
-  for (const { oldPageIndex } of entries) {
-    writeStore.delete(`${filePath}:${oldPageIndex}`);
-  }
-  // put with new keys
-  for (const { newPageIndex, data } of hasData) {
-    if (data) {
-      writeStore.put(data, `${filePath}:${newPageIndex}`);
-    }
-  }
-  await waitForTransaction(writeTx, '[renameTemporaryPageKeys] write tx timeout');
-}
 
 /**
  * PCT-070 / PCT-104: 指定ページの一時退避エントリのみ削除する。

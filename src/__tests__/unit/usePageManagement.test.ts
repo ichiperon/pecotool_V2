@@ -1,10 +1,10 @@
 /**
- * Phase 5 Wave 2: usePageManagement テスト
+ * Phase 5 Wave 2: usePageManagement テスト (PCT-104 A-lite 段階3 更新)
  * Cases: U-PM2-01, U-PM2-02, U-PM2-03
  *
  * usePageManagement は pecoStore.deletePages / movePage を呼び出したあと、
- * IDB I/O (deleteTemporaryPageKeys / renameTemporaryPageKeys) を副作用として実行する hook。
- * ここでは IDB 副作用層と store 連携の双方を検証する。
+ * IDB 副作用 (deleteTemporaryPageKeys) を担う hook。
+ * PCT-104 (A-lite 段階3): pageId が不変なため movePage の IDB rename は完全に不要。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -13,10 +13,8 @@ import { useInfraStore } from '../../store/infraStore';
 import type { PageData, PecoDocument } from '../../types';
 
 // ── IDB ヘルパのモック ──────────────────────────────────────────
-// usePageManagement は pdfTemporaryStorage から deleteTemporaryPageKeys / renameTemporaryPageKeys をインポートする
 vi.mock('../../utils/pdfTemporaryStorage', () => ({
   deleteTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
-  renameTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
   saveTemporaryPageData: vi.fn().mockResolvedValue(undefined),
   getTemporaryPageData: vi.fn().mockResolvedValue(null),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
@@ -29,12 +27,10 @@ vi.mock('../../utils/pdfLoader', () => ({
   clearTemporaryChanges: vi.fn().mockResolvedValue(undefined),
   getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
   deleteTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
-  renameTemporaryPageKeys: vi.fn().mockResolvedValue(undefined),
 }));
 
 import {
   deleteTemporaryPageKeys,
-  renameTemporaryPageKeys,
 } from '../../utils/pdfTemporaryStorage';
 
 import { usePageManagement } from '../../hooks/usePageManagement';
@@ -106,7 +102,6 @@ const INITIAL_INFRA_STATE = {
 beforeEach(async () => {
   await waitForPendingIdbSaves();
   vi.mocked(deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined);
-  vi.mocked(renameTemporaryPageKeys).mockReset().mockResolvedValue(undefined);
   usePecoStore.setState({ ...INITIAL_PECO_STATE });
   useInfraStore.setState({ ...INITIAL_INFRA_STATE });
 });
@@ -137,7 +132,6 @@ describe('U-PM2-01: handleDeletePages — 空配列は no-op', () => {
     expect(state.isDirty).toBe(false);
     // IDB 副作用も呼ばれない
     expect(deleteTemporaryPageKeys).not.toHaveBeenCalled();
-    expect(renameTemporaryPageKeys).not.toHaveBeenCalled();
   });
 
   it('document=null のとき空配列でも no-op で例外を投げない', async () => {
@@ -218,7 +212,7 @@ describe('U-PM2-02: handleDeletePages — 削除後の currentPageIndex 調整',
     expect(usePecoStore.getState().isDirty).toBe(true);
   });
 
-  it('削除後に IDB 副作用が非同期で実行される', async () => {
+  it('削除後に deleteTemporaryPageKeys が IDB 副作用として実行される', async () => {
     const doc = makeDoc(3);
     usePecoStore.setState({
       document: doc,
@@ -236,19 +230,13 @@ describe('U-PM2-02: handleDeletePages — 削除後の currentPageIndex 調整',
     await Promise.resolve();
     await Promise.resolve();
 
-    // deleteTemporaryPageKeys または renameTemporaryPageKeys のいずれかが呼ばれる
-    // (実際の呼び出しは IDB callback 内の void chain なので、少なくとも一方が呼ばれることを確認)
-    expect(
-      vi.mocked(deleteTemporaryPageKeys).mock.calls.length +
-      vi.mocked(renameTemporaryPageKeys).mock.calls.length
-    ).toBeGreaterThan(0);
+    // PCT-104 段階3: deleteTemporaryPageKeys が pageId 形式で呼ばれる
+    expect(deleteTemporaryPageKeys).toHaveBeenCalled();
   });
 
-  it('PCT-029: hook-side delete/rename IDB work が waitForPendingIdbSaves に追跡される', async () => {
+  it('PCT-029: hook-side delete IDB work が waitForPendingIdbSaves に追跡される', async () => {
     const deleteWork = deferredVoid();
-    const renameWork = deferredVoid();
     vi.mocked(deleteTemporaryPageKeys).mockReturnValueOnce(deleteWork.promise);
-    vi.mocked(renameTemporaryPageKeys).mockReturnValueOnce(renameWork.promise);
 
     const doc = makeDoc(3);
     usePecoStore.setState({
@@ -273,17 +261,10 @@ describe('U-PM2-02: handleDeletePages — 削除後の currentPageIndex 調整',
       expect(waitResolved).toBe(false);
 
       deleteWork.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(renameTemporaryPageKeys).toHaveBeenCalled();
-      expect(waitResolved).toBe(false);
-
-      renameWork.resolve();
       await waitPromise;
       expect(waitResolved).toBe(true);
     } finally {
       deleteWork.resolve();
-      renameWork.resolve();
       await waitPromise;
     }
   });
@@ -309,7 +290,6 @@ describe('U-PM2-02: handleDeletePages — 削除後の currentPageIndex 調整',
       await waitForPendingIdbSaves();
 
       expect(useInfraStore.getState().lastIdbError).toBe(idbError);
-      expect(renameTemporaryPageKeys).not.toHaveBeenCalled();
     } finally {
       errorSpy.mockRestore();
     }
@@ -341,8 +321,8 @@ describe('U-PM2-03: handleMovePage — 移動元=移動先のとき no-op', () =
     expect(state.pageOrder).toEqual(initialPageOrder);
     // isDirty にならない
     expect(state.isDirty).toBe(false);
-    // IDB 副作用は呼ばれない
-    expect(renameTemporaryPageKeys).not.toHaveBeenCalled();
+    // PCT-104 段階3: movePage は IDB 副作用なし
+    expect(deleteTemporaryPageKeys).not.toHaveBeenCalled();
   });
 
   it('0→2 移動で pageOrder が正しく並び替えられる', async () => {
@@ -364,76 +344,11 @@ describe('U-PM2-03: handleMovePage — 移動元=移動先のとき no-op', () =
     expect(state.pageOrder.length).toBe(3);
     // isDirty になる
     expect(state.isDirty).toBe(true);
+    // PCT-104 段階3: movePage は IDB rename 不要
+    expect(deleteTemporaryPageKeys).not.toHaveBeenCalled();
   });
 
-  it('IDB エラー時に lastIdbError が設定される', async () => {
-    const idbError = new Error('IDB rename failed');
-    vi.mocked(renameTemporaryPageKeys).mockRejectedValueOnce(idbError);
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    try {
-      const doc = makeDoc(3);
-      usePecoStore.setState({
-        document: doc,
-        pageOrder: [0, 1, 2],
-        currentPageIndex: 0,
-      });
-
-      const { result } = renderHook(() => usePageManagement());
-
-      await act(async () => {
-        await result.current.handleMovePage(0, 2);
-      });
-      await waitForPendingIdbSaves();
-
-      expect(useInfraStore.getState().lastIdbError).toBe(idbError);
-    } finally {
-      errorSpy.mockRestore();
-    }
-  });
-
-  it('PCT-029: hook-side move rename IDB work が waitForPendingIdbSaves に追跡される', async () => {
-    const renameWork = deferredVoid();
-    vi.mocked(renameTemporaryPageKeys).mockReturnValueOnce(renameWork.promise);
-
-    const doc = makeDoc(3);
-    usePecoStore.setState({
-      document: doc,
-      pageOrder: [0, 1, 2],
-      currentPageIndex: 0,
-    });
-
-    const { result } = renderHook(() => usePageManagement());
-
-    await act(async () => {
-      await result.current.handleMovePage(0, 2);
-    });
-
-    let waitResolved = false;
-    const waitPromise = waitForPendingIdbSaves().then(() => {
-      waitResolved = true;
-    });
-
-    try {
-      await Promise.resolve();
-      expect(waitResolved).toBe(false);
-
-      renameWork.resolve();
-      await waitPromise;
-      expect(waitResolved).toBe(true);
-    } finally {
-      renameWork.resolve();
-      await waitPromise;
-    }
-  });
-
-  it('PCT-031: 同一 tick の move 連打では先行 rename 完了まで次の rename を開始しない', async () => {
-    const firstRename = deferredVoid();
-    const secondRename = deferredVoid();
-    vi.mocked(renameTemporaryPageKeys)
-      .mockReturnValueOnce(firstRename.promise)
-      .mockReturnValueOnce(secondRename.promise);
-
+  it('PCT-031: 同一 tick の move 連打でも全ての movePage が完了する', async () => {
     const doc = makeDoc(4);
     usePecoStore.setState({
       document: doc,
@@ -442,43 +357,25 @@ describe('U-PM2-03: handleMovePage — 移動元=移動先のとき no-op', () =
     });
 
     const { result } = renderHook(() => usePageManagement());
-    let firstPromise: Promise<void> = Promise.resolve();
-    let secondPromise: Promise<void> = Promise.resolve();
-    let secondResolved = false;
+    let firstDone = false;
+    let secondDone = false;
 
     await act(async () => {
-      firstPromise = result.current.handleMovePage(0, 3);
-      secondPromise = result.current.handleMovePage(0, 2).then(() => {
-        secondResolved = true;
-      });
+      const firstPromise = result.current.handleMovePage(0, 3).then(() => { firstDone = true; });
+      const secondPromise = result.current.handleMovePage(0, 2).then(() => { secondDone = true; });
       await flushMicrotasks();
+      await Promise.all([firstPromise, secondPromise]);
     });
 
-    try {
-      expect(renameTemporaryPageKeys).toHaveBeenCalledTimes(1);
-      expect(secondResolved).toBe(false);
-
-      firstRename.resolve();
-      await act(async () => {
-        await flushMicrotasks();
-      });
-
-      expect(renameTemporaryPageKeys).toHaveBeenCalledTimes(2);
-      await act(async () => {
-        await Promise.all([firstPromise, secondPromise]);
-      });
-      expect(secondResolved).toBe(true);
-    } finally {
-      firstRename.resolve();
-      secondRename.resolve();
-      await Promise.allSettled([firstPromise, secondPromise]);
-      await waitForPendingIdbSaves();
-    }
+    expect(firstDone).toBe(true);
+    expect(secondDone).toBe(true);
+    // PCT-104 段階3: movePage で IDB 操作なし
+    expect(deleteTemporaryPageKeys).not.toHaveBeenCalled();
   });
 
-  it('PCT-031: move 中に始まった delete は先行 rename 完了まで IDB delete を開始しない', async () => {
-    const moveRename = deferredVoid();
-    vi.mocked(renameTemporaryPageKeys).mockReturnValueOnce(moveRename.promise);
+  it('PCT-031: move 中に始まった delete は enqueuePageOperation でシリアライズされる', async () => {
+    const deleteWork = deferredVoid();
+    vi.mocked(deleteTemporaryPageKeys).mockReturnValueOnce(deleteWork.promise);
 
     const doc = makeDoc(4);
     usePecoStore.setState({
@@ -498,20 +395,15 @@ describe('U-PM2-03: handleMovePage — 移動元=移動先のとき no-op', () =
     });
 
     try {
-      expect(renameTemporaryPageKeys).toHaveBeenCalledTimes(1);
-      expect(deleteTemporaryPageKeys).not.toHaveBeenCalled();
-
-      moveRename.resolve();
-      await act(async () => {
-        await flushMicrotasks();
-      });
-
-      expect(deleteTemporaryPageKeys).toHaveBeenCalledTimes(1);
+      // deleteTemporaryPageKeys は delete 処理が始まってから呼ばれる
+      deleteWork.resolve();
       await act(async () => {
         await Promise.all([movePromise, deletePromise]);
       });
+      // delete は呼ばれた（move 後にシリアライズされて実行）
+      expect(deleteTemporaryPageKeys).toHaveBeenCalledTimes(1);
     } finally {
-      moveRename.resolve();
+      deleteWork.resolve();
       await Promise.allSettled([movePromise, deletePromise]);
       await waitForPendingIdbSaves();
     }

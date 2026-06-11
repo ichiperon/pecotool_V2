@@ -34,7 +34,6 @@ const mocks = vi.hoisted(() => ({
   clearTemporaryChanges: vi.fn(),
   clearTemporaryChangesForPages: vi.fn(),
   deleteTemporaryPageKeys: vi.fn(),
-  renameTemporaryPageKeys: vi.fn(),
   clearCachedPages: vi.fn(),
   getSharedPdfProxy: vi.fn(),
   loadPage: vi.fn(),
@@ -55,7 +54,6 @@ vi.mock('../../utils/pdfTemporaryStorage', () => ({
   clearTemporaryChanges: vi.fn(async () => {}),
   clearTemporaryChangesForPages: vi.fn(async () => {}),
   deleteTemporaryPageKeys: vi.fn(async () => {}),
-  renameTemporaryPageKeys: vi.fn(async () => {}),
   getCachedPage: vi.fn(async () => null),
   setCachedPage: vi.fn(),
 }));
@@ -79,7 +77,6 @@ vi.mock('../../utils/pdfLoader', () => ({
   clearTemporaryChanges: mocks.clearTemporaryChanges,
   clearTemporaryChangesForPages: mocks.clearTemporaryChangesForPages,
   deleteTemporaryPageKeys: mocks.deleteTemporaryPageKeys,
-  renameTemporaryPageKeys: mocks.renameTemporaryPageKeys,
   clearCachedPages: mocks.clearCachedPages,
   getSharedPdfProxy: mocks.getSharedPdfProxy,
   loadPage: mocks.loadPage,
@@ -163,7 +160,6 @@ beforeEach(() => {
   mocks.clearTemporaryChanges.mockResolvedValue(undefined);
   mocks.clearTemporaryChangesForPages.mockResolvedValue(undefined);
   mocks.deleteTemporaryPageKeys.mockResolvedValue(undefined);
-  mocks.renameTemporaryPageKeys.mockResolvedValue(undefined);
   mocks.clearCachedPages.mockResolvedValue(undefined);
   mocks.getSharedPdfProxy.mockResolvedValue(null);
   mocks.loadPage.mockResolvedValue(null);
@@ -558,9 +554,8 @@ describe('PCT-068: 保存マージはメモリ在ページを IDB エントリ�
 
 describe('PCT-069: ページ移動 → undo → 保存で旧 index に他ページ内容が混入しない', () => {
   /**
-   * PCT-104 (A-lite 段階2): rename 挙動まで再現するステートフルな fake IDB を mocks に装着する。
-   * saveTemporaryPageDataBatch は pageId (string) キー、deleteTemporaryPageKeys / clearTemporaryChangesForPages も
-   * pageId (string[]) 引数に変更。getAllTemporaryPageData は Map<pageId, ...> を返す。
+   * PCT-104 (A-lite 段階3): pageId ベースのステートフルな fake IDB を mocks に装着する。
+   * rename は pageId 不変により完全に不要。
    */
   function installStatefulIdbMocks(fakeIdb: Map<string, Record<string, unknown>>) {
     mocks.saveTemporaryPageDataBatch.mockImplementation(
@@ -577,38 +572,21 @@ describe('PCT-069: ページ移動 → undo → 保存で旧 index に他ペー�
       for (const [k, v] of fakeIdb) {
         if (!k.startsWith(prefix)) continue;
         const suffix = k.slice(prefix.length);
-        // "src:N" 形式の新キー
         if (suffix.startsWith('src:')) {
           out.set(suffix, v);
         } else {
-          // 旧形式 "N" (整数) -> "src:N" にマップ
           const n = parseInt(suffix, 10);
           if (Number.isFinite(n)) out.set(`src:${n}`, v);
         }
       }
       return out;
     });
-    mocks.renameTemporaryPageKeys.mockImplementation(
-      async (filePath: string, entries: Array<{ oldPageIndex: number; newPageIndex: number }>) => {
-        // 実装と同じ: 全 old を読み出し → old を全削除 → data があるものだけ new へ put
-        // 段階2では renameTemporaryPageKeys は旧キー (filePath:N) のみに作用する
-        const moved = entries.map(({ oldPageIndex, newPageIndex }) => ({
-          newPageIndex,
-          data: fakeIdb.get(`${filePath}:${oldPageIndex}`) ?? null,
-        }));
-        for (const { oldPageIndex } of entries) fakeIdb.delete(`${filePath}:${oldPageIndex}`);
-        for (const { newPageIndex, data } of moved) {
-          if (data) fakeIdb.set(`${filePath}:${newPageIndex}`, data);
-        }
-      });
     mocks.deleteTemporaryPageKeys.mockImplementation(async (filePath: string, pageIds: string[]) => {
-      // PCT-104: pageId (string) で削除する。新キー (filePath:src:N) を削除。
       for (const pageId of pageIds) {
         fakeIdb.delete(`${filePath}:${pageId}`);
       }
     });
     mocks.clearTemporaryChangesForPages.mockImplementation(async (filePath: string, pageIds: string[]) => {
-      // PCT-104: pageId (string[]) で削除する
       for (const pageId of pageIds) {
         fakeIdb.delete(`${filePath}:${pageId}`);
       }
@@ -654,12 +632,10 @@ describe('PCT-069: ページ移動 → undo → 保存で旧 index に他ペー�
     expect((fakeIdb.get('/c2.pdf:src:2') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P2_EDITED');
 
     // ページ移動 (display 2 → 0)。
-    // 段階2: renameTemporaryPageKeys は旧キー (filePath:N) のみ rename。
-    // 新キー (filePath:src:N) は pageId が不変なため rename 不要 → 安定したまま。
+    // 段階3: pageId が不変なため rename は不要。src:2 は移動後も安定したまま。
     await usePecoStore.getState().movePage(2, 0);
     await waitForPendingIdbSaves();
-    // pageId (src:2) は移動後も不変 → undo/redo sync は contentEntries で書き込む
-    // movePage の contentEntries 書き込みにより src:2 = P2_EDITED が維持される
+    // pageId (src:2) は移動後も不変 → src:2 = P2_EDITED が維持される
     expect((fakeIdb.get('/c2.pdf:src:2') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P2_EDITED');
 
     // undo → scheduleStructuralUndoRedoIdbSync で contentEntries を beforePages (beforeOrder) で書き込む

@@ -542,21 +542,9 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     const { deleteTemporaryPageKeys } =
       await import('../../utils/pdfTemporaryStorage');
 
+    // PCT-104 (段階3): pageId 形式 (string[]) で渡す
     await expect(
-      deleteTemporaryPageKeys('delete-fail.pdf', [0]),
+      deleteTemporaryPageKeys('delete-fail.pdf', ['src:0']),
     ).rejects.toThrow('delete transaction failed');
-  });
-
-  it('renameTemporaryPageKeys は IDB 失敗を reject する', async () => {
-    vi.resetModules();
-    setupFakeIdb(new FailingDirtyTransactionDatabase('rename transaction failed'));
-    const { renameTemporaryPageKeys } =
-      await import('../../utils/pdfTemporaryStorage');
-
-    await expect(
-      renameTemporaryPageKeys('rename-fail.pdf', [
-        { oldPageIndex: 0, newPageIndex: 1 },
-      ]),
-    ).rejects.toThrow('rename transaction failed');
   });
 });
