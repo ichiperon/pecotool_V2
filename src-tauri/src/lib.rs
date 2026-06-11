@@ -555,15 +555,37 @@ async fn list_ocr_languages() -> Result<Vec<OcrLanguageInfo>, String> {
 /// The temp file lives in `std::env::temp_dir()` and is never subject to Tauri
 /// fs-scope validation, so the `\\?\`-prefix canonicalization issue (#285) cannot
 /// occur here.
+///
+/// PCT-101: image bytes は IPC raw body として受け取る（JSON 経由では
+/// Uint8Array→number[] の変換で 2MB PNG が約 16MB ヒープを消費するため）。
+/// 数値メタは HTTP-like headers で渡す:
+///   x-page-width    : f64 (文字列)
+///   x-page-height   : f64 (文字列, 現状未使用)
+///   x-render-scale  : f64 (文字列)
+///   x-language-tag  : OCR 言語タグ (省略時 "ja")
 #[tauri::command]
-async fn run_ocr(
-    image_bytes: Vec<u8>,
-    page_width: f64,
-    page_height: f64,
-    render_scale: f64,
-    language_tag: Option<String>,
-) -> Result<String, String> {
-    let _ = (page_width, page_height); // 座標変換は render_scale のみ使用
+async fn run_ocr(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let headers = request.headers();
+
+    // M1 (PCT-101): parse_run_ocr_headers でヘッダー欠落・パース失敗を明示エラーにする。
+    // 旧来の unwrap_or(1.0) による黙示 fallback は「OCR が完走して座標だけズレる」
+    // 最悪の壊れ方を引き起こすため、write_pdf_chunk のエラー方針に揃えた。
+    let ocr_headers = parse_run_ocr_headers(headers)?;
+    let render_scale = ocr_headers.render_scale;
+    let language_tag = ocr_headers.language_tag;
+    // x-page-height は現状未使用だが、以前と同様 headers から読めることを確保する。
+    let _page_height: f64 = headers
+        .get("x-page-height")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let _ = (ocr_headers.page_width, _page_height); // 座標変換は render_scale のみ使用
+
+    let image_bytes: Vec<u8> = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.clone(),
+        _ => return Err("[run_ocr] expected raw body".to_string()),
+    };
+
     let result = tokio::task::spawn_blocking(move || {
         let temp_path = write_ocr_temp_bytes(&image_bytes)?;
         let image = temp_path.to_string_lossy().to_string();
@@ -1162,6 +1184,43 @@ fn parse_pdf_chunk_offset(headers: &tauri::http::HeaderMap) -> Result<u64, Strin
     offset
         .parse()
         .map_err(|_| "invalid x-offset header".to_string())
+}
+
+/// M1 (PCT-101): run_ocr の headers から数値メタを解析する。
+/// 欠落・パース失敗は Err を返す（unwrap_or による黙示 fallback を禁止）。
+/// x-render-scale 欠落→1.0 続行は「OCR が完走して座標だけズレる」最悪の壊れ方のため、
+/// write_pdf_chunk のエラー方針（欠落/パース失敗は Err）に揃える。
+#[derive(Debug)]
+struct RunOcrHeaders {
+    page_width: f64,
+    render_scale: f64,
+    language_tag: Option<String>,
+}
+
+fn parse_run_ocr_headers(headers: &tauri::http::HeaderMap) -> Result<RunOcrHeaders, String> {
+    let page_width: f64 = headers
+        .get("x-page-width")
+        .ok_or_else(|| "missing x-page-width header".to_string())?
+        .to_str()
+        .map_err(|_| "invalid x-page-width header".to_string())?
+        .parse()
+        .map_err(|_| "invalid x-page-width header".to_string())?;
+
+    let render_scale: f64 = headers
+        .get("x-render-scale")
+        .ok_or_else(|| "missing x-render-scale header".to_string())?
+        .to_str()
+        .map_err(|_| "invalid x-render-scale header".to_string())?
+        .parse()
+        .map_err(|_| "invalid x-render-scale header".to_string())?;
+
+    let language_tag: Option<String> = headers
+        .get("x-language-tag")
+        .and_then(|h| h.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    Ok(RunOcrHeaders { page_width, render_scale, language_tag })
 }
 
 fn validate_pdf_chunk_offset_contiguous(current_len: u64, offset: u64) -> Result<(), String> {
@@ -1768,6 +1827,82 @@ mod tests {
             err.contains("render_scale"),
             "error must mention render_scale, got: {err}"
         );
+    }
+
+    // ── M2 (PCT-101): parse_run_ocr_headers テスト ──────────────────────────
+
+    #[test]
+    fn parse_run_ocr_headers_success_with_all_required() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-page-width", HeaderValue::from_static("595.0"));
+        headers.insert("x-render-scale", HeaderValue::from_static("1.5"));
+
+        let result = parse_run_ocr_headers(&headers).unwrap();
+        assert!((result.page_width - 595.0).abs() < f64::EPSILON);
+        assert!((result.render_scale - 1.5).abs() < f64::EPSILON);
+        assert!(result.language_tag.is_none());
+    }
+
+    #[test]
+    fn parse_run_ocr_headers_success_with_language_tag() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-page-width", HeaderValue::from_static("842.0"));
+        headers.insert("x-render-scale", HeaderValue::from_static("2.0"));
+        headers.insert("x-language-tag", HeaderValue::from_static("en-US"));
+
+        let result = parse_run_ocr_headers(&headers).unwrap();
+        assert_eq!(result.language_tag, Some("en-US".to_string()));
+    }
+
+    #[test]
+    fn parse_run_ocr_headers_missing_page_width_returns_err() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-render-scale", HeaderValue::from_static("1.0"));
+
+        let err = parse_run_ocr_headers(&headers).unwrap_err();
+        assert_eq!(err, "missing x-page-width header");
+    }
+
+    #[test]
+    fn parse_run_ocr_headers_missing_render_scale_returns_err() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-page-width", HeaderValue::from_static("595.0"));
+        // x-render-scale を意図的に省略
+
+        let err = parse_run_ocr_headers(&headers).unwrap_err();
+        assert_eq!(err, "missing x-render-scale header");
+    }
+
+    #[test]
+    fn parse_run_ocr_headers_invalid_render_scale_returns_err() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-page-width", HeaderValue::from_static("595.0"));
+        headers.insert("x-render-scale", HeaderValue::from_static("not-a-number"));
+
+        let err = parse_run_ocr_headers(&headers).unwrap_err();
+        assert_eq!(err, "invalid x-render-scale header");
+    }
+
+    #[test]
+    fn parse_run_ocr_headers_invalid_page_width_returns_err() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-page-width", HeaderValue::from_static("bad"));
+        headers.insert("x-render-scale", HeaderValue::from_static("1.0"));
+
+        let err = parse_run_ocr_headers(&headers).unwrap_err();
+        assert_eq!(err, "invalid x-page-width header");
+    }
+
+    #[test]
+    fn parse_run_ocr_headers_empty_language_tag_is_none() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-page-width", HeaderValue::from_static("595.0"));
+        headers.insert("x-render-scale", HeaderValue::from_static("1.0"));
+        headers.insert("x-language-tag", HeaderValue::from_static(""));
+
+        let result = parse_run_ocr_headers(&headers).unwrap();
+        // 空文字は filter で None になる
+        assert!(result.language_tag.is_none());
     }
 }
 

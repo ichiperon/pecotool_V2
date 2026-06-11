@@ -113,6 +113,8 @@ export function usePageNavigation({
               const { readFile } = await import('@tauri-apps/plugin-fs');
               return readFile(doc.filePath);
             },
+            filePath: doc.filePath,
+            mtime: doc.mtime,
           });
         } catch {
           nextBBoxMeta = null;

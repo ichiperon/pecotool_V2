@@ -216,13 +216,17 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
     const { result } = renderHook(() => useOcrEngine(showToast));
     await act(async () => { await result.current.runOcrCurrentPage(); });
 
-    // invoke が呼ばれ、Tauri fs 経由の一時ファイルは使わない
-    expect(h.invokeMock).toHaveBeenCalledWith(
-      'run_ocr',
-      expect.objectContaining({ imageBytes: expect.any(Array) }),
-    );
-    const runOcrArgs = h.invokeMock.mock.calls.find(([cmd]) => cmd === 'run_ocr')?.[1] as Record<string, unknown>;
-    expect(runOcrArgs.imagePath).toBeUndefined();
+    // PCT-101: invoke が raw body (ArrayBuffer) + headers 形式で呼ばれること
+    const runOcrCall = h.invokeMock.mock.calls.find(([cmd]) => cmd === 'run_ocr');
+    expect(runOcrCall).toBeDefined();
+    // 第2引数は ArrayBuffer (raw bytes)
+    expect(runOcrCall![1]).toBeInstanceOf(ArrayBuffer);
+    // 第3引数は headers オブジェクト
+    const runOcrOptions = runOcrCall![2] as { headers: Record<string, string> };
+    expect(runOcrOptions).toBeDefined();
+    expect(runOcrOptions.headers['x-page-width']).toBeDefined();
+    expect(runOcrOptions.headers['x-render-scale']).toBeDefined();
+    // imagePath は使われないこと（Tauri fs 経由ではない）
     expect(h.writeFileMock).not.toHaveBeenCalled();
     expect(h.removeMock).not.toHaveBeenCalled();
 
@@ -773,9 +777,12 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
         await result.current.runOcrOnRegion(canvas, { x: 100, y: 200, width: 80, height: 40 }, 0, 100);
       });
 
-      expect(h.invokeMock).toHaveBeenCalledWith('run_ocr', expect.objectContaining({ imageBytes: expect.any(Array) }));
-      const runOcrArgs = h.invokeMock.mock.calls.find(([cmd]) => cmd === 'run_ocr')?.[1] as Record<string, unknown>;
-      expect(runOcrArgs.imagePath).toBeUndefined();
+      // PCT-101: raw body (ArrayBuffer) + headers 形式で呼ばれること
+      const runOcrCall = h.invokeMock.mock.calls.find(([cmd]) => cmd === 'run_ocr');
+      expect(runOcrCall).toBeDefined();
+      expect(runOcrCall![1]).toBeInstanceOf(ArrayBuffer);
+      const runOcrOptions = runOcrCall![2] as { headers: Record<string, string> };
+      expect(runOcrOptions?.headers?.['x-page-width']).toBeDefined();
       expect(h.writeFileMock).not.toHaveBeenCalled();
       expect(h.removeMock).not.toHaveBeenCalled();
 
@@ -912,10 +919,10 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
       // getCachedPageProxy は width=612, height=792 を返す
       h.getCachedPageProxyMock.mockResolvedValue(makeMockPage(612, 792));
 
-      let capturedRunOcrArgs: Record<string, unknown> | null = null;
-      h.invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      let capturedRunOcrHeaders: Record<string, string> | null = null;
+      h.invokeMock.mockImplementation(async (cmd: string, _body?: unknown, opts?: { headers?: Record<string, string> }) => {
         if (cmd === 'run_ocr') {
-          capturedRunOcrArgs = args ?? null;
+          capturedRunOcrHeaders = opts?.headers ?? null;
           return JSON.stringify({
             status: 'ok',
             blocks: [
@@ -933,10 +940,10 @@ describe('useOcrEngine: JS 側のパイプライン (invoke 結果を mock)', ()
         await result.current.runOcrOnRegion(canvas, { x: 10, y: 10, width: 50, height: 30 }, 0, 100);
       });
 
-      // run_ocr が呼ばれ、有効な寸法（getCachedPageProxy 由来の 612×792）が渡されること
-      expect(capturedRunOcrArgs).not.toBeNull();
-      expect(capturedRunOcrArgs!.pageWidth).toBe(612);
-      expect(capturedRunOcrArgs!.pageHeight).toBe(792);
+      // PCT-101: run_ocr が呼ばれ、有効な寸法（getCachedPageProxy 由来の 612×792）が headers で渡されること
+      expect(capturedRunOcrHeaders).not.toBeNull();
+      expect(Number(capturedRunOcrHeaders!['x-page-width'])).toBe(612);
+      expect(Number(capturedRunOcrHeaders!['x-page-height'])).toBe(792);
     });
 
     it('キャンセル済みなら run_ocr 完了後の範囲指定OCR結果を store に反映しない', async () => {
@@ -1063,10 +1070,10 @@ describe('PCT-046 regression: runOcrCurrentPage が pageWidth/pageHeight に有�
     const pdf = makeMockPdf(1, { width: 595, height: 842 });
     h.openFreshPdfDocMock.mockResolvedValue(pdf);
 
-    let capturedRunOcrArgs: Record<string, unknown> | null = null;
-    h.invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+    let capturedRunOcrHeaders: Record<string, string> | null = null;
+    h.invokeMock.mockImplementation(async (cmd: string, _body?: unknown, opts?: { headers?: Record<string, string> }) => {
       if (cmd === 'run_ocr') {
-        capturedRunOcrArgs = args ?? null;
+        capturedRunOcrHeaders = opts?.headers ?? null;
         return JSON.stringify({ status: 'ok', blocks: [] });
       }
       return '';
@@ -1075,16 +1082,16 @@ describe('PCT-046 regression: runOcrCurrentPage が pageWidth/pageHeight に有�
     const { result } = renderHook(() => useOcrEngine(() => {}));
     await act(async () => { await result.current.runOcrCurrentPage(); });
 
-    // run_ocr が呼ばれていること
-    expect(capturedRunOcrArgs).not.toBeNull();
+    // PCT-101: run_ocr が呼ばれ、有効な寸法が headers で渡されること
+    expect(capturedRunOcrHeaders).not.toBeNull();
     // pageWidth/pageHeight が有効な数値（undefined でも 0 でもない）であること
-    expect(typeof capturedRunOcrArgs!.pageWidth).toBe('number');
-    expect(typeof capturedRunOcrArgs!.pageHeight).toBe('number');
-    expect(capturedRunOcrArgs!.pageWidth).toBeGreaterThan(0);
-    expect(capturedRunOcrArgs!.pageHeight).toBeGreaterThan(0);
+    expect(typeof Number(capturedRunOcrHeaders!['x-page-width'])).toBe('number');
+    expect(typeof Number(capturedRunOcrHeaders!['x-page-height'])).toBe('number');
+    expect(Number(capturedRunOcrHeaders!['x-page-width'])).toBeGreaterThan(0);
+    expect(Number(capturedRunOcrHeaders!['x-page-height'])).toBeGreaterThan(0);
     // viewport の寸法が使われていること (scale=1.0 で 595×842)
-    expect(capturedRunOcrArgs!.pageWidth).toBe(595);
-    expect(capturedRunOcrArgs!.pageHeight).toBe(842);
+    expect(Number(capturedRunOcrHeaders!['x-page-width'])).toBe(595);
+    expect(Number(capturedRunOcrHeaders!['x-page-height'])).toBe(842);
   });
 
   it('pageData が未ロード（pages.get(0)===undefined）のとき、getCachedPageProxy 経由で取得した有効な寸法が run_ocr に渡される', async () => {
@@ -1107,10 +1114,10 @@ describe('PCT-046 regression: runOcrCurrentPage が pageWidth/pageHeight に有�
     const pdf = makeMockPdf(1, { width: 800, height: 600 });
     h.openFreshPdfDocMock.mockResolvedValue(pdf);
 
-    let capturedRunOcrArgs: Record<string, unknown> | null = null;
-    h.invokeMock.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+    let capturedRunOcrHeaders: Record<string, string> | null = null;
+    h.invokeMock.mockImplementation(async (cmd: string, _body?: unknown, opts?: { headers?: Record<string, string> }) => {
       if (cmd === 'run_ocr') {
-        capturedRunOcrArgs = args ?? null;
+        capturedRunOcrHeaders = opts?.headers ?? null;
         return JSON.stringify({ status: 'ok', blocks: [] });
       }
       return '';
@@ -1119,11 +1126,10 @@ describe('PCT-046 regression: runOcrCurrentPage が pageWidth/pageHeight に有�
     const { result } = renderHook(() => useOcrEngine(() => {}));
     await act(async () => { await result.current.runOcrCurrentPage(); });
 
-    // run_ocr が呼ばれていること
-    expect(capturedRunOcrArgs).not.toBeNull();
-    // getCachedPageProxy 経由の合成 pageData（width=800, height=600）がそのまま渡されること
-    expect(capturedRunOcrArgs!.pageWidth).toBe(800);
-    expect(capturedRunOcrArgs!.pageHeight).toBe(600);
+    // PCT-101: run_ocr が呼ばれ、getCachedPageProxy 経由の寸法（width=800, height=600）が headers で渡されること
+    expect(capturedRunOcrHeaders).not.toBeNull();
+    expect(Number(capturedRunOcrHeaders!['x-page-width'])).toBe(800);
+    expect(Number(capturedRunOcrHeaders!['x-page-height'])).toBe(600);
   });
 });
 

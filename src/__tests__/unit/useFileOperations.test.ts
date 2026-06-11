@@ -56,6 +56,10 @@ vi.mock('../../hooks/useFontLoader', () => ({
   getPrimaryFontKind: vi.fn().mockReturnValue('bundled'),
   disableSystemFontForSession: vi.fn(),
 }));
+// PCT-101/C1: invalidateBBoxMetaCache の呼び出しを検証するためにモック
+vi.mock('../../utils/pdfMetadataLoader', () => ({
+  invalidateBBoxMetaCache: vi.fn(),
+}));
 
 // pecoStore は本物を使うが、必要最小限の状態だけ。
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
@@ -68,6 +72,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { readFile, stat } from '@tauri-apps/plugin-fs';
 import type { PecoDocument, PageData } from '../../types';
+import { invalidateBBoxMetaCache } from '../../utils/pdfMetadataLoader';
 
 beforeEach(() => {
   // issue #37: Recent Files は localStorage に保存される。両方クリアして検証ノイズを排除。
@@ -1975,5 +1980,70 @@ describe('PCT-076: handleOpen suppressOcrZeroPrompt オプション', () => {
     expect(opened).toBe(true);
     expect(onOpenComplete).toHaveBeenCalledTimes(1);
     expect(onOpenComplete.mock.calls[0][0]).toMatchObject({ filePath: '/fixed/path.pdf' });
+  });
+});
+
+// ── PCT-101/C1: 保存成功パスが invalidateBBoxMetaCache() を呼ぶ配線テスト ────
+describe('PCT-101/C1: 保存成功パスが invalidateBBoxMetaCache を呼ぶ', () => {
+  function setupSavableDoc(filePath: string): void {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'blk', text: 'HELLO', isDirty: true }],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+  }
+
+  beforeEach(() => {
+    (invalidateBBoxMetaCache as unknown as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  it('上書き保存が成功すると invalidateBBoxMetaCache が呼ばれる', async () => {
+    setupSavableDoc('/pct101/save.pdf');
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(true);
+    // 保存成功パスで stale キャッシュが破棄されること
+    expect(invalidateBBoxMetaCache).toHaveBeenCalled();
+  });
+
+  it('保存が失敗 (savePDF が reject) した場合は invalidateBBoxMetaCache が呼ばれない', async () => {
+    setupSavableDoc('/pct101/fail.pdf');
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('save failed'),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(false);
+    // 失敗パスではキャッシュ破棄しない（ディスクが書き換わっていないため）
+    expect(invalidateBBoxMetaCache).not.toHaveBeenCalled();
   });
 });
