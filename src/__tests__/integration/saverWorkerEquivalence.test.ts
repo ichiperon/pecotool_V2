@@ -268,4 +268,50 @@ describe('PCT-097: pdfSaver / Worker 出力等価性', () => {
       expect(workerRotate).toBe(mainRotate);
     }, 60_000);
   });
+
+  describe('D-after 回帰ガード: 孤児オブジェクトあり・dirty=0 の PDF は short-circuit しない (invariants A-06)', () => {
+    it('孤児オブジェクトあり・dirty=0 の場合、main/worker ともに全書換する（バイト列は縮まる）', async () => {
+      // 孤児オブジェクトを意図的に含む PDF を生成する。
+      // flateStream を register するが /Root から参照しない = 孤児化。
+      const tmpPdf = await PDFDocument.create();
+      tmpPdf.addPage([PAGE_W, PAGE_H]);
+      const orphanStream = tmpPdf.context.flateStream(new TextEncoder().encode('orphan data here'));
+      tmpPdf.context.register(orphanStream); // 孤児化: /Root から参照しない
+      const withOrphanBytes = await tmpPdf.save({ useObjectStreams: false, addDefaultPage: false });
+
+      // dirty=0 + hadLegacyBBoxMeta=false + hadExistingBBoxMeta=false の clean document を作る
+      const cleanDoc = makeDocument(PAGE_W, PAGE_H, undefined);
+      const cleanDocNoDirty = {
+        ...cleanDoc,
+        pages: new Map([[0, { ...cleanDoc.pages.get(0)!, isDirty: false, textBlocks: [] }]]),
+      };
+      const serializedPages = serializePages(cleanDocNoDirty);
+
+      // main 経路
+      const mainBytes = await buildPdfDocument(withOrphanBytes, cleanDocNoDirty, undefined);
+      // worker 経路
+      const { savedBytes: workerBytes } = await __handleSavePdfForTest(
+        withOrphanBytes,
+        { ...cleanDocNoDirty, pages: serializedPages },
+        undefined,
+        [],
+      );
+
+      // 両経路とも孤児があれば全書換するので、同じ判断（short-circuit か否か）をしているはず。
+      const mainSameAsInput = mainBytes.byteLength === withOrphanBytes.byteLength &&
+        mainBytes.every((b, i) => b === withOrphanBytes[i]);
+      const workerSameAsInput = workerBytes.byteLength === withOrphanBytes.byteLength &&
+        workerBytes.every((b, i) => b === withOrphanBytes[i]);
+
+      // D-after: 両経路ともに同じ判断をしている（孤児ありなら両方全書換、孤児なしなら両方 short-circuit）
+      expect(mainSameAsInput).toBe(workerSameAsInput);
+      // レビュー指摘: 「両経路一致」だけでは core から earlySweep が消える回帰で
+      // 両方 short-circuit して素通りする。孤児ありなら全書換 (=入力と不一致) を直接ピン留めする (A-06)。
+      expect(mainSameAsInput).toBe(false);
+
+      // 両経路の出力サイズが近い値であること（同一 core ロジックの証明）
+      const sizeDiff = Math.abs(mainBytes.byteLength - workerBytes.byteLength);
+      expect(sizeDiff).toBeLessThan(1024);
+    }, 60_000);
+  });
 });
