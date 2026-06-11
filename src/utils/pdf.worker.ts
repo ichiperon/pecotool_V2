@@ -256,6 +256,16 @@ async function handleSavePdf(
 
     const page = pdfDoc.getPage(pageIndex);
     const { width: pageW, height: pageH } = page.getSize();
+
+    // PCT-096: issue #207 と同一ロジック (pdfSaver.ts:387-390 の二重実装のため両方に必要)。
+    // ユーザー指定の rotation を PDF /Rotate に適用してから getRotation() で cm を計算する。
+    // Worker に渡された documentState.pages は SerializedPageData (Omit<PageData, 'thumbnail'>)
+    // のため rotation フィールドは構造化クローン越しに保持されている。
+    const userRotation = documentState.pages[pageIndex]?.rotation;
+    if (userRotation !== undefined) {
+      page.setRotation(degrees(userRotation));
+    }
+
     // #71: 詳細コメントは pdfSaver.ts 側参照。viewport-space bbox を rotation 別 cm で描画する。
     const rotation = normalizeRotation(page.getRotation?.().angle ?? 0); // PCT-053: pdfSaver.ts と同様に optional chaining で統一
     const { vh } = getViewportSize(rotation, pageW, pageH);
