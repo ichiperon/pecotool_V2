@@ -129,13 +129,19 @@ async function runOcrForPage(
 ): Promise<{ result: OcrResult }> {
   // #285 D案: bytes を直接 Rust に渡す。Tauri fs-scope を経由しないため
   // Windows UNC verbatim prefix (\\?\) によるスコープ不一致が発生しない。
+  // PCT-101: Array.from(bytes) を廃止し ArrayBuffer を raw body で転送する。
+  // 2MB PNG が約 16MB ヒープを消費していた JSON 経由の変換を排除する。
   const bytes = await renderPageToBytes(ocrPdf, pageIndex);
-  const raw = await invoke<string>('run_ocr', {
-    imageBytes: Array.from(bytes),
-    pageWidth,
-    pageHeight,
-    renderScale: RENDER_SCALE,
-    languageTag: languageTag ?? null,
+  const body = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer
+    : bytes.slice().buffer;
+  const raw = await invoke<string>('run_ocr', body, {
+    headers: {
+      'x-page-width': String(pageWidth),
+      'x-page-height': String(pageHeight),
+      'x-render-scale': String(RENDER_SCALE),
+      'x-language-tag': languageTag ?? '',
+    },
   });
   let parsed: OcrResult;
   try {
@@ -716,6 +722,8 @@ export function useOcrEngine(
           const { readFile } = await import('@tauri-apps/plugin-fs');
           return readFile(doc.filePath);
         },
+        filePath: doc.filePath,
+        mtime: doc.mtime,
       });
     } catch {
       // メタロード失敗は無視して従来どおり null (fallback) で続行する
@@ -799,6 +807,8 @@ export function useOcrEngine(
             const { readFile } = await import('@tauri-apps/plugin-fs');
             return readFile(doc.filePath);
           },
+          filePath: doc.filePath,
+          mtime: doc.mtime,
         });
         if (meta !== null && Object.keys(meta).length > 0) {
           // メタあり: 何もせず return
@@ -909,13 +919,18 @@ export function useOcrEngine(
       // Windows UNC verbatim prefix (\\?\) によるスコープ不一致が発生しない。
       // クロップ画像は zoom 済みピクセルなので renderScale として zoom / 100 を渡す。
       // pageWidth/pageHeight はクロップ前のページ全体サイズ（座標変換に使われる）。
+      // PCT-101: Array.from(bytes) を廃止し ArrayBuffer を raw body で転送する。
       const settings = useOcrSettingsStore.getState();
-      const raw = await invoke<string>('run_ocr', {
-        imageBytes: Array.from(bytes),
-        pageWidth,
-        pageHeight,
-        renderScale: scale,
-        languageTag: settings.ocrLanguage ?? null,
+      const ocrBody = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes.buffer
+        : bytes.slice().buffer;
+      const raw = await invoke<string>('run_ocr', ocrBody, {
+        headers: {
+          'x-page-width': String(pageWidth),
+          'x-page-height': String(pageHeight),
+          'x-render-scale': String(scale),
+          'x-language-tag': settings.ocrLanguage ?? '',
+        },
       });
 
       let parsed: import('../types').OcrResult;

@@ -18,6 +18,7 @@ import {
 import { savePDF } from '../utils/pdfSaver';
 import type { SavePdfSource, SkippedPdfTextChar } from '../utils/pdfWorkerTypes';
 import { formatFileSize } from '../utils/format';
+import { invalidateBBoxMetaCache } from '../utils/pdfMetadataLoader';
 import {
   disableSystemFontForSession,
   getPrimaryFontKind,
@@ -630,6 +631,10 @@ export function useFileOperations(
     // 再 render しないため、保存前にレンダリング済みのページ画像はそのまま固着し、
     // 以降の zoom 変更で再ラスタライズされない (issue #118)。
     destroySharedPdfProxy();
+    // PCT-103 / PCT-101: ディスク上の PDF バイト列が差し替わったため、
+    // 保存前メタを返す stale キャッシュを明示破棄する。
+    // clearCachedPages / destroySharedPdfProxy と同じ「ディスク差し替え後の stale 破棄」規約に参加。
+    invalidateBBoxMetaCache();
     const liveStateBeforeNormalize = usePecoStore.getState();
     const liveDoc = liveStateBeforeNormalize.document;
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {

@@ -4,8 +4,8 @@
  * - prototype 汚染攻撃 / bbox の非有限値などが弾かれること。
  * - #36: custom.PecoToolBBoxes が空/非文字列でも info.PecoToolBBoxes に fallback される
  */
-import { describe, it, expect } from 'vitest';
-import { loadPecoToolBBoxMeta } from '../../utils/pdfMetadataLoader';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { loadPecoToolBBoxMeta, _resetBBoxMetaCacheForTest, invalidateBBoxMetaCache } from '../../utils/pdfMetadataLoader';
 import {
   PDFDocument,
   PDFHexString,
@@ -400,5 +400,184 @@ describe('PCT-049: sanitizeBBoxMetaRecord — per-entry / per-page sanitization'
     if (result !== null) {
       expect(result['0']).toBeUndefined();
     }
+  });
+});
+
+// ── PCT-103: loadPecoToolBBoxMeta メモ化テスト ────────────────────────────
+describe('PCT-103: loadPecoToolBBoxMeta memoization', () => {
+  beforeEach(() => {
+    _resetBBoxMetaCacheForTest();
+  });
+
+  const goodEntry = {
+    bbox: { x: 10, y: 20, width: 100, height: 30 },
+    writingMode: 'horizontal',
+    order: 0,
+    text: 'cached',
+  };
+
+  it('同一 filePath + mtime では loadBytes を1回しか呼ばない', async () => {
+    let loadCount = 0;
+    const raw = JSON.stringify({ '0': [goodEntry] });
+    const fakePdf = makeFakePdf(null);
+    const source = {
+      loadBytes: async () => {
+        loadCount++;
+        // bytes を返さず null で fallback させ、PDF metadata 経由でも確認する
+        return null as any;
+      },
+      filePath: '/test/file.pdf',
+      mtime: 12345,
+    };
+
+    // 1回目: キャッシュミス → loadBytes が呼ばれる
+    const r1 = await loadPecoToolBBoxMeta(
+      { getMetadata: async () => ({ info: { PecoToolBBoxes: raw }, metadata: null, contentDispositionFilename: null, contentLength: null }) } as any,
+      source,
+    );
+    expect(loadCount).toBe(1);
+
+    // 2回目: キャッシュヒット → loadBytes が呼ばれない
+    const r2 = await loadPecoToolBBoxMeta(
+      { getMetadata: async () => ({ info: { PecoToolBBoxes: raw }, metadata: null, contentDispositionFilename: null, contentLength: null }) } as any,
+      source,
+    );
+    expect(loadCount).toBe(1); // 変化なし
+
+    // 結果が同一オブジェクトであること（キャッシュヒット）
+    expect(r1).toBe(r2);
+  });
+
+  it('mtime が変化したら再ロードする', async () => {
+    let loadCount = 0;
+    const raw = JSON.stringify({ '0': [goodEntry] });
+    const fakePdfMeta = { getMetadata: async () => ({ info: { PecoToolBBoxes: raw }, metadata: null, contentDispositionFilename: null, contentLength: null }) } as any;
+    const makeSource = (mtime: number) => ({
+      loadBytes: async () => { loadCount++; return null as any; },
+      filePath: '/test/file.pdf',
+      mtime,
+    });
+
+    await loadPecoToolBBoxMeta(fakePdfMeta, makeSource(100));
+    expect(loadCount).toBe(1);
+
+    // mtime が変わった → キャッシュミスで再ロード
+    await loadPecoToolBBoxMeta(fakePdfMeta, makeSource(200));
+    expect(loadCount).toBe(2);
+  });
+
+  it('別ファイルでは再ロードする', async () => {
+    let loadCount = 0;
+    const raw = JSON.stringify({ '0': [goodEntry] });
+    const fakePdfMeta = { getMetadata: async () => ({ info: { PecoToolBBoxes: raw }, metadata: null, contentDispositionFilename: null, contentLength: null }) } as any;
+    const makeSource = (filePath: string) => ({
+      loadBytes: async () => { loadCount++; return null as any; },
+      filePath,
+      mtime: 100,
+    });
+
+    await loadPecoToolBBoxMeta(fakePdfMeta, makeSource('/test/a.pdf'));
+    expect(loadCount).toBe(1);
+
+    // 別ファイル → キャッシュミスで再ロード
+    await loadPecoToolBBoxMeta(fakePdfMeta, makeSource('/test/b.pdf'));
+    expect(loadCount).toBe(2);
+  });
+
+  it('mtime が渡されない場合はキャッシュをスキップする（安全側）', async () => {
+    let loadCount = 0;
+    const raw = JSON.stringify({ '0': [goodEntry] });
+    const fakePdfMeta = { getMetadata: async () => ({ info: { PecoToolBBoxes: raw }, metadata: null, contentDispositionFilename: null, contentLength: null }) } as any;
+    const source = {
+      loadBytes: async () => { loadCount++; return null as any; },
+      filePath: '/test/file.pdf',
+      // mtime: 未指定
+    };
+
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+
+    // mtime なし → 毎回 loadBytes が呼ばれる
+    expect(loadCount).toBe(2);
+  });
+});
+
+// ── PCT-101/C1: invalidateBBoxMetaCache — 保存後の stale キャッシュ破棄 ─────
+describe('PCT-101/C1: invalidateBBoxMetaCache', () => {
+  beforeEach(() => {
+    _resetBBoxMetaCacheForTest();
+  });
+
+  const goodEntry = {
+    bbox: { x: 10, y: 20, width: 100, height: 30 },
+    writingMode: 'horizontal',
+    order: 0,
+    text: 'before-save',
+  };
+
+  it('キャッシュ済み → invalidateBBoxMetaCache() → 再ロードが走る（loadBytes が再度呼ばれる）', async () => {
+    let loadCount = 0;
+    const raw = JSON.stringify({ '0': [goodEntry] });
+    const fakePdfMeta = {
+      getMetadata: async () => ({
+        info: { PecoToolBBoxes: raw },
+        metadata: null,
+        contentDispositionFilename: null,
+        contentLength: null,
+      }),
+    } as any;
+    const source = {
+      loadBytes: async () => { loadCount++; return null as any; },
+      filePath: '/test/file.pdf',
+      mtime: 12345,
+    };
+
+    // 1回目: キャッシュミス → loadBytes が呼ばれる
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+    expect(loadCount).toBe(1);
+
+    // 2回目: キャッシュヒット → loadBytes が呼ばれない
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+    expect(loadCount).toBe(1); // 変化なし
+
+    // 上書き保存を模倣: invalidateBBoxMetaCache() でキャッシュ破棄
+    invalidateBBoxMetaCache();
+
+    // 3回目: キャッシュ破棄後 → loadBytes が再度呼ばれる（再ロード）
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+    expect(loadCount).toBe(2); // 増加 = 再ロードが走った
+  });
+
+  it('invalidateBBoxMetaCache() を外すと保存後もキャッシュヒットする（mutation 実証）', async () => {
+    // このテストは「invalidate がないと退行が再現する」ことを示す。
+    // invalidate を呼ばない場合、同一 filePath + mtime ではキャッシュが継続する。
+    let loadCount = 0;
+    const raw = JSON.stringify({ '0': [goodEntry] });
+    const fakePdfMeta = {
+      getMetadata: async () => ({
+        info: { PecoToolBBoxes: raw },
+        metadata: null,
+        contentDispositionFilename: null,
+        contentLength: null,
+      }),
+    } as any;
+    const source = {
+      loadBytes: async () => { loadCount++; return null as any; },
+      filePath: '/test/file.pdf',
+      mtime: 99999,
+    };
+
+    // 1回目ロード
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+    expect(loadCount).toBe(1);
+
+    // invalidate を呼ばずに2回目ロード → キャッシュヒットで loadBytes は呼ばれない
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+    expect(loadCount).toBe(1); // 変化なし = 退行の再現（保存後に古いメタが返る状況）
+
+    // invalidate を呼べば次ロードで loadBytes が走る（正しい挙動）
+    invalidateBBoxMetaCache();
+    await loadPecoToolBBoxMeta(fakePdfMeta, source);
+    expect(loadCount).toBe(2); // invalidate あり = 再ロード成功
   });
 });

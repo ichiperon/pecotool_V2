@@ -360,15 +360,18 @@ export async function renameTemporaryPageKeys(
   if (entries.length === 0) return;
   const db = await openDB();
   // 1st pass: 全 old エントリを読み出す
+  // PCT-102: O(N) lookup map を事前構築して entries.find() O(N²) を回避する
+  const oldToNewMap = new Map<number, number>(entries.map(e => [e.oldPageIndex, e.newPageIndex]));
   const readTx = db.transaction(STORE_NAME_DIRTY, 'readonly');
   const readStore = readTx.objectStore(STORE_NAME_DIRTY);
   const reads = entries.map(({ oldPageIndex }) => {
     const key = `${filePath}:${oldPageIndex}`;
     return new Promise<{ newPageIndex: number; data: Partial<PageData> | null }>(
       (resolve) => {
+        const newPageIndex = oldToNewMap.get(oldPageIndex)!;
         const req = readStore.get(key);
-        req.onsuccess = () => resolve({ newPageIndex: entries.find(e => e.oldPageIndex === oldPageIndex)!.newPageIndex, data: req.result || null });
-        req.onerror = () => resolve({ newPageIndex: entries.find(e => e.oldPageIndex === oldPageIndex)!.newPageIndex, data: null });
+        req.onsuccess = () => resolve({ newPageIndex, data: req.result || null });
+        req.onerror = () => resolve({ newPageIndex, data: null });
       }
     );
   });
