@@ -49,6 +49,9 @@ rename の直前に `sync_file_to_disk` を 1 回呼ぶ（PCT-078）。呼ばな
 **S-13 — meta ロードは不正エントリのみ drop する**
 `sanitizeBBoxMetaRecord` は不正エントリをエントリ単位で drop し有効分を必ず保持する（PCT-049）。all-or-nothing に戻すと1件の破損で文書全体の meta が null になり全ページの OCR データが再オープンで消失する。
 
+**S-14 — 保存オーケストレーションは単一実装（PCT-100）**
+保存の全ロジックは `buildPdfDocumentCore`（`pdfSaverCore.ts`）に集約する。`pdfSaver.ts`（main 殻）と `pdf.worker.ts`（worker 殻）はアダプタ（bytes 解決・pages 正規化・timeout 指定・コールバック変換）のみを担い、保存ロジックを殻側に再実装してはいけない。殻にロジックを書くと PCT-052/053/096 と同類の二重実装漏れが再発する。
+
 ---
 
 ## 2. 座標・回転
@@ -60,7 +63,7 @@ bbox は viewport-space px（rotated screen, y-down）で統一する。保存�
 bbox → PDF 座標変換は viewport 寸法（`vw/vh`）と `getRotationCm` を使う（issue #71）。rotation=0 仮定の `translate(bbox.x, pageH - bbox.y)` はページ外に飛ぶ。
 
 **C-03 — pdfSaver と pdf.worker.ts の対称性**
-`pdfSaver.ts` に実装した機能（setRotation, confidence 書込, optional chaining, invisible スペース描画）は `pdf.worker.ts` にも同一実装が必要（PCT-052, PCT-053, PCT-096、A-07 も参照）。片方だけ実装すると Worker 経路保存で機能が落ちる。`saverWorkerEquivalence.test.ts` が機械的に監視する。
+【PCT-100 で解消】保存オーケストレーションは `buildPdfDocumentCore`（`pdfSaverCore.ts`）に単一化。`pdfSaver.ts`（main 殻）と `pdf.worker.ts`（worker 殻）は薄いアダプタのみで、ロジックの二重実装は構造的に発生不能。PCT-052/053/096 のような「片方だけ実装漏れ」は起きない。`saverWorkerEquivalence.test.ts` は equivalence の回帰ガードとして引き続き維持する。
 
 **C-04 — writing mode は PDF user space で判定**
 `|uy| > |ux|` は PDF 座標系（フォント行列）で判定する（issue #39, `pdfTextExtractor.ts`）。viewport 変換後のスクリーン座標で判定すると /Rotate 90/270 ページで横書きが縦書きと誤判定される。
@@ -119,7 +122,7 @@ LRU 保存失敗ロールバックは generation counter で照合する（PCT-0
 clean short-circuit（入力 bytes をそのまま返す）の前に `sweepUnreachableObjects` を呼ぶ（issue #96）。孤児が 1 件以上あれば通常パスで全書き換えして孤児を除去する。
 
 **A-07 — 各 BB 末尾に invisible スペース（U+0020, renderMode 3）を描画する**
-Acrobat の text extraction は BT...ET 境界を無視し heuristic で隣接 BB を連結するため（issue #100）。外すと Ctrl+A コピペで隣接 BB が連結される。saver / worker / curve の3経路に同一実装が必要（C-03 の対称性リストにも参照）。
+Acrobat の text extraction は BT...ET 境界を無視し heuristic で隣接 BB を連結するため（issue #100）。外すと Ctrl+A コピペで隣接 BB が連結される。saver / worker は `buildPdfDocumentCore` に単一化（PCT-100）。core 内の横書き / 縦書き / curve の3描画分岐すべてに invisible スペースが必要、は不変。
 
 ---
 
@@ -226,4 +229,4 @@ Worker 内での `fetch()` は Tauri のファイルシステムにアクセス�
 
 ---
 
-*最終更新: 2026-06-11 / PCT-099 時点*
+*最終更新: 2026-06-11 / PCT-100 時点*
