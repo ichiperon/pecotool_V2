@@ -26,8 +26,9 @@ export function usePageManagement() {
     (displayIndices: number[]) => enqueuePageOperation(async () => {
       await waitForPendingIdbSaves();
 
-      await deletePages(displayIndices, (filePath, deletedOrigIndices, renamedEntries) => {
-        const work = deleteTemporaryPageKeys(filePath, deletedOrigIndices)
+      // PCT-104 (A-lite 段階2): deletedPageIds は pageId 文字列配列として渡ってくる
+      await deletePages(displayIndices, (filePath, deletedPageIds, renamedEntries) => {
+        const work = deleteTemporaryPageKeys(filePath, deletedPageIds)
           .then(() => renameTemporaryPageKeys(filePath, renamedEntries))
           .then(() => {
             useInfraStore.getState().clearLastIdbErrorIfSet();

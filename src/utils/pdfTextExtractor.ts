@@ -53,9 +53,12 @@ export async function loadPage(
   // savedMeta の有無 (`m1` / `m0`) を mix-in して分離する。
   const hasMeta = !!(bboxMeta && bboxMeta[String(pageIndex)] && bboxMeta[String(pageIndex)].length > 0);
   const cacheKey = `${filePath}:${pageIndex}:${mtime ?? 0}:${hasMeta ? 'm1' : 'm0'}`;
+  // PCT-104 (A-lite 段階2): pageId = "src:" + sourceIndex (pageIndex)。
+  // IDB temporary_changes は pageId キーで読む。displayPageIndex ではなく pageIndex を使う。
+  const pageIdForIdb = `src:${pageIndex}`;
   const [cached, tempEdited] = await Promise.all([
     getCachedPage(cacheKey),
-    getTemporaryPageData(filePath, displayPageIndex),
+    getTemporaryPageData(filePath, pageIdForIdb),
   ]);
 
   let pageData: PageData;

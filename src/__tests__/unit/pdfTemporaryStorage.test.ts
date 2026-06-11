@@ -165,6 +165,14 @@ describe('pdfTemporaryStorage page cache GC', () => {
         return request
       }),
     } as unknown as IDBFactory
+    // IDBKeyRange が jsdom 環境で未定義のため mock を提供する。
+    // getAllTemporaryPageData で IDBKeyRange.bound(...) を呼ぶが、FakeObjectStore.openCursor
+    // は range を無視して全件返すため、bound の戻り値は何でもよい。
+    if (!globalThis.IDBKeyRange) {
+      ;(globalThis as unknown as { IDBKeyRange: { bound: (...args: unknown[]) => unknown } }).IDBKeyRange = {
+        bound: () => ({}),
+      }
+    }
   })
 
   afterEach(() => {
@@ -203,27 +211,29 @@ describe('pdfTemporaryStorage page cache GC', () => {
     expect(await getCachedPage('doc.pdf:800:1:m1')).toMatchObject({ pageIndex: 800, thumbnail: null })
   })
 
-  // ── PCT-070: 保存完了後のページ限定クリア ─────────────────────────
+  // ── PCT-070 / PCT-104: 保存完了後のページ限定クリア ─────────────────────────
 
-  it('PCT-070: clearTemporaryChangesForPages は指定ページのキーのみ削除する', async () => {
+  it('PCT-070 / PCT-104: clearTemporaryChangesForPages は指定 pageId のキーのみ削除する', async () => {
     const { saveTemporaryPageDataBatch, clearTemporaryChangesForPages } =
       await import('../../utils/pdfTemporaryStorage')
 
+    // PCT-104 (A-lite 段階2): pageId = "src:N" を使って保存
     await saveTemporaryPageDataBatch([
-      { filePath: 'a.pdf', pageIndex: 0, data: makePage(0) },
-      { filePath: 'a.pdf', pageIndex: 1, data: makePage(1) },
-      { filePath: 'a.pdf', pageIndex: 2, data: makePage(2) },
-      { filePath: 'b.pdf', pageIndex: 0, data: makePage(0) },
+      { filePath: 'a.pdf', pageId: 'src:0', data: makePage(0) },
+      { filePath: 'a.pdf', pageId: 'src:1', data: makePage(1) },
+      { filePath: 'a.pdf', pageId: 'src:2', data: makePage(2) },
+      { filePath: 'b.pdf', pageId: 'src:0', data: makePage(0) },
     ])
 
-    await clearTemporaryChangesForPages('a.pdf', [0, 2])
+    // pageId 文字列配列でクリア
+    await clearTemporaryChangesForPages('a.pdf', ['src:0', 'src:2'])
 
     const dirtyStore = fakeDb.stores.get('temporary_changes')!
-    // 保存で回収した a.pdf の 0, 2 だけが消え、未回収の 1 と別ファイルは残る
-    expect(dirtyStore.has('a.pdf:0')).toBe(false)
-    expect(dirtyStore.has('a.pdf:2')).toBe(false)
-    expect(dirtyStore.has('a.pdf:1')).toBe(true)
-    expect(dirtyStore.has('b.pdf:0')).toBe(true)
+    // 保存で回収した a.pdf の src:0, src:2 だけが消え、未回収の src:1 と別ファイルは残る
+    expect(dirtyStore.has('a.pdf:src:0')).toBe(false)
+    expect(dirtyStore.has('a.pdf:src:2')).toBe(false)
+    expect(dirtyStore.has('a.pdf:src:1')).toBe(true)
+    expect(dirtyStore.has('b.pdf:src:0')).toBe(true)
   })
 
   // ── PCT-071: saveTemporaryPageDataBatch のタイマー残留解消 ──────────
@@ -234,7 +244,7 @@ describe('pdfTemporaryStorage page cache GC', () => {
     vi.useFakeTimers()
     try {
       await saveTemporaryPageDataBatch([
-        { filePath: 'a.pdf', pageIndex: 0, data: makePage(0) },
+        { filePath: 'a.pdf', pageId: 'src:0', data: makePage(0) },
       ])
       // waitForTransaction が clearTimeout 済みのため、タイマーは残らない
       // (旧実装は自前 setTimeout を clear せず 10 秒間残留していた)
@@ -242,5 +252,47 @@ describe('pdfTemporaryStorage page cache GC', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // ── PCT-104: 旧キー (filePath:N) データの移行フォールバック ──────────
+
+  it('PCT-104: getTemporaryPageData は旧キー (filePath:N) で保存されたデータを pageId で読める', async () => {
+    const { getTemporaryPageData, saveTemporaryPageDataBatch } = await import('../../utils/pdfTemporaryStorage')
+
+    // IDB ストアを初期化するため先に何か書き込む（openDB + upgrade が走る）
+    await saveTemporaryPageDataBatch([{ filePath: 'doc.pdf', pageId: 'src:99', data: makePage(99) }])
+
+    // 旧キー形式 (filePath:N) でデータを直接 IDB に書き込む（アプリ更新前の状態を再現）
+    const dirtyStore = fakeDb.stores.get('temporary_changes')!
+    const oldData = { ...makePage(3), isDirty: true }
+    dirtyStore.set('doc.pdf:3', oldData)
+
+    // 新キー形式 pageId = "src:3" でアクセスすると旧キーにフォールバックして読める
+    const result = await getTemporaryPageData('doc.pdf', 'src:3')
+    expect(result).not.toBeNull()
+    expect(result?.isDirty).toBe(true)
+    expect(result?.pageIndex).toBe(3)
+  })
+
+  it('PCT-104: getAllTemporaryPageData は旧キーエントリを pageId (src:N) にマップして返す', async () => {
+    const { getAllTemporaryPageData, saveTemporaryPageDataBatch } =
+      await import('../../utils/pdfTemporaryStorage')
+
+    // 新キー形式でまず 1 件書き込み（IDB ストアを初期化）
+    await saveTemporaryPageDataBatch([
+      { filePath: 'doc.pdf', pageId: 'src:1', data: { ...makePage(1), isDirty: true } },
+    ])
+
+    // 旧キー形式と新キー形式が混在する状態（アプリ更新直後）
+    const dirtyStore = fakeDb.stores.get('temporary_changes')!
+    const oldData = { ...makePage(0), isDirty: true }
+    dirtyStore.set('doc.pdf:0', oldData) // 旧キー
+
+    const result = await getAllTemporaryPageData('doc.pdf')
+    // 旧キー (doc.pdf:0) は pageId "src:0" にマップされる
+    expect(result.has('src:0')).toBe(true)
+    // 新キー (doc.pdf:src:1) は pageId "src:1" にマップされる
+    expect(result.has('src:1')).toBe(true)
+    expect(result.size).toBe(2)
   })
 })

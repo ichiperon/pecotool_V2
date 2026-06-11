@@ -3,6 +3,7 @@ import type { RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
+import { resolveDisplayIndex } from '../utils/pageOrder';
 import { PageData } from '../types';
 import { logger } from '../utils/logger';
 
@@ -211,14 +212,21 @@ export function useAutoBackup(
         }
       }
 
-      // IDB 退避済みのページをマージ（メモリ側が優先）
-      for (const [idx, page] of idbDirtyPages.entries()) {
-        const key = String(idx);
-        if (!dirtyPages[key]) {
-          const { thumbnail: _t, ...cleanPage } = page;
-          // cleanPage は Partial のため PageData に満たない可能性があるが
-          // バックアップ形式としては Partial 相当で許容する。
-          dirtyPages[key] = cleanPage as Omit<PageData, 'thumbnail'>;
+      // PCT-104 (A-lite 段階2): IDB 退避済みのページをマージ（メモリ側が優先）。
+      // idbDirtyPages は Map<pageId, Partial<PageData>> なので resolveDisplayIndex で変換。
+      // dirtyPages のキーは displayIndex の文字列表現（復元時に parseInt で使われる）。
+      {
+        const pageOrder = usePecoStore.getState().pageOrder;
+        for (const [pageId, page] of idbDirtyPages.entries()) {
+          const display = resolveDisplayIndex(pageOrder, pageId);
+          if (display < 0) continue;
+          const key = String(display);
+          if (!dirtyPages[key]) {
+            const { thumbnail: _t, ...cleanPage } = page;
+            // cleanPage は Partial のため PageData に満たない可能性があるが
+            // バックアップ形式としては Partial 相当で許容する。
+            dirtyPages[key] = cleanPage as Omit<PageData, 'thumbnail'>;
+          }
         }
       }
 

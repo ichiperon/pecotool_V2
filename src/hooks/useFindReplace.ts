@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePecoStore } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
+import { resolveDisplayIndex } from '../utils/pageOrder';
 import { useDebouncedValue } from './useDebouncedValue';
 import type { PageData, WritingMode } from '../types';
 
@@ -317,7 +318,17 @@ export function useFindReplace(
     let cancelled = false;
     getAllTemporaryPageData(filePath)
       .then((m) => {
-        if (!cancelled) setIdbPages(m);
+        if (cancelled) return;
+        // PCT-104 (A-lite 段階2): getAllTemporaryPageData は Map<pageId, ...> を返す。
+        // mergeIdbPages / countMatches / buildMatchPreview は Map<number, ...> を期待するため、
+        // resolveDisplayIndex で displayIndex に変換してから setIdbPages に渡す。
+        const pageOrder = usePecoStore.getState().pageOrder;
+        const converted = new Map<number, Partial<PageData>>();
+        for (const [pageId, data] of m.entries()) {
+          const display = resolveDisplayIndex(pageOrder, pageId);
+          if (display >= 0) converted.set(display, data);
+        }
+        setIdbPages(converted);
       })
       .catch(() => {
         if (!cancelled) setIdbPages(undefined);

@@ -7,6 +7,7 @@ import { writeFileAtomically, isWriteAccessError } from '../utils/tauriFileIO';
 export { isWriteAccessError };
 
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
+import { resolveDisplayIndex, resolvePageId } from '../utils/pageOrder';
 import {
   loadPDF,
   getAllTemporaryPageData,
@@ -574,10 +575,18 @@ export function useFileOperations(
     // 巻き戻す事故が起きていた。IDB へ書く全経路 (LRU 退避 / undo・redo
     // write-through / clearOcrAllPages) は「メモリと同値」か「メモリから
     // 消えたページのみ」を書くため、メモリ在ページは常にメモリが最新。
+    //
+    // PCT-104 (A-lite 段階2): tempDirtyPages は Map<pageId, Partial<PageData>> を返す。
+    // S-02 不変条件: resolveDisplayIndex で displayIndex に変換してから mergedPages に積む。
     const mergedPages = new Map<number, PageData>(document.pages);
-    for (const [idx, data] of tempDirtyPages.entries()) {
-      if (!mergedPages.has(idx)) {
-        mergedPages.set(idx, data as PageData);
+    {
+      const pageOrder = usePecoStore.getState().pageOrder;
+      for (const [pageId, data] of tempDirtyPages.entries()) {
+        const display = resolveDisplayIndex(pageOrder, pageId);
+        if (display < 0) continue;
+        if (!mergedPages.has(display)) {
+          mergedPages.set(display, data as PageData);
+        }
       }
     }
 
@@ -668,7 +677,11 @@ export function useFileOperations(
     // IDB エントリのみクリアする。ファイル単位の全削除 (clearTemporaryChanges) だと、
     // スナップショット後に退避された別ページの未保存編集まで巻き込んで消えるため。
     // 失敗しても保存は成功扱い。
-    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChangesForPages(sourceFilePath, [...dirtyOnlyPages.keys()]))
+    // PCT-104 (A-lite 段階2): clearTemporaryChangesForPages は string[] (pageId) を受け取る。
+    // dirtyOnlyPages キーは displayIndex なので resolvePageId で変換する。
+    // 保存時点の pageOrder (savePageOrder) を基準にする（スナップショット時点で一致）。
+    const dirtyPageIds = [...dirtyOnlyPages.keys()].map((di) => resolvePageId(savePageOrder, di));
+    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChangesForPages(sourceFilePath, dirtyPageIds))
       .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
     // issue #115 / #119: 保存スナップショットに載った各ページの PageData
     // オブジェクト参照 (savedPageSnapshots) を返す。呼び出し側は保存後の
