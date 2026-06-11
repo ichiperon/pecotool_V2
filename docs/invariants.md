@@ -100,7 +100,13 @@ LRU 保存失敗ロールバックは generation counter で照合する（PCT-0
 `compositionstart/end` で `data-composing` 属性を立て、Ctrl+S による `flushActiveOcrCardText` は composing 中はスキップする（PCT-051）。スキップしないと未確定文字がストアにコミットされる。blur 経路（PCT-067）は WebView2 実機での compositionend 発火順確認待ちで別途対応が必要。
 
 **ST-08 — pageId は不変（PCT-104 A-lite）**
-pageId は `"src:" + initialSourceIndex`（ファイルを開いた時点のソースインデックス）で確定し、以後の move/delete/rotate/undo/redo を通じて変化しない。IDB キー `filePath:pageId` はページの物理的な移動・削除操作で変化しない。pageId を変える操作（例: ページの新規追加で別ソースインデックスを割り当てる）を設計する場合は、IDB キー衝突の可能性を精査すること。
+pageId は `"src:" + initialSourceIndex`（ファイルを開いた時点のソースインデックス）で確定し、以後の move/delete/rotate/undo/redo を通じて変化しない。IDB キー `filePath:pageId` はページの物理的な移動・削除操作で変化しない。
+
+単一保存サイクル内では pageId は不変。保存完了時に normalizePageOrderAfterSave 連動で remap を実行し、IDB 残存エントリのキーを normalize 後の pageOrder に追従させる。IDB を読む側（LRU 復元・replaceText all スコープ等）は常に現在の pageOrder で resolveDisplayIndex して displayIndex に変換する（IDB キーは pageId のまま変化しないが、displayIndex は pageOrder 変化で変わる）。
+
+保存中はライブ pageOrder を読まず、保存スナップショット時点の savePageOrder を使うこと（M1）。
+
+pageId を変える操作（例: ページの新規追加で別ソースインデックスを割り当てる）を設計する場合は、IDB キー衝突の可能性を精査すること。
 
 **ST-09 — IDB 旧キー（filePath:N）は移行期間中フォールバック読込する**
 PCT-104 A-lite 以前に保存されたデータには `filePath:pageIndex`（数値インデックス）形式のキーが残存する可能性がある。`getTemporaryPageData` / `getAllTemporaryPageData` は新キー（`filePath:src:N`）を優先しつつ旧キー（`filePath:N`）もフォールバックとして読み込む。`deleteTemporaryPageKeys` は両キーを同時に削除する。移行完了後（十分なバージョンが普及した段階）にフォールバックロジックを除去できる。

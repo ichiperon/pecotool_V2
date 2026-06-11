@@ -6,15 +6,15 @@ import { writeFileAtomically, isWriteAccessError } from '../utils/tauriFileIO';
 
 export { isWriteAccessError };
 
-import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
+import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../store/pecoStore';
 import { resolveDisplayIndex, resolvePageId } from '../utils/pageOrder';
 import {
   loadPDF,
   getAllTemporaryPageData,
   clearTemporaryChanges,
-  clearTemporaryChangesForPages,
   clearCachedPages,
   destroySharedPdfProxy,
+  remapTemporaryPageEntries,
 } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import type { SavePdfSource, SkippedPdfTextChar } from '../utils/pdfWorkerTypes';
@@ -578,11 +578,11 @@ export function useFileOperations(
     //
     // PCT-104 (A-lite 段階2): tempDirtyPages は Map<pageId, Partial<PageData>> を返す。
     // S-02 不変条件: resolveDisplayIndex で displayIndex に変換してから mergedPages に積む。
+    // M1: 保存中はライブ pageOrder を読まず savePageOrder（スナップショット）に統一する。
     const mergedPages = new Map<number, PageData>(document.pages);
     {
-      const pageOrder = usePecoStore.getState().pageOrder;
       for (const [pageId, data] of tempDirtyPages.entries()) {
-        const display = resolveDisplayIndex(pageOrder, pageId);
+        const display = resolveDisplayIndex(savePageOrder, pageId);
         if (display < 0) continue;
         if (!mergedPages.has(display)) {
           mergedPages.set(display, data as PageData);
@@ -654,9 +654,34 @@ export function useFileOperations(
       liveStateBeforeNormalize.pageOrder.every((sourceIndex, displayIndex) => sourceIndex === savePageOrder[displayIndex]);
     const hasPostSnapshotChanges =
       !pageOrderMatchesSnapshot || liveStateBeforeNormalize.undoStack.length > savedActionIndex;
+    // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
+    // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
+    setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
+
+    // PCT-050: savePDF の実行中にユーザーが別ページを編集すると、LRU パージで
+    // 新たな saveTemporaryPageDataBatch が pendingIdbSaves へ追加される場合がある。
+    // IDB クリア/remap の直前に再度待機し、それらの書き込みが完了してから処理する。
+    await withStep('waitIdbSavesBeforeClear', 15_000, () => waitForPendingIdbSaves())
+      .catch((e) => { console.warn('[save] waitIdbSavesBeforeClear failed (ignored):', e); });
+
+    // B1: 裁定「案1簡約版」実装
+    // 1. normalizePageOrderAfterSave（pageOrder を normalize 後の状態に更新）
     if (executeOptions.normalizePageOrderForCurrentDocument !== false) {
       liveStateBeforeNormalize.normalizePageOrderAfterSave(savePageOrder);
     }
+    // 2. remap ブロック: 旧体系キーを normalize 後の新キーで再構築し、保存済みページを破棄
+    //    - 旧体系キー全読み出し → 解決不能・dirtyOnlyPages 該当（保存済み）を破棄
+    //    - 残りを normalize 後の新キーで再構築（旧キー削除）
+    //    - put（新キー書込）→ delete（旧キー削除）の順（原子性: クラッシュ時も旧キーが残る安全側）
+    {
+      const normalizedPageOrder = usePecoStore.getState().pageOrder;
+      const dirtyPageIds = [...dirtyOnlyPages.keys()].map((di) => resolvePageId(savePageOrder, di));
+      trackPendingIdbWork(
+        remapTemporaryPageEntries(sourceFilePath, savePageOrder, normalizedPageOrder, dirtyPageIds)
+          .catch((e) => { console.warn('[save] remapTemporaryPageEntries failed (ignored):', e); })
+      );
+    }
+    // 3. bumpDocumentEpoch
     // issue #118: documentEpoch を +1 して usePageNavigation / usePdfRendering に
     // 「pdfjs proxy を取り直して現在ページ画像を再 render せよ」と通知する。
     // setDocument と違い textBlocks / BB / dirty / undo・redo / currentPageIndex /
@@ -665,24 +690,6 @@ export function useFileOperations(
     // 変えることでも reload が走るが、上書き保存は filePath が不変なので epoch bump が
     // 唯一の再 render トリガーになる。
     usePecoStore.getState().bumpDocumentEpoch();
-    // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
-    // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
-    setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
-    // PCT-050: savePDF の実行中にユーザーが別ページを編集すると、LRU パージで
-    // 新たな saveTemporaryPageDataBatch が pendingIdbSaves へ追加される場合がある。
-    // IDB クリアの直前に再度待機し、それらの書き込みが完了してからクリアする。
-    await withStep('waitIdbSavesBeforeClear', 15_000, () => waitForPendingIdbSaves())
-      .catch((e) => { console.warn('[save] waitIdbSavesBeforeClear failed (ignored):', e); });
-    // PCT-070: 保存スナップショットで実際に回収したページ (dirtyOnlyPages) の
-    // IDB エントリのみクリアする。ファイル単位の全削除 (clearTemporaryChanges) だと、
-    // スナップショット後に退避された別ページの未保存編集まで巻き込んで消えるため。
-    // 失敗しても保存は成功扱い。
-    // PCT-104 (A-lite 段階2): clearTemporaryChangesForPages は string[] (pageId) を受け取る。
-    // dirtyOnlyPages キーは displayIndex なので resolvePageId で変換する。
-    // 保存時点の pageOrder (savePageOrder) を基準にする（スナップショット時点で一致）。
-    const dirtyPageIds = [...dirtyOnlyPages.keys()].map((di) => resolvePageId(savePageOrder, di));
-    await withStep('clearIdbDirty', 10_000, () => clearTemporaryChangesForPages(sourceFilePath, dirtyPageIds))
-      .catch((e) => { console.warn('[save] clearIdbDirty failed (ignored):', e); });
     // issue #115 / #119: 保存スナップショットに載った各ページの PageData
     // オブジェクト参照 (savedPageSnapshots) を返す。呼び出し側は保存後の
     // resetDirty にこれを渡し、保存中に編集された (= 参照が変わった) ページの

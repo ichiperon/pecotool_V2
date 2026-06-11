@@ -34,31 +34,33 @@ import { PDFDocument } from '@cantoo/pdf-lib';
 const fakeIdb = new Map<string, unknown>();
 
 vi.mock('../../utils/pdfTemporaryStorage', () => ({
-  saveTemporaryPageData: vi.fn(async (filePath: string, pageIndex: number, data: any) => {
-    const key = `${filePath}:${pageIndex}`;
+  // PCT-104: pageId (string) ベースのキー
+  saveTemporaryPageData: vi.fn(async (filePath: string, pageId: string, data: any) => {
+    const key = `${filePath}:${pageId}`;
     const { thumbnail: _t, ...clean } = data;
     fakeIdb.set(key, clean);
   }),
   saveTemporaryPageDataBatch: vi.fn(
-    async (entries: Array<{ filePath: string; pageIndex: number; data: any }>) => {
-      for (const { filePath, pageIndex, data } of entries) {
-        const key = `${filePath}:${pageIndex}`;
+    async (entries: Array<{ filePath: string; pageId: string; data: any }>) => {
+      for (const { filePath, pageId, data } of entries) {
+        const key = `${filePath}:${pageId}`;
         const { thumbnail: _t, ...clean } = data;
         fakeIdb.set(key, clean);
       }
     },
   ),
-  getTemporaryPageData: vi.fn(async (filePath: string, pageIndex: number) => {
-    const key = `${filePath}:${pageIndex}`;
+  getTemporaryPageData: vi.fn(async (filePath: string, pageId: string) => {
+    const key = `${filePath}:${pageId}`;
     return fakeIdb.get(key) ?? null;
   }),
+  // PCT-104: Map<string, Partial<PageData>> を返す (pageId ベース)
   getAllTemporaryPageData: vi.fn(async (filePath: string) => {
-    const result = new Map<number, unknown>();
+    const result = new Map<string, unknown>();
     const prefix = `${filePath}:`;
     for (const [key, value] of fakeIdb.entries()) {
       if (key.startsWith(prefix)) {
-        const idx = parseInt(key.slice(prefix.length), 10);
-        result.set(idx, value);
+        const pageId = key.slice(prefix.length); // e.g. "src:0"
+        result.set(pageId, value);
       }
     }
     return result;
@@ -69,9 +71,10 @@ vi.mock('../../utils/pdfTemporaryStorage', () => ({
       if (key.startsWith(prefix)) fakeIdb.delete(key);
     }
   }),
-  clearTemporaryChangesForPages: vi.fn(async (filePath: string, pageIndexes: number[]) => {
-    for (const pageIndex of pageIndexes) fakeIdb.delete(`${filePath}:${pageIndex}`);
+  clearTemporaryChangesForPages: vi.fn(async (filePath: string, pageIds: string[]) => {
+    for (const pageId of pageIds) fakeIdb.delete(`${filePath}:${pageId}`);
   }),
+  remapTemporaryPageEntries: vi.fn(async () => {}),
   getCachedPage: vi.fn(async () => null),
   setCachedPage: vi.fn(),
 }));
@@ -93,6 +96,7 @@ import {
   hasLegacyPecoToolBBoxInfo,
   readPecoToolBBoxMetaFromPdfDoc,
 } from '../../utils/pdfPecoToolMetadata';
+import { parsePageId } from '../../utils/pageOrder';
 import type { PecoDocument, PageData, TextBlock } from '../../types';
 
 const TEST_DIR = resolve(__dirname, '../../../test');
@@ -228,10 +232,14 @@ describe.skipIf(!hasRealPdf)('A3: LRU + IDB 経由の save', () => {
     console.log(`[A3] getAllTemporaryPageData returned: ${tempPages.size} pages`);
 
     // PCT-068: 実装と同じくメモリ在ページは IDB エントリで上書きしない (メモリ優先)
+    // PCT-104: getAllTemporaryPageData は Map<pageId, PageData> を返す。
+    //          pageId (e.g. "src:0") → pageIndex (number) の変換が必要。
     const merged = new Map<number, PageData>(afterEditState.document!.pages);
-    for (const [idx, data] of tempPages.entries()) {
-      if (!merged.has(idx)) {
-        merged.set(idx, data as PageData);
+    for (const [pageId, data] of tempPages.entries()) {
+      const pageIndex = parsePageId(pageId);
+      if (pageIndex === null) continue; // 解析失敗はスキップ
+      if (!merged.has(pageIndex)) {
+        merged.set(pageIndex, data as PageData);
       }
     }
     const dirtyOnly = new Map<number, PageData>(

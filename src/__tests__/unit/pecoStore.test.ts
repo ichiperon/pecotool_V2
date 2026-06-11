@@ -1290,7 +1290,7 @@ describe('pecoStore', () => {
       expect((action as Record<string, unknown>).renamedEntries).toBeUndefined()
     })
 
-    it('movePage の undo/redo で renameTemporaryPageKeys は呼ばれない', async () => {
+    it('movePage の undo/redo で IDB キー操作は不要（pageId 不変）', async () => {
       usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
       await usePecoStore.getState().movePage(0, 2)
       await waitForPendingIdbSaves()

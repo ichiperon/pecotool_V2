@@ -1,4 +1,5 @@
 import { PageData } from '../types';
+import { makePageId, parsePageId, resolveDisplayIndex, resolvePageId } from './pageOrder';
 
 // IndexedDB cache for OCR results and temporary edits
 const DB_NAME = 'peco_ocr_cache';
@@ -201,16 +202,13 @@ export async function getTemporaryPageData(filePath: string, pageId: string): Pr
         }
         // PCT-104 移行フォールバック: pageId キー未ヒット時に旧 displayIndex キーを試す
         // "src:N" の N を旧 pageIndex として使う (identity 前提)
-        const prefix = 'src:';
-        if (pageId.startsWith(prefix)) {
-          const oldIndex = parseInt(pageId.slice(prefix.length), 10);
-          if (Number.isFinite(oldIndex)) {
-            const oldKey = `${filePath}:${oldIndex}`;
-            const fallbackRequest = store.get(oldKey);
-            fallbackRequest.onsuccess = () => resolve(fallbackRequest.result || null);
-            fallbackRequest.onerror = () => resolve(null);
-            return;
-          }
+        const oldIndex = parsePageId(pageId);
+        if (oldIndex !== null) {
+          const oldKey = `${filePath}:${oldIndex}`;
+          const fallbackRequest = store.get(oldKey);
+          fallbackRequest.onsuccess = () => resolve(fallbackRequest.result || null);
+          fallbackRequest.onerror = () => resolve(null);
+          return;
         }
         resolve(null);
       };
@@ -286,8 +284,7 @@ export async function clearTemporaryChanges(filePath: string) {
 
 /**
  * PCT-104 (A-lite 段階2): 指定 pageId のエントリを temporary_changes ストアから削除する。
- * 新キー (filePath:src:N) と旧キー (filePath:N) の両方を削除する移行期間対応。
- * 段階3でこの関数は signature 変更不要; 旧キー削除パスのみ削除する。
+ * 新キー (filePath:pageId = filePath:src:N) と旧キー (filePath:N) の両方を削除する移行期間対応。
  */
 export async function deleteTemporaryPageKeys(filePath: string, pageIds: string[]): Promise<void> {
   if (pageIds.length === 0) return;
@@ -298,12 +295,9 @@ export async function deleteTemporaryPageKeys(filePath: string, pageIds: string[
     // 新キー: filePath:src:N
     store.delete(`${filePath}:${pageId}`);
     // 旧キー (移行期間): filePath:N (N が整数)
-    const prefix = 'src:';
-    if (pageId.startsWith(prefix)) {
-      const oldIndex = parseInt(pageId.slice(prefix.length), 10);
-      if (Number.isFinite(oldIndex)) {
-        store.delete(`${filePath}:${oldIndex}`);
-      }
+    const oldIndex = parsePageId(pageId);
+    if (oldIndex !== null) {
+      store.delete(`${filePath}:${oldIndex}`);
     }
   }
   await waitForTransaction(tx, '[deleteTemporaryPageKeys] tx timeout');
@@ -360,6 +354,13 @@ export async function clearCachedPages(filePath: string) {
  * 旧キー形式: filePath:N（N が整数、段階2以前のエントリ）
  *   -> identity 変換として pageId = "src:N" にマップする（アプリ更新直後の移行対応）
  *
+ * 新旧キー混在時の優先順: IDB カーソルは辞書順で走査するため、同一 pageId への
+ * 新旧両エントリが存在する場合は後に走査されたエントリが Map を上書きする。
+ * "filePath:src:N" (新) は "filePath:N" (旧・Nが1桁) より辞書順で後になるため
+ * 新キーが優先される（N が 3 桁以上の場合は ":" < 任意数字 のため同様に新キーが後）。
+ * この動作は移行期間の正しい挙動として意図的に許容する。
+ * 移行完了後（旧キーが消えた時点）はこの混在状態は発生しない。
+ *
  * 呼び出し元は resolveDisplayIndex(pageOrder, pageId) で displayIndex に変換すること (S-02 保持)。
  */
 export async function getAllTemporaryPageData(filePath: string): Promise<Map<string, Partial<PageData>>> {
@@ -390,7 +391,7 @@ export async function getAllTemporaryPageData(filePath: string): Promise<Map<str
             } else {
               // 旧形式: "N" (整数文字列) -> identity 変換
               const oldIndex = parseInt(suffix, 10);
-              pageId = Number.isFinite(oldIndex) ? `src:${oldIndex}` : suffix;
+              pageId = Number.isFinite(oldIndex) ? makePageId(oldIndex) : suffix;
             }
             results.set(pageId, cursor.value as Partial<PageData>);
             cursor.continue();
@@ -413,6 +414,99 @@ export async function getAllTemporaryPageData(filePath: string): Promise<Map<str
     return results;
   }
 }
+/**
+ * PCT-104 (B1 remap): 保存後に旧体系 IDB エントリを新キー体系に一括再構築する。
+ *
+ * 動作:
+ *   1. filePath 配下の全エントリを読む（カーソルスキャン）
+ *   2. 解決不能（resolveDisplayIndex < 0）と dirtyPageIds 該当（保存済み）を破棄
+ *   3. 残りを normalize 後の新キー（normalizedPageOrder から解決した pageId）で再構築
+ *   4. 旧キーと新キーが同一ならスキップ（不要な write を避ける）
+ *   5. put（新キー書込）→ delete（旧キー削除）の順で原子的に処理
+ *
+ * @param filePath          対象ファイルパス
+ * @param oldPageOrder      保存スナップショット時点の pageOrder（旧体系キー解決用）
+ * @param normalizedPageOrder normalize 後の pageOrder（新体系キー生成用）
+ * @param dirtyPageIds      保存で実際に回収した pageId 配列（破棄対象）
+ */
+export async function remapTemporaryPageEntries(
+  filePath: string,
+  oldPageOrder: number[],
+  normalizedPageOrder: number[],
+  dirtyPageIds: string[],
+): Promise<void> {
+  const db = await openDB();
+  const tx = db.transaction(STORE_NAME_DIRTY, 'readwrite');
+  const store = tx.objectStore(STORE_NAME_DIRTY);
+
+  const prefix = `${filePath}:`;
+  const range = IDBKeyRange.bound(prefix, prefix + '￿', false, false);
+
+  // dirty で保存済みの pageId セット（破棄対象）
+  const dirtySet = new Set(dirtyPageIds);
+
+  // カーソルで全エントリを収集
+  const toProcess: Array<{ oldKey: string; pageId: string; value: unknown }> = [];
+  await new Promise<void>((resolve) => {
+    const request = store.openCursor(range);
+    request.onsuccess = () => {
+      try {
+        const cursor = request.result;
+        if (cursor) {
+          const key = cursor.key as string;
+          const suffix = key.slice(prefix.length);
+          let pageId: string;
+          if (suffix.startsWith('src:')) {
+            pageId = suffix;
+          } else {
+            const oldIndex = parseInt(suffix, 10);
+            pageId = Number.isFinite(oldIndex) ? makePageId(oldIndex) : suffix;
+          }
+          toProcess.push({ oldKey: key, pageId, value: cursor.value });
+          cursor.continue();
+        } else {
+          resolve();
+        }
+      } catch {
+        resolve();
+      }
+    };
+    request.onerror = () => resolve();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+    tx.onabort = () => resolve();
+  });
+
+  // 各エントリに対して put(新) → delete(旧) の順で処理
+  for (const { oldKey, pageId, value } of toProcess) {
+    // 1. 解決不能キーは破棄
+    const displayIdx = resolveDisplayIndex(oldPageOrder, pageId);
+    if (displayIdx < 0) {
+      store.delete(oldKey);
+      continue;
+    }
+
+    // 2. 保存済み（dirtyOnlyPages 該当）は破棄
+    if (dirtySet.has(pageId)) {
+      store.delete(oldKey);
+      continue;
+    }
+
+    // 3. normalize 後の pageOrder で新キーを作る
+    const newPageId = resolvePageId(normalizedPageOrder, displayIdx);
+    const newKey = `${filePath}:${newPageId}`;
+
+    // 4. キーが同一ならスキップ
+    if (newKey === oldKey) continue;
+
+    // 5. put（新）→ delete（旧）の順（put 前クラッシュでも旧キーが残りデータ消失しない）
+    store.put(value, newKey);
+    store.delete(oldKey);
+  }
+
+  await waitForTransaction(tx, '[remapTemporaryPageEntries] tx timeout');
+}
+
 export async function getCachedPage(key: string): Promise<PageData | null> {
   try {
     const db = await openDB();

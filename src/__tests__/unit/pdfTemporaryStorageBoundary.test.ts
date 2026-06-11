@@ -289,10 +289,10 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     const FILE_PATH = 'large-batch.pdf';
     const N = 5000;
 
-    // 5000 件を一括書き込み
+    // 5000 件を一括書き込み (PCT-104: pageId 形式 "src:N")
     const entries = Array.from({ length: N }, (_, i) => ({
       filePath: FILE_PATH,
-      pageIndex: i,
+      pageId: `src:${i}`,
       data: makePartialPage(i),
     }));
     await saveTemporaryPageDataBatch(entries);
@@ -306,10 +306,10 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     const result = await getAllTemporaryPageData(FILE_PATH);
     const elapsed = Date.now() - start;
 
-    // 5000 件が全て返ってくる
+    // 5000 件が全て返ってくる (PCT-104: キーは pageId 文字列 "src:N")
     expect(result.size).toBe(N);
     for (let i = 0; i < N; i++) {
-      expect(result.has(i), `pageIndex ${i} が result に含まれること`).toBe(true);
+      expect(result.has(`src:${i}`), `pageId src:${i} が result に含まれること`).toBe(true);
     }
     // 1 分未満で完了 (テスト環境の制約でゆるめに設定)
     expect(elapsed).toBeLessThan(60_000);
@@ -330,15 +330,15 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     const FILE_A = 'concurrent-a.pdf';
     const FILE_B = 'concurrent-b.pdf';
 
-    // 2 つのファイルに対して異なるページを並列書き込み
+    // 2 つのファイルに対して異なるページを並列書き込み (PCT-104: pageId 形式)
     const batchA = Array.from({ length: 10 }, (_, i) => ({
       filePath: FILE_A,
-      pageIndex: i,
+      pageId: `src:${i}`,
       data: makePartialPage(i),
     }));
     const batchB = Array.from({ length: 10 }, (_, i) => ({
       filePath: FILE_B,
-      pageIndex: i,
+      pageId: `src:${i}`,
       data: makePartialPage(i),
     }));
 
@@ -355,10 +355,10 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     expect(resultA.size).toBe(10);
     expect(resultB.size).toBe(10);
 
-    // 各ページのデータが正しい
+    // 各ページのデータが正しい (PCT-104: キーは pageId 文字列)
     for (let i = 0; i < 10; i++) {
-      expect(resultA.has(i)).toBe(true);
-      expect(resultB.has(i)).toBe(true);
+      expect(resultA.has(`src:${i}`)).toBe(true);
+      expect(resultB.has(`src:${i}`)).toBe(true);
     }
   }, 30_000);
 
@@ -401,8 +401,8 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     const { saveTemporaryPageData, getTemporaryPageData } =
       await import('../../utils/pdfTemporaryStorage');
 
-    // 初回接続・書き込み (db1 が使われる)
-    await saveTemporaryPageData('close-test.pdf', 0, makePartialPage(0));
+    // 初回接続・書き込み (db1 が使われる) (PCT-104: pageId 形式)
+    await saveTemporaryPageData('close-test.pdf', 'src:0', makePartialPage(0));
     expect(openCalls.length).toBe(1);
     expect(openCalls[0]).toBe(db1);
 
@@ -419,8 +419,8 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     fakeDb = db2;
     currentFakeDb = db2;
 
-    // 次のアクセスで db2 への再接続が起きる
-    await getTemporaryPageData('close-test.pdf', 0);
+    // 次のアクセスで db2 への再接続が起きる (PCT-104: pageId 形式)
+    await getTemporaryPageData('close-test.pdf', 'src:0');
 
     // indexedDB.open が 2 回呼ばれた (= db1 の close 後に db2 への再接続が発生)
     expect(openCalls.length).toBe(2);
@@ -436,34 +436,34 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
       await import('../../utils/pdfTemporaryStorage');
 
     const FILE = 'overwrite-test.pdf';
-    const PAGE = 3;
+    const PAGE_ID = 'src:3'; // PCT-104: pageId 形式
 
     // 1 回目の書き込み
     const data1: Partial<PageData> = {
-      pageIndex: PAGE,
+      pageIndex: 3,
       isDirty: true,
       textBlocks: [
         { id: 'blk-first', text: 'FIRST_WRITE' } as PageData['textBlocks'][number],
       ],
     };
-    await saveTemporaryPageData(FILE, PAGE, data1);
+    await saveTemporaryPageData(FILE, PAGE_ID, data1);
 
-    const afterFirst = await getTemporaryPageData(FILE, PAGE);
+    const afterFirst = await getTemporaryPageData(FILE, PAGE_ID);
     expect(
       (afterFirst?.textBlocks?.[0] as { text?: string } | undefined)?.text,
     ).toBe('FIRST_WRITE');
 
     // 2 回目の書き込み (後勝ち)
     const data2: Partial<PageData> = {
-      pageIndex: PAGE,
+      pageIndex: 3,
       isDirty: true,
       textBlocks: [
         { id: 'blk-second', text: 'SECOND_WRITE' } as PageData['textBlocks'][number],
       ],
     };
-    await saveTemporaryPageData(FILE, PAGE, data2);
+    await saveTemporaryPageData(FILE, PAGE_ID, data2);
 
-    const afterSecond = await getTemporaryPageData(FILE, PAGE);
+    const afterSecond = await getTemporaryPageData(FILE, PAGE_ID);
     // 後勝ち: 2 回目の data2 が読み返せる
     expect(
       (afterSecond?.textBlocks?.[0] as { text?: string } | undefined)?.text,
@@ -472,7 +472,7 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
     // ストアに同一キーの重複エントリは存在しない (1 件のみ)
     const store = fakeDb.stores.get('temporary_changes');
     const matchingKeys = Array.from(store?.keys() ?? []).filter(
-      (k) => k === `${FILE}:${PAGE}`,
+      (k) => k === `${FILE}:${PAGE_ID}`,
     );
     expect(matchingKeys.length).toBe(1);
   }, 30_000);
@@ -491,16 +491,17 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
       thumbnail: 'data:image/png;base64,XXXX',
       textBlocks: [],
     };
-    await saveTemporaryPageData('thumb-strip.pdf', 0, dataWithThumb);
+    // PCT-104: pageId 形式で書き込み
+    await saveTemporaryPageData('thumb-strip.pdf', 'src:0', dataWithThumb);
 
     const stored = fakeDb.stores.get('temporary_changes')?.get(
-      'thumb-strip.pdf:0',
+      'thumb-strip.pdf:src:0',
     ) as Record<string, unknown> | undefined;
     // thumbnail はストアに保存されていない
     expect(stored).not.toHaveProperty('thumbnail');
 
-    // getTemporaryPageData でも thumbnail は無い
-    const result = await getTemporaryPageData('thumb-strip.pdf', 0);
+    // getTemporaryPageData でも thumbnail は無い (PCT-104: pageId 形式)
+    const result = await getTemporaryPageData('thumb-strip.pdf', 'src:0');
     expect(result).not.toBeNull();
     expect((result as Record<string, unknown>)?.thumbnail).toBeUndefined();
   }, 30_000);
@@ -515,25 +516,25 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
       getAllTemporaryPageData,
     } = await import('../../utils/pdfTemporaryStorage');
 
-    // FILE_A と FILE_B の両方に書き込む
+    // FILE_A と FILE_B の両方に書き込む (PCT-104: pageId 形式)
     await saveTemporaryPageDataBatch([
-      { filePath: 'filter-a.pdf', pageIndex: 0, data: makePartialPage(0) },
-      { filePath: 'filter-a.pdf', pageIndex: 1, data: makePartialPage(1) },
-      { filePath: 'filter-b.pdf', pageIndex: 0, data: makePartialPage(0) },
+      { filePath: 'filter-a.pdf', pageId: 'src:0', data: makePartialPage(0) },
+      { filePath: 'filter-a.pdf', pageId: 'src:1', data: makePartialPage(1) },
+      { filePath: 'filter-b.pdf', pageId: 'src:0', data: makePartialPage(0) },
     ]);
 
     const resultA = await getAllTemporaryPageData('filter-a.pdf');
     const resultB = await getAllTemporaryPageData('filter-b.pdf');
 
-    // filter-a.pdf は 2 件、filter-b.pdf は 1 件
+    // filter-a.pdf は 2 件、filter-b.pdf は 1 件 (PCT-104: キーは pageId 文字列)
     expect(resultA.size).toBe(2);
-    expect(resultA.has(0)).toBe(true);
-    expect(resultA.has(1)).toBe(true);
+    expect(resultA.has('src:0')).toBe(true);
+    expect(resultA.has('src:1')).toBe(true);
 
     expect(resultB.size).toBe(1);
-    expect(resultB.has(0)).toBe(true);
+    expect(resultB.has('src:0')).toBe(true);
     // filter-b.pdf の結果に filter-a.pdf のデータが混入していない
-    expect(resultB.has(1)).toBe(false);
+    expect(resultB.has('src:1')).toBe(false);
   }, 30_000);
 
   it('deleteTemporaryPageKeys は IDB 失敗を reject する', async () => {

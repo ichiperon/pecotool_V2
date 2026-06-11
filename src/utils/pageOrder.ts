@@ -2,6 +2,27 @@ export function displayToSourcePageIndex(pageOrder: number[] | undefined, displa
   return pageOrder?.[displayIndex] ?? displayIndex;
 }
 
+/** PCT-104: pageId の標準プレフィックス */
+const PAGE_ID_PREFIX = 'src:';
+
+/**
+ * PCT-104: sourceIndex を pageId 文字列に変換する。
+ * 'src:' リテラルを一箇所に集約するためのファクトリ関数。
+ */
+export function makePageId(sourceIndex: number): string {
+  return `${PAGE_ID_PREFIX}${sourceIndex}`;
+}
+
+/**
+ * PCT-104: pageId 文字列から sourceIndex を取り出す。
+ * 'src:' プレフィックスを持たない場合や非有限数の場合は null を返す。
+ */
+export function parsePageId(pageId: string): number | null {
+  if (!pageId.startsWith(PAGE_ID_PREFIX)) return null;
+  const n = parseInt(pageId.slice(PAGE_ID_PREFIX.length), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function isIdentityPageOrder(pageOrder: number[] | undefined): boolean {
   return !pageOrder || pageOrder.length === 0 || pageOrder.every((sourceIndex, displayIndex) => sourceIndex === displayIndex);
 }
@@ -15,7 +36,7 @@ export function isIdentityPageOrder(pageOrder: number[] | undefined): boolean {
  */
 export function resolvePageId(pageOrder: number[], displayIndex: number): string {
   const sourceIndex = pageOrder[displayIndex] ?? displayIndex;
-  return `src:${sourceIndex}`;
+  return makePageId(sourceIndex);
 }
 
 /**
@@ -26,11 +47,7 @@ export function resolvePageId(pageOrder: number[], displayIndex: number): string
  * ②IDB temporary_changes を読み書きする全箇所はこの関数を必ず経由する（段階2以降）。
  */
 export function resolveDisplayIndex(pageOrder: number[], pageId: string): number {
-  // pageId は "src:" + sourceIndex の形式
-  const prefix = 'src:';
-  if (!pageId.startsWith(prefix)) return -1;
-  const sourceIndex = parseInt(pageId.slice(prefix.length), 10);
-  if (!Number.isFinite(sourceIndex)) return -1;
-  const idx = pageOrder.indexOf(sourceIndex);
-  return idx;
+  const sourceIndex = parsePageId(pageId);
+  if (sourceIndex === null) return -1;
+  return pageOrder.indexOf(sourceIndex);
 }

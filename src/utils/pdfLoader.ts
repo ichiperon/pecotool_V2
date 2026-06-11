@@ -352,5 +352,6 @@ export {
   clearCachedPages,
   getAllTemporaryPageData,
   deleteTemporaryPageKeys,
+  remapTemporaryPageEntries,
 } from './pdfTemporaryStorage';
 export { loadPage } from './pdfTextExtractor';

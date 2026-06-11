@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   getAllTemporaryPageData: vi.fn(),
   clearTemporaryChanges: vi.fn(),
   clearTemporaryChangesForPages: vi.fn(),
+  remapTemporaryPageEntries: vi.fn(),
   deleteTemporaryPageKeys: vi.fn(),
   clearCachedPages: vi.fn(),
   getSharedPdfProxy: vi.fn(),
@@ -76,6 +77,7 @@ vi.mock('../../utils/pdfLoader', () => ({
   getAllTemporaryPageData: mocks.getAllTemporaryPageData,
   clearTemporaryChanges: mocks.clearTemporaryChanges,
   clearTemporaryChangesForPages: mocks.clearTemporaryChangesForPages,
+  remapTemporaryPageEntries: mocks.remapTemporaryPageEntries,
   deleteTemporaryPageKeys: mocks.deleteTemporaryPageKeys,
   clearCachedPages: mocks.clearCachedPages,
   getSharedPdfProxy: mocks.getSharedPdfProxy,
@@ -159,6 +161,7 @@ beforeEach(() => {
   mocks.getAllTemporaryPageData.mockResolvedValue(new Map());
   mocks.clearTemporaryChanges.mockResolvedValue(undefined);
   mocks.clearTemporaryChangesForPages.mockResolvedValue(undefined);
+  mocks.remapTemporaryPageEntries.mockResolvedValue(undefined);
   mocks.deleteTemporaryPageKeys.mockResolvedValue(undefined);
   mocks.clearCachedPages.mockResolvedValue(undefined);
   mocks.getSharedPdfProxy.mockResolvedValue(null);
@@ -437,8 +440,8 @@ describe('C1: save-during-edit race (resetDirty が新編集を巻き込まな�
 // ── PCT-050: IDB クリア前の waitForPendingIdbSaves 再呼び出し ──
 // (PCT-070 でクリア対象が clearTemporaryChanges → clearTemporaryChangesForPages に変更)
 
-describe('PCT-050: _executeSave は IDB クリア直前に waitForPendingIdbSaves を再呼び出しする', () => {
-  it('clearTemporaryChangesForPages が呼ばれる前に waitForPendingIdbSaves が 2 回呼ばれる (スナップショット前 + clear 前)', async () => {
+describe('PCT-050: _executeSave は IDB remap 直前に waitForPendingIdbSaves を再呼び出しする', () => {
+  it('remapTemporaryPageEntries が enqueue される前に waitForPendingIdbSaves が 2 回呼ばれる (スナップショット前 + remap 前)', async () => {
     // pecoStore の waitForPendingIdbSaves をスパイして呼び出し順序を検証する。
     const pecoStoreModule = await import('../../store/pecoStore');
     const waitSpy = vi.spyOn(pecoStoreModule, 'waitForPendingIdbSaves').mockResolvedValue(undefined);
@@ -465,15 +468,15 @@ describe('PCT-050: _executeSave は IDB クリア直前に waitForPendingIdbSave
 
       // waitForPendingIdbSaves は _executeSave 内で 2 回呼ばれる:
       //   1. waitIdbSaves ステップ (getAllTemporaryPageData の前)
-      //   2. waitIdbSavesBeforeClear ステップ (PCT-050: IDB クリアの直前)
+      //   2. waitIdbSavesBeforeClear ステップ (PCT-050: IDB remap の直前)
       const callCount = waitSpy.mock.calls.length;
       expect(callCount).toBeGreaterThanOrEqual(2);
 
-      // clearTemporaryChangesForPages は waitForPendingIdbSaves の後に呼ばれる
+      // PCT-104 remap: remapTemporaryPageEntries は waitForPendingIdbSaves の後に enqueue される
       const waitOrder = waitSpy.mock.invocationCallOrder;
-      const clearOrder = (mocks.clearTemporaryChangesForPages as ReturnType<typeof vi.fn>).mock.invocationCallOrder;
-      // クリアが呼ばれた時点では少なくとも 2 回の wait が完了している
-      expect(waitOrder[waitOrder.length - 1]).toBeLessThan(clearOrder[0]);
+      const remapOrder = (mocks.remapTemporaryPageEntries as ReturnType<typeof vi.fn>).mock.invocationCallOrder;
+      // remap が呼ばれた時点では少なくとも 2 回の wait が完了している
+      expect(waitOrder[waitOrder.length - 1]).toBeLessThan(remapOrder[0]);
     } finally {
       waitSpy.mockRestore();
     }
@@ -662,12 +665,12 @@ describe('PCT-069: ページ移動 → undo → 保存で旧 index に他ペー�
 // ── PCT-070: 保存後の IDB クリアは保存スナップショットのページに限定 ──
 
 describe('PCT-070: 保存完了後のクリアは保存で回収したページのみ', () => {
-  it('clearTemporaryChangesForPages が dirty ページのキー集合で呼ばれ、全削除 clearTemporaryChanges は呼ばれない', async () => {
+  it('PCT-104 remap: 保存完了後に remapTemporaryPageEntries が呼ばれ、全削除 clearTemporaryChanges は呼ばれない', async () => {
     const doc: PecoDocument = {
       filePath: '/a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
       pages: new Map([
-        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0', text: 'DIRTY' })], isDirty: true, thumbnail: null }],
-        [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p1', text: 'CLEAN' })], isDirty: false, thumbnail: null }],
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0', text: 'DIRTY' })], isDirty: true, thumbnail: null, pageId: 'src:0' }],
+        [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p1', text: 'CLEAN' })], isDirty: false, thumbnail: null, pageId: 'src:1' }],
       ]),
     };
     usePecoStore.setState({
@@ -683,8 +686,13 @@ describe('PCT-070: 保存完了後のクリアは保存で回収したページ�
     const saved = await result.current.handleSave();
     expect(saved).toBe(true);
 
-    // PCT-104 (A-lite 段階2): clearTemporaryChangesForPages は pageId 文字列配列で呼ばれる
-    expect(mocks.clearTemporaryChangesForPages).toHaveBeenCalledWith('/a.pdf', ['src:0']);
+    // PCT-104 (remap): 保存後は clearTemporaryChangesForPages ではなく remapTemporaryPageEntries で旧キーを再構築
+    expect(mocks.remapTemporaryPageEntries).toHaveBeenCalledWith(
+      '/a.pdf',
+      [0, 1],         // savePageOrder (保存時スナップショット)
+      expect.any(Array), // normalizedPageOrder (normalize 後の pageOrder)
+      ['src:0'],      // dirtyPageIds (dirty なページの pageId)
+    );
     expect(mocks.clearTemporaryChanges).not.toHaveBeenCalled();
   });
 });

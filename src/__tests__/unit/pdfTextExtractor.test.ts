@@ -190,10 +190,12 @@ describe('loadPage bboxMeta vs pdfjs fallback (#99 主因リグレッション)'
       ],
     });
     vi.mocked(getCachedPageProxy).mockResolvedValue(pageProxy);
-    vi.mocked(getTemporaryPageData).mockImplementation(async (_filePath: string, idx: number) => (
-      idx === 0
+    // PCT-104: pdfTextExtractor は pageIdForIdb = 'src:${pageIndex}' で呼ぶ
+    // pageIndex=2（source）の場合、pageId は 'src:2'
+    vi.mocked(getTemporaryPageData).mockImplementation(async (_filePath: string, pageId: string) => (
+      pageId === 'src:2'
         ? {
-            pageIndex: 0,
+            pageIndex: 2,
             textBlocks: [{
               id: 'display-edit',
               text: 'DISPLAY_EDIT',
@@ -214,8 +216,9 @@ describe('loadPage bboxMeta vs pdfjs fallback (#99 主因リグレッション)'
     const result = await loadPage(null as any, 2, '/tmp/reordered-display-idb.pdf', null, undefined, { displayPageIndex: 0 });
 
     expect(getCachedPageProxy).toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 2);
-    expect(getTemporaryPageData).toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 0);
-    expect(getTemporaryPageData).not.toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 2);
+    // PCT-104: pageId 形式 'src:N' (source pageIndex ベース) で呼ばれる
+    expect(getTemporaryPageData).toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 'src:2');
+    expect(getTemporaryPageData).not.toHaveBeenCalledWith('/tmp/reordered-display-idb.pdf', 'src:0');
     expect(result.textBlocks[0].text).toBe('DISPLAY_EDIT');
   });
 });

@@ -1206,6 +1206,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
           thumbnail: partial.thumbnail ?? null,
           isTextExtracted: partial.isTextExtracted,
           ocrCleared: partial.ocrCleared,
+          // m3: IDB 復元時に pageId を設定する（IDB キー解決を安全に行うため）
+          pageId: partial.pageId ?? pageId,
         };
         basePages.set(idx, restored);
       }
@@ -1377,6 +1379,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
           thumbnail: partial.thumbnail ?? null,
           isTextExtracted: partial.isTextExtracted,
           ocrCleared: partial.ocrCleared,
+          // m3: IDB 復元時に pageId を設定する（IDB キー解決を安全に行うため）
+          pageId: partial.pageId ?? pageId,
         };
         basePages.set(idx, restored);
       }
