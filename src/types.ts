@@ -54,6 +54,13 @@ export interface TextBlock {
 
 export interface PageData {
   pageIndex: number;
+  /**
+   * PCT-104 (A-lite): ページの安定ID。値は `"src:" + 初期 source index`。
+   * move / delete / rotate / undo / redo を通じて不変。
+   * IDB temporary_changes キーの `filePath:pageId` 化（段階2）で rename 同期を全廃するための基盤。
+   * optional: 段階0 は型宣言のみで既存エントリには存在しない。
+   */
+  pageId?: string;
   width: number;
   height: number;
   textBlocks: TextBlock[];

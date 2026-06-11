@@ -203,5 +203,10 @@ export async function loadPage(
     pageData = { ...pageData, ...tempEdited, isDirty: true };
   }
 
-  return { ...pageData, pageIndex: displayPageIndex };
+  // PCT-104 (A-lite 段階0): pageId を付与する。
+  // 値は "src:" + 初期 source index (pageIndex)。move/delete/rotate/undo/redo を通じて不変。
+  // tempEdited に pageId が入っている場合はそちらを優先する（段階2以降で IDB から復元される）。
+  const pageId = pageData.pageId ?? `src:${pageIndex}`;
+
+  return { ...pageData, pageIndex: displayPageIndex, pageId };
 }

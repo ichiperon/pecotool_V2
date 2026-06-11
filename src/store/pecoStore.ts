@@ -574,8 +574,26 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // infraStore から pendingRestoration を取り出してから state をリセットする
     const restoration = useInfraStore.getState().pendingRestoration;
 
+    // PCT-104 (A-lite 段階0): 既存 pages Map の各ページに pageId を付与する。
+    // 値は "src:" + pageIndex。pages Map が空の場合（setDocument 後に loadPage で順次ロードされる場合）は
+    // loadPage 側で pageId を付与するため、ここではロード済みページのみ対象にする。
+    let docWithPageIds = doc;
+    if (doc && doc.pages.size > 0) {
+      const pagesWithIds = new Map(doc.pages);
+      let needsUpdate = false;
+      for (const [idx, page] of pagesWithIds.entries()) {
+        if (!page.pageId) {
+          pagesWithIds.set(idx, { ...page, pageId: `src:${idx}` });
+          needsUpdate = true;
+        }
+      }
+      if (needsUpdate) {
+        docWithPageIds = { ...doc, pages: pagesWithIds };
+      }
+    }
+
     set({
-      document: doc,
+      document: docWithPageIds,
       pageOrder: doc ? Array.from({ length: doc.totalPages }, (_, i) => i) : [],
       currentPageIndex: 0,
       // バックアップ復元時は即座に isDirty=true にしておく
