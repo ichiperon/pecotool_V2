@@ -150,7 +150,8 @@ describe('pecoStore', () => {
       usePecoStore.getState().undo()
 
       const state = usePecoStore.getState()
-      expect(state.document!.pages.get(0)).toEqual(beforePage)
+      // issue #350: undo 後は isDirty=true で復元される (保存漏れ防止)
+      expect(state.document!.pages.get(0)).toEqual({ ...beforePage, isDirty: true })
       expect(state.undoStack).toHaveLength(0)
       expect(state.redoStack).toHaveLength(1)
       expect(state.redoStack[0]).toBe(action)
@@ -305,10 +306,12 @@ describe('pecoStore', () => {
       usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [] })
 
       usePecoStore.getState().undo()
-      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(before)
+      // issue #350: undo 後は isDirty=true で復元される
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual({ ...before, isDirty: true })
 
       usePecoStore.getState().redo()
-      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(after)
+      // issue #350: redo 後も isDirty=true で復元される
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual({ ...after, isDirty: true })
     })
   })
 
@@ -1208,15 +1211,15 @@ describe('pecoStore', () => {
       // 非同期 IDB 書き込みの完了を待つ
       await waitForPendingIdbSaves()
 
-      // メモリ Map は巻き戻されている
-      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(beforePage)
-      // IDB にも before が書き込まれている (LRU 退避フローと対称)
+      // issue #350: undo 後は isDirty=true で復元される
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual({ ...beforePage, isDirty: true })
+      // IDB にも isDirty=true の before が書き込まれている
       // PCT-104 (段階2): エントリは {filePath, pageId, data} 形式。pageOrder=[0] なので pageId="src:0"
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
       const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
-      expect(matched!.data).toEqual(beforePage)
+      expect(matched!.data).toEqual({ ...beforePage, isDirty: true })
     })
 
     it('redo() で IDB の該当ページが action.after に書き換わる', async () => {
@@ -1230,12 +1233,13 @@ describe('pecoStore', () => {
 
       await waitForPendingIdbSaves()
 
-      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(afterPage)
+      // issue #350: redo 後も isDirty=true で復元される
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual({ ...afterPage, isDirty: true })
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
       const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
-      expect(matched!.data).toEqual(afterPage)
+      expect(matched!.data).toEqual({ ...afterPage, isDirty: true })
     })
 
     it('LRU 退避済み (メモリ Map から削除) ページの undo() でも IDB に before が書き込まれる', async () => {
@@ -1250,13 +1254,13 @@ describe('pecoStore', () => {
 
       await waitForPendingIdbSaves()
 
-      // IDB へ before が書き込まれている (save 時のマージで before が反映される)
+      // issue #350: IDB へ isDirty=true の before が書き込まれている
       // PCT-104 (段階2): pageId キー形式
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
       const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
-      expect(matched!.data).toEqual(beforePage)
+      expect(matched!.data).toEqual({ ...beforePage, isDirty: true })
     })
   })
 
@@ -1325,7 +1329,7 @@ describe('pecoStore', () => {
       expect(entries.map((e) => e.pageId).sort()).toEqual(['src:0', 'src:1', 'src:2'])
     })
 
-    it('delete_pages redo は deletePageIds (pageId 形式) で deleteTemporaryPageKeys を呼ぶ', async () => {
+    it('delete_pages redo は IDB temp 削除をせず afterPages 内容だけ書き込む (issue #351 案a)', async () => {
       usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
       await usePecoStore.getState().deletePages([0])
       await waitForPendingIdbSaves()
@@ -1337,12 +1341,10 @@ describe('pecoStore', () => {
       usePecoStore.getState().redo()
       await waitForPendingIdbSaves()
 
-      // 段階3: deleteTemporaryPageKeys は pageId 形式の配列で呼ばれる
-      expect(pdfLoader.deleteTemporaryPageKeys).toHaveBeenCalledWith('test.pdf', ['src:0'])
-      // delete → afterPages 書き込みの順序
-      const deleteOrder = vi.mocked(pdfLoader.deleteTemporaryPageKeys).mock.invocationCallOrder[0]
-      const batchOrder = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.invocationCallOrder[0]
-      expect(deleteOrder).toBeLessThan(batchOrder)
+      // issue #351 (案a): IDB temp 削除は行わない。pageOrder 外 pageId は次回保存の remap で破棄される。
+      expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled()
+      // afterPages の内容は書き込まれる (在メモリ redo 後ページの強制同期)
+      expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
     })
 
     it('reorder_pages action の undo は pageOrder を戻すだけで IDB 操作なし', async () => {
@@ -1362,6 +1364,48 @@ describe('pecoStore', () => {
       // rename 系呼び出しなし
       expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled()
       expect(pdfLoader.saveTemporaryPageDataBatch).not.toHaveBeenCalled()
+    })
+
+    it('#360: delete_pages undo の saveTemporaryPageDataBatch に渡す pageId は schedule 時点（beforeOrder）で確定する', async () => {
+      // 初期状態: 3 ページ
+      usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
+
+      // ページ 1 を削除
+      await usePecoStore.getState().deletePages([1])
+      await waitForPendingIdbSaves()
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockClear()
+
+      // undo すると delete_pages が巻き戻る
+      usePecoStore.getState().undo()
+      await waitForPendingIdbSaves()
+
+      expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
+      const entries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls[0][0]
+      // beforeOrder=[0,1,2] から解決された pageId が渡される（src:0, src:1, src:2）
+      const pageIds = entries.map((e) => e.pageId).sort()
+      expect(pageIds).toEqual(['src:0', 'src:1', 'src:2'])
+    })
+
+    it('#360: delete_pages redo の saveTemporaryPageDataBatch に渡す pageId は schedule 時点（afterOrder）で確定する', async () => {
+      // 初期状態: 3 ページ
+      usePecoStore.setState({ document: makeThreePagesDoc(), pageOrder: [0, 1, 2], currentPageIndex: 0 })
+
+      // ページ 0 を削除 → undo で戻す → redo で再削除
+      await usePecoStore.getState().deletePages([0])
+      await waitForPendingIdbSaves()
+      usePecoStore.getState().undo()
+      await waitForPendingIdbSaves()
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockClear()
+
+      usePecoStore.getState().redo()
+      await waitForPendingIdbSaves()
+
+      // afterOrder は削除後の order。afterPages に残ったページのみ書き込まれる。
+      // afterPages は [1,2] → pageId は src:1, src:2
+      expect(pdfLoader.saveTemporaryPageDataBatch).toHaveBeenCalledTimes(1)
+      const entries = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls[0][0]
+      const pageIds = entries.map((e) => e.pageId).sort()
+      expect(pageIds).toEqual(['src:1', 'src:2'])
     })
   })
 
@@ -1632,16 +1676,16 @@ describe('pecoStore', () => {
       const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
       expect(blocks[0].text).toBe('abc# def#')
 
-      // 構文エラーは throw (async なので rejects.toThrow)
-      await expect(
-        usePecoStore.getState().replaceText({
-          scope: 'current',
-          pattern: '[invalid',
-          replacement: 'x',
-          caseSensitive: false,
-          useRegex: true,
-        }),
-      ).rejects.toThrow()
+      // #338: 構文エラーは throw せず error フィールドで返す
+      const errResult = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '[invalid',
+        replacement: 'x',
+        caseSensitive: false,
+        useRegex: true,
+      })
+      expect(errResult.error).toBeDefined()
+      expect(errResult.hits).toBe(0)
     })
 
     it('U-FR-06: 1 回の replaceText は 1 つの update_pages Action として undo / redo できる', async () => {
@@ -2192,6 +2236,28 @@ describe('pecoStore', () => {
       const result = await usePecoStore.getState().replaceTextBatch([], 'all')
       expect(result.totalHits).toBe(0)
       expect(result.perRuleHits).toEqual([])
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
+
+    it('#338: isRegex=true で構文エラーのルールがあれば全体中断して error フィールドを返す', async () => {
+      const b0 = makeBlock({ id: 'b0', text: 'hello world' })
+      const page0 = makePage({ pageIndex: 0, textBlocks: [b0] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page0]])),
+        currentPageIndex: 0,
+        undoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: 'hello', replacement: 'hi', isRegex: false, caseSensitive: false },
+          { pattern: '[invalid', replacement: 'x', isRegex: true, caseSensitive: false },
+        ],
+        'current',
+      )
+      expect(result.error).toBeDefined()
+      expect(result.totalHits).toBe(0)
+      // 中断されたため undoStack は空のまま
       expect(usePecoStore.getState().undoStack).toHaveLength(0)
     })
   })
@@ -3023,6 +3089,191 @@ describe('pecoStore', () => {
     })
   })
 
+  // ── issue #349: deletePages 疎 Map 再キー詰めバグ ─────────────────────────
+
+  describe('issue #349: deletePages sparse-Map re-keying', () => {
+    beforeEach(async () => {
+      await waitForPendingIdbSaves()
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined)
+    })
+
+    it('未訪問ページが存在する疎 Map で page0 を削除すると残存 page2 が新 key=1 に配置される', async () => {
+      // 3 ページ構成 (pageOrder=[0,1,2], totalPages=3)。
+      // page0・page2 のみメモリに存在 (page1 は未訪問/LRU退避で Map に無い)
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'p0' })] })
+      const page2 = makePage({ pageIndex: 2, textBlocks: [makeBlock({ text: 'p2' })] })
+      const doc: PecoDocument = {
+        filePath: 'test.pdf',
+        fileName: 'test.pdf',
+        totalPages: 3, // 実際のページ数 (疎 Map の pages.size とは別)
+        metadata: {},
+        pages: new Map([[0, page0], [2, page2]]),
+      }
+      usePecoStore.setState({ document: doc, pageOrder: [0, 1, 2], currentPageIndex: 0 })
+
+      // page0 (displayIndex=0) を削除
+      await usePecoStore.getState().deletePages([0])
+
+      const state = usePecoStore.getState()
+      // 残存: page1(未訪問)=新key0、page2=新key1 → totalPages=2
+      expect(state.document!.totalPages).toBe(2)
+      // page2 の編集テキストが新 key=1 に保持されていること
+      const movedPage = state.document!.pages.get(1)
+      expect(movedPage).toBeDefined()
+      expect(movedPage!.textBlocks[0].text).toBe('p2')
+      expect(movedPage!.pageIndex).toBe(1)
+    })
+  })
+
+  // ── issue #350: 保存を跨ぐ undo が isDirty=false を復元する ─────────────
+
+  describe('issue #350: undo/redo preserves isDirty=true after save boundary', () => {
+    it('保存相当操作後の undo でページが isDirty=true になる', () => {
+      const pageBefore = makePage({ pageIndex: 0, isDirty: false, textBlocks: [makeBlock({ text: 'before' })] })
+      const pageAfter = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock({ text: 'after' })] })
+      const doc = makeDoc(new Map([[0, pageAfter]]))
+      const action: Action = { type: 'update_page', pageIndex: 0, before: pageBefore, after: pageAfter }
+
+      // 編集後に保存相当: lastSavedActionIndex=1 で "保存済み" 扱いにする
+      usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [], lastSavedActionIndex: 1 })
+
+      usePecoStore.getState().undo()
+
+      const state = usePecoStore.getState()
+      // undo 後のページは isDirty=false ではなく true になること
+      expect(state.document!.pages.get(0)!.isDirty).toBe(true)
+    })
+
+    it('保存相当操作後の undo で lastSavedActionIndex が切り下がる', () => {
+      const pageBefore = makePage({ pageIndex: 0, isDirty: false })
+      const pageAfter = makePage({ pageIndex: 0, isDirty: true })
+      const doc = makeDoc(new Map([[0, pageAfter]]))
+      const action: Action = { type: 'update_page', pageIndex: 0, before: pageBefore, after: pageAfter }
+
+      usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [], lastSavedActionIndex: 1 })
+
+      usePecoStore.getState().undo()
+
+      // undoStack が 0 になるため lastSavedActionIndex も 0 に切り下がる
+      expect(usePecoStore.getState().lastSavedActionIndex).toBe(0)
+    })
+
+    it('update_pages undo でも各ページが isDirty=true になる', () => {
+      const p0Before = makePage({ pageIndex: 0, isDirty: false, textBlocks: [makeBlock({ text: 'b0' })] })
+      const p0After = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock({ text: 'a0' })] })
+      const p1Before = makePage({ pageIndex: 1, isDirty: false, textBlocks: [makeBlock({ text: 'b1' })] })
+      const p1After = makePage({ pageIndex: 1, isDirty: true, textBlocks: [makeBlock({ text: 'a1' })] })
+      const doc = makeDoc(new Map([[0, p0After], [1, p1After]]))
+      const action: Action = {
+        type: 'update_pages',
+        entries: [
+          { pageIndex: 0, before: p0Before, after: p0After },
+          { pageIndex: 1, before: p1Before, after: p1After },
+        ],
+      }
+
+      usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [], lastSavedActionIndex: 1 })
+
+      usePecoStore.getState().undo()
+
+      const state = usePecoStore.getState()
+      expect(state.document!.pages.get(0)!.isDirty).toBe(true)
+      expect(state.document!.pages.get(1)!.isDirty).toBe(true)
+    })
+  })
+
+  // ── issue #351: LRU退避済み編集ページを削除→undoで編集消失 ───────────────
+
+  describe('issue #351: deletePages undo restores IDB-evicted edits', () => {
+    beforeEach(async () => {
+      await waitForPendingIdbSaves()
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined)
+    })
+
+    it('deletePages は IDB temp エントリを削除しない (案a)', async () => {
+      const page0 = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock({ text: 'evicted' })] })
+      const page1 = makePage({ pageIndex: 1, isDirty: false })
+      const doc: PecoDocument = {
+        filePath: 'test.pdf',
+        fileName: 'test.pdf',
+        totalPages: 2,
+        metadata: {},
+        pages: new Map([[0, page0], [1, page1]]),
+      }
+      usePecoStore.setState({ document: doc, pageOrder: [0, 1], currentPageIndex: 1 })
+
+      await usePecoStore.getState().deletePages([0])
+      await waitForPendingIdbSaves()
+
+      // IDB temp の削除は行われない
+      expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled()
+    })
+
+    it('deletePages → undo で pageOrder が復帰しメモリ上の beforePages が戻る', async () => {
+      const editedPage = makePage({ pageIndex: 0, isDirty: true, textBlocks: [makeBlock({ text: 'edit' })] })
+      const otherPage = makePage({ pageIndex: 1, isDirty: false })
+      const doc = makeDoc(new Map([[0, editedPage], [1, otherPage]]))
+      usePecoStore.setState({ document: doc, pageOrder: [0, 1], currentPageIndex: 1 })
+
+      await usePecoStore.getState().deletePages([0])
+      expect(usePecoStore.getState().document!.totalPages).toBe(1)
+
+      usePecoStore.getState().undo()
+      await waitForPendingIdbSaves()
+
+      const state = usePecoStore.getState()
+      expect(state.document!.totalPages).toBe(2)
+      expect(state.pageOrder).toEqual([0, 1])
+      // undo 後のメモリ page0 に編集テキストが保持されていること
+      const restoredPage = state.document!.pages.get(0)
+      expect(restoredPage).toBeDefined()
+      expect(restoredPage!.textBlocks[0].text).toBe('edit')
+    })
+  })
+
+  // ── issue #365: paste の order 採番衝突 ────────────────────────────────────
+
+  describe('issue #365: pasteClipboard order collision with non-contiguous orders', () => {
+    it('order が [0,2] の非連続状態で paste → 新ブロックの order が 3 になる', () => {
+      const e1 = makeBlock({ order: 0 })
+      const e2 = makeBlock({ order: 2 }) // order=1 は削除済みで欠番
+      const toPaste = makeBlock({ order: 0 }) // クリップボード側の order は無視される
+      const page = makePage({ textBlocks: [e1, e2] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [toPaste],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks).toHaveLength(3)
+      // 新ブロックの order は max(0,2)+1 = 3
+      const pasted = blocks[2]
+      expect(pasted.order).toBe(3)
+    })
+
+    it('既存ブロックが空のとき paste → order は 0 から始まる', () => {
+      const toPaste1 = makeBlock({ order: 5 }) // クリップボード側の order は無視
+      const toPaste2 = makeBlock({ order: 9 })
+      const page = makePage({ textBlocks: [] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [toPaste1, toPaste2],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].order).toBe(0)
+      expect(blocks[1].order).toBe(1)
+    })
+  })
+
   // ── #191: isRangeOcrMode ────────────────────────────────────────────────────
 
   describe('#191 isRangeOcrMode', () => {
@@ -3081,6 +3332,31 @@ describe('pecoStore', () => {
       useViewerStore.getState().toggleCurveMode()
       expect(useViewerStore.getState().isCurveMode).toBe(true)
       expect(useViewerStore.getState().isRangeOcrMode).toBe(false)
+    })
+  })
+
+  // ── #335: legacy セレクタ削除の回帰テスト ─────────────────────
+  describe('#335: legacy セレクタ (selectLastIdbError / selectCurrentPageProxy / selectCurrentPageProxyKey) が pecoStore から削除済み', () => {
+    it('selectLastIdbError は pecoStore からエクスポートされていない', async () => {
+      const mod = await import('../../store/pecoStore')
+      expect((mod as Record<string, unknown>).selectLastIdbError).toBeUndefined()
+    })
+
+    it('selectCurrentPageProxy は pecoStore からエクスポートされていない', async () => {
+      const mod = await import('../../store/pecoStore')
+      expect((mod as Record<string, unknown>).selectCurrentPageProxy).toBeUndefined()
+    })
+
+    it('selectCurrentPageProxyKey は pecoStore からエクスポートされていない', async () => {
+      const mod = await import('../../store/pecoStore')
+      expect((mod as Record<string, unknown>).selectCurrentPageProxyKey).toBeUndefined()
+    })
+
+    it('infraStore には正規版セレクタが存在する', async () => {
+      const mod = await import('../../store/infraStore')
+      expect(typeof (mod as Record<string, unknown>).selectLastIdbError).toBe('function')
+      expect(typeof (mod as Record<string, unknown>).selectCurrentPageProxy).toBe('function')
+      expect(typeof (mod as Record<string, unknown>).selectCurrentPageProxyKey).toBe('function')
     })
   })
 })

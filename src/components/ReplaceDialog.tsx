@@ -397,9 +397,10 @@ function RuleSetTab({ id }: { id: string }) {
   const handleBatchApply = useCallback(async () => {
     if (enabledRules.length === 0) return;
     setProgress({ total: enabledRules.length, done: 0, results: [] });
+    setImportError(null);
 
     // issue #213: replaceTextBatch で 1-pass 適用 (IDB 読み込み 1 回 / undoStack 1 entry)
-    const { perRuleHits } = await replaceTextBatch(
+    const batchResult = await replaceTextBatch(
       enabledRules.map((r) => ({
         pattern: r.pattern,
         replacement: r.replacement,
@@ -409,9 +410,21 @@ function RuleSetTab({ id }: { id: string }) {
       'all',
     );
 
+    // #338: RegExp SyntaxError は error フィールドで返る（全体中断）。
+    // #360: 構造変更検知 (document_changed) も同フィールドで返るため文言を分岐する。
+    if (batchResult.error) {
+      setProgress(null);
+      setImportError(
+        batchResult.error === 'document_changed'
+          ? '文書が変更されたため一括置換を中断しました。再度実行してください。'
+          : `正規表現の構文が正しくありません: ${batchResult.error}`,
+      );
+      return;
+    }
+
     const results: ApplyProgress['results'] = enabledRules.map((rule, i) => ({
       pattern: rule.pattern,
-      hits: perRuleHits[i] ?? 0,
+      hits: batchResult.perRuleHits[i] ?? 0,
       blocks: 0,
       pages: 0,
     }));

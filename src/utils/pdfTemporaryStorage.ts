@@ -508,26 +508,34 @@ export async function remapTemporaryPageEntries(
 }
 
 export async function getCachedPage(key: string): Promise<PageData | null> {
+  // #340: GET は readonly トランザクションで実行して readwrite 直列化キューを占有しない。
+  // ヒット時の LRU タッチ（updatedAt put）は GET 完了後に別の readwrite トランザクションで
+  // fire-and-forget 実行する（失敗は無視）。
   try {
     const db = await openDB();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.get(key);
-    return new Promise((resolve) => {
+    const readTx = db.transaction(STORE_NAME, 'readonly');
+    const readStore = readTx.objectStore(STORE_NAME);
+    const request = readStore.get(key);
+    const pageData = await new Promise<PageData | null>((resolve) => {
       request.onsuccess = () => {
         const record = request.result as CachedPageRecord | undefined;
         if (!record) {
           resolve(null);
           return;
         }
-        const pageData = stripCacheMetadata(record);
-        try {
-          store.put(withCacheMetadata(pageData, Date.now()), key);
-        } catch { /* ignore LRU touch errors */ }
-        resolve(pageData);
+        resolve(stripCacheMetadata(record));
       };
       request.onerror = () => resolve(null);
     });
+    if (pageData !== null) {
+      // LRU タッチ: 別の readwrite トランザクションで fire-and-forget
+      try {
+        const writeTx = db.transaction(STORE_NAME, 'readwrite');
+        writeTx.objectStore(STORE_NAME).put(withCacheMetadata(pageData, Date.now()), key);
+        // トランザクション完了は待たない（LRU タッチ失敗は無視）
+      } catch { /* ignore LRU touch errors */ }
+    }
+    return pageData;
   } catch {
     return null;
   }
