@@ -17,7 +17,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { PDFDocument, PDFName, PDFNumber } from '@cantoo/pdf-lib';
+import { deflate } from 'pako';
+import { PDFDict, PDFDocument, PDFName, PDFNumber } from '@cantoo/pdf-lib';
 import { buildPdfDocument } from '../../utils/pdfSaver';
 import { __handleSavePdfForTest } from '../../utils/pdf.worker';
 import { readPecoToolBBoxMetaFromPdfDoc } from '../../utils/pdfPecoToolMetadata';
@@ -313,5 +314,124 @@ describe('PCT-097: pdfSaver / Worker 出力等価性', () => {
       const sizeDiff = Math.abs(mainBytes.byteLength - workerBytes.byteLength);
       expect(sizeDiff).toBeLessThan(1024);
     }, 60_000);
+  });
+
+  // -------------------------------------------------------------------------
+  // #337 (通常経路): dirty ページの confidence が bboxMeta まで保全されること
+  // 注: makeDocument は isDirty=true のページを作るため、この describe の 2 本は
+  //     pdfSaverCore の「通常経路」(dirty page → bboxMeta 直接書込) のみを通る。
+  //     bloat repair 経路 (#337 の修正対象) は次の describe で別途検証する。
+  // -------------------------------------------------------------------------
+  describe('#337: 通常経路 (dirty page) の confidence 保全', () => {
+    it('buildPdfDocument で confidence=0.75 を持つブロックが bboxMeta に保存される', async () => {
+      const originalPdf = await makeRotatedPdf(PAGE_W, PAGE_H, 0);
+      // confidence=0.75 を持つ TextBlock を dirty ページとして渡す
+      const doc = makeDocument(PAGE_W, PAGE_H, undefined, 0.75);
+
+      const mainBytes = await buildPdfDocument(originalPdf, doc, FONT_BYTES);
+
+      // bboxMeta を読み出して confidence が保全されていることを確認
+      const reloaded = await PDFDocument.load(new Uint8Array(mainBytes), { throwOnInvalidObject: false });
+      const meta = readPecoToolBBoxMetaFromPdfDoc(reloaded);
+      const entries = meta['0'] as Array<Record<string, unknown>>;
+      expect(Array.isArray(entries)).toBe(true);
+      expect(entries.length).toBeGreaterThan(0);
+      expect(entries[0].confidence).toBe(0.75);
+    }, 60_000);
+
+    it('buildPdfDocument で confidence が undefined のブロックは bboxMeta に confidence キーなし', async () => {
+      const originalPdf = await makeRotatedPdf(PAGE_W, PAGE_H, 0);
+      // confidence なし
+      const doc = makeDocument(PAGE_W, PAGE_H, undefined, undefined);
+
+      const mainBytes = await buildPdfDocument(originalPdf, doc, FONT_BYTES);
+
+      const reloaded = await PDFDocument.load(new Uint8Array(mainBytes), { throwOnInvalidObject: false });
+      const meta = readPecoToolBBoxMetaFromPdfDoc(reloaded);
+      const entries = meta['0'] as Array<Record<string, unknown>>;
+      expect(Array.isArray(entries)).toBe(true);
+      expect(entries.length).toBeGreaterThan(0);
+      // confidence なし → キー自体が存在しない
+      expect(Object.prototype.hasOwnProperty.call(entries[0], 'confidence')).toBe(false);
+    }, 60_000);
+  });
+
+  // -------------------------------------------------------------------------
+  // #337 (bloat repair 経路): 非 dirty ページが bloat 検知で再描画される際に
+  // existingBBoxMeta の confidence が RepairTextBlock 経由で bboxMeta まで引き継がれること
+  // -------------------------------------------------------------------------
+  describe('#337: bloat repair 経路の confidence 保全', () => {
+    it('非 dirty + bloat 検知で repair 再描画されたページの bboxMeta に confidence が保全される', async () => {
+      // pdfSaverCore.ts buildPdfDocumentCore の bloat repair 分岐を実際に発火させる。
+      // 発火条件 (issue #96 Option B / BLOAT_DETECTION_FONT_THRESHOLD=3):
+      //   (a) 対象ページが非 dirty (pagesToWrite 未登録)
+      //   (b) existingBBoxMeta にそのページのエントリがある
+      //   (c) Font 辞書の PecoTool 由来キーが閾値 (3) を超える
+      //   (d) fontBytes が渡されている
+      //   + pageHasTextOperatorDamage=true (BT 外のテキスト演算子, issue #1 損傷と同形)
+      //
+      // repair は textBlocks を existingBBoxMeta から復元するため、#337 修正
+      // (RepairTextBlock への confidence 引き継ぎ) が無いと bboxMeta の confidence が
+      // 再保存で欠落する。dirty ページの通常経路では検出できない退行のための回帰テスト。
+
+      // --- stage 1: confidence=0.75 の dirty ブロックを通常保存し、
+      //     PecoToolBBoxes メタ + PecoF フォントキー付き PDF を作る ---
+      const originalPdf = await makeRotatedPdf(PAGE_W, PAGE_H, 0);
+      const doc = makeDocument(PAGE_W, PAGE_H, undefined, 0.75);
+      const saved1 = await buildPdfDocument(originalPdf, doc, FONT_BYTES);
+
+      // --- stage 2: saved1 を「過去保存で bloat した PDF」へ加工する ---
+      const bloatDoc = await PDFDocument.load(new Uint8Array(saved1), { throwOnInvalidObject: false });
+      const page = bloatDoc.getPage(0);
+      const resources = (page.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
+      const fontDict = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+      expect(fontDict).toBeDefined();
+      const fontEntries = fontDict!.entries();
+      expect(fontEntries.length).toBeGreaterThan(0);
+      const [, anyFontValue] = fontEntries[0];
+      // (c): legacy PecoTool フォントキー (Meiryo-N) を 4 つ注入して閾値 3 を超えさせる
+      for (let i = 0; i < 4; i++) {
+        fontDict!.set(PDFName.of(`Meiryo-${i}`), anyFontValue);
+      }
+      // 損傷注入: BT 外の Tj/TL で pageHasTextOperatorDamage=true にする
+      const damagedOps = new TextEncoder().encode('(orphan) Tj\n12 TL\n0 0 100 100 re f');
+      const damagedRef = bloatDoc.context.register(
+        bloatDoc.context.stream(deflate(damagedOps), { Filter: PDFName.of('FlateDecode') }),
+      );
+      page.node.set(PDFName.of('Contents'), damagedRef);
+      const bloatedBytes = await bloatDoc.save({ useObjectStreams: false, addDefaultPage: false });
+
+      // --- stage 3: 全ページ非 dirty で再保存 → bloat repair 経路が発火する ---
+      const nonDirtyDoc: PecoDocument = {
+        filePath: 'test.pdf',
+        fileName: 'test.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map(),
+      };
+      const repairedBytes = await buildPdfDocument(bloatedBytes, nonDirtyDoc, FONT_BYTES);
+
+      // --- 検証 1: repair が実際に発火したこと (素通り green の防止) ---
+      // repair 経路では pruneStalePecoToolResources が走り、注入した Meiryo-N キーが
+      // 全て除去される。非 repair 経路 (sweepNonDirtyPage) はフォント辞書に触れないため、
+      // Meiryo-N の消滅が repair 発火の直接証拠になる。
+      const repairedDoc = await PDFDocument.load(new Uint8Array(repairedBytes), { throwOnInvalidObject: false });
+      const repairedPage = repairedDoc.getPage(0);
+      const repairedResources = (repairedPage.node as unknown as { Resources?: () => PDFDict | undefined }).Resources?.();
+      const repairedFontDict = repairedResources?.lookupMaybe(PDFName.of('Font'), PDFDict);
+      const repairedFontKeys = repairedFontDict
+        ? repairedFontDict.entries().map(([key]) => key.toString())
+        : [];
+      expect(repairedFontKeys.filter((key) => key.startsWith('/Meiryo-'))).toEqual([]);
+
+      // --- 検証 2: repair 再描画後の bboxMeta に confidence=0.75 が引き継がれていること ---
+      // #337 修正 (repair 経路の confidence 引き継ぎ) をコメントアウトすると、
+      // RepairTextBlock に confidence が乗らず、ここで fail する。
+      const meta = readPecoToolBBoxMetaFromPdfDoc(repairedDoc);
+      const entries = meta['0'] as Array<Record<string, unknown>>;
+      expect(Array.isArray(entries)).toBe(true);
+      expect(entries.length).toBeGreaterThan(0);
+      expect(entries[0].confidence).toBe(0.75);
+    }, 120_000);
   });
 });

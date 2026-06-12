@@ -589,6 +589,69 @@ export function getViewportSize(rotation: number, pageW: number, pageH: number):
 }
 
 // ---------------------------------------------------------------------------
+// remapBboxForRotation
+// ---------------------------------------------------------------------------
+
+/**
+ * #352: bboxMeta に書き込む前に、bbox 座標を「originalRotation フレーム」から
+ * 「finalRotation フレーム」へリマップする。
+ *
+ * 背景:
+ *   bboxMeta の bbox は「その PDF をロードしたときの pdfjs viewport 座標」として解釈される。
+ *   userRotation を適用して /Rotate を合成すると、次回ロード時の pdfjs viewport は
+ *   finalRotation (= originalRotation + userRotation) になる。
+ *   したがって bboxMeta には finalRotation フレームの座標を書かなければならない。
+ *
+ * 変換式 (viewport1 → user-space → viewport2):
+ *   delta = normalizeRotation(finalRotation - originalRotation)
+ *   vw0 = getViewportSize(originalRotation, pageW, pageH).vw
+ *   vh0 = getViewportSize(originalRotation, pageW, pageH).vh
+ *
+ *   delta=0:   恒等 (no-op)
+ *   delta=90:  {x: vh0-y-h,  y: x,       w: h, h: w}
+ *   delta=180: {x: vw0-x-w,  y: vh0-y-h, w: w, h: h}
+ *   delta=270: {x: y,        y: vw0-x-w, w: h, h: w}
+ *
+ * 式の導出は pdfjs viewport↔user-space 変換
+ *   R=0:   user(u_x, u_y) = (x_v, pageH - y_v)
+ *   R=90:  user(u_x, u_y) = (y_v, x_v)
+ *   R=180: user(u_x, u_y) = (pageW - x_v, y_v)
+ *   R=270: user(u_x, u_y) = (pageW - y_v, pageH - x_v)
+ * を使い、(originalRotation→user→finalRotation) を全 (Ro, delta) 組み合わせで
+ * 検証・一般化したもの。
+ *
+ * @param bbox   originalRotation フレームの bbox
+ * @param originalRotation  保存前の /Rotate (0..270)
+ * @param finalRotation     保存後の /Rotate (0..270)
+ * @param pageW  PDF user-space width (page.getSize().width)
+ * @param pageH  PDF user-space height (page.getSize().height)
+ */
+export function remapBboxForRotation(
+  bbox: { x: number; y: number; width: number; height: number },
+  originalRotation: number,
+  finalRotation: number,
+  pageW: number,
+  pageH: number,
+): { x: number; y: number; width: number; height: number } {
+  const delta = normalizeRotation(finalRotation - originalRotation);
+  if (delta === 0) return bbox;
+
+  const { vw: vw0, vh: vh0 } = getViewportSize(originalRotation, pageW, pageH);
+  const { x, y, width: w, height: h } = bbox;
+
+  switch (delta) {
+    case 90:
+      return { x: vh0 - y - h, y: x, width: h, height: w };
+    case 180:
+      return { x: vw0 - x - w, y: vh0 - y - h, width: w, height: h };
+    case 270:
+      return { x: y, y: vw0 - x - w, width: h, height: w };
+    default:
+      return bbox;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // asPageIndex
 // ---------------------------------------------------------------------------
 
@@ -1080,8 +1143,13 @@ export async function buildPdfDocumentCore(
           if (isCurveDefinition((block as { curve?: unknown }).curve)) {
             out.curve = (block as { curve: CurveDefinition }).curve;
           }
-          // NOTE: confidence は repair 経路で引き継がない。次回保存時に bboxMeta 経由で再永続化されるため
-          // 一時的欠落に留まる（PCT-047 設計上の許容）。
+          // #337: confidence を repair 経路でも引き継ぐ。
+          // 旧注釈「次回保存時に再永続化されるため一時的欠落は許容」は実態と乖離していた。
+          // bloat repair は textBlocks を existingBBoxMeta から復元するため、confidence が
+          // ここで欠落すると再オープン後の低信頼ハイライトが消える。
+          if (typeof (block as { confidence?: unknown }).confidence === 'number') {
+            out.confidence = (block as { confidence: number }).confidence;
+          }
           return out;
         });
       if (repairBlocks.length === 0) continue;
@@ -1125,9 +1193,33 @@ export async function buildPdfDocumentCore(
       .map((block) => ({ ...block, text: sanitizeTextForPdfCopy(block.text, skippedChars, pageIndex) }))
       .sort((a, b) => a.order - b.order);
     const hasDrawableBlocks = sortedBlocks.some((block) => stripUnsafePdfCopyChars(block.text).trim() !== '');
+
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageW, height: pageH } = page.getSize();
+
+    // #352 (1/3): bbox の捕捉フレーム (元 /Rotate) を setRotation より先に取得する。
+    // setRotation 後に getRotation() を読むと合成後フレームになり、cm 構築と
+    // bboxMeta リマップの両方で誤ったフレームを参照してしまう。
+    const originalRotation = normalizeRotation(page.getRotation?.().angle ?? 0);
+
+    // issue #207 / #352 (2/3): userRotation は「差分」意味論。元 /Rotate に加算して
+    // 合成値を setRotation する。旧実装は userRotation を絶対値で上書きしていたため、
+    // 元 /Rotate≠0 のページ（スキャナ由来）でプレビューと食い違う問題があった。
+    const userRotation = documentState.pages.get(pageIndex)?.rotation;
+    if (userRotation !== undefined) {
+      const finalRotation = normalizeRotation(originalRotation + userRotation);
+      page.setRotation(degrees(finalRotation));
+    }
+
+    // #352 (3/3): bboxMeta の bbox は「originalRotation フレームの座標」として捕捉されている。
+    // 保存後の再ロード時に pdfjs が finalRotation viewport で解釈するよう、
+    // remapBboxForRotation で座標を変換してから書き込む。
+    // userRotation が undefined のページは remapBboxForRotation(delta=0) が恒等を返す。
+    const finalRotationForMeta = normalizeRotation(page.getRotation?.().angle ?? 0);
     bboxMeta[String(pageIndex)] = sortedBlocks.map(b => {
+      const remappedBbox = remapBboxForRotation(b.bbox, originalRotation, finalRotationForMeta, pageW, pageH);
       const entry: Record<string, unknown> = {
-        bbox: b.bbox,
+        bbox: remappedBbox,
         writingMode: b.writingMode,
         order: b.order,
         text: b.text,
@@ -1141,23 +1233,13 @@ export async function buildPdfDocumentCore(
     });
     metaChanged = true;
 
-    const page = pdfDoc.getPage(pageIndex);
-    const { width: pageW, height: pageH } = page.getSize();
-
-    // issue #207: ユーザー指定の rotation があれば PDF ページの /Rotate を上書きする。
-    // documentState.pages には dirty ページが含まれるが、pageOrder 並べ替え後の新インデックスで
-    // 引けるように dirtyPages の元エントリ (pageData) を参照する。
-    const userRotation = documentState.pages.get(pageIndex)?.rotation;
-    if (userRotation !== undefined) {
-      page.setRotation(degrees(userRotation));
-    }
-
     // #71: bbox は OCR / 既存テキスト経由いずれも viewport 空間 (rotated screen, y-down)。
     // pdfSaver は元々 R=0 を仮定して translate(bbox.x, pageH - bbox.y) していたため、
     // R=90/180/270 では位置がページ外へ飛んでいた (#50 regression)。
     // 修正方針: viewport 寸法 (vw/vh) を使い、rotation に応じた cm を per-block push する。
-    // rotation は setRotation 後の値を取得する (user rotation 適用済み)。
-    const rotation = normalizeRotation(page.getRotation?.().angle ?? 0);
+    // #352: cm 構築は捕捉フレーム (originalRotation) を使う。bbox が originalRotation 空間
+    // の座標なので、cm も同フレームで構築しなければテキスト層の位置が合わない。
+    const rotation = originalRotation;
     const { vh } = getViewportSize(rotation, pageW, pageH);
     const rotationCm = getRotationCm(rotation, pageW, pageH);
 

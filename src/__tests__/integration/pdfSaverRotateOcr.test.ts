@@ -27,6 +27,8 @@ import { resolve } from 'node:path';
 import { PDFDocument, PDFArray, PDFRawStream, PDFName } from '@cantoo/pdf-lib';
 import { inflate } from 'pako';
 import { buildPdfDocument } from '../../utils/pdfSaver';
+import { readPecoToolBBoxMetaFromBytes } from '../../utils/pdfPecoToolMetadata';
+import { remapBboxForRotation } from '../../utils/pdfSaverCore';
 import type { PageData, PecoDocument, TextBlock } from '../../types';
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
@@ -229,4 +231,262 @@ describe('pdfSaver issue #71: viewport-space bbox + rotation cm 補正', () => {
     // 期待 viewport 位置: (100, 100). 旧位置: (742, 100). 大きく x がずれている
     expect(Math.abs(oldViewportFromR90[0] - BBOX_V.x)).toBeGreaterThan(500);
   });
+});
+
+// ---------------------------------------------------------------------------
+// #352: userRotation (差分) + 元 /Rotate (非ゼロ) の合成検証
+// ---------------------------------------------------------------------------
+
+describe('#352 userRotation 合成: 元 /Rotate=90 + userRotation=90 → 保存後 /Rotate=180', () => {
+  const PAGE_W = 595;
+  const PAGE_H = 842;
+  const BBOX_V = { x: 100, y: 50, width: 200, height: 20 };
+
+  function makeDocWithUserRotation(
+    bboxV: { x: number; y: number; width: number; height: number },
+    pageW: number,
+    pageH: number,
+    userRot: 0 | 90 | 180 | 270,
+  ): PecoDocument {
+    const block: TextBlock = {
+      id: 'b0',
+      text: 'Test',
+      originalText: 'Test',
+      bbox: bboxV,
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: true,
+    };
+    const page: PageData = {
+      pageIndex: 0,
+      width: pageW,
+      height: pageH,
+      textBlocks: [block],
+      isDirty: true,
+      thumbnail: null,
+      rotation: userRot,
+    };
+    return {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, page]]),
+    };
+  }
+
+  const fontBytes = arrayBufferFromFile(resolve(process.cwd(), 'public/fonts/IPAexGothic.ttf'));
+
+  it('元 /Rotate=90 + userRotation=90 → 保存後 /Rotate=180 (合成値)', async () => {
+    // 元 PDF: /Rotate=90
+    const originalPdf = await (async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage([PAGE_W, PAGE_H]);
+      const { degrees } = await import('@cantoo/pdf-lib');
+      page.setRotation(degrees(90));
+      return pdf.save({ useObjectStreams: false, addDefaultPage: false });
+    })();
+
+    const doc = makeDocWithUserRotation(BBOX_V, PAGE_W, PAGE_H, 90);
+    const saved = await buildPdfDocument(originalPdf, doc, fontBytes);
+
+    // 保存後の /Rotate が 180 になっていることを確認
+    const reloaded = await PDFDocument.load(new Uint8Array(saved), { throwOnInvalidObject: false });
+    const savedPage = reloaded.getPage(0);
+    const savedRotation = savedPage.getRotation().angle;
+    expect(savedRotation).toBe(180);
+  }, 60_000);
+
+  it('元 /Rotate=0 + userRotation=0 → 保存後 /Rotate=0 (恒等)', async () => {
+    const originalPdf = await (async () => {
+      const pdf = await PDFDocument.create();
+      pdf.addPage([PAGE_W, PAGE_H]);
+      return pdf.save({ useObjectStreams: false, addDefaultPage: false });
+    })();
+
+    const doc = makeDocWithUserRotation(BBOX_V, PAGE_W, PAGE_H, 0);
+    const saved = await buildPdfDocument(originalPdf, doc, fontBytes);
+
+    const reloaded = await PDFDocument.load(new Uint8Array(saved), { throwOnInvalidObject: false });
+    const savedRotation = reloaded.getPage(0).getRotation().angle;
+    expect(savedRotation).toBe(0);
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// #352: bboxMeta リマップ roundtrip 検証
+// remapBboxForRotation 単体のユニットテストと、保存→再ロードの結合テスト
+// ---------------------------------------------------------------------------
+
+describe('#352 remapBboxForRotation: 既知の点で手計算期待値と照合', () => {
+  const PAGE_W = 600;
+  const PAGE_H = 800;
+
+  // 手計算期待値の導出（式: viewport1 → user-space → viewport2）:
+  //
+  //   original=R=0, delta=90:
+  //     (x,y,w,h)=(100,50,200,20) → new_x=vh0-y-h=800-50-20=730, new_y=x=100, new_w=20, new_h=200
+  //   original=R=0, delta=180:
+  //     → new_x=vw0-x-w=600-100-200=300, new_y=vh0-y-h=800-50-20=730, new_w=200, new_h=20
+  //   original=R=0, delta=270:
+  //     → new_x=y=50, new_y=vw0-x-w=600-100-200=300, new_w=20, new_h=200
+  //   original=R=90, delta=90:
+  //     vw0=pageH=800, vh0=pageW=600
+  //     → new_x=vh0-y-h=600-50-20=530, new_y=x=100, new_w=20, new_h=200
+
+  it('delta=0: 恒等 (座標変化なし)', () => {
+    const bbox = { x: 100, y: 50, width: 200, height: 20 };
+    expect(remapBboxForRotation(bbox, 0, 0, PAGE_W, PAGE_H)).toEqual(bbox);
+    expect(remapBboxForRotation(bbox, 90, 90, PAGE_W, PAGE_H)).toEqual(bbox);
+  });
+
+  it('original=0, delta=90 → new={x:730, y:100, w:20, h:200}', () => {
+    const bbox = { x: 100, y: 50, width: 200, height: 20 };
+    const result = remapBboxForRotation(bbox, 0, 90, PAGE_W, PAGE_H);
+    // vh0(R=0)=pageH=800; new_x=800-50-20=730, new_y=100, new_w=20, new_h=200
+    expect(result).toEqual({ x: 730, y: 100, width: 20, height: 200 });
+  });
+
+  it('original=0, delta=180 → new={x:300, y:730, w:200, h:20}', () => {
+    const bbox = { x: 100, y: 50, width: 200, height: 20 };
+    const result = remapBboxForRotation(bbox, 0, 180, PAGE_W, PAGE_H);
+    // vw0(R=0)=600, vh0=800; new_x=600-100-200=300, new_y=800-50-20=730
+    expect(result).toEqual({ x: 300, y: 730, width: 200, height: 20 });
+  });
+
+  it('original=0, delta=270 → new={x:50, y:300, w:20, h:200}', () => {
+    const bbox = { x: 100, y: 50, width: 200, height: 20 };
+    const result = remapBboxForRotation(bbox, 0, 270, PAGE_W, PAGE_H);
+    // vw0(R=0)=600; new_x=y=50, new_y=600-100-200=300
+    expect(result).toEqual({ x: 50, y: 300, width: 20, height: 200 });
+  });
+
+  it('original=90, delta=90 → new={x:530, y:100, w:20, h:200} (vw0=pageH=800,vh0=pageW=600)', () => {
+    const bbox = { x: 100, y: 50, width: 200, height: 20 };
+    const result = remapBboxForRotation(bbox, 90, 180, PAGE_W, PAGE_H);
+    // vw0(R=90)=pageH=800, vh0=pageW=600; new_x=600-50-20=530, new_y=100
+    expect(result).toEqual({ x: 530, y: 100, width: 20, height: 200 });
+  });
+
+  it('4回 90° 累積リマップで元 bbox に戻る (360° roundtrip)', () => {
+    const bbox = { x: 100, y: 50, width: 200, height: 20 };
+    const r1 = remapBboxForRotation(bbox, 0,   90,  PAGE_W, PAGE_H);
+    const r2 = remapBboxForRotation(r1,  90,  180, PAGE_W, PAGE_H);
+    const r3 = remapBboxForRotation(r2,  180, 270, PAGE_W, PAGE_H);
+    const r4 = remapBboxForRotation(r3,  270, 360, PAGE_W, PAGE_H);
+    // 360=0 (normalizeRotation), should be identity overall
+    expect(r4.x).toBeCloseTo(bbox.x, 5);
+    expect(r4.y).toBeCloseTo(bbox.y, 5);
+    expect(r4.width).toBeCloseTo(bbox.width, 5);
+    expect(r4.height).toBeCloseTo(bbox.height, 5);
+  });
+});
+
+describe('#352 bboxMeta roundtrip: userRotation 付き保存 → 再ロードで bbox が新フレームの期待座標と一致', () => {
+  const PAGE_W = 595;
+  const PAGE_H = 842;
+
+  const fontBytes = arrayBufferFromFile(resolve(process.cwd(), 'public/fonts/IPAexGothic.ttf'));
+
+  it('元 /Rotate=0 + userRotation=90 → bboxMeta が R=90 フレームの期待座標', async () => {
+    const BBOX_V = { x: 100, y: 50, width: 200, height: 20 };
+
+    const originalPdf = await (async () => {
+      const pdf = await PDFDocument.create();
+      pdf.addPage([PAGE_W, PAGE_H]);
+      return pdf.save({ useObjectStreams: false, addDefaultPage: false });
+    })();
+
+    const block: TextBlock = {
+      id: 'b0',
+      text: 'Hello',
+      originalText: 'Hello',
+      bbox: BBOX_V,
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: true,
+    };
+    const page: PageData = {
+      pageIndex: 0,
+      width: PAGE_W,
+      height: PAGE_H,
+      textBlocks: [block],
+      isDirty: true,
+      thumbnail: null,
+      rotation: 90,
+    };
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, page]]),
+    };
+
+    const saved = await buildPdfDocument(originalPdf, doc, fontBytes);
+    const meta = await readPecoToolBBoxMetaFromBytes(saved);
+    const entries = meta['0'] as Array<Record<string, unknown>>;
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+
+    const savedBbox = entries[0].bbox as { x: number; y: number; width: number; height: number };
+
+    // 期待値: remapBboxForRotation(BBOX_V, 0, 90, PAGE_W, PAGE_H)
+    // delta=90: new_x=vh0-y-h=842-50-20=772, new_y=x=100, new_w=20, new_h=200
+    const expected = remapBboxForRotation(BBOX_V, 0, 90, PAGE_W, PAGE_H);
+    expect(savedBbox.x).toBeCloseTo(expected.x, 1);
+    expect(savedBbox.y).toBeCloseTo(expected.y, 1);
+    expect(savedBbox.width).toBeCloseTo(expected.width, 1);
+    expect(savedBbox.height).toBeCloseTo(expected.height, 1);
+  }, 60_000);
+
+  it('#352 d: userRotation なしページの bboxMeta は変換なし (恒等性)', async () => {
+    const BBOX_V = { x: 100, y: 50, width: 200, height: 20 };
+
+    const originalPdf = await (async () => {
+      const pdf = await PDFDocument.create();
+      pdf.addPage([PAGE_W, PAGE_H]);
+      return pdf.save({ useObjectStreams: false, addDefaultPage: false });
+    })();
+
+    const block: TextBlock = {
+      id: 'b0',
+      text: 'Hello',
+      originalText: 'Hello',
+      bbox: BBOX_V,
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: true,
+    };
+    const page: PageData = {
+      pageIndex: 0,
+      width: PAGE_W,
+      height: PAGE_H,
+      textBlocks: [block],
+      isDirty: true,
+      thumbnail: null,
+      // rotation なし (userRotation=undefined)
+    };
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, page]]),
+    };
+
+    const saved = await buildPdfDocument(originalPdf, doc, fontBytes);
+    const meta = await readPecoToolBBoxMetaFromBytes(saved);
+    const entries = meta['0'] as Array<Record<string, unknown>>;
+
+    const savedBbox = entries[0].bbox as { x: number; y: number; width: number; height: number };
+    // userRotation なし → bboxMeta は元の座標のまま
+    expect(savedBbox.x).toBeCloseTo(BBOX_V.x, 1);
+    expect(savedBbox.y).toBeCloseTo(BBOX_V.y, 1);
+    expect(savedBbox.width).toBeCloseTo(BBOX_V.width, 1);
+    expect(savedBbox.height).toBeCloseTo(BBOX_V.height, 1);
+  }, 60_000);
 });
