@@ -189,6 +189,7 @@ export function PdfCanvas({
     currentTextBlocksById,
     getPageData,
     updatePageData,
+    pushAction,
     overlayCanvasRef,
     renderOverlaysRef,
     overlayRafRef,
@@ -864,7 +865,16 @@ export function PdfCanvas({
   };
 
   const handleMouseUp = () => {
-    if (disableDrawing) return;
+    // #362: Space パンでの mouseup 取り逃しを防ぐ。
+    // disableDrawing 中でもアクティブなドラッグ系が残っている場合は確定処理を通す。
+    if (
+      disableDrawing &&
+      !drag.draggedId &&
+      !drawing.isDrawing &&
+      !rangeOcrDrag.isDrawing &&
+      !drag.isAltDragging &&
+      !curveEditor.curveHandleDragRef.current
+    ) return;
 
     // #191: 範囲指定 OCR ドラッグ確定
     if (rangeOcrDrag.isDrawing) {
@@ -898,6 +908,47 @@ export function PdfCanvas({
     drag.finishDragResize();
   };
 
+  // #362-4: mouseleave でのゴーストドラッグを防ぐ。
+  // (案1) ドラッグ系がアクティブな間だけ window に mouseup リスナーを張り、
+  // canvas 外でボタンを放しても確定処理が走るようにする。
+  // onMouseLeave はホバー系クリア（カーソルリセット等）のみ担当し、ドラッグ確定はしない。
+  // 既存テスト (useBlockDragResize.test.ts) への影響が小さいためこの案を採用。
+  const isDragActive =
+    !!drag.draggedId ||
+    drag.isAltDragging ||
+    drawing.isDrawing ||
+    rangeOcrDrag.isDrawing ||
+    !!curveEditor.curveHandleDragRef.current;
+
+  // handleMouseUp は render ごとに再生成されるため、リスナーには最新版を ref 経由で
+  // 呼ばせる。effect クロージャの handleMouseUp を直接 capture すると、drawing /
+  // rangeOcr / altDrag が参照する React state が mousedown 時点の値で固定され、
+  // canvas 外リリースの確定がサイレントキャンセルになる（latest-ref パターン）。
+  const handleMouseUpRef = useRef(handleMouseUp);
+  handleMouseUpRef.current = handleMouseUp;
+
+  useEffect(() => {
+    if (!isDragActive) return;
+    const onWindowMouseUp = (e: MouseEvent) => {
+      // overlay canvas 上のリリースは React の onMouseUp が確定処理を行うため、
+      // ここで重ねて呼ぶと新規ブロック等が二重確定する。このリスナーは
+      // canvas 外でボタンを離した場合の救済のみを担う。
+      const overlay = overlayCanvasRef.current;
+      if (overlay && e.target instanceof Node && overlay.contains(e.target)) return;
+      handleMouseUpRef.current();
+    };
+    window.addEventListener("mouseup", onWindowMouseUp);
+    return () => window.removeEventListener("mouseup", onWindowMouseUp);
+  }, [isDragActive]);
+
+  const handleMouseLeave = () => {
+    // ドラッグ確定は window mouseup リスナーに任せ、ここではホバー系だけクリアする
+    if (overlayCanvasRef.current) {
+      overlayCanvasRef.current.style.cursor = "default";
+    }
+    splitHoverPosRef.current = null;
+  };
+
   return (
     <div
       ref={wrapperRef}
@@ -923,7 +974,7 @@ export function PdfCanvas({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
         onDoubleClick={handleDoubleClick}
         style={{
           position: "absolute",

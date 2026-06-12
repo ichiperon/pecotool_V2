@@ -25,6 +25,33 @@ export interface BlockColors {
   textColor: string;
 }
 
+/**
+ * #341: measureText の結果をキャッシュする上限付き Map（挿入順 evict = FIFO）。
+ * キー = "<context.font>|<text>" で font (fontSize 含む) + テキスト変化に対応。
+ * 上限 MEASURE_CACHE_MAX を超えたら Map 挿入順の最古エントリを削除する。
+ */
+const MEASURE_CACHE_MAX = 500;
+const measureCache = new Map<string, number>();
+
+/** @internal テスト専用: キャッシュをリセットする */
+export function _clearMeasureCacheForTest(): void {
+  measureCache.clear();
+}
+
+function cachedMeasureText(context: CanvasRenderingContext2D, text: string): number {
+  const key = `${context.font}|${text}`;
+  const cached = measureCache.get(key);
+  if (cached !== undefined) return cached;
+  const width = context.measureText(text).width || 1;
+  if (measureCache.size >= MEASURE_CACHE_MAX) {
+    // Map の挿入順で最古キーを削除
+    const firstKey = measureCache.keys().next().value;
+    if (firstKey !== undefined) measureCache.delete(firstKey);
+  }
+  measureCache.set(key, width);
+  return width;
+}
+
 export function drawStaticBlock(
   context: CanvasRenderingContext2D,
   block: TextBlock,
@@ -112,7 +139,7 @@ export function drawStaticBlock(
   context.font = `bold ${fontSize}px sans-serif`;
   context.textBaseline = "top";
 
-  const textWidth = context.measureText(block.text).width || 1;
+  const textWidth = cachedMeasureText(context, block.text); // #341: LRU memo
   const sx = w / textWidth;
 
   context.translate(x, y + 2);

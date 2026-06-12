@@ -18,14 +18,14 @@
  *   - drawImage は呼ばれない (Phase 2 cache 再導入 guard 維持)
  *   - save / restore / translate / rotate が呼ばれる (字ごとの回転)
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // PdfCanvas は import 連鎖で pdfjs-dist を読み込み jsdom 上で DOMMatrix エラーを
 // 起こすため、helper だけを取り出すのに必要な subset を mock する。
 vi.mock('pdfjs-dist', () => ({ default: {} }))
 vi.mock('../../utils/pdfLoader', () => ({ getCachedPageProxy: vi.fn() }))
 
-import { drawStaticBlock, drawStaticBlockCurve, renderStaticLayer } from '../../utils/pdfCanvasRender'
+import { drawStaticBlock, drawStaticBlockCurve, renderStaticLayer, _clearMeasureCacheForTest } from '../../utils/pdfCanvasRender'
 import type { TextBlock, CurveDefinition } from '../../types'
 
 function makeMockContext() {
@@ -610,6 +610,47 @@ describe('PdfCanvas static layer – search highlight (issue #196)', () => {
 
     // 黄色 fillRect が呼ばれている (青+黄色=2回)
     expect(ctx.fillRect).toHaveBeenCalledTimes(2)
+  })
+})
+
+// ── #341: measureText LRU メモ化 ────────────────────────────────────────
+// 同一テキスト・同一 font で drawStaticBlock を2回呼んだとき
+// ctx.measureText は1回しか呼ばれない（2回目はキャッシュヒット）ことを確認する。
+describe('PdfCanvas drawStaticBlock – measureText LRU cache (#341)', () => {
+  beforeEach(() => {
+    // モジュールスコープキャッシュをリセットしてテスト間の干渉を排除
+    _clearMeasureCacheForTest()
+  })
+
+  it('同一テキスト・同一サイズで2回描画すると measureText の呼び出しは1回だけ', () => {
+    const ctx = makeMockContext()
+    const block = makeBlock({ text: 'cachetest', writingMode: 'horizontal' })
+
+    // 1回目
+    drawStaticBlock(ctx as unknown as CanvasRenderingContext2D, block, 1, 0.5)
+    const callsAfterFirst = (ctx.measureText as ReturnType<typeof vi.fn>).mock.calls.length
+
+    // 2回目（同じ font key + text）
+    drawStaticBlock(ctx as unknown as CanvasRenderingContext2D, block, 1, 0.5)
+    const callsAfterSecond = (ctx.measureText as ReturnType<typeof vi.fn>).mock.calls.length
+
+    // 2回目はキャッシュヒットなので measureText 追加呼び出しなし
+    expect(callsAfterSecond).toBe(callsAfterFirst)
+  })
+
+  it('テキストが異なると measureText が改めて呼ばれる（キャッシュミス）', () => {
+    const ctx = makeMockContext()
+    const block1 = makeBlock({ text: 'textA', writingMode: 'horizontal' })
+    const block2 = makeBlock({ text: 'textB', writingMode: 'horizontal' })
+
+    drawStaticBlock(ctx as unknown as CanvasRenderingContext2D, block1, 1, 0.5)
+    const callsAfterFirst = (ctx.measureText as ReturnType<typeof vi.fn>).mock.calls.length
+
+    drawStaticBlock(ctx as unknown as CanvasRenderingContext2D, block2, 1, 0.5)
+    const callsAfterSecond = (ctx.measureText as ReturnType<typeof vi.fn>).mock.calls.length
+
+    // 異なるテキストなのでキャッシュミス → 追加呼び出しが発生する
+    expect(callsAfterSecond).toBeGreaterThan(callsAfterFirst)
   })
 })
 

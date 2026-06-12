@@ -88,6 +88,9 @@ export function useThumbnailWindow() {
 
   // --- サムネイル窓からの状態要求に応答 ---
   useEffect(() => {
+    // #339: cancelled フラグで非同期 setup 完了前の cleanup 競合を防ぐ
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
     const setup = async () => {
       const u1 = await listen('thumbnail:request-state', () => {
         const doc = usePecoStore.getState().document;
@@ -108,18 +111,31 @@ export function useThumbnailWindow() {
       });
       return () => { u1(); u2(); };
     };
-    let unlisten: (() => void) | undefined;
-    const p = setup().then(fn => { unlisten = fn; }).catch(logUnlessTauriWindowNotFound);
-    return () => { p.then(() => unlisten?.()); };
+    setup().then(fn => {
+      if (cancelled) { fn(); return; }
+      unlistenFn = fn;
+    }).catch(logUnlessTauriWindowNotFound);
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
   }, [getDirtyPages]);
 
   // --- ページ選択をサムネイル窓から受け取る ---
   useEffect(() => {
+    // #339: cancelled フラグで非同期 setup 完了前の cleanup 競合を防ぐ
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen<{ pageIndex: number }>('thumbnail:page-selected', (e) => {
       usePecoStore.getState().setCurrentPage(e.payload.pageIndex);
-    }).then(fn => { unlisten = fn; }).catch(logUnlessTauriWindowNotFound);
-    return () => { unlisten?.(); };
+    }).then(fn => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    }).catch(logUnlessTauriWindowNotFound);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   // --- ファイル開閉をサムネイル窓に通知（自動表示は行わず状態転送のみ）---

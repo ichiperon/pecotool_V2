@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const DOUBLE_CLICK_GUARD_MS = 300;
 import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
 import { isCurveDefinition } from "../utils/curveDefinition";
-import type { CurveDefinition, PageData, TextBlock } from "../types";
+import type { Action, CurveDefinition, PageData, TextBlock } from "../types";
 
 export interface UseCurveEditorParams {
   pageIndex: number;
@@ -23,6 +23,8 @@ export interface UseCurveEditorParams {
   currentTextBlocksById: Map<string, TextBlock>;
   getPageData: () => PageData | undefined;
   updatePageData: (pageIndex: number, partial: Partial<PageData>, pushUndo?: boolean) => void;
+  /** #356: useBlockDragResize と同じ機構で undo アクションを積む */
+  pushAction: (action: Action) => void;
   overlayCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   renderOverlaysRef: React.RefObject<(() => void) | null>;
   overlayRafRef: React.MutableRefObject<number | null>;
@@ -52,6 +54,7 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     currentTextBlocksById,
     getPageData,
     updatePageData,
+    pushAction,
     overlayCanvasRef,
     renderOverlaysRef,
     overlayRafRef,
@@ -62,6 +65,8 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
   const [curveClickPoints, setCurveClickPoints] = useState<Array<{ x: number; y: number }>>([]);
   // handle drag: どの handle を掴んでいるか (0=始点 1=中点 2=終点)、null=非ドラッグ
   const curveHandleDragRef = useRef<{ handleIndex: number; blockId: string } | null>(null);
+  // #356: ハンドルドラッグ開始時のページスナップショット (useBlockDragResize.preDragPageRef 相当)
+  const preDragPageRef = useRef<PageData | null>(null);
 
   // ── #205: Polyline 作成 draft state ───────────────────────────
   const [polylineDraftPoints, setPolylineDraftPoints] = useState<Array<{ x: number; y: number }>>([]);
@@ -131,6 +136,16 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     polylineMousePosRef.current = null;
   }, [polylineDraftActive, polylineDraftPoints, selectedIds, getPageData, updatePageData, pageIndex]);
 
+  // #362: isCurveMode を抜けたとき polyline draft をゾンビ化させない
+  useEffect(() => {
+    if (!isCurveMode) {
+      setPolylineDraftPoints([]);
+      setPolylineDraftActive(false);
+      polylineMousePosRef.current = null;
+      setCurveClickPoints([]);
+    }
+  }, [isCurveMode]);
+
   // #205: キーボードで Enter 確定 / Esc キャンセル
   useEffect(() => {
     if (!polylineDraftActive) return;
@@ -171,6 +186,9 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     const hit = hitTestCurveHandle(pos);
     if (hit) {
       curveHandleDragRef.current = { handleIndex: hit.handleIndex, blockId: hit.blockId };
+      // #356: ドラッグ開始時のスナップショットを保持して mouseup 後の undo に使う
+      const page = getPageData();
+      preDragPageRef.current = page ? { ...page, textBlocks: [...page.textBlocks] } : null;
       return true;
     }
 
@@ -277,27 +295,42 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
    * 処理した場合は true を返す。
    */
   const handleMouseUpCurve = useCallback((): boolean => {
-    // curve handle drag 確定: 最終位置を undoable で書き込む
+    // curve handle drag 確定
     if (curveHandleDragRef.current) {
       const { blockId } = curveHandleDragRef.current;
       curveHandleDragRef.current = null;
-      // mouseMove 中は undoable=false で書き込んでいるため、mouseUp 時点の
-      // 最新 curve を undoable=true で再書き込みして undo スタックに積む。
-      // #266: find (O(n)) → currentTextBlocksById.get (O(1)) に変更
-      const block = currentTextBlocksById.get(blockId);
-      if (block) {
-        const page = getPageData();
-        if (page) {
-          const newBlocks = page.textBlocks.map((b) =>
-            b.id === blockId ? { ...b, isDirty: true } : b,
-          );
-          updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, true);
-        }
+
+      // #356: useBlockDragResize パターンに合わせて before/after で undo を積む。
+      // mousemove 中に undoable=false で逐次書き込み済みのため、ここでは追加の
+      // 書き込みはせず、pushAction で 1 アクション積むだけでよい。
+      const beforePage = preDragPageRef.current;
+      preDragPageRef.current = null;
+
+      const afterPage = getPageData();
+      if (!afterPage) return true;
+
+      // 移動ゼロ判定: before と after で対象ブロックの curve が変わっていなければ積まない
+      const beforeBlock = beforePage?.textBlocks.find((b) => b.id === blockId);
+      const afterBlock = afterPage.textBlocks.find((b) => b.id === blockId);
+      const hasCurveChange =
+        beforeBlock && afterBlock
+          ? JSON.stringify(beforeBlock.curve) !== JSON.stringify(afterBlock.curve)
+          : true;
+
+      if (beforePage && hasCurveChange) {
+        const action: Action = {
+          type: "update_page",
+          pageIndex,
+          before: beforePage,
+          after: { ...afterPage },
+        };
+        pushAction(action);
       }
+
       return true;
     }
     return false;
-  }, [currentTextBlocksById, getPageData, updatePageData, pageIndex]);
+  }, [getPageData, pushAction, pageIndex]);
 
   /**
    * curve mode の doubleClick 処理 (#205: polyline 作成開始)。

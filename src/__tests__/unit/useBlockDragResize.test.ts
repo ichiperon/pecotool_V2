@@ -925,14 +925,37 @@ describe('useBlockDragResize: getHoverCursor (ハンドル判定の座標計算)
     expect(result.current.getHoverCursor({ x: 180, y: 120 }, normalOpts)).toBe('se-resize');
   });
 
-  it('ハンドル許容半径 (hs=10px) の内外で判定が切り替わる', () => {
+  it('ハンドル許容半径の内外で判定が切り替わる (#362: hs は BB 表示サイズに応じて縮小)', () => {
+    // bbox=(100,100,80,20): w=80, h=20 → hs = Math.min(10, Math.max(3, Math.min(80,20)/4)) = 5
     const block = makeBlock();
     const { result } = renderHover({ block, selectedIds: new Set([block.id]) });
 
-    // 隅 (100,100) から 9px ずれ → まだハンドル内 (Math.abs<10)
+    // 隅 (100,100) から 4px ずれ → hs=5 内なのでハンドル判定
+    expect(result.current.getHoverCursor({ x: 104, y: 100 }, normalOpts)).toBe('nw-resize');
+    // 5px ちょうどは境界外 (< 5 が条件) → BB 内部なので 'move'
+    expect(result.current.getHoverCursor({ x: 105, y: 100 }, normalOpts)).toBe('move');
+  });
+
+  it('大型 BB (w=200, h=200) では hs=10 上限が効く', () => {
+    // bbox=(100,100,200,200): hs = Math.min(10, Math.max(3, Math.min(200,200)/4)) = Math.min(10, 50) = 10
+    const bigBlock = makeBlock({ bbox: { x: 100, y: 100, width: 200, height: 200 } });
+    const { result } = renderHover({ block: bigBlock, selectedIds: new Set([bigBlock.id]) });
+
+    // 隅 (100,100) から 9px ずれ → hs=10 内なのでハンドル判定
     expect(result.current.getHoverCursor({ x: 109, y: 100 }, normalOpts)).toBe('nw-resize');
-    // 10px ちょうどは境界外 (< 10 が条件) → ハンドルではなく BB 内部なので 'move'
+    // 10px ちょうどは境界外 → BB 内部なので 'move'
     expect(result.current.getHoverCursor({ x: 110, y: 100 }, normalOpts)).toBe('move');
+  });
+
+  it('極小 BB (w=8, h=8) では hs=3 下限が効く', () => {
+    // bbox=(100,100,8,8): hs = Math.min(10, Math.max(3, Math.min(8,8)/4)) = Math.min(10, Math.max(3, 2)) = 3
+    const tinyBlock = makeBlock({ bbox: { x: 100, y: 100, width: 8, height: 8 } });
+    const { result } = renderHover({ block: tinyBlock, selectedIds: new Set([tinyBlock.id]) });
+
+    // 隅 (100,100) から 2px ずれ → hs=3 内なのでハンドル判定
+    expect(result.current.getHoverCursor({ x: 102, y: 100 }, normalOpts)).toBe('nw-resize');
+    // 3px ちょうどは境界外 → BB 内部なので 'move'
+    expect(result.current.getHoverCursor({ x: 103, y: 100 }, normalOpts)).toBe('move');
   });
 
   it('BB 内部 (ハンドル外) は move、BB 完全外は default', () => {
@@ -1238,5 +1261,179 @@ describe('useBlockDragResize: 厳格化 - 複数選択と全リサイズハン�
     expect(updatedBlock.bbox.width).toBeGreaterThanOrEqual(1);
     expect(updatedBlock.bbox.height).toBeGreaterThanOrEqual(1);
     expect(updatePageData.mock.calls[0][1].isDirty).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// #362-2: ドラッグセッション中のズーム変化で座標系が混在しない (scale 固定)
+// ─────────────────────────────────────────────────────────────
+describe('useBlockDragResize: #362-2 ドラッグ開始時の scale を固定する', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('ドラッグ開始時 zoom=100 で開始し、updateDragResize は開始時の scale で dx を計算する', () => {
+    // zoom=100 で開始し、そのまま finishDragResize まで同じスケールが使われることを確認する
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes,
+      })
+    );
+
+    // zoom=100 でドラッグ開始
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    // zoom=100 のまま dx=30 (viewport 座標)
+    act(() => {
+      result.current.updateDragResize({ x: 140, y: 130 });
+    });
+    act(() => { flushRaf(); });
+
+    const map = setDragPreviewBboxes.mock.calls[0][0] as Map<string, { x: number; y: number }>;
+    // scale=1 で dx=(140-110)/1=30, dy=(130-110)/1=20
+    expect(map.get(block.id)!.x).toBe(block.bbox.x + 30);
+    expect(map.get(block.id)!.y).toBe(block.bbox.y + 20);
+  });
+
+  it('ドラッグ中に zoom が 100→200 へ変わっても、プレビューは開始時 scale=1 で dx/dy を計算する', () => {
+    // #362-2 の本丸: ドラッグセッション中のズーム変更で dragScaleRef の固定が効くことを検証する。
+    // dragScaleRef を外して現在 zoom (200, scale=2) を参照する実装に戻すと
+    // dx=(140-110)/2=15, dy=(130-110)/2=10 となり fail する。
+    // (上のテストは zoom を一度も変えないため、固定の有無を区別できない)
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result, rerender } = renderHook(
+      ({ zoom }: { zoom: number }) =>
+        useBlockDragResize({
+          pageIndex: 0,
+          zoom,
+          selectedIds: new Set([block.id]),
+          getPageData: () => pageData,
+          updatePageData,
+          toggleSelection: vi.fn(),
+          pushAction: vi.fn(),
+          setDragPreviewBboxes,
+        }),
+      { initialProps: { zoom: 100 } }
+    );
+
+    // zoom=100 (scale=1) でドラッグ開始
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    // ドラッグセッション中にズーム変更 (zoom=200, scale=2)
+    rerender({ zoom: 200 });
+
+    // viewport 座標で dx=30, dy=20 移動
+    act(() => {
+      result.current.updateDragResize({ x: 140, y: 130 });
+    });
+    act(() => { flushRaf(); });
+
+    const map = setDragPreviewBboxes.mock.calls[0][0] as Map<string, { x: number; y: number }>;
+    // 開始時 scale=1 で除算: dx=(140-110)/1=30, dy=(130-110)/1=20
+    expect(map.get(block.id)!.x).toBe(block.bbox.x + 30);
+    expect(map.get(block.id)!.y).toBe(block.bbox.y + 20);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// #362-5: 小型 BB でも BB 中央付近は move 判定になる (hs 縮小)
+// ─────────────────────────────────────────────────────────────
+describe('useBlockDragResize: #362-5 小型 BB で move 判定が機能する', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('小型 BB (w=12, h=12): 中央付近クリックで move に入る (hs が縮小されてハンドル占有が減る)', () => {
+    // bbox=(100,100,12,12): hs = Math.min(10, Math.max(3, Math.min(12,12)/4)) = Math.min(10, Math.max(3, 3)) = 3
+    // 中央付近 (106,106) はいずれのハンドルからも 3px 以上離れているので move になるはず
+    const smallBlock = makeBlock({ bbox: { x: 100, y: 100, width: 12, height: 12 } });
+    const pageData = makePage([smallBlock]);
+    const updatePageData = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([smallBlock.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 106, y: 106 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    // 中央付近で move に入れること
+    expect(result.current.dragMode).toBe('move');
+    expect(result.current.draggedId).toBe(smallBlock.id);
+  });
+
+  it('小型 BB (w=12, h=12): 隅から 2px 以内はリサイズハンドルとして機能する', () => {
+    // hs=3 なので 2px ズレはまだハンドル内
+    const smallBlock = makeBlock({ bbox: { x: 100, y: 100, width: 12, height: 12 } });
+    const pageData = makePage([smallBlock]);
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([smallBlock.id]),
+        getPageData: () => pageData,
+        updatePageData: vi.fn(),
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes: vi.fn(),
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 102, y: 100 },  // nw 隅 (100,100) から 2px ずれ → hs=3 内
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    expect(result.current.dragMode).toBe('resize-nw');
   });
 });

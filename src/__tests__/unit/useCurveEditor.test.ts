@@ -52,6 +52,7 @@ function makeParams(
 ): UseCurveEditorParams {
   const getPageData = vi.fn(() => undefined as PageData | undefined);
   const updatePageData = vi.fn();
+  const pushAction = vi.fn();
 
   const overlayCanvasRef: RefObject<HTMLCanvasElement | null> = {
     current: {
@@ -69,6 +70,7 @@ function makeParams(
     currentTextBlocksById: new Map([['block1', makeTextBlock('block1')]]),
     getPageData,
     updatePageData,
+    pushAction,
     overlayCanvasRef,
     renderOverlaysRef,
     overlayRafRef,
@@ -407,7 +409,11 @@ describe('useCurveEditor — handle drag lifecycle', () => {
     expect(lastCall[2]).toBe(false); // undoable=false during drag
   });
 
-  it('mouseUp after drag calls updatePageData with undoable=true and clears dragRef', () => {
+  it('#356: mouseUp after drag pushes undo Action (before/after) and clears dragRef', () => {
+    // #356: 旧実装は mouseup 時に updatePageData(undoable=true) で undo を積んでいたが、
+    // before がドラッグ後の状態を指す問題があった。
+    // 修正後は useBlockDragResize と同じ pushAction パターンを使い、
+    // mousedown 時のスナップショット(before) と mouseup 時の状態(after) で Action を積む。
     const arc: CurveDefinition = {
       type: 'arc',
       center: { x: 50, y: 50 },
@@ -416,13 +422,30 @@ describe('useCurveEditor — handle drag lifecycle', () => {
       endAngle: Math.PI,
     };
     const block = makeTextBlock('block1', arc);
-    const page = makePageData([block]);
-    const getPageData = vi.fn(() => page);
-    const updatePageData = vi.fn();
+    const beforePage = makePageData([block]);
+
+    // mousemove 後に curve が変化したことを模擬するため、
+    // updatePageData が呼ばれたら currentPage を新しい curve に差し替える
+    const movedArc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 55, y: 55 },
+      radius: 30,
+      startAngle: 0,
+      endAngle: Math.PI,
+    };
+    const movedBlock = makeTextBlock('block1', movedArc);
+    let currentPage = beforePage;
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      currentPage = { ...currentPage, ...partial };
+    });
+    const getPageData = vi.fn(() => currentPage);
+    const pushAction = vi.fn();
+
     const params = makeParams({
-      currentTextBlocksById: new Map([['block1', block]]),
+      currentTextBlocksById: new Map([['block1', movedBlock]]),
       getPageData,
       updatePageData,
+      pushAction,
       zoom: 100,
     });
     const { result } = renderHook(() => useCurveEditor(params));
@@ -437,10 +460,19 @@ describe('useCurveEditor — handle drag lifecycle', () => {
       result.current.handleMouseUpCurve();
     });
 
+    // dragRef がクリアされている
     expect(result.current.curveHandleDragRef.current).toBeNull();
-    // Last updatePageData call must be undoable=true
-    const lastCall = updatePageData.mock.calls[updatePageData.mock.calls.length - 1];
-    expect(lastCall[2]).toBe(true);
+    // #356: mousemove では undoable=false で呼ばれる
+    if (updatePageData.mock.calls.length > 0) {
+      const lastMoveCall = updatePageData.mock.calls[updatePageData.mock.calls.length - 1];
+      expect(lastMoveCall[2]).toBe(false);
+    }
+    // pushAction に update_page アクションが積まれている (curve が変化したため)
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const action = pushAction.mock.calls[0][0];
+    expect(action.type).toBe('update_page');
+    expect(action.before).toBeDefined();
+    expect(action.after).toBeDefined();
   });
 
   it('mouseUp when not dragging returns false', () => {
@@ -515,5 +547,115 @@ describe('useCurveEditor — selectedIds.size !== 1 guard', () => {
       handled = result.current.handleMouseDownCurve({ x: 10, y: 10 });
     });
     expect(handled).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #356: curve ハンドルドラッグが undo 不能だったバグの回帰テスト
+// pushAction の before がドラッグ前の curve を持ち、after がドラッグ後の curve を持つ
+// ─────────────────────────────────────────────────────────────────────────────
+describe('useCurveEditor — #356: handle drag undo (before=drag前, after=drag後)', () => {
+  it('ドラッグ→undo シミュレート: pushAction.before が drag 前 curve を持つ', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 50, y: 50 },
+      radius: 30,
+      startAngle: 0,
+      endAngle: Math.PI,
+    };
+    const block = makeTextBlock('block1', arc);
+    const beforePage = makePageData([block]);
+
+    // ドラッグ後の curve (移動後)
+    const movedArc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 60, y: 60 },
+      radius: 30,
+      startAngle: 0,
+      endAngle: Math.PI,
+    };
+    const movedBlock = { ...block, curve: movedArc };
+    const afterPage = makePageData([movedBlock]);
+
+    let currentPage = beforePage;
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      // mousemove での undoable=false 書き込みで afterPage に差し替える
+      currentPage = { ...currentPage, ...partial };
+    });
+    const getPageData = vi.fn(() => currentPage);
+    const pushAction = vi.fn();
+
+    // hitTestCurveHandle は currentTextBlocksById を参照するため、
+    // beforeBlock (元の arc) を渡してドラッグ開始が hit-test を通過するようにする
+    const params = makeParams({
+      currentTextBlocksById: new Map([['block1', block]]),
+      getPageData,
+      updatePageData,
+      pushAction,
+      zoom: 100,
+    });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    // ドラッグ開始: beforeArc center=(50,50) radius=30 startAngle=0 → handle[0]=(80,50)
+    act(() => {
+      result.current.handleMouseDownCurve({ x: 80, y: 50 });
+    });
+    // drag 後を模擬: currentPage を afterPage に差し替え
+    currentPage = afterPage;
+    // mouseup で pushAction が呼ばれる
+    act(() => {
+      result.current.handleMouseUpCurve();
+    });
+
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const action = pushAction.mock.calls[0][0];
+
+    // before は drag 開始前の curve を持つ (undo 後にここに戻れる)
+    const beforeCurve = action.before.textBlocks.find((b: TextBlock) => b.id === 'block1')?.curve;
+    const afterCurve = action.after.textBlocks.find((b: TextBlock) => b.id === 'block1')?.curve;
+
+    // before が drag 前の arc center を持つ
+    expect((beforeCurve as typeof arc).center.x).toBe(50);
+    expect((beforeCurve as typeof arc).center.y).toBe(50);
+
+    // after が drag 後の arc center を持つ
+    expect((afterCurve as typeof movedArc).center.x).toBe(60);
+    expect((afterCurve as typeof movedArc).center.y).toBe(60);
+
+    // before と after が別の snapshot であること (回帰の核心)
+    expect(JSON.stringify(beforeCurve)).not.toBe(JSON.stringify(afterCurve));
+  });
+
+  it('移動ゼロ (クリックのみ): pushAction は呼ばれない', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 50, y: 50 },
+      radius: 30,
+      startAngle: 0,
+      endAngle: Math.PI,
+    };
+    const block = makeTextBlock('block1', arc);
+    const page = makePageData([block]);
+    const pushAction = vi.fn();
+
+    const params = makeParams({
+      currentTextBlocksById: new Map([['block1', block]]),
+      getPageData: vi.fn(() => page),
+      updatePageData: vi.fn(),
+      pushAction,
+      zoom: 100,
+    });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    // mousedown (handle hit) → mouseup (移動なし: mousemove を呼ばない)
+    act(() => {
+      result.current.handleMouseDownCurve({ x: 80, y: 50 });
+    });
+    act(() => {
+      result.current.handleMouseUpCurve();
+    });
+
+    // curve に変化がない場合は pushAction を呼ばない
+    expect(pushAction).not.toHaveBeenCalled();
   });
 });

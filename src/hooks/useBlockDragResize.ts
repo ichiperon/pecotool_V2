@@ -72,6 +72,8 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
   >(new Map());
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
   const preDragPageRef = useRef<PageData | null>(null);
+  // #362: ドラッグセッション開始時の scale を固定して、ドラッグ中ズーム変化による座標系混在を防ぐ
+  const dragScaleRef = useRef<number>(1);
   // updateDragResize を RAF で coalesce するための保留状態。
   // mousemove は 1 フレームに複数発火しうるため、毎回 updatePageData を呼ぶと
   // pages Map / textBlocks 配列の全コピーが mousemove ごとに発生してカクつく。
@@ -114,6 +116,10 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     mods: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }
   ): boolean => {
     const scale = zoom / 100;
+    // #362: tryStart 時点の scale を固定する（ドラッグが成立した場合に updateDragResize /
+    // finishDragResize がこの値を使う。ドラッグ中のズーム変化で座標系が混在するのを防ぐ）。
+    // ドラッグ不成立時にも代入されるが、消費側はドラッグ中のみ参照するため無害。
+    dragScaleRef.current = scale;
     const pageData = getPageData();
     if (!pageData) return false;
 
@@ -127,7 +133,8 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
       const y = block.bbox.y * scale;
       const w = block.bbox.width * scale;
       const h = block.bbox.height * scale;
-      const hs = 10;
+      // #362: 小型 BB でも move 判定に入れるよう、hs を BB 表示サイズに応じて縮小する
+      const hs = Math.min(10, Math.max(3, Math.min(w, h) / 4));
 
       if (Math.abs(pos.x - x) < hs && Math.abs(pos.y - y) < hs) detectedDragMode = "resize-nw";
       else if (Math.abs(pos.x - (x + w)) < hs && Math.abs(pos.y - y) < hs)
@@ -212,7 +219,8 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     },
   ): Map<string, BoundingBox> | null => {
     if (!draggedId || dragMode === "none") return null;
-    const scale = zoom / 100;
+    // #362: ドラッグセッション固定の scale を使う（ドラッグ中にズームが変わっても座標系が混在しない）
+    const scale = dragScaleRef.current;
     const dx = (pos.x - dragStartMouse.x) / scale;
     const dy = (pos.y - dragStartMouse.y) / scale;
 
@@ -419,7 +427,8 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
         const y = block.bbox.y * scale;
         const w = block.bbox.width * scale;
         const h = block.bbox.height * scale;
-        const hs = 10;
+        // #362: tryStartDragOrResize と同じ式でハンドルゾーンを算出
+        const hs = Math.min(10, Math.max(3, Math.min(w, h) / 4));
         if (Math.abs(pos.x - x) < hs && Math.abs(pos.y - y) < hs) hoverCursor = "nw-resize";
         else if (Math.abs(pos.x - (x + w)) < hs && Math.abs(pos.y - y) < hs)
           hoverCursor = "ne-resize";
