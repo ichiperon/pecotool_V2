@@ -183,6 +183,11 @@ export function useOcrEngine(
   const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null);
   const cancelTokenRef = useRef(false);
   const isOcrRunningRef = useRef(false);
+  // #355: ユーザーによる明示的キャンセル専用フラグ。
+  // cancelTokenRef はページ内部 cancel（epoch 不一致など）でも立つため、
+  // フォルダループの「savePdf をスキップして全体を停止する」判定には使えない。
+  // cancelOcr() でのみ立てる。フォルダ OCR 開始時にリセット。
+  const userCancelRequestedRef = useRef(false);
 
   // 描画タイミングに依存しないよう、非同期処理では getState() で最新状態を取得する。
   // Toolbar の disabled 制御に必要な「document の有無」と「現在ページ」だけ細粒度購読し、
@@ -254,13 +259,20 @@ export function useOcrEngine(
     doc: PecoDocument,
     progressForPage?: (pageIndex: number, timing: { startedAt: number; avgMsPerPage: number; estimatedRemainingMs: number }) => OcrProgress,
     pageIndices?: number[],
+    // #354: 呼び出し元で doc 取得直後に捕捉した epoch を受け取る。
+    // 省略時は本関数冒頭で取得（後方互換のため残す）。
+    callerCapturedEpoch?: number,
   ) => {
-    // #102: 開始時点の epoch を captured epoch として保持。
-    // ループ内で getState().documentEpoch と比較し、F5 / Ctrl+O 経由で document が
-    // 差し替えられた瞬間に検知して停止する (filePath 一致でも doc 自体は別物のため)。
-    // updatePageData による document 差し替えは epoch を増やさないので、書き込みは正常に続く。
-    const capturedEpoch = useInfraStore.getState().documentEpoch;
+    // #102 / #354: epoch は呼び出し元から渡された値を優先する。
+    // 呼び出し元が ask() 等の await より前に捕捉した epoch を受け取ることで、
+    // ダイアログ待機中の文書切替を検知できる。
+    const capturedEpoch = callerCapturedEpoch ?? useInfraStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
+    // #354: openFreshPdfDoc の後でも epoch を再検証してから処理を始める。
+    if (!isCurrentDocument(capturedEpoch)) {
+      ocrPdf.destroy().catch(() => {});
+      return;
+    }
 
     // #199: 対象ページインデックス一覧。指定がなければ全ページ。
     const targets = pageIndices ?? Array.from({ length: doc.totalPages }, (_, i) => i);
@@ -271,6 +283,9 @@ export function useOcrEngine(
     const startedAt = performance.now();
     let avgMsPerPage = 0;
     let pageStartTime = startedAt;
+
+    // #359: 失敗ページ番号（1-based 表示用）を収集して呼び出し元に返す。
+    const failedPages: number[] = [];
 
     try {
       for (let step = 0; step < targets.length; step++) {
@@ -299,6 +314,8 @@ export function useOcrEngine(
           size = await getPageSize(ocrPdf, sourcePageIndex, pageData);
         } catch (e) {
           console.warn(`[OCR] ページ ${i + 1}: サイズ取得失敗、スキップします`, e);
+          // #359: サイズ取得失敗は失敗ページとして集計する。
+          failedPages.push(i + 1);
           continue;
         }
 
@@ -334,6 +351,8 @@ export function useOcrEngine(
           }
           if (result.status === 'error') {
             console.error(`[OCR] ページ ${i + 1} エラー: ${result.message}`);
+            // #359: result.status==='error' も失敗ページとして集計する。
+            failedPages.push(i + 1);
             continue;
           }
           // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
@@ -347,6 +366,8 @@ export function useOcrEngine(
           }, false);
         } catch (e) {
           console.error(`[OCR] ページ ${i + 1} 失敗:`, e);
+          // #359: 例外 catch も失敗ページとして集計する。
+          failedPages.push(i + 1);
         }
         if ((step + 1) % 25 === 0) {
           await ocrPdf.cleanup().catch(() => {});
@@ -356,14 +377,25 @@ export function useOcrEngine(
     } finally {
       ocrPdf.destroy().catch(() => {});
     }
+
+    // #359: 失敗ページ番号を返す。呼び出し元でトーストに反映する。
+    return failedPages;
   };
 
   const runOcrCurrentPage = async () => {
+    // #359: 入口ガード（PCT-076 と同型）
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     // 最新状態を取得
     const state = usePecoStore.getState();
     const doc = state.document;
     const pageIdx = state.currentPageIndex;
     if (!doc) return;
+    // #354: doc 取得直後（最初の await より前）に epoch を捕捉する。
+    // getCachedPageProxy や getTemporaryPageData、ask() 待機中の文書切替を検知できる。
+    const currentPageEpoch = useInfraStore.getState().documentEpoch;
     const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIdx);
     let pageData = doc.pages.get(pageIdx);
     if (!pageData) {
@@ -403,12 +435,14 @@ export function useOcrEngine(
       if (!confirmed) return;
     }
 
+    // #354: ask() 完了後、epoch が変わっていないか最終確認する。
+    if (!isCurrentDocument(currentPageEpoch)) return;
+
     cancelTokenRef.current = false;
     setOcrRunning(true);
     perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
-    // #102: 開始時点の documentEpoch を保持。F5 等で同パスの別 doc に置き換わった際は
-    // epoch がインクリメントされるため、古い結果を書き込む前に検知できる。
-    const capturedEpoch = useInfraStore.getState().documentEpoch;
+    // #102 / #354: doc 取得直後に捕捉した epoch（currentPageEpoch）を使う。
+    const capturedEpoch = currentPageEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       if (!isCurrentDocument(capturedEpoch)) return;
@@ -477,6 +511,9 @@ export function useOcrEngine(
     // 最新状態を取得（checkAndPromptOcrZero から呼ばれた場合もstaleにならないよう）
     const doc = usePecoStore.getState().document;
     if (!doc) return;
+    // #354: doc 取得直後（最初の await より前）に epoch を捕捉する。
+    // ask() や hasExistingOcrBlocks の await 中に文書が切り替わっても検知できる。
+    const allPagesEpoch = useInfraStore.getState().documentEpoch;
 
     const confirmed = await ask(
       '全ページOCRを実行します。この操作はUndo できません。続行しますか？',
@@ -497,13 +534,19 @@ export function useOcrEngine(
       if (!overwriteConfirmed) return;
     }
 
+    // #354: 全ダイアログ完了後に epoch が変わっていないか最終確認する。
+    if (!isCurrentDocument(allPagesEpoch)) return;
+
     cancelTokenRef.current = false;
     setOcrRunning(true);
     setOcrProgress({ current: 0, total: doc.totalPages, startedAt: performance.now(), avgMsPerPage: 0, estimatedRemainingMs: 0 });
     perf.mark('ui.ocrRunAllPages', { totalPages: doc.totalPages });
 
+    let allPagesFailedPages: number[] = [];
     try {
-      await processAllPages(doc);
+      // #354: 呼び出し元で捕捉した epoch を processAllPages に渡す。
+      // #359: 失敗ページ番号を受け取る（undefined は空配列扱い）。
+      allPagesFailedPages = (await processAllPages(doc, undefined, undefined, allPagesEpoch)) ?? [];
     } finally {
       setOcrRunning(false);
       setOcrProgress(null);
@@ -511,6 +554,11 @@ export function useOcrEngine(
 
     if (cancelTokenRef.current) {
       showToast('OCRをキャンセルしました');
+    } else if (allPagesFailedPages.length > 0) {
+      // #359: 失敗ページがある場合は件数と先頭5件のページ番号を表示する。
+      const shown = allPagesFailedPages.slice(0, 5);
+      const extra = allPagesFailedPages.length > 5 ? `、他${allPagesFailedPages.length - 5}件` : '';
+      showToast(`全ページOCRが完了しました（${allPagesFailedPages.length} ページ失敗: p.${shown.join(', p.')}${extra}）`, true);
     } else {
       showToast('全ページOCRが完了しました');
     }
@@ -518,6 +566,9 @@ export function useOcrEngine(
 
   const cancelOcr = () => {
     cancelTokenRef.current = true;
+    // #355: ユーザーによる明示的キャンセルであることをマークする。
+    // フォルダ OCR ループはこちらのフラグで全体停止を判定する。
+    userCancelRequestedRef.current = true;
   };
 
   /**
@@ -550,8 +601,15 @@ export function useOcrEngine(
 
   // #199: ページ範囲指定 OCR
   const runOcrRange = async (pageRangeString: string) => {
+    // #359: 入口ガード（PCT-076 と同型）
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     const doc = usePecoStore.getState().document;
     if (!doc) return;
+    // #354: doc 取得直後（最初の await より前）に epoch を捕捉する。
+    const rangeEpoch = useInfraStore.getState().documentEpoch;
 
     const parsed = parsePageRange(pageRangeString, doc.totalPages);
     if ('error' in parsed) {
@@ -580,13 +638,19 @@ export function useOcrEngine(
       if (!overwriteConfirmed) return;
     }
 
+    // #354: 全ダイアログ完了後に epoch が変わっていないか最終確認する。
+    if (!isCurrentDocument(rangeEpoch)) return;
+
     cancelTokenRef.current = false;
     setOcrRunning(true);
     setOcrProgress({ current: 0, total: pageIndices.length, startedAt: performance.now(), avgMsPerPage: 0, estimatedRemainingMs: 0 });
     perf.mark('ui.ocrRunRange', { pageCount: pageIndices.length });
 
+    let rangeFailedPages: number[] = [];
     try {
-      await processAllPages(doc, undefined, pageIndices);
+      // #354: 呼び出し元で捕捉した epoch を processAllPages に渡す。
+      // #359: 失敗ページ番号を受け取る。
+      rangeFailedPages = (await processAllPages(doc, undefined, pageIndices, rangeEpoch)) ?? [];
     } finally {
       setOcrRunning(false);
       setOcrProgress(null);
@@ -594,6 +658,11 @@ export function useOcrEngine(
 
     if (cancelTokenRef.current) {
       showToast('OCRをキャンセルしました');
+    } else if (rangeFailedPages.length > 0) {
+      // #359: 失敗ページがある場合は件数と先頭5件のページ番号を表示する。
+      const shown = rangeFailedPages.slice(0, 5);
+      const extra = rangeFailedPages.length > 5 ? `、他${rangeFailedPages.length - 5}件` : '';
+      showToast(`ページ範囲OCRが完了しました（${pageIndices.length} ページ中 ${rangeFailedPages.length} ページ失敗: p.${shown.join(', p.')}${extra}）`, true);
     } else {
       showToast(`ページ範囲OCRが完了しました（${pageIndices.length} ページ）`);
     }
@@ -629,6 +698,8 @@ export function useOcrEngine(
     }
 
     cancelTokenRef.current = false;
+    // #355: フォルダ OCR 開始時にユーザーキャンセルフラグをリセットする。
+    userCancelRequestedRef.current = false;
     setOcrRunning(true);
     perf.mark('ui.ocrRunFolder', { totalFiles: pdfFiles.length });
 
@@ -638,9 +709,16 @@ export function useOcrEngine(
     let folderCancelled = false;
     try {
       for (let fileIndex = 0; fileIndex < pdfFiles.length; fileIndex++) {
+        // #355: ループ先頭でユーザーキャンセルをチェックする。
+        if (userCancelRequestedRef.current) {
+          folderCancelled = true;
+          break;
+        }
         if (folderCancelled) break;
         // 各ファイル開始時に cancelTokenRef を必ずリセット。
         // 前ファイルで epoch 検知により内部 cancel が立っていても、新ファイルでは正常に処理する。
+        // #355: cancelTokenRef は per-file 用途（epoch 内部 cancel）のみ。ユーザーキャンセルは
+        // userCancelRequestedRef で別管理するため、こちらはリセットを継続する。
         cancelTokenRef.current = false;
         const filePath = pdfFiles[fileIndex];
         const fileName = filePath.split(/[\\/]/).pop() || filePath;
@@ -663,10 +741,13 @@ export function useOcrEngine(
           avgMsPerPage: timing.avgMsPerPage,
           estimatedRemainingMs: timing.estimatedRemainingMs,
         }));
-        // ユーザが明示的に cancelOcr() を押した場合のみフォルダ全体を停止する。
-        // epoch 検知での内部 cancel はこのファイルだけスキップ扱いにし、次ファイルに進む。
-        // ユーザ cancel と内部 cancel の区別がつかないため、cancelTokenRef は触らず次の
-        // openPdf 直前で必ずリセットして判定を継続する。
+
+        // #355: processAllPages 完了後にユーザーキャンセルを確認する。
+        // キャンセル済みなら部分 OCR のままで保存しない（即 break）。
+        if (userCancelRequestedRef.current) {
+          folderCancelled = true;
+          break;
+        }
 
         setOcrProgress({ current: doc.totalPages, total: doc.totalPages, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName, startedAt: fileStartedAt, avgMsPerPage: 0, estimatedRemainingMs: 0 });
         // #48: savePdf の戻り値で成功/失敗を明示判定する。
@@ -685,7 +766,12 @@ export function useOcrEngine(
     }
 
     if (folderCancelled) {
-      showToast('フォルダOCRをキャンセルしました');
+      // #355: ユーザーキャンセルの場合は保存しなかったことを明示するトーストを出す。
+      if (userCancelRequestedRef.current) {
+        showToast('フォルダOCRをキャンセルしました（保存せず中断）');
+      } else {
+        showToast('フォルダOCRをキャンセルしました');
+      }
     } else {
       showToast('フォルダOCRが完了しました');
     }
@@ -867,6 +953,11 @@ export function useOcrEngine(
     pageIndex: number,
     zoom: number,
   ) => {
+    // #359: 入口ガード（PCT-076 と同型）
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     const state = usePecoStore.getState();
     const doc = state.document;
     if (!doc) return;
@@ -876,6 +967,9 @@ export function useOcrEngine(
       showToast(`ページ ${pageIndex + 1} のデータが見つかりません。`, true);
       return;
     }
+
+    // #359: 開始時点の sourcePageIndex を捕捉する（書込前の再検証に使う）。
+    const regionSourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIndex);
 
     // canvas ピクセル座標での矩形
     const sx = Math.round(rect.x);
@@ -895,8 +989,7 @@ export function useOcrEngine(
       let pageHeight = pageData.height;
       if (pageWidth === 0 || pageHeight === 0) {
         try {
-          const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIndex);
-          const page = await getCachedPageProxy(doc.filePath, sourcePageIndex);
+          const page = await getCachedPageProxy(doc.filePath, regionSourcePageIndex);
           const viewport = page.getViewport({ scale: 1.0 });
           pageWidth = viewport.width;
           pageHeight = viewport.height;
@@ -962,6 +1055,12 @@ export function useOcrEngine(
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
         return;
       }
+      // #359: 書込直前にページ順序を再解決し、開始時点と異なれば結果を破棄する。
+      // processAllPages :330 / runOcrCurrentPage :440 と同型の3行チェック。
+      if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== regionSourcePageIndex) {
+        showToast('OCR結果は破棄されました（ページ順序が変更されました）。', true);
+        return;
+      }
 
       // クロップ画像での bbox を元ページの viewport 座標に変換する。
       // OCR 結果の bbox はクロップ画像基準 (renderScale=zoom/100 でスケール済み) なので、
@@ -982,9 +1081,14 @@ export function useOcrEngine(
       const newBlocks = toTextBlocks(adjustedBlocks, settings);
       const currentPage = usePecoStore.getState().document?.pages.get(pageIndex);
       const existingBlocks = currentPage?.textBlocks ?? [];
+      // #365: order は既存ブロックの max(order) + 1 から採番する（連番の穴あきに対応）。
+      // 既存ブロックが空なら 0 起点。existingBlocks.length 方式は削除後の重複 order を生む。
+      const maxExistingOrder = existingBlocks.length > 0
+        ? Math.max(...existingBlocks.map((b) => b.order))
+        : -1;
       const mergedBlocks = [
         ...existingBlocks,
-        ...newBlocks.map((b, i) => ({ ...b, order: existingBlocks.length + i })),
+        ...newBlocks.map((b, i) => ({ ...b, order: maxExistingOrder + 1 + i })),
       ];
 
       usePecoStore.getState().updatePageData(pageIndex, {

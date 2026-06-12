@@ -1343,3 +1343,222 @@ describe('PCT-094: checkAndPromptOcrZero は PecoToolBBoxes メタあり PDF を
     }
   });
 });
+
+// =====================================================================
+// #354: ask 待機中に epoch が変わったら書き込まない
+// =====================================================================
+describe('#354: ask 待機中の documentEpoch 変化で結果を書き込まない', () => {
+  it('runOcrAllPages: ask 待機中に setDocument → epoch 変化 → processAllPages に進まない', async () => {
+    const initialDoc = makeDoc(2);
+    usePecoStore.getState().setDocument(initialDoc);
+    h.openFreshPdfDocMock.mockResolvedValue(makeMockPdf(2));
+
+    // ask() の間に別の doc をセットして epoch を進める
+    h.askMock.mockImplementation(async () => {
+      // ask() が呼ばれた瞬間に文書を差し替えて epoch を bump する
+      const anotherDoc = makeDoc(2);
+      usePecoStore.getState().setDocument(anotherDoc);
+      return true; // ユーザーは「はい」を押したことにする
+    });
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    await act(async () => { await result.current.runOcrAllPages(); });
+
+    // epoch が変わったので processAllPages に進まず run_ocr は呼ばれない
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+    // 新 doc にも何も書き込まれていない
+    const liveDoc = usePecoStore.getState().document!;
+    expect(liveDoc).not.toBe(initialDoc);
+    for (let i = 0; i < liveDoc.totalPages; i++) {
+      expect(liveDoc.pages.get(i)?.textBlocks ?? []).toHaveLength(0);
+    }
+  });
+
+  it('runOcrRange: ask 待機中に setDocument → epoch 変化 → processAllPages に進まない', async () => {
+    const initialDoc = makeDoc(3);
+    usePecoStore.getState().setDocument(initialDoc);
+    h.openFreshPdfDocMock.mockResolvedValue(makeMockPdf(3));
+
+    h.askMock.mockImplementation(async () => {
+      const anotherDoc = makeDoc(3);
+      usePecoStore.getState().setDocument(anotherDoc);
+      return true;
+    });
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    await act(async () => { await result.current.runOcrRange('1-3'); });
+
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+    const liveDoc = usePecoStore.getState().document!;
+    expect(liveDoc).not.toBe(initialDoc);
+    for (let i = 0; i < liveDoc.totalPages; i++) {
+      expect(liveDoc.pages.get(i)?.textBlocks ?? []).toHaveLength(0);
+    }
+  });
+});
+
+// =====================================================================
+// #355: フォルダ OCR キャンセル — savePdf を呼ばず後続ファイルも処理しない
+// =====================================================================
+describe('#355: フォルダ OCR のユーザーキャンセル', () => {
+  it('processAllPages 中に cancelOcr → savePdf が呼ばれず後続ファイルも処理しない', async () => {
+    const openDialogMock = (await import('@tauri-apps/plugin-dialog')).open as ReturnType<typeof vi.fn>;
+    openDialogMock.mockResolvedValueOnce('/folder');
+    h.askMock.mockResolvedValue(true);
+
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_pdf_files_in_folder') return ['/folder/a.pdf', '/folder/b.pdf', '/folder/c.pdf'];
+      if (cmd === 'run_ocr') {
+        // OCR 処理中に少し待つ（cancelOcr が呼ばれる隙間を作る）
+        await new Promise((r) => setTimeout(r, 5));
+        return JSON.stringify({
+          status: 'ok',
+          blocks: [{ text: 'X', bbox: { x: 0, y: 0, width: 5, height: 5 }, writingMode: 'horizontal', confidence: 1 }],
+        });
+      }
+      return '';
+    });
+
+    const openCalls: string[] = [];
+    const openPdf = async (filePath: string) => {
+      openCalls.push(filePath);
+      usePecoStore.getState().setDocument({
+        filePath,
+        fileName: filePath.split('/').pop()!,
+        totalPages: 1,
+        metadata: {},
+        pages: new Map([[0, { pageIndex: 0, width: 595, height: 842, textBlocks: [], isDirty: false, thumbnail: null }]]),
+      });
+      return true;
+    };
+    const savePdf = vi.fn(async () => true);
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() =>
+      useOcrEngine((m, e) => toasts.push({ msg: m, err: e }), { openPdf, savePdf }),
+    );
+
+    // フォルダ OCR を開始し、1 ファイル目の OCR 中にキャンセル
+    const promise = result.current.runOcrFolder();
+    await new Promise((r) => setTimeout(r, 15));
+    act(() => { result.current.cancelOcr(); });
+    await act(async () => { await promise; });
+
+    // savePdf は呼ばれていない（部分 OCR 状態のまま保存しない）
+    expect(savePdf).not.toHaveBeenCalled();
+    // b.pdf / c.pdf は処理されていない（openPdf は a.pdf のみ）
+    expect(openCalls).toHaveLength(1);
+    expect(openCalls[0]).toBe('/folder/a.pdf');
+    // キャンセルトースト（保存せず中断を示す）
+    expect(toasts.some((t) => !t.err && t.msg.includes('キャンセル') && t.msg.includes('保存せず'))).toBe(true);
+  });
+});
+
+// =====================================================================
+// #359: 入口ガードと部分失敗集計
+// =====================================================================
+describe('#359: OCR 実行経路の防御', () => {
+  it('runOcrRange: OCR 実行中は入口ガードで即 return する', async () => {
+    usePecoStore.getState().setDocument(makeDoc(2));
+
+    let releaseOpen!: (pdf: unknown) => void;
+    h.openFreshPdfDocMock.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseOpen = resolve; }),
+    );
+    h.askMock.mockResolvedValue(true);
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() =>
+      useOcrEngine((msg: string, err?: boolean) => toasts.push({ msg, err })),
+    );
+
+    // サイレント OCR を開始 (isOcrRunningRef が立つ)
+    let silentDone!: Promise<boolean>;
+    act(() => { silentDone = result.current.runOcrAllPagesSilent(); });
+
+    // 実行中に runOcrRange を呼ぶ
+    await act(async () => { await result.current.runOcrRange('1-2'); });
+
+    // 入口ガードで弾かれ、確認ダイアログは出ない
+    expect(h.askMock).not.toHaveBeenCalled();
+    expect(toasts.some((t) => t.err === true && /OCR実行中/.test(t.msg))).toBe(true);
+
+    // 後片付け
+    await act(async () => {
+      result.current.cancelOcr();
+      releaseOpen(makeMockPdf(2));
+      await silentDone;
+    });
+  });
+
+  it('runOcrCurrentPage: OCR 実行中は入口ガードで即 return する', async () => {
+    usePecoStore.getState().setDocument(makeDoc(2));
+    usePecoStore.setState({ currentPageIndex: 0 } as any);
+
+    let releaseOpen!: (pdf: unknown) => void;
+    h.openFreshPdfDocMock.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseOpen = resolve; }),
+    );
+    h.askMock.mockResolvedValue(true);
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() =>
+      useOcrEngine((msg: string, err?: boolean) => toasts.push({ msg, err })),
+    );
+
+    let silentDone!: Promise<boolean>;
+    act(() => { silentDone = result.current.runOcrAllPagesSilent(); });
+
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    // 入口ガードで弾かれる
+    expect(toasts.some((t) => t.err === true && /OCR実行中/.test(t.msg))).toBe(true);
+    // run_ocr は呼ばれない（サイレントOCR側のみ）
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+
+    await act(async () => {
+      result.current.cancelOcr();
+      releaseOpen(makeMockPdf(2));
+      await silentDone;
+    });
+  });
+
+  it('runOcrAllPages: 一部ページが status=error のとき失敗ページ番号をトーストに含める', async () => {
+    usePecoStore.getState().setDocument(makeDoc(3));
+    h.openFreshPdfDocMock.mockResolvedValue(makeMockPdf(3));
+    h.askMock.mockResolvedValue(true);
+
+    let callCount = 0;
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      callCount++;
+      // 2 ページ目だけ error を返す
+      if (callCount === 2) {
+        return JSON.stringify({ status: 'error', blocks: [], message: 'engine error' });
+      }
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [{ text: `P${callCount}`, bbox: { x: 0, y: 0, width: 10, height: 10 }, writingMode: 'horizontal', confidence: 1 }],
+      });
+    });
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    await act(async () => { await result.current.runOcrAllPages(); });
+
+    // 失敗ページトーストが発火し、ページ番号 "2" が含まれる
+    const failToast = toasts.find((t) => t.err === true && t.msg.includes('失敗'));
+    expect(failToast).toBeDefined();
+    expect(failToast!.msg).toContain('p.2');
+    // 成功した 1・3 ページは書き込まれている
+    const doc = usePecoStore.getState().document!;
+    expect(doc.pages.get(0)!.textBlocks).toHaveLength(1);
+    expect(doc.pages.get(1)!.textBlocks).toHaveLength(0); // error
+    expect(doc.pages.get(2)!.textBlocks).toHaveLength(1);
+  });
+});
