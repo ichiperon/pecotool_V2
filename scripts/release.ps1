@@ -6,7 +6,7 @@
 # 前提:
 #   - 署名秘密鍵: $HOME\.tauri\pecotool_v2.key (または keys\pecotool_v2.key)
 #   - gh CLI が認証済み (gh auth status)
-#   - npm install 済み
+#   （依存関係はスクリプト内で npm ci により再現インストールされる）
 #
 # 使い方:
 #   powershell -ExecutionPolicy Bypass -File scripts\release.ps1
@@ -35,6 +35,10 @@ if (-not $version) { Write-Error 'tauri.conf.json から version を取得でき
 Write-Host "[1/6] バージョン: $version"
 
 # --- 2. 署名付きビルド -----------------------------------------------------
+Write-Host '依存関係をロックファイルから再現インストール (npm ci)...'
+npm ci
+if ($LASTEXITCODE -ne 0) { Write-Error 'npm ci が失敗しました' }
+
 Write-Host '[2/6] 署名付きビルドを実行 (数分〜15分)...'
 # Tauri v2 の build は TAURI_SIGNING_PRIVATE_KEY (鍵の中身) のみを参照する。
 # _PATH 変数は signer generate のヘルプに載っているが build では読まれない
@@ -50,7 +54,7 @@ $setupExe = Get-ChildItem $bundleDir -Filter "*_${version}_x64-setup.exe" | Sele
 if (-not $setupExe) { Write-Error "インストーラが見つかりません: $bundleDir" }
 $sigFile = Get-ChildItem $bundleDir -Filter "$($setupExe.Name).sig" | Select-Object -First 1
 if (-not $sigFile) {
-    Write-Error "署名ファイル (.sig) が見つかりません。TAURI_SIGNING_PRIVATE_KEY_PATH が効いているか確認してください"
+    Write-Error "署名ファイル (.sig) が見つかりません。TAURI_SIGNING_PRIVATE_KEY 環境変数（鍵の中身）が設定されているか確認してください"
 }
 Write-Host "[3/6] 成果物: $($setupExe.Name) + .sig"
 

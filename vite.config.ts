@@ -12,7 +12,7 @@ const tauriConf = JSON.parse(readFileSync("./src-tauri/tauri.conf.json", "utf-8"
 const appVersion: string = tauriConf.version ?? "0.0.0";
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(async ({ command }) => ({
   plugins: [react()],
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
@@ -48,18 +48,22 @@ export default defineConfig(async () => ({
     },
   },
 
-  // Resolve alias for modules unavailable in plain browser context (dev server / E2E).
+  // Resolve alias for modules unavailable in plain browser context (dev server / E2E only).
   // @tauri-apps/plugin-updater is only available inside a real Tauri runtime.
   // Without this alias the vite import-analysis plugin throws an error that prevents
   // the dev server from serving the app — which breaks all Playwright E2E tests.
-  resolve: {
-    alias: {
-      '@tauri-apps/plugin-updater': new URL(
-        './src/__tests__/__stubs__/tauri-plugin-updater.e2e.ts',
-        import.meta.url,
-      ).pathname,
+  // This alias is intentionally omitted during `build` so the real plugin-updater is
+  // bundled into the production output. Applying it in build would stub out auto-update.
+  ...(command === 'serve' ? {
+    resolve: {
+      alias: {
+        '@tauri-apps/plugin-updater': new URL(
+          './src/__tests__/__stubs__/tauri-plugin-updater.e2e.ts',
+          import.meta.url,
+        ).pathname,
+      },
     },
-  },
+  } : {}),
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

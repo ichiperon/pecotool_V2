@@ -252,6 +252,15 @@ describe('Tauri capability vs source integrity', () => {
     ).toBe(true);
   });
 
+  it('opener:default is present in capabilities (App.tsx open_log_folder guard)', () => {
+    // App.tsx calls invoke('open_log_folder') which is backed by the opener plugin on the Rust
+    // side. Without opener:default in capabilities the IPC call silently fails at runtime.
+    expect(
+      granted.has('opener:default'),
+      'opener:default is missing from capabilities/default.json but open_log_folder (opener plugin) is used in App.tsx',
+    ).toBe(true);
+  });
+
   it('plugin-updater usage has updater:default in capabilities (PCT-093 regression guard)', () => {
     // PCT-093 (v2.0.16 regression): @tauri-apps/plugin-updater の check() を
     // 呼んでいるのに capabilities に updater 系 permission が無く、

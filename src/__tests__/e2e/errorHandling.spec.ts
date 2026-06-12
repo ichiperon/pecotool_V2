@@ -72,11 +72,11 @@ test.describe('ErrorHandling: エラー系 E2E', () => {
     // 何らかのエラー toast が表示されること
     // prefetch 失敗 or EACCES フォールバック toast が出る
     await expect(page.locator('.toast-error').first()).toBeVisible({ timeout: 10000 });
-    // R04D-2/R04D-3: エラートーストは原因の仮説と次アクションを案内する文言
-    // （OS エラー生文字列は表示しない）。
-    //   prefetch 失敗: 「元のPDFファイルが移動または削除された可能性があります。ファイルを再度開き直してください。」
-    //   write access: 「他のアプリでこの PDF が開かれている可能性があります。閉じてから再度保存してください。」
-    await expect(page.locator('.toast-error').first()).toContainText(/失敗|エラー|error|EACCES|保存先|開けません|開かれている|開き直して|許可|permission/i);
+    // R04D-2/R04D-3: エラートーストは原因の仮説と次アクションを案内する固有文言が出ること。
+    // OS エラー生文字列（EACCES 等）は表示しない。
+    //   R04D-2 (write access): 「他のアプリでこの PDF が開かれている可能性があります。閉じてから再度保存してください。」
+    //   R04D-3 (prefetch 失敗): 「元のPDFファイルが移動または削除された可能性があります。ファイルを再度開き直してください。」
+    await expect(page.locator('.toast-error').first()).toContainText(/開かれている可能性|開き直してください/);
   });
 
   /**
