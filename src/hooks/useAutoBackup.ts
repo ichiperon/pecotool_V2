@@ -11,6 +11,9 @@ export interface PendingBackup {
   file_path: string;
   timestamp: string;
   backup_path: string;
+  // #364: 元 PDF がこのバックアップより新しいとき true。
+  // 復元すると保存済みの内容より古い状態に戻る可能性があるため、ダイアログで注意喚起する。
+  is_stale: boolean;
 }
 
 export interface BackupData {

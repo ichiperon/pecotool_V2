@@ -30,6 +30,7 @@ const sampleBackup: PendingBackup = {
   file_path: 'C:/work/sample.pdf',
   timestamp: '2024-01-02T03:04:05.000Z',
   backup_path: 'C:/work/.peco_backup/sample.pdf.bak',
+  is_stale: false,
 };
 
 // ── HelpModal ────────────────────────────────────────────────────────

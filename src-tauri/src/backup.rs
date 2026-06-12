@@ -8,6 +8,149 @@ pub struct BackupInfo {
     pub file_path: String,
     pub timestamp: String,
     pub backup_path: String,
+    // #364: 元 PDF がこのバックアップより新しいとき true。
+    // 判定不能 (元 PDF 不在 / mtime 取得失敗 / timestamp パース失敗) は false = 安全側で表示する。
+    // 既存 BackupInfo は serde rename しておらず snake_case のままフロントへ渡るため、
+    // 本フィールドも snake_case (is_stale) のままにしてフロントの PendingBackup と整合させる。
+    pub is_stale: bool,
+}
+
+/// #342: `originalFilePath` の sanity check。
+/// バックアップ JSON は外部入力相当 (改ざん・破損があり得る) のため、
+/// 元 PDF パスとして妥当なエントリのみを復元候補に載せる。
+/// 不合格時は `false` を返し、呼び出し側でスキップ + ログする。
+///
+/// 条件:
+/// - 絶対パス (Windows: ドライブレター `X:\` もしくは UNC `\\`)
+/// - 拡張子が `.pdf` (大文字小文字不問)
+/// - 長さが上限 (600 文字) 以内
+fn is_valid_original_file_path(file_path: &str) -> bool {
+    const MAX_LEN: usize = 600;
+
+    if file_path.is_empty() || file_path.len() > MAX_LEN {
+        return false;
+    }
+
+    // 絶対パス判定: ドライブレター (例 "C:\") または UNC (例 "\\server\share")。
+    // 非 Windows ビルドでも文字列ベースで同じ規則を適用する (バックアップは Windows 由来)。
+    let bytes = file_path.as_bytes();
+    let is_drive_abs = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let is_unc_abs = file_path.starts_with("\\\\");
+    if !is_drive_abs && !is_unc_abs {
+        return false;
+    }
+
+    // 拡張子 .pdf (大文字小文字不問)。Path::extension で末尾コンポーネントを見る。
+    Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
+/// #364: バックアップ JSON の timestamp は ISO 8601 (例 "2026-06-04T00:00:00Z" /
+/// "2026-06-04T09:30:00.123+09:00") で保存される (フロントの `new Date().toISOString()`)。
+/// chrono 依存を増やさないため、UTC からのオフセットを考慮した epoch 秒へ最小パースする。
+/// パースできない形式は `None` を返し、鮮度判定は安全側 (is_stale=false) に倒す。
+fn parse_iso8601_to_epoch_secs(ts: &str) -> Option<i64> {
+    // 期待形式: YYYY-MM-DDThh:mm:ss[.fff][Z|±hh:mm]
+    let bytes = ts.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    // 区切り文字の固定位置を検証する。
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    if bytes[10] != b'T' && bytes[10] != b't' && bytes[10] != b' ' {
+        return None;
+    }
+    if bytes[13] != b':' || bytes[16] != b':' {
+        return None;
+    }
+
+    let year: i64 = ts.get(0..4)?.parse().ok()?;
+    let month: i64 = ts.get(5..7)?.parse().ok()?;
+    let day: i64 = ts.get(8..10)?.parse().ok()?;
+    let hour: i64 = ts.get(11..13)?.parse().ok()?;
+    let minute: i64 = ts.get(14..16)?.parse().ok()?;
+    let second: i64 = ts.get(17..19)?.parse().ok()?;
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    // 秒の後ろ (19 文字目以降) は ".fff" や "Z" / "+09:00" 等。
+    // 小数秒はスキップし、タイムゾーンオフセットだけ抽出する。
+    let mut offset_secs: i64 = 0;
+    let rest = &ts[19..];
+    let rest = rest.strip_prefix('.').map_or(rest, |frac| {
+        // 小数秒の数字列を読み飛ばす
+        let non_digit = frac
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(frac.len());
+        &frac[non_digit..]
+    });
+    if rest.is_empty() || rest == "Z" || rest == "z" {
+        // UTC
+    } else if let Some(tz) = rest.strip_prefix('+').or_else(|| rest.strip_prefix('-')) {
+        // ±hh:mm または ±hhmm
+        let sign = if rest.starts_with('-') { -1 } else { 1 };
+        let digits: String = tz.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() != 4 {
+            return None;
+        }
+        let tz_hour: i64 = digits.get(0..2)?.parse().ok()?;
+        let tz_min: i64 = digits.get(2..4)?.parse().ok()?;
+        offset_secs = sign * (tz_hour * 3600 + tz_min * 60);
+    } else {
+        return None;
+    }
+
+    // 日付→epoch 秒 (proleptic Gregorian, days_from_civil アルゴリズム)。
+    let epoch_days = days_from_civil(year, month, day);
+    let local_secs = epoch_days * 86_400 + hour * 3600 + minute * 60 + second;
+    // ローカル時刻 - オフセット = UTC epoch 秒
+    Some(local_secs - offset_secs)
+}
+
+/// 1970-01-01 を 0 とする日数を返す (Howard Hinnant の days_from_civil)。
+/// month は 1..=12、day は 1..=31。
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// #364: 元 PDF (`file_path`) の mtime が `timestamp`(バックアップ作成時刻) より新しければ true。
+/// 元 PDF 不在 / mtime 取得失敗 / timestamp パース失敗はいずれも false (判定不能=安全側で表示)。
+fn is_backup_stale(file_path: &str, timestamp: &str) -> bool {
+    let backup_epoch = match parse_iso8601_to_epoch_secs(timestamp) {
+        Some(e) => e,
+        None => return false,
+    };
+    let meta = match std::fs::metadata(file_path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let modified = match meta.modified() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let pdf_epoch = match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        // mtime が UNIX_EPOCH より前 (異常) の場合は判定不能扱い
+        Err(_) => return false,
+    };
+    pdf_epoch > backup_epoch
 }
 
 /// ファイルパスをハッシュ化してバックアップファイル名を生成する。
@@ -77,7 +220,15 @@ fn write_backup_file_atomically(path: &Path, json_str: &str) -> Result<(), Strin
     })();
 
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        // #342: 掃除失敗は動作に影響しないが、残骸蓄積の調査用に記録する (NotFound は正常系)。
+        if let Err(e) = std::fs::remove_file(&temp) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "write_backup_file_atomically: temp cleanup failed ({}): {e}",
+                    temp.display()
+                );
+            }
+        }
     }
     result
 }
@@ -192,7 +343,13 @@ pub async fn save_backup(
         write_backup_file_atomically(&bpath, &json_str)?;
         let legacy_bpath = legacy_backup_file_path(&backup_dir, &file_path);
         if legacy_bpath != bpath && legacy_bpath.exists() {
-            let _ = std::fs::remove_file(legacy_bpath);
+            // #342: legacy バックアップの掃除失敗を記録する (動作には影響しない)。
+            if let Err(e) = std::fs::remove_file(&legacy_bpath) {
+                eprintln!(
+                    "save_backup: legacy backup cleanup failed ({}): {e}",
+                    legacy_bpath.display()
+                );
+            }
         }
         Ok(())
     })
@@ -223,13 +380,23 @@ pub async fn check_pending_backups(app: AppHandle) -> Result<Vec<BackupInfo>, St
                     let file_path = data["originalFilePath"].as_str().unwrap_or("").to_string();
                     let timestamp = data["timestamp"].as_str().unwrap_or("").to_string();
                     let backup_path = path.to_string_lossy().to_string();
-                    if !file_path.is_empty() {
-                        backups.push(BackupInfo {
-                            file_path,
-                            timestamp,
-                            backup_path,
-                        });
+                    // #342: 元 PDF パスとして妥当でないエントリ (改ざん・破損 JSON 等) は
+                    // 復元候補に載せずスキップする。
+                    if !is_valid_original_file_path(&file_path) {
+                        eprintln!(
+                            "check_pending_backups: skip backup with invalid originalFilePath (backup={})",
+                            backup_path
+                        );
+                        continue;
                     }
+                    // #364: 元 PDF がこのバックアップより新しければ is_stale=true。
+                    let is_stale = is_backup_stale(&file_path, &timestamp);
+                    backups.push(BackupInfo {
+                        file_path,
+                        timestamp,
+                        backup_path,
+                        is_stale,
+                    });
                 }
             }
         }
@@ -279,8 +446,9 @@ pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_file_path, clear_backup_targets, legacy_backup_file_path, legacy_path_hash,
-        path_hash, read_backup_file, write_backup_file_atomically,
+        backup_file_path, clear_backup_targets, is_valid_original_file_path, legacy_backup_file_path,
+        legacy_path_hash, parse_iso8601_to_epoch_secs, path_hash, read_backup_file,
+        write_backup_file_atomically,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -476,5 +644,87 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
+    // ── #342: is_valid_original_file_path ────────────────────────────────
+
+    /// 妥当な元 PDF パス (ドライブレター絶対パス / UNC / 大文字拡張子) は通る。
+    #[test]
+    fn is_valid_original_file_path_accepts_valid_paths() {
+        assert!(is_valid_original_file_path("C:\\docs\\sample.pdf"));
+        // 大文字拡張子も許容 (eq_ignore_ascii_case)
+        assert!(is_valid_original_file_path("D:\\folder\\REPORT.PDF"));
+        // UNC パス
+        assert!(is_valid_original_file_path("\\\\server\\share\\file.pdf"));
+    }
+
+    /// 不正な元 PDF パス (相対パス / 非 PDF 拡張子 / 空 / 長すぎ) は弾く。
+    #[test]
+    fn is_valid_original_file_path_rejects_invalid_paths() {
+        // 空文字
+        assert!(!is_valid_original_file_path(""));
+        // 相対パス (絶対パスでない)
+        assert!(!is_valid_original_file_path("docs\\sample.pdf"));
+        // 拡張子が .pdf でない
+        assert!(!is_valid_original_file_path("C:\\docs\\sample.txt"));
+        // 拡張子なし
+        assert!(!is_valid_original_file_path("C:\\docs\\sample"));
+        // 上限超過 (絶対パス形式だが 600 文字超)
+        let too_long = format!("C:\\{}.pdf", "a".repeat(600));
+        assert!(!is_valid_original_file_path(&too_long));
+    }
+
+    // ── #364: parse_iso8601_to_epoch_secs ────────────────────────────────
+
+    /// UTC ("Z") 形式を epoch 秒へ正しく変換する。
+    #[test]
+    fn parse_iso8601_utc_z() {
+        // 1970-01-01T00:00:00Z = epoch 0
+        assert_eq!(parse_iso8601_to_epoch_secs("1970-01-01T00:00:00Z"), Some(0));
+        // 2026-06-04T00:00:00Z (フロントの toISOString 形式)
+        // days_from_civil(2026,6,4) を 86400 倍した既知値
+        let expected = super::days_from_civil(2026, 6, 4) * 86_400;
+        assert_eq!(
+            parse_iso8601_to_epoch_secs("2026-06-04T00:00:00Z"),
+            Some(expected)
+        );
+        // 小数秒付き Z も秒精度で同じ値
+        assert_eq!(
+            parse_iso8601_to_epoch_secs("2026-06-04T00:00:00.123Z"),
+            Some(expected)
+        );
+    }
+
+    /// タイムゾーンオフセット (+09:00) を UTC へ正規化する。
+    #[test]
+    fn parse_iso8601_with_offset() {
+        // 2026-06-04T09:00:00+09:00 == 2026-06-04T00:00:00Z (同一瞬間)
+        let utc = parse_iso8601_to_epoch_secs("2026-06-04T00:00:00Z").unwrap();
+        assert_eq!(
+            parse_iso8601_to_epoch_secs("2026-06-04T09:00:00+09:00"),
+            Some(utc)
+        );
+        // 負オフセット: 2026-06-03T19:00:00-05:00 == 2026-06-04T00:00:00Z
+        assert_eq!(
+            parse_iso8601_to_epoch_secs("2026-06-03T19:00:00-05:00"),
+            Some(utc)
+        );
+    }
+
+    /// 不正な形式は None を返す (鮮度判定は安全側に倒れる)。
+    #[test]
+    fn parse_iso8601_rejects_malformed() {
+        // 空文字
+        assert_eq!(parse_iso8601_to_epoch_secs(""), None);
+        // 短すぎる
+        assert_eq!(parse_iso8601_to_epoch_secs("2026-06-04"), None);
+        // 区切り文字が違う
+        assert_eq!(parse_iso8601_to_epoch_secs("2026/06/04T00:00:00Z"), None);
+        // 月が範囲外
+        assert_eq!(parse_iso8601_to_epoch_secs("2026-13-04T00:00:00Z"), None);
+        // オフセット桁数不足 (+9)
+        assert_eq!(parse_iso8601_to_epoch_secs("2026-06-04T00:00:00+9"), None);
+        // 末尾に不正なトークン
+        assert_eq!(parse_iso8601_to_epoch_secs("2026-06-04T00:00:00XYZ"), None);
     }
 }

@@ -514,6 +514,17 @@ describe('useFileOperations writeFileAtomically EACCES フォールバック (is
     expect(isWriteAccessError('out of memory')).toBe(false);
   });
 
+  it('#363: isWriteAccessError が日本語 Windows の os error 番号を検出する', () => {
+    // 日本語 Windows の ERROR_ACCESS_DENIED: 「アクセスが拒否されました。 (os error 5)」
+    expect(isWriteAccessError('アクセスが拒否されました。 (os error 5)')).toBe(true);
+    // os error 19 (WRITE_PROTECT) / os error 1224 (USER_MAPPED_FILE)
+    expect(isWriteAccessError('書き込み禁止です。 (os error 19)')).toBe(true);
+    expect(isWriteAccessError('user mapped file error (os error 1224)')).toBe(true);
+    // os error 5 が含まれていても文脈が違えば誤検出しないこと（番号 \b 境界で照合）
+    expect(isWriteAccessError('os error 50')).toBe(false);
+    expect(isWriteAccessError('os error 51')).toBe(false);
+  });
+
   it('#53: replace_pdf_file が EACCES で失敗したら、saveAs アクション付きトーストが表示される', async () => {
     // dirty page を 1 件用意
     const dirtyPage = { textBlocks: [], imageBlocks: [], isDirty: true } as unknown as PageData;
@@ -2142,5 +2153,287 @@ describe('PCT-104 R1: remap ターゲット順序ゲーティング', () => {
     const [, , remapNormalizedOrder] = remapMock.mock.calls[0] as [string, number[], number[], string[]];
     // 通常経路では normalizedPageOrder は post-normalize 順（この場合 identity）
     expect(remapNormalizedOrder).toEqual([0, 1, 2]);
+  });
+
+  it('R1 / #361: 非 identity 順 [1,0,2] の通常保存では remap の normalizedPageOrder が normalize 後の identity [0,1,2] になる', async () => {
+    // issue #361: normalizeActive 判定が「normalize 後の pageOrder」と比較していた退行の回帰テスト。
+    // normalizePageOrderAfterSave は順序一致時に pageOrder を identity へ書き換えるため、
+    // 比較を normalize 後に行うと非 identity の保存順では常に不一致 → normalizeActive=false
+    // → normalizedPageOrder=savePageOrder ([1,0,2]) になり real remap が不動点退化する。
+    // 修正後（比較は normalize 前の liveOrderBeforeNormalize）は identity [0,1,2] が渡る。
+    // identity 順での通常保存（上のテスト）では両実装の出力が一致するため検出できない。
+    const savePageOrder = [1, 0, 2];
+    setupSavableDocWithPageOrder('/pct104r1/real-remap.pdf', savePageOrder);
+
+    const remapMock = remapTemporaryPageEntries as unknown as ReturnType<typeof vi.fn>;
+    remapMock.mockClear();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(true);
+    expect(remapMock).toHaveBeenCalled();
+    const [, remapOldOrder, remapNormalizedOrder] = remapMock.mock.calls[0] as [string, number[], number[], string[]];
+    // 第2引数 (oldPageOrder) は保存スナップショットの非 identity 順
+    expect(remapOldOrder).toEqual([1, 0, 2]);
+    // 第3引数 (normalizedPageOrder) は normalize 後の identity 順 — real remap が配線されている証拠
+    expect(remapNormalizedOrder).toEqual([0, 1, 2]);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// issue #353: 監査ログが保存成功時に diff 付きで書かれること
+// ────────────────────────────────────────────────────────────────────────
+describe('issue #353: 監査ログ write_audit_log が保存成功時に diff 付きで呼ばれる', () => {
+  function setupDocWithAuditAction(filePath: string) {
+    // undoStack に update_page アクションを 1 件積んで lastSavedActionIndex=0 にする。
+    // これにより computeSaveDiff が 1 件の diff エントリを返す状態を作る。
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'audit-blk', text: 'NEW_TEXT', isDirty: true }],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const before = {
+      textBlocks: [{ id: 'audit-blk', text: 'OLD_TEXT' }],
+    };
+    const after = {
+      textBlocks: [{ id: 'audit-blk', text: 'NEW_TEXT' }],
+    };
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      isDirty: true,
+      undoStack: [{ type: 'update_page', pageIndex: 0, before: before as any, after: after as any }],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  it('#353: handleSave 成功時に write_audit_log が diff エントリ付きで呼ばれる', async () => {
+    setupDocWithAuditAction('/audit/save.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation(() => Promise.resolve(undefined));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const auditCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_audit_log');
+    expect(auditCalls.length).toBe(1);
+    // body は JSON 文字列: diff エントリが含まれていること
+    const [, args] = auditCalls[0] as [string, { body: string }];
+    const parsed = JSON.parse(args.body) as { filePath: string; entries: unknown[] };
+    expect(parsed.filePath).toBe('/audit/save.pdf');
+    expect(parsed.entries.length).toBeGreaterThan(0);
+  });
+
+  it('#353: handleSave 成功時、setLastSavedActionIndex 更新後でも audit diff は空にならない', async () => {
+    // 保存前の undoStack.length=1, lastSavedActionIndex=0 → diff あり。
+    // 保存後 setLastSavedActionIndex(1) が呼ばれてから _writeAuditLog が実行されても
+    // preSaveDiff（スナップショット段階）を渡すため空にならないことを確認する。
+    setupDocWithAuditAction('/audit/notEmpty.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation(() => Promise.resolve(undefined));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // 保存後は lastSavedActionIndex が更新されている
+    expect(usePecoStore.getState().lastSavedActionIndex).toBe(1);
+
+    const auditCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_audit_log');
+    expect(auditCalls.length).toBe(1);
+    const [, args] = auditCalls[0] as [string, { body: string }];
+    const parsed = JSON.parse(args.body) as { entries: unknown[] };
+    // index 更新後でも preSaveDiff 経由なので entries は空でない
+    expect(parsed.entries.length).toBeGreaterThan(0);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// issue #361: isLoadingFile 中の executeSaveAs / handleSaveTo が拒否されること
+// ────────────────────────────────────────────────────────────────────────
+describe('issue #361: isLoadingFile 中の別名保存ガード', () => {
+  function setupSavableDoc361(filePath: string): PecoDocument {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'blk', text: 'T', isDirty: true }],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: true });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  it('#361: handleOpen の loadPDF 待機中（isLoadingFile=true）に executeSaveAs を呼ぶとダイアログを開かず拒否トーストを出す', async () => {
+    // handleOpen 開始 → loadPDF pending → その間に executeSaveAs を呼ぶ
+    setupSavableDoc361('/guard/save-as.pdf');
+    // isLoadingFile になるには handleOpen でファイルを開く必要がある
+    // loadPDF を pending にして読み込み中状態を維持する
+    let resolveLoadPdf!: (doc: PecoDocument) => void;
+    const pendingLoadPdf = new Promise<PecoDocument>((resolve) => { resolveLoadPdf = resolve; });
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(pendingLoadPdf);
+
+    const { save: saveDlg } = await import('@tauri-apps/plugin-dialog');
+    (saveDlg as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    // handleOpen を開始（pending 状態のまま）
+    const openPromise = result.current.handleOpen('/guard/save-as.pdf');
+    // loadPDF が呼ばれるまで待つ = isLoadingFileRef.current が true になる
+    await waitFor(() => expect(loadPDF).toHaveBeenCalled());
+
+    // 読み込み中に executeSaveAs を呼ぶ
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    // ダイアログは開かれていない
+    expect(saveDlg).not.toHaveBeenCalled();
+    // 拒否トーストが出ている
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/読み込み中は保存/),
+    );
+
+    // pending loadPDF を解決してクリーンアップ
+    resolveLoadPdf({
+      filePath: '/guard/save-as.pdf',
+      fileName: 'save-as.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map(),
+    } as unknown as PecoDocument);
+    await openPromise;
+  });
+
+  it('#361: handleOpen の loadPDF 待機中（isLoadingFile=true）に handleSaveTo を呼ぶと false を返し拒否トーストを出す', async () => {
+    setupSavableDoc361('/guard/save-to.pdf');
+
+    let resolveLoadPdf!: (doc: PecoDocument) => void;
+    const pendingLoadPdf = new Promise<PecoDocument>((resolve) => { resolveLoadPdf = resolve; });
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(pendingLoadPdf);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const openPromise = result.current.handleOpen('/guard/save-to.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalled());
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/guard/save-to-out.pdf');
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/読み込み中は保存/),
+    );
+
+    resolveLoadPdf({
+      filePath: '/guard/save-to.pdf',
+      fileName: 'save-to.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map(),
+    } as unknown as PecoDocument);
+    await openPromise;
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// issue #364: clear_backup 失敗時も保存は成功扱いで警告トーストが出ること
+// ────────────────────────────────────────────────────────────────────────
+describe('issue #364: clear_backup 失敗時の警告トースト', () => {
+  function setupSavableDoc364(filePath: string): PecoDocument {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'blk', text: 'T', isDirty: true }],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  it('#364: handleSave で clear_backup が失敗しても true を返し警告トーストが出る', async () => {
+    setupSavableDoc364('/backup/save.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'clear_backup') {
+        return Promise.reject(new Error('access denied'));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    // 保存は成功扱い
+    expect(ok).toBe(true);
+    // 保存成功トーストが出ている
+    const successCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] !== true);
+    expect(successCalls.some((args) => String(args[0]).includes('保存しました'))).toBe(true);
+    // 警告トーストが出ている
+    const warnCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] === true);
+    expect(warnCalls.some((args) => String(args[0]).includes('バックアップファイルの削除に失敗'))).toBe(true);
   });
 });

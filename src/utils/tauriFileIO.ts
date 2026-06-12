@@ -80,6 +80,9 @@ export function isWriteAccessError(message: string): boolean {
     lower.includes('being used by another process') ||
     lower.includes('sharing violation') ||
     lower.includes('lock violation') ||
-    /os error (32|33)\b/.test(lower)
+    // issue #363: 日本語 Windows の ERROR_ACCESS_DENIED は「アクセスが拒否されました。
+    // (os error 5)」と返ってくる。英語環境の os error 32/33 に加えて、
+    // 5 (ACCESS_DENIED), 19 (WRITE_PROTECT), 1224 (USER_MAPPED_FILE) も対象にする。
+    /os error (5|19|32|33|1224)\b/.test(lower)
   );
 }

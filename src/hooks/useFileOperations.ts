@@ -219,6 +219,12 @@ interface SaveResult {
    * 巻き込んでクリアしないようにできる。
    */
   savedPageSnapshots: Map<number, PageData>;
+  /**
+   * issue #353: 保存スナップショット時点での diff（保存開始前の undoStack/lastSavedActionIndex
+   * を使って計算済み）。保存完了後に _writeAuditLog へ渡すことで、更新後 index で
+   * 再計算して常に空になる問題を回避する。
+   */
+  preSaveDiff: SaveDiffSummary;
 }
 
 function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
@@ -532,6 +538,11 @@ export function useFileOperations(
     const savePageOrder = [...saveSnapshot.pageOrder];
     const savedActionIndex = saveSnapshot.undoStack.length;
     const sourceFilePath = document.filePath;
+    // issue #353: 保存開始時点のスナップショットから diff を計算する。
+    // _executeSave 完了後に setLastSavedActionIndex で index が更新されてしまうと、
+    // その後 computeSaveDiff を呼んでも常に空になる。スナップショット段階で計算して
+    // SaveResult に載せ、呼び出し側から _writeAuditLog に渡す。
+    const preSaveDiff = computeSaveDiff(saveSnapshot.undoStack, saveSnapshot.lastSavedActionIndex);
 
     // issue #164: 保存ロック画面の進捗ステップ通知。
     setSaveStep?.('changes');
@@ -665,6 +676,16 @@ export function useFileOperations(
       .catch((e) => { console.warn('[save] waitIdbSavesBeforeClear failed (ignored):', e); });
 
     // B1: 裁定「案1簡約版」実装
+    // issue #361: pageOrderMatchesSnapshot は 663 行目で計算したが、await
+    // (readOriginalBytesFingerprint / waitIdbSavesBeforeClear) を挟んだ後に使うと
+    // stale になるため、使用直前に再計算する。ただし normalizePageOrderAfterSave は
+    // 順序一致時に pageOrder を identity へ書き換えるため、比較は必ず normalize の
+    // 「前」に行うこと（normalize 後に比較すると非 identity の保存順で常に不一致と
+    // 判定され、PCT-104 R1 の real remap が退化パスに落ちる）。
+    const liveOrderBeforeNormalize = usePecoStore.getState().pageOrder;
+    const pageOrderMatchesSnapshotForRemap =
+      liveOrderBeforeNormalize.length === savePageOrder.length &&
+      liveOrderBeforeNormalize.every((sourceIndex, displayIndex) => sourceIndex === savePageOrder[displayIndex]);
     // 1. normalizePageOrderAfterSave（pageOrder を normalize 後の状態に更新）
     if (executeOptions.normalizePageOrderForCurrentDocument !== false) {
       liveStateBeforeNormalize.normalizePageOrderAfterSave(savePageOrder);
@@ -684,7 +705,8 @@ export function useFileOperations(
     //   （旧 clearIdbDirty と同等の不動点）。
     {
       const normalizeActive =
-        executeOptions.normalizePageOrderForCurrentDocument !== false && pageOrderMatchesSnapshot;
+        executeOptions.normalizePageOrderForCurrentDocument !== false && pageOrderMatchesSnapshotForRemap;
+      // remap のターゲットは normalize 後（= identity 化済み）の pageOrder を読む。
       const normalizedPageOrder = normalizeActive
         ? usePecoStore.getState().pageOrder
         : savePageOrder;
@@ -713,6 +735,7 @@ export function useFileOperations(
       savedPageSnapshots,
       savedActionIndex,
       hasPostSnapshotChanges,
+      preSaveDiff,
     };
   };
 
@@ -802,12 +825,19 @@ export function useFileOperations(
           usePecoStore.setState({ isDirty: true });
         }
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
-        // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
-        void _writeAuditLog(document.filePath).catch((e) => {
+        // issue #201 / #353: NDJSON 監査ログを出力する (fire-and-forget)。
+        // diff は _executeSave のスナップショット段階で計算済みの preSaveDiff を渡す。
+        void _writeAuditLog(document.filePath, result.preSaveDiff).catch((e) => {
           console.warn('[save] audit log write failed (ignored):', e);
         });
-        // 正常保存後はバックアップファイルを削除する（fire-and-forget）
-        invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
+        // issue #364: clear_backup の成否を確認し、失敗時は警告トーストを出す。
+        // 保存自体は成功しているため return true は変えない。
+        try {
+          await invoke('clear_backup', { filePath: document.filePath });
+        } catch (clearErr) {
+          console.warn('[save] clear_backup failed:', clearErr);
+          showToast('バックアップファイルの削除に失敗しました（保存は完了しています）', true);
+        }
         return true;
       }
       return false;
@@ -867,6 +897,11 @@ export function useFileOperations(
     }
     const { document } = usePecoStore.getState();
     if (!document) return;
+    // issue #361: ファイル読込中の別名保存を拒否する（handleSave と対称のガード）。
+    if (isLoadingFileRef.current) {
+      showToast('PDFの読み込み中は保存できません。読み込みが完了してから再度お試しください。');
+      return;
+    }
     if (isOcrRunningRef?.current) {
       showToast('OCR実行中は保存できません。OCRを中止または完了してから保存してください。', true);
       return;
@@ -890,6 +925,11 @@ export function useFileOperations(
           showToast('別の保存処理が進行中です。完了してから再度お試しください。');
           return;
         }
+        // issue #361: ダイアログ待機中に読み込みが開始した場合も拒否する。
+        if (isLoadingFileRef.current) {
+          showToast('PDFの読み込み中は保存できません。読み込みが完了してから再度お試しください。');
+          return;
+        }
         isSavingRef.current = true;
         setIsSaving?.(true);
         try {
@@ -910,14 +950,22 @@ export function useFileOperations(
               usePecoStore.setState({ isDirty: true });
             }
             showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
-            // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
-            void _writeAuditLog(path).catch((e) => {
+            // issue #201 / #353: NDJSON 監査ログを出力する (fire-and-forget)。
+            // diff は _executeSave のスナップショット段階で計算済みの preSaveDiff を渡す。
+            void _writeAuditLog(path, result.preSaveDiff).catch((e) => {
               console.warn('[save-as] audit log write failed (ignored):', e);
             });
             addToRecent(path);
-            // 元のパスのバックアップも新しいパスのバックアップも削除する
-            if (prevPath) invoke('clear_backup', { filePath: prevPath }).catch(() => {});
-            invoke('clear_backup', { filePath: path }).catch(() => {});
+            // issue #364: clear_backup の成否を確認し、失敗時は警告トーストを出す。
+            // 保存自体は成功しているため処理は継続する。
+            const clearResults = await Promise.allSettled([
+              prevPath ? invoke('clear_backup', { filePath: prevPath }) : Promise.resolve(undefined),
+              invoke('clear_backup', { filePath: path }),
+            ]);
+            if (clearResults.some((r) => r.status === 'rejected')) {
+              console.warn('[save-as] clear_backup failed:', clearResults);
+              showToast('バックアップファイルの削除に失敗しました（保存は完了しています）', true);
+            }
           }
         } finally {
           isSavingRef.current = false;
@@ -932,12 +980,14 @@ export function useFileOperations(
   };
 
   /**
-   * issue #201: 保存成功後に NDJSON 監査ログを appData/pecotool/audit/<YYYY-MM-DD>.ndjson に追記する。
+   * issue #201 / #353: 保存成功後に NDJSON 監査ログを appData/pecotool/audit/<YYYY-MM-DD>.ndjson に追記する。
    * undoStack の直近変更エントリを集約して 1 行の JSON として書き出す。
+   *
+   * issue #353 修正: diff は呼び出し側（handleSave / executeSaveAs）が保存開始時点の
+   * スナップショットから計算して渡す。保存完了後に lastSavedActionIndex が更新されてから
+   * この関数内で computeSaveDiff を呼ぶと常に空になるため、引数経由で受け取る方式に変更。
    */
-  const _writeAuditLog = async (filePath: string): Promise<void> => {
-    const { undoStack, lastSavedActionIndex } = usePecoStore.getState();
-    const diff = computeSaveDiff(undoStack, lastSavedActionIndex);
+  const _writeAuditLog = async (filePath: string, diff: SaveDiffSummary): Promise<void> => {
     if (diff.entries.length === 0) return;
     const record = {
       timestamp: new Date().toISOString(),
@@ -966,6 +1016,11 @@ export function useFileOperations(
    * 成功時 true / 失敗時 false を返す。
    */
   const handleSaveTo = async (targetPath: string, options?: SaveInvocationOptions): Promise<boolean> => {
+    // issue #361: ファイル読込中の別名保存を拒否する（handleSave と対称のガード）。
+    if (isLoadingFileRef.current) {
+      showToast('PDFの読み込み中は保存できません。読み込みが完了してから再度お試しください。');
+      return false;
+    }
     if (isSavingRef.current) {
       showToast('保存処理が進行中です。');
       return false;
@@ -987,6 +1042,9 @@ export function useFileOperations(
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
         }
+        // issue #353: handleSaveTo は別ファイルへの書き出しであり上書き保存と意味が
+        // 異なるため、監査ログは書かない（handleSave / executeSaveAs と同様の
+        // _writeAuditLog 呼び出しは意図的に行っていない）。
         return true;
       }
       return false;

@@ -127,6 +127,12 @@ export function BackupRestoreDialog({
                   <div style={{ fontSize: '11px', color: '#6c7086', marginBottom: '10px' }}>
                     バックアップ日時: {formatTimestamp(backup.timestamp)}
                   </div>
+                  {/* #364: 元 PDF がバックアップより新しい場合の注意喚起（自動破棄はしない） */}
+                  {backup.is_stale && (
+                    <div style={{ fontSize: '11px', color: '#f9e2af', marginBottom: '10px', lineHeight: 1.5 }}>
+                      このバックアップより新しい保存済みファイルがあります。復元すると保存済みの内容より古い状態に戻る可能性があります。
+                    </div>
+                  )}
 
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     {isProcessing ? (

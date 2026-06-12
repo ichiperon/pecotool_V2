@@ -327,6 +327,14 @@ fn list_pdf_files(dir: &std::path::Path) -> Result<Vec<String>, String> {
     for entry in fs::read_dir(dir).map_err(|e| format!("read_dir failed: {e}"))? {
         let entry = entry.map_err(|e| format!("read_dir entry failed: {e}"))?;
         let path = entry.path();
+        // #342: symlink は対象外。entry.file_type() は symlink を追従しないため、
+        // symlink 自体を検出して除外する (path.is_file() はリンク先を追従してしまう)。
+        // file_type 取得失敗時は安全側でスキップする。
+        match entry.file_type() {
+            Ok(ft) if ft.is_symlink() => continue,
+            Ok(_) => {}
+            Err(_) => continue,
+        }
         if !path.is_file() {
             continue;
         }
@@ -591,7 +599,14 @@ async fn run_ocr(request: tauri::ipc::Request<'_>) -> Result<String, String> {
         let image = temp_path.to_string_lossy().to_string();
         let tag = language_tag.unwrap_or_else(|| "ja".to_string());
         let ocr_result = do_windows_ocr(&image, render_scale, &tag);
-        let _ = std::fs::remove_file(&temp_path);
+        // #342: 一時ファイル削除の失敗は致命的ではない (動作は変えない) が、
+        // 蓄積に気付けるよう失敗だけは記録する。
+        if let Err(e) = std::fs::remove_file(&temp_path) {
+            eprintln!(
+                "run_ocr: failed to remove OCR temp file {}: {e}",
+                temp_path.display()
+            );
+        }
         ocr_result
     })
     .await
