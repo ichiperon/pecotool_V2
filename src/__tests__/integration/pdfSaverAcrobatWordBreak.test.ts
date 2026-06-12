@@ -30,6 +30,8 @@ import { PDFDocument, PDFArray, PDFRawStream, PDFName } from '@cantoo/pdf-lib';
 import { inflate } from 'pako';
 import { buildPdfDocument } from '../../utils/pdfSaver';
 import type { PageData, PecoDocument, TextBlock, WritingMode } from '../../types';
+// #357: renderMode 3 不可視性の厳密検証ヘルパー
+import { assertAllTextSegmentsHaveRenderMode3 } from './helpers/renderModeHelpers';
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
 
@@ -242,8 +244,13 @@ describe('pdfSaver issue #100: Acrobat copy-paste word-break (trailing space)', 
     expect(btCount).toBeGreaterThanOrEqual(4);
     expect(etCount).toBe(btCount);
 
-    // renderMode 3 (invisible) が維持されていることを確認 (テキスト全体で 3 Tr が出ている)
-    expect(latin).toMatch(/\b3\s+Tr\b/);
+    // renderMode 3 (invisible) が維持されていることを確認
+    // #357: 単発マッチではなく「各 BT...ET セグメントで Tj より前に 3 Tr が存在する」を検証
+    const renderMode3Check = assertAllTextSegmentsHaveRenderMode3(latin);
+    expect(
+      renderMode3Check.pass,
+      `#357: renderMode 3 check failed for ${renderMode3Check.failingSegmentCount}/${renderMode3Check.totalTextSegments} segments`,
+    ).toBe(true);
 
     // Tj operands を全抽出して、単独 space 用 Tj が 2 つ (= BB 数) 存在することを確認
     const tjOps = extractTjOperands(latin);
@@ -277,7 +284,12 @@ describe('pdfSaver issue #100: Acrobat copy-paste word-break (trailing space)', 
     expect(etCount).toBe(btCount);
 
     // renderMode 3 invisible が維持されている
-    expect(latin).toMatch(/\b3\s+Tr\b/);
+    // #357: 単発マッチではなく「各 BT...ET セグメントで Tj より前に 3 Tr が存在する」を検証
+    const renderMode3CheckVert = assertAllTextSegmentsHaveRenderMode3(latin);
+    expect(
+      renderMode3CheckVert.pass,
+      `#357: renderMode 3 check failed for ${renderMode3CheckVert.failingSegmentCount}/${renderMode3CheckVert.totalTextSegments} segments (vertical)`,
+    ).toBe(true);
 
     // Tj operands 抽出
     const tjOps = extractTjOperands(latin);

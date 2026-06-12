@@ -25,7 +25,7 @@ vi.mock('../../utils/perfLogger', () => ({
   perf: { mark: vi.fn() },
 }));
 
-import { loadPage } from '../../utils/pdfTextExtractor';
+import { loadPage, shouldUseSavedMeta } from '../../utils/pdfTextExtractor';
 import { getCachedPageProxy } from '../../utils/pdfLoader';
 import { getTemporaryPageData } from '../../utils/pdfTemporaryStorage';
 
@@ -281,5 +281,139 @@ describe('loadPage writing mode detection (#39)', () => {
     expect(result.textBlocks).toHaveLength(2);
     expect(result.textBlocks[0].writingMode).toBe('horizontal');
     expect(result.textBlocks[1].writingMode).toBe('vertical');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #347: shouldUseSavedMeta の境界値テスト
+// 閾値: threshold = Math.max(nonEmptyTextItemCount * 2, nonEmptyTextItemCount + 25)
+// savedMeta.length <= threshold → true（メタ経路採用）
+// ---------------------------------------------------------------------------
+
+/**
+ * テスト用の最小限 PecoToolBBoxMetaEntry を生成するヘルパー
+ */
+function makeSavedMetaEntries(count: number): Array<{
+  bbox: { x: number; y: number; width: number; height: number };
+  writingMode: string;
+  order: number;
+  text: string;
+}> {
+  return Array.from({ length: count }, (_, i) => ({
+    bbox: { x: 10 * i, y: 10, width: 100, height: 20 },
+    writingMode: 'horizontal',
+    order: i,
+    text: `block-${i}`,
+  }));
+}
+
+/**
+ * pdfjs TextItem を模した最小限オブジェクトを生成するヘルパー（非空の str のみ）
+ */
+function makeTextItems(count: number): Array<{ str: string }> {
+  return Array.from({ length: count }, (_, i) => ({ str: `item-${i}` }));
+}
+
+describe('#347 shouldUseSavedMeta 境界値テスト（閾値 Math.max(count*2, count+25)）', () => {
+  // --- count=0 の特殊ケース ---
+  // threshold = Math.max(0, 25) = 25
+  // nonEmptyTextItemCount=0 のとき: savedMeta が非空なら true を返す（pdfjs が何も返さない PDF でも meta を使う）
+
+  it('count=0 特殊ケース: textItems が空で savedMeta が非空 → true（pdfjs が無テキスト PDF）', () => {
+    const savedMeta = makeSavedMetaEntries(1);
+    const textItems = makeTextItems(0);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  it('count=0 特殊ケース: savedMeta が空 → false（meta なしは false）', () => {
+    const textItems = makeTextItems(0);
+    expect(shouldUseSavedMeta([], textItems as any)).toBe(false);
+  });
+
+  it('count=0 特殊ケース: savedMeta が undefined → false', () => {
+    const textItems = makeTextItems(0);
+    expect(shouldUseSavedMeta(undefined as any, textItems as any)).toBe(false);
+  });
+
+  // --- count=24 の境界: threshold = Math.max(48, 49) = 49 ---
+  // count+25 が効く側。savedMeta.length <= 49 → true
+
+  it('count=24: savedMeta.length=49（閾値ちょうど）→ true', () => {
+    const savedMeta = makeSavedMetaEntries(49);
+    const textItems = makeTextItems(24);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  it('count=24: savedMeta.length=50（閾値+1）→ false', () => {
+    const savedMeta = makeSavedMetaEntries(50);
+    const textItems = makeTextItems(24);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(false);
+  });
+
+  it('count=24: savedMeta.length=48（閾値-1）→ true', () => {
+    const savedMeta = makeSavedMetaEntries(48);
+    const textItems = makeTextItems(24);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  // --- count=25 の境界: threshold = Math.max(50, 50) = 50 ---
+  // count*2 と count+25 が等しくなる境界点。savedMeta.length <= 50 → true
+
+  it('count=25: savedMeta.length=50（閾値ちょうど・count*2=count+25 の境界点）→ true', () => {
+    const savedMeta = makeSavedMetaEntries(50);
+    const textItems = makeTextItems(25);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  it('count=25: savedMeta.length=51（閾値+1）→ false', () => {
+    const savedMeta = makeSavedMetaEntries(51);
+    const textItems = makeTextItems(25);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(false);
+  });
+
+  it('count=25: savedMeta.length=49（閾値-1）→ true', () => {
+    const savedMeta = makeSavedMetaEntries(49);
+    const textItems = makeTextItems(25);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  // --- count=100: threshold = Math.max(200, 125) = 200 ---
+  // count*2 が効く側（count > 25 で count*2 > count+25 になる）。savedMeta.length <= 200 → true
+
+  it('count=100: savedMeta.length=200（閾値ちょうど・count*2 が効く側）→ true', () => {
+    const savedMeta = makeSavedMetaEntries(200);
+    const textItems = makeTextItems(100);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  it('count=100: savedMeta.length=201（閾値+1）→ false', () => {
+    const savedMeta = makeSavedMetaEntries(201);
+    const textItems = makeTextItems(100);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(false);
+  });
+
+  it('count=100: savedMeta.length=199（閾値-1）→ true', () => {
+    const savedMeta = makeSavedMetaEntries(199);
+    const textItems = makeTextItems(100);
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  // --- count=100: count+25=125 が threshold にならない（count*2=200 が大きい）確認 ---
+  // savedMeta.length=126（count+25+1）でも threshold=200 以下なので true になるはず
+
+  it('count=100: savedMeta.length=126（count+25+1）→ true（count*2=200 が threshold なので通過する）', () => {
+    const savedMeta = makeSavedMetaEntries(126);
+    const textItems = makeTextItems(100);
+    // threshold = max(200, 125) = 200。126 <= 200 → true
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
+  });
+
+  // --- 典型的な正常ケース: savedMeta が textItems と同数 ---
+
+  it('典型ケース: savedMeta.length = textItems.length（同数）→ true', () => {
+    const savedMeta = makeSavedMetaEntries(10);
+    const textItems = makeTextItems(10);
+    // threshold = max(20, 35) = 35。10 <= 35 → true
+    expect(shouldUseSavedMeta(savedMeta as any, textItems as any)).toBe(true);
   });
 });

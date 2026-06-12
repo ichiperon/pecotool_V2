@@ -48,8 +48,12 @@ import {
   loadFontBytesForCorpus,
   buildAllCorpus,
   type CorpusEntry,
+  C04_LEGACY_TEXT,
+  C04_BLOCK_TEXT_0,
 } from './helpers/goldenCorpus';
-import { reloadBBoxMetaViaPdfjs, decodePageContents } from './helpers/realPdfFixtures';
+import { reloadBBoxMetaViaPdfjs, decodePageContents, loadPecoDocumentMetaFirst } from './helpers/realPdfFixtures';
+// #357: renderMode 3 不可視性の厳密検証ヘルパー
+import { assertAllTextSegmentsHaveRenderMode3 } from './helpers/renderModeHelpers';
 
 // ---------------------------------------------------------------------------
 // テスト環境セットアップ
@@ -277,14 +281,28 @@ describe('PCT-098 C01: 横書き複数ブロック・複数ページ', () => {
     expect(allText).toContain('Page Two A');
   }, 30_000);
 
-  it('2サイクル耐久: meta が劣化しない（PCT-094 型漂流検出・S-12 shouldUseSavedMeta 経路検証）', async () => {
-    // 1 サイクル
+  it('(e) A-07: 各 BT...ET セグメントで Tj より前に renderMode 3 が設定される（#357）', async () => {
+    // #357: A-07 ヘッダの主張（各 BB 末尾 invisible スペース）を content stream レベルで検証
+    // 単発マッチ `\b3\s+Tr\b` ではなく「各 BT...ET セグメントで Tj より前に 3 Tr が存在する」
+    const savedBytes = await buildPdfDocument(corpus.C01.inputBytes, corpus.C01.doc, fontBytes);
+    const contentText = await decodePageContentStream(savedBytes, 0);
+    expect(contentText, 'page 0 content stream should be non-empty').not.toBe('');
+
+    const result = assertAllTextSegmentsHaveRenderMode3(contentText);
+    expect(result.totalTextSegments, 'C01 page 0 should have text segments').toBeGreaterThan(0);
+    expect(
+      result.pass,
+      `#357 A-07: ${result.failingSegmentCount}/${result.totalTextSegments} BT...ET segments are missing renderMode 3 before Tj`,
+    ).toBe(true);
+  }, 30_000);
+
+  it('2サイクル耐久: メタから再構築し再保存する本物のループ（#366 PCT-094 型漂流検出・S-12 shouldUseSavedMeta 経路検証）', async () => {
+    // 1 サイクル: corpus.C01 から保存
     const saved1 = await buildPdfDocument(corpus.C01.inputBytes, corpus.C01.doc, fontBytes);
     const { meta: meta1 } = await reloadBBoxMetaViaPdfjs(saved1);
     expect(meta1, 'cycle 1 meta').not.toBeNull();
 
-    // 2 サイクル: 1サイクル目出力の bboxMeta から再構築し、shouldUseSavedMeta がメタ経路を選ぶことを確認
-    // これで「自己出力 → メタ経路ロード → 再保存 → 不変」の本物のループになる（PCT-094 型劣化の検出）
+    // S-12 検証: 1サイクル目出力に対して shouldUseSavedMeta がメタ経路を選ぶことを確認
     const pdfjsLib: any = await import('pdfjs-dist/legacy/build/pdf.mjs');
     const pdfjsDoc2 = await pdfjsLib.getDocument({
       data: new Uint8Array(saved1),
@@ -305,16 +323,42 @@ describe('PCT-098 C01: 横書き複数ブロック・複数ページ', () => {
     try { await pdfjsDoc2.cleanup(); } catch { /* ignore */ }
     try { await pdfjsDoc2.destroy(); } catch { /* ignore */ }
 
-    // 2 サイクル目保存: 1サイクル目の PDF バイト列を入力として再保存
-    const saved2 = await buildPdfDocument(saved1, corpus.C01.doc, fontBytes);
+    // #366: 2 サイクル目は「1サイクル目出力の bboxMeta から TextBlock を実際に再構築」してから保存する。
+    // production の構築経路（pdfTextExtractor の meta→TextBlock 構築）と同等の処理を使う。
+    // loadPecoDocumentMetaFirst は production の loadPecoToolBBoxMeta + TextBlock 構築と同等の経路。
+    // コメント参照固定: src/__tests__/integration/helpers/realPdfFixtures.ts#loadPecoDocumentMetaFirst
+    const { doc: rebuiltDoc } = await loadPecoDocumentMetaFirst(saved1, 'c01_cycle2_rebuilt.pdf');
+
+    // 再構築された TextBlock が meta1 のデータと一致することを確認（再構築ループの正確性）
+    const rebuiltPage0Blocks = rebuiltDoc.pages.get(0)?.textBlocks ?? [];
+    expect(rebuiltPage0Blocks.length, 'rebuilt blocks count should match meta1').toBe(meta1!['0'].length);
+    for (let i = 0; i < rebuiltPage0Blocks.length; i++) {
+      expect(rebuiltPage0Blocks[i].text, `rebuilt block ${i} text`).toBe(meta1!['0'][i].text);
+      expect(rebuiltPage0Blocks[i].bbox.x, `rebuilt block ${i} bbox.x`).toBeCloseTo(meta1!['0'][i].bbox.x, 0);
+      expect(rebuiltPage0Blocks[i].bbox.y, `rebuilt block ${i} bbox.y`).toBeCloseTo(meta1!['0'][i].bbox.y, 0);
+    }
+
+    // 2 サイクル目保存: 再構築した doc で保存
+    const saved2 = await buildPdfDocument(saved1, rebuiltDoc, fontBytes);
     const { meta: meta2 } = await reloadBBoxMetaViaPdfjs(saved2);
     expect(meta2, 'cycle 2 meta').not.toBeNull();
 
-    // meta1 と meta2 が一致（漂流なし）
+    // meta1 入力と meta2 が一致（漂流なし）— corpus 入力値との比較
     assertMetaMatchesInput(corpus.C01, meta2!);
     // page 0 block 0 の bbox が cycle 1 と cycle 2 で一致
     expect(meta2!['0'][0].bbox.x).toBeCloseTo(meta1!['0'][0].bbox.x, 0);
     expect(meta2!['0'][0].bbox.y).toBeCloseTo(meta1!['0'][0].bbox.y, 0);
+
+    // #358: C01 2サイクル耐久での出現回数検証
+    // 2サイクル目保存後も各ブロック文字列がちょうど 1 回出現すること（二重化なし）
+    const texts2 = await extractTextViaPdfjs(saved2);
+    const allText2 = texts2.flat();
+    // 'Hello World' が 2 サイクル後もちょうど 1 回出現（二重化・消失なし）
+    const helloCount = allText2.filter((t) => t.includes('Hello World')).length;
+    expect(
+      helloCount,
+      `#358: 'Hello World' should appear exactly once after 2 cycles, got ${helloCount}`,
+    ).toBe(1);
   }, 60_000);
 });
 
@@ -418,6 +462,21 @@ describe('PCT-098 C03: 縦書きブロック混在', () => {
     expect(vertBlock2.bbox.height).toBeCloseTo(vertBlock1.bbox.height, 0);
     expect(vertBlock2.bbox.width).toBeCloseTo(vertBlock1.bbox.width, 0);
   }, 60_000);
+
+  it('(e) A-07: 縦書き BT...ET セグメントでも Tj より前に renderMode 3 が設定される（#357）', async () => {
+    // #357: C03 縦書きブロックに対して、A-07 の主張を content stream レベルで検証
+    // 縦書き各 BT...ET セグメントで Tj より前に 3 Tr が存在することを確認
+    const savedBytes = await buildPdfDocument(corpus.C03.inputBytes, corpus.C03.doc, fontBytes);
+    const contentText = await decodePageContentStream(savedBytes, 0);
+    expect(contentText, 'page 0 content stream should be non-empty').not.toBe('');
+
+    const result = assertAllTextSegmentsHaveRenderMode3(contentText);
+    expect(result.totalTextSegments, 'C03 page 0 should have text segments').toBeGreaterThan(0);
+    expect(
+      result.pass,
+      `#357 A-07 (vertical): ${result.failingSegmentCount}/${result.totalTextSegments} BT...ET segments are missing renderMode 3 before Tj`,
+    ).toBe(true);
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -431,11 +490,27 @@ describe('PCT-098 C04: 既存テキスト層あり（外部 OCR PDF 風）', () 
     assertMetaMatchesInput(corpus.C04, reloadedMeta.meta!);
   }, 30_000);
 
-  it('(d) pdfjs で開いてテキストが取れる（xref 健全性）', async () => {
+  it('(d) pdfjs で開いてテキストが取れる（xref 健全性）— strip / 二重化検証強化（#358）', async () => {
     const savedBytes = await buildPdfDocument(corpus.C04.inputBytes, corpus.C04.doc, fontBytes);
     const texts = await extractTextViaPdfjs(savedBytes);
     const allText = texts.flat().join(' ');
-    // PecoTool が書き込んだテキスト（invisible スペース含む）が取れること
+
+    // (1) PecoTool が書き込んだ TextBlock テキストがちょうど 1 回出現すること（二重化なし）
+    // C04_BLOCK_TEXT_0 = 'Existing text layer content' が 1 回だけ出現することを検証
+    const block0Count = texts.flat().filter((t) => t.includes(C04_BLOCK_TEXT_0)).length;
+    expect(
+      block0Count,
+      `#358: '${C04_BLOCK_TEXT_0}' should appear exactly once (no duplication), got ${block0Count}`,
+    ).toBe(1);
+
+    // (2) 既存テキスト層（C04_LEGACY_TEXT = 'LEGACY_LAYER_x7'）が出現しないこと（stripTextBlocks 済み）
+    // #358: drawText で埋め込んだ既存層が保存後に除去されていることを確認
+    expect(
+      allText,
+      `#358: legacy text '${C04_LEGACY_TEXT}' should be stripped after save`,
+    ).not.toContain(C04_LEGACY_TEXT);
+
+    // (3) テキスト総量が非ゼロ（xref 健全性）
     expect(allText.length, 'extracted text should be non-empty').toBeGreaterThan(0);
   }, 30_000);
 });
@@ -649,4 +724,98 @@ describe('PCT-098 S-13: sanitizeBBoxMetaRecord は不正エントリのみ drop'
     expect(reloaded!['1'], 'page 1 should be unaffected').toBeDefined();
     expect(reloaded!['1'].length, 'page 1 block count').toBe(3);
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// #357 ヘルパー自己テスト: assertAllTextSegmentsHaveRenderMode3 の信頼性検証
+// 「わざと 0 Tr を混ぜた合成ストリングでヘルパーが fail を返す」ことを確認
+// ---------------------------------------------------------------------------
+
+describe('#357 renderModeHelpers 自己テスト', () => {
+  it('正常: すべての BT...ET セグメントで 3 Tr が Tj より前にある場合は pass を返す', () => {
+    // 典型的な invisible テキストの content stream 断片
+    const validStream = [
+      'q',
+      'BT',
+      '3 Tr',
+      '1 0 0 1 50 800 Tm',
+      '(Hello) Tj',
+      'ET',
+      'BT',
+      '3 Tr',
+      '1 0 0 1 50 750 Tm',
+      '(World) Tj',
+      'ET',
+      'Q',
+    ].join('\n');
+
+    const result = assertAllTextSegmentsHaveRenderMode3(validStream);
+    expect(result.pass).toBe(true);
+    expect(result.totalTextSegments).toBe(2);
+    expect(result.failingSegmentCount).toBe(0);
+  });
+
+  it('異常: 0 Tr（visible）が混入したセグメントでは fail を返す（ヘルパー検出力の証明）', () => {
+    // renderMode 0（visible）が混入した stream — A-07 違反を検出できることを確認
+    const invalidStream = [
+      'q',
+      'BT',
+      '3 Tr',
+      '1 0 0 1 50 800 Tm',
+      '(Invisible) Tj',
+      'ET',
+      // このセグメントは 0 Tr（visible）なので A-07 違反
+      'BT',
+      '0 Tr',
+      '1 0 0 1 50 750 Tm',
+      '(Visible — A-07 violation) Tj',
+      'ET',
+      'Q',
+    ].join('\n');
+
+    const result = assertAllTextSegmentsHaveRenderMode3(invalidStream);
+    expect(result.pass).toBe(false);
+    expect(result.totalTextSegments).toBe(2);
+    expect(result.failingSegmentCount).toBe(1);
+    expect(result.failingSegmentIndices).toContain(1);
+  });
+
+  it('異常: 3 Tr が Tj より後に書かれた場合も fail を返す（順序チェック）', () => {
+    // 3 Tr は存在するが Tj の後に書かれているケース
+    const lateRenderModeStream = [
+      'q',
+      'BT',
+      '1 0 0 1 50 800 Tm',
+      '(Text first) Tj',
+      '3 Tr',
+      'ET',
+      'Q',
+    ].join('\n');
+
+    const result = assertAllTextSegmentsHaveRenderMode3(lateRenderModeStream);
+    expect(result.pass).toBe(false);
+    expect(result.failingSegmentCount).toBe(1);
+  });
+
+  it('異常: 3 Tr が存在しないセグメントでは fail を返す', () => {
+    const noRenderModeStream = [
+      'q',
+      'BT',
+      '1 0 0 1 50 800 Tm',
+      '(No render mode) Tj',
+      'ET',
+      'Q',
+    ].join('\n');
+
+    const result = assertAllTextSegmentsHaveRenderMode3(noRenderModeStream);
+    expect(result.pass).toBe(false);
+    expect(result.failingSegmentCount).toBe(1);
+  });
+
+  it('BT...ET が存在しない stream では totalTextSegments=0 で pass を返す（空の stream は違反ではない）', () => {
+    const emptyStream = 'q Q';
+    const result = assertAllTextSegmentsHaveRenderMode3(emptyStream);
+    expect(result.pass).toBe(true);
+    expect(result.totalTextSegments).toBe(0);
+  });
 });

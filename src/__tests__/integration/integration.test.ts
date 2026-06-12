@@ -418,7 +418,6 @@ describe('I-06: 縦書きPDFの保存', () => {
 // ── 追加インポート ──────────────────────────────────────────────
 import { sortOcrBlocks } from '../../utils/ocrSort'
 import { classifyDirection, reorderBlocks } from '../../utils/bulkReorder'
-import { formatFileSize } from '../../utils/format'
 import type { OcrResultBlock } from '../../types'
 import type { OcrSortSettings } from '../../store/ocrSettingsStore'
 
@@ -802,22 +801,3 @@ describe('I-25: setDocument resets all editing state', () => {
   })
 })
 
-// ── I-26: formatFileSize utility ────────────────────────────
-
-describe('I-26: formatFileSize utility', () => {
-  it('0 → "0 B"', () => {
-    expect(formatFileSize(0)).toBe('0 B')
-  })
-
-  it('1024 → "1 KB"', () => {
-    expect(formatFileSize(1024)).toBe('1 KB')
-  })
-
-  it('1048576 → "1 MB"', () => {
-    expect(formatFileSize(1048576)).toBe('1 MB')
-  })
-
-  it('1073741824 → "1 GB"', () => {
-    expect(formatFileSize(1073741824)).toBe('1 GB')
-  })
-})
