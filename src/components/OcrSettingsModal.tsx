@@ -21,14 +21,18 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) =
     horizontal, vertical, groupTolerance, mixedOrder,
     ocrLanguage, availableLanguages,
     ocrConfidenceThreshold, showLowConfidenceHighlight,
+    pdfTextOffsetRightMm, pdfTextOffsetDownMm,
     setHorizontalRowOrder, setHorizontalColumnOrder,
     setVerticalColumnOrder, setVerticalRowOrder,
     setGroupTolerance, setMixedOrder,
     setOcrLanguage, setAvailableLanguages,
     setOcrConfidenceThreshold, setShowLowConfidenceHighlight,
+    setPdfTextOffsetRightMm, setPdfTextOffsetDownMm,
   } = useOcrSettingsStore();
 
   const [toleranceInput, setToleranceInput] = useState(String(groupTolerance));
+  const [offsetRightInput, setOffsetRightInput] = useState(String(pdfTextOffsetRightMm));
+  const [offsetDownInput, setOffsetDownInput] = useState(String(pdfTextOffsetDownMm));
   const [langLoading, setLangLoading] = useState(false);
   const titleId = useModalTitleId();
 
@@ -248,8 +252,53 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) =
           </tbody>
         </table>
 
+        {/* PDF テキスト層の位置オフセット（Acrobat の Ctrl+A 選択範囲） */}
+        <div className="modal-section-title ocr-settings-section-title">テキスト層の位置補正</div>
+        <table className="ocr-settings-table">
+          <tbody>
+            <tr>
+              <td className="label pb">右方向</td>
+              <td className="value pb">
+                <input
+                  type="number"
+                  step={0.5}
+                  aria-label="テキスト層オフセット：右方向（mm）"
+                  value={offsetRightInput}
+                  onChange={(e) => setOffsetRightInput(e.target.value)}
+                  onBlur={() => {
+                    const parsed = parseFloat(offsetRightInput);
+                    const val = isNaN(parsed) ? pdfTextOffsetRightMm : parsed;
+                    setPdfTextOffsetRightMm(val);
+                    setOffsetRightInput(String(val));
+                  }}
+                />
+                <span className="ocr-settings-tolerance-hint"> mm（正で右・負で左）</span>
+              </td>
+            </tr>
+            <tr>
+              <td className="label">下方向</td>
+              <td className="value">
+                <input
+                  type="number"
+                  step={0.5}
+                  aria-label="テキスト層オフセット：下方向（mm）"
+                  value={offsetDownInput}
+                  onChange={(e) => setOffsetDownInput(e.target.value)}
+                  onBlur={() => {
+                    const parsed = parseFloat(offsetDownInput);
+                    const val = isNaN(parsed) ? pdfTextOffsetDownMm : parsed;
+                    setPdfTextOffsetDownMm(val);
+                    setOffsetDownInput(String(val));
+                  }}
+                />
+                <span className="ocr-settings-tolerance-hint"> mm（正で下・負で上）</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
         <div className="ocr-settings-note">
-          設定はOCR実行時に適用されます。
+          位置補正は保存する PDF の透明テキスト層（Acrobat の Ctrl+A 選択範囲）にのみ反映されます。
+          画面表示やテキスト枠の位置は変わりません。その他の設定はOCR実行時に適用されます。
         </div>
       </div>
     </Modal>

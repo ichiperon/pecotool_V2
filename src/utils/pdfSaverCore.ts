@@ -893,6 +893,13 @@ export async function buildPdfDocumentCore(
 ): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[] }> {
   const { options, pageOrder, saveTimeoutMs } = coreOptions;
 
+  // OCR テキスト層 (renderMode 3・Ctrl+A 選択範囲) の表示オフセット (point)。
+  // viewport 表示座標系で平行移動する: dx>0 で右、dy>0 で下。
+  // 全描画経路 (横書き / 縦書き / curve) で translate / cm に同量を加える。
+  // 未指定なら無シフト ({0,0})。直接 core を叩く既存テストの座標は不変に保たれる。
+  const textOffsetDx = options?.textLayerOffsetPt?.dx ?? 0;
+  const textOffsetDy = options?.textLayerOffsetPt?.dy ?? 0;
+
   const originalVersion = extractPdfVersion(originalPdfBytes);
   // Acrobat dirty-flag 回避: 入力 PDF の trailer /ID を保存後に書き戻す。
   const originalTrailerId = extractTrailerId(originalPdfBytes);
@@ -1203,6 +1210,7 @@ export async function buildPdfDocumentCore(
             fontSize,
             vh,
             rotationCm as unknown as Parameters<typeof buildCurveBlockOperators>[6],
+            { dx: textOffsetDx, dy: textOffsetDy },
           );
           if (ops.length > 0) {
             page.pushOperators(...ops);
@@ -1260,7 +1268,7 @@ export async function buildPdfDocumentCore(
             page.pushOperators(
               pushGraphicsState(),
               ...rotationCm,
-              translate(baselineX_run, baselineY_run),
+              translate(baselineX_run + textOffsetDx, baselineY_run - textOffsetDy),
               scale(sx_outer, sy_outer),
             );
             page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
@@ -1283,7 +1291,7 @@ export async function buildPdfDocumentCore(
             page.pushOperators(
               pushGraphicsState(),
               ...rotationCm,
-              translate(lastBaselineX, trailingBaselineY),
+              translate(lastBaselineX + textOffsetDx, trailingBaselineY - textOffsetDy),
               scale(sx_outer, sy_outer),
             );
             page.drawText(' ', { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
@@ -1311,7 +1319,7 @@ export async function buildPdfDocumentCore(
           page.pushOperators(
             pushGraphicsState(),
             ...rotationCm,
-            translate(block.bbox.x, baselineY),
+            translate(block.bbox.x + textOffsetDx, baselineY - textOffsetDy),
             scale(sx, sy),
           );
           let offset = 0;

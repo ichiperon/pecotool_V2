@@ -7,6 +7,7 @@ import { writeFileAtomically, isWriteAccessError } from '../utils/tauriFileIO';
 export { isWriteAccessError };
 
 import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../store/pecoStore';
+import { useOcrSettingsStore } from '../store/ocrSettingsStore';
 import { resolveDisplayIndex, resolvePageId } from '../utils/pageOrder';
 import {
   loadPDF,
@@ -253,6 +254,12 @@ export type SaveStep = 'changes' | 'pdf-gen' | 'safe-replace' | null;
 export interface SaveDialogOptions {
   compression: 'none' | 'compressed' | 'rasterized';
   rasterizeQuality?: number;
+  /**
+   * 保存 PDF の OCR テキスト層（Acrobat の Ctrl+A 選択範囲）を表示座標系で平行移動する量 (point)。
+   * dx: 正で右、dy: 正で下。未指定なら無シフト ({0,0})。OCR 序列設定 (ocrSettingsStore) 由来。
+   * worker / main 両経路ともこの options を素通しで buildPdfDocumentCore へ運ぶ。
+   */
+  textLayerOffsetPt?: { dx: number; dy: number };
 }
 
 type SaveInvocationOptions = {
@@ -604,8 +611,22 @@ export function useFileOperations(
     }
     const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
     let skippedChars: SkippedPdfTextChar[] = [];
+
+    // OCR テキスト層の表示オフセット (mm → point)。OCR 序列設定の値を保存出力にだけ反映する。
+    // dx=正で右、dy=正で下。pdfSaverCore は viewport 表示座標系でこの量を平行移動する。
+    const MM_TO_PT = 72 / 25.4;
+    const ocrSettings = useOcrSettingsStore.getState();
+    const textLayerOffsetPt = {
+      dx: ocrSettings.pdfTextOffsetRightMm * MM_TO_PT,
+      dy: ocrSettings.pdfTextOffsetDownMm * MM_TO_PT,
+    };
+    const effectiveSaveOptions: SaveDialogOptions = {
+      ...(saveOptions ?? { compression: 'none' }),
+      textLayerOffsetPt,
+    };
+
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
-      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; }, savePageOrder, saveOptions);
+      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; }, savePageOrder, effectiveSaveOptions);
     let savedBytes: Uint8Array;
     // issue #164: PDF生成フェーズに遷移
     setSaveStep?.('pdf-gen');

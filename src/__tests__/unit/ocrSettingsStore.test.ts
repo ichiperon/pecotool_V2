@@ -10,6 +10,8 @@ beforeEach(() => {
     mixedOrder: 'vertical-first',
     ocrConfidenceThreshold: 0.7,
     showLowConfidenceHighlight: true,
+    pdfTextOffsetRightMm: 4,
+    pdfTextOffsetDownMm: 2,
   })
 })
 
@@ -38,6 +40,28 @@ describe('ocrSettingsStore', () => {
 
     it('U-OS-06: mixedOrder defaults to vertical-first', () => {
       expect(useOcrSettingsStore.getState().mixedOrder).toBe('vertical-first')
+    })
+
+    it('pdfTextOffsetRightMm defaults to 4 (右 4mm)', () => {
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(4)
+    })
+
+    it('pdfTextOffsetDownMm defaults to 2 (下 2mm)', () => {
+      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(2)
+    })
+  })
+
+  describe('PDF テキスト層オフセット setters', () => {
+    it('setPdfTextOffsetRightMm updates only pdfTextOffsetRightMm (負値も許容)', () => {
+      useOcrSettingsStore.getState().setPdfTextOffsetRightMm(-1.5)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(-1.5)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(2)
+    })
+
+    it('setPdfTextOffsetDownMm updates only pdfTextOffsetDownMm', () => {
+      useOcrSettingsStore.getState().setPdfTextOffsetDownMm(3)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(3)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(4)
     })
   })
 

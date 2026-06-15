@@ -103,7 +103,11 @@ export function buildPageRotationCm(
 }
 
 /**
- * curve TextBlock 1 個分のフル operator: q + rotation cm + BT...ET + Q
+ * curve TextBlock 1 個分のフル operator: q + rotation cm + (offset cm) + BT...ET + Q
+ *
+ * offset は OCR テキスト層の表示オフセット (point)。viewport 表示座標系で平行移動する:
+ * dx>0 で右、dy>0 で下。axis-aligned 経路の translate と同じく rotationCm の後に適用するため、
+ * ページ回転に依らず「表示上の右/下」へ一様にずれる。未指定 (0,0) なら cm を発行しない。
  */
 export function buildCurveBlockOperators(
   text: string,
@@ -113,10 +117,15 @@ export function buildCurveBlockOperators(
   fontSize: number,
   pageHeight: number,
   rotationCm: PDFOperator[],
+  offset: { dx: number; dy: number } = { dx: 0, dy: 0 },
 ): PDFOperator[] {
   // Empty text curve block is intentionally skipped — no operators to emit.
   if (!text) return [];
   const inner = buildCurveGlyphOperators(text, curve, font, fontKey, fontSize, pageHeight);
   if (inner.length === 0) return [];
-  return [pushGraphicsState(), ...rotationCm, ...inner, popGraphicsState()];
+  const offsetCm: PDFOperator[] =
+    offset.dx === 0 && offset.dy === 0
+      ? []
+      : [concatTransformationMatrix(1, 0, 0, 1, offset.dx, -offset.dy)];
+  return [pushGraphicsState(), ...rotationCm, ...offsetCm, ...inner, popGraphicsState()];
 }
