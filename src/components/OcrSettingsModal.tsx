@@ -19,9 +19,14 @@ interface OcrSettingsModalProps {
    * 未指定なら「プレビュー」ボタンを表示しない。
    */
   onPreview?: () => void | Promise<unknown>;
+  /**
+   * 位置補正を未編集ページも含む全ページに適用して上書き保存する。
+   * 未指定なら「全ページに適用して保存」ボタンを表示しない。
+   */
+  onSaveAllPages?: () => void | Promise<unknown>;
 }
 
-export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onPreview }) => {
+export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onPreview, onSaveAllPages }) => {
   const {
     horizontal, vertical, groupTolerance, mixedOrder,
     ocrLanguage, availableLanguages,
@@ -39,6 +44,7 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onP
   const [offsetRightInput, setOffsetRightInput] = useState(String(pdfTextOffsetRightMm));
   const [offsetDownInput, setOffsetDownInput] = useState(String(pdfTextOffsetDownMm));
   const [previewing, setPreviewing] = useState(false);
+  const [savingAll, setSavingAll] = useState(false);
 
   const handlePreview = async () => {
     if (!onPreview || previewing) return;
@@ -47,6 +53,16 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onP
       await onPreview();
     } finally {
       setPreviewing(false);
+    }
+  };
+
+  const handleSaveAllPages = async () => {
+    if (!onSaveAllPages || savingAll) return;
+    setSavingAll(true);
+    try {
+      await onSaveAllPages();
+    } finally {
+      setSavingAll(false);
     }
   };
   const [langLoading, setLangLoading] = useState(false);
@@ -318,12 +334,27 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onP
               type="button"
               className="ocr-settings-preview-btn"
               onClick={handlePreview}
-              disabled={previewing}
+              disabled={previewing || savingAll}
             >
-              {previewing ? 'プレビュー生成中…' : 'この補正値でプレビュー'}
+              {previewing ? 'プレビュー生成中…' : 'この補正値で全ページプレビュー'}
             </button>
             <span className="ocr-settings-tolerance-hint">
               一時PDFを書き出して既定ビューアで開きます（保存はされません）
+            </span>
+          </div>
+        )}
+        {onSaveAllPages && (
+          <div className="ocr-settings-preview-row">
+            <button
+              type="button"
+              className="ocr-settings-preview-btn"
+              onClick={handleSaveAllPages}
+              disabled={savingAll || previewing}
+            >
+              {savingAll ? '全ページ保存中…' : '全ページに適用して保存'}
+            </button>
+            <span className="ocr-settings-tolerance-hint">
+              未編集ページにも補正を反映して上書き保存（ページ数が多いと遅くなります）
             </span>
           </div>
         )}

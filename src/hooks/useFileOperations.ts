@@ -8,7 +8,7 @@ export { isWriteAccessError };
 
 import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../store/pecoStore';
 import { useOcrSettingsStore } from '../store/ocrSettingsStore';
-import { resolveDisplayIndex, resolvePageId } from '../utils/pageOrder';
+import { resolveDisplayIndex, resolvePageId, displayToSourcePageIndex } from '../utils/pageOrder';
 import {
   loadPDF,
   getAllTemporaryPageData,
@@ -16,6 +16,9 @@ import {
   clearCachedPages,
   destroySharedPdfProxy,
   remapTemporaryPageEntries,
+  getSharedPdfProxy,
+  loadPecoToolBBoxMeta,
+  loadPage,
 } from '../utils/pdfLoader';
 import { savePDF } from '../utils/pdfSaver';
 import type { SavePdfSource, SkippedPdfTextChar } from '../utils/pdfWorkerTypes';
@@ -208,6 +211,49 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
   return task;
 }
 
+/**
+ * 全ページ適用（OCR 位置補正を未編集ページにも効かせる）用に、全ページの
+ * textBlocks をロードした Map を返す。
+ *
+ * 通常保存は dirty ページしか再描画しないため未編集ページに offset が乗らない。
+ * このローダーは全ページを loadPage で抽出し（PecoTool メタデータがあれば正確に、
+ * 無ければ pdfjs textItems から復元）、保存/プレビューの再描画対象を全ページへ広げる。
+ *
+ * 重い経路（ユーザー明示選択）: 単一 pdfjs worker を詰まらせないよう **逐次** 実行する。
+ * 既にメモリ上で text 抽出済み (isTextExtracted) のページは再ロードしない。
+ */
+async function loadAllPagesWithTextBlocks(
+  filePath: string,
+  pageOrder: number[],
+  document: PecoDocument,
+): Promise<Map<number, PageData>> {
+  const pdf = await getSharedPdfProxy(filePath);
+  let bboxMeta: Awaited<ReturnType<typeof loadPecoToolBBoxMeta>> | null = null;
+  try {
+    bboxMeta = await loadPecoToolBBoxMeta(pdf, {
+      loadBytes: async () => readFile(filePath),
+      filePath,
+      mtime: document.mtime,
+    });
+  } catch {
+    bboxMeta = null;
+  }
+  const all = new Map<number, PageData>();
+  for (let displayIdx = 0; displayIdx < document.totalPages; displayIdx += 1) {
+    const existing = document.pages.get(displayIdx);
+    if (existing && existing.isTextExtracted) {
+      all.set(displayIdx, existing);
+      continue;
+    }
+    const sourceIndex = displayToSourcePageIndex(pageOrder, displayIdx);
+    const pd = await loadPage(pdf, sourceIndex, filePath, bboxMeta, document.mtime, {
+      displayPageIndex: displayIdx,
+    });
+    all.set(displayIdx, pd);
+  }
+  return all;
+}
+
 interface SaveResult {
   size: number;
   skippedChars: SkippedPdfTextChar[];
@@ -280,6 +326,12 @@ type ExecuteSaveOptions = {
    * OCR 位置補正の calibration 用。書き出し後に呼び出し側が既定ビューアで開く。
    */
   previewMode?: boolean;
+  /**
+   * OCR 位置補正を未編集ページにも効かせる「全ページ適用」モード。
+   * 通常は dirty ページのみ再描画するが、true のときは全ページの textBlocks を
+   * ロードして全ページを再描画対象にする（重い: 大量ページで遅くなる）。
+   */
+  applyOffsetAllPages?: boolean;
 };
 
 export function useFileOperations(
@@ -621,7 +673,23 @@ export function useFileOperations(
       const snapshotPage = document.pages.get(idx);
       if (snapshotPage) savedPageSnapshots.set(idx, snapshotPage);
     }
-    const mergedDoc: PecoDocument = { ...document, pages: dirtyOnlyPages };
+
+    // 再描画対象。通常は dirty ページのみ（最重要パフォーマンス修正を維持）。
+    // 全ページ適用モード時は、全ページの textBlocks をロードして再描画対象を全ページへ広げ、
+    // 位置補正を未編集ページにも反映する。dirty ページの編集内容は overlay で優先する。
+    let renderPages = dirtyOnlyPages;
+    if (executeOptions.applyOffsetAllPages) {
+      const allPages = await withStep(
+        'loadAllPages',
+        600_000,
+        () => loadAllPagesWithTextBlocks(sourceFilePath, savePageOrder, document),
+      );
+      for (const [idx, p] of mergedPages.entries()) {
+        allPages.set(idx, p); // 編集済み（メモリ/IDB）ページの内容を優先
+      }
+      renderPages = allPages;
+    }
+    const mergedDoc: PecoDocument = { ...document, pages: renderPages };
     let skippedChars: SkippedPdfTextChar[] = [];
 
     // OCR テキスト層の表示オフセット (mm → point)。OCR 序列設定の値を保存出力にだけ反映する。
@@ -1079,6 +1147,8 @@ export function useFileOperations(
       const result = await _executeSave(undefined, { compression: 'none' }, {
         previewMode: true,
         normalizePageOrderForCurrentDocument: false,
+        // プレビューは常に全ページへ位置補正を反映して、未編集ページの結果も確認できるようにする。
+        applyOffsetAllPages: true,
       });
       if (result === null || !result.previewBytes) return false;
       // Rust の open_pdf_preview が temp_dir へ一意名で直書き + 既定ビューア起動を行う
@@ -1101,9 +1171,57 @@ export function useFileOperations(
     }
   };
 
+  /**
+   * OCR 位置補正を「未編集ページも含む全ページ」に適用して上書き保存する明示アクション。
+   * 通常の Ctrl+S は性能のため dirty ページしか再描画しない（未編集ページに offset が乗らない）。
+   * これは全ページの textBlocks をロードして全ページを再描画するため重い（大量ページで遅い）。
+   * 状態更新（dirty 解除/remap/epoch）は通常保存と同じく dirty ページ基準で、再描画対象だけが
+   * 全ページに広がる。プレビューで見た目を確認してから使う想定。
+   */
+  const saveAllPagesWithOffset = async (): Promise<boolean> => {
+    const { document } = usePecoStore.getState();
+    if (!document) {
+      showToast('保存するPDFが開かれていません。', true);
+      return false;
+    }
+    if (isSavingRef.current) {
+      showToast('保存処理が進行中です。');
+      return false;
+    }
+    if (isOcrRunningRef?.current) {
+      showToast('OCR実行中は保存できません。OCRを中止または完了してください。', true);
+      return false;
+    }
+    commitActiveOcrCardEdit();
+    isSavingRef.current = true;
+    setIsSaving?.(true);
+    showToast('全ページに位置補正を適用して保存中…（ページ数が多いと時間がかかります）');
+    try {
+      const result = await _executeSave(undefined, undefined, { applyOffsetAllPages: true });
+      if (result === null) return false;
+      resetDirty(result.savedPageSnapshots);
+      setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+      if (result.hasPostSnapshotChanges) {
+        usePecoStore.setState({ isDirty: true });
+      }
+      showToast(formatSaveToast('全ページに位置補正を適用して保存しました', result.size, result.skippedChars));
+      invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
+      return true;
+    } catch (err) {
+      console.error('[saveAllPagesWithOffset] failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`保存に失敗しました: ${msg}`, true);
+      return false;
+    } finally {
+      isSavingRef.current = false;
+      setIsSaving?.(false);
+      setSaveStep?.(null);
+    }
+  };
+
   // issue #137: useAutoBackup から保存中ガードに使う共有 ref。
   // 旧実装は useAutoBackup 内で独自の isSavingRef を持っていたため、
   // useFileOperations の保存中に autoBackup の performBackup が並走しうる
   // (Rust 側の writeFileAtomically と save_backup が同一ファイルを取り合う) 状態だった。
-  return { handleOpen, handleSave, executeSaveAs, handleSaveTo, previewOcrOffset, isSavingRef };
+  return { handleOpen, handleSave, executeSaveAs, handleSaveTo, previewOcrOffset, saveAllPagesWithOffset, isSavingRef };
 }
