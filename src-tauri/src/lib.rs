@@ -626,6 +626,48 @@ pub(crate) fn write_ocr_temp_bytes(bytes: &[u8]) -> Result<std::path::PathBuf, S
     Ok(temp_path)
 }
 
+/// OCR 位置補正の calibration 用プレビュー: PDF bytes を `temp_dir()` へ一意名で直書きし、
+/// 既定の PDF ビューアで開く。
+///
+/// `temp_dir()` 直書きにより Tauri fs スコープ検証を回避する（#285: Windows の
+/// `\\?\`-prefix 正規化で $TEMP がスコープ glob にマッチせず `is_allowed` が false に
+/// なるため、JS 側 writeFileAtomically/opener 経由では開けない）。表示も Rust の
+/// `app.opener()` で行い opener スコープ検証も回避する。毎回一意名なのでビューアの
+/// ファイルキャッシュに当たらず、数値変更 → プレビューの反復ができる。
+///
+/// フロントは PDF bytes を raw IPC body で渡す。返り値は書き出した一時パス。
+#[tauri::command]
+async fn open_pdf_preview(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<String, String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let bytes: Vec<u8> = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.clone(),
+        _ => return Err("[open_pdf_preview] expected raw body".to_string()),
+    };
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = OCR_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "peco_ocr_preview_{}_{}_{}.pdf",
+        std::process::id(),
+        nanos,
+        counter,
+    ));
+    std::fs::write(&path, &bytes).map_err(|e| format!("preview write failed: {}", e))?;
+
+    let path_str = path.to_string_lossy().to_string();
+    app.opener()
+        .open_path(path_str.clone(), None::<&str>)
+        .map_err(|e| format!("open_path failed: {}", e))?;
+    Ok(path_str)
+}
+
 /// Heuristic OCR confidence (0.0..=1.0).
 ///
 /// Windows.Media.Ocr does not expose per-word confidence, so we approximate
@@ -1932,6 +1974,7 @@ pub fn run() {
             write_operation_log,
             write_audit_log,
             open_log_folder,
+            open_pdf_preview,
             write_pdf_chunk,
             replace_pdf_file,
             backup::save_backup,

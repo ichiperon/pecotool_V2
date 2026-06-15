@@ -1,8 +1,6 @@
 import { useRef } from 'react';
 import { ask, open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, stat } from '@tauri-apps/plugin-fs';
-import { tempDir, join } from '@tauri-apps/api/path';
-import { openPath } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFileAtomically, isWriteAccessError } from '../utils/tauriFileIO';
 
@@ -222,6 +220,12 @@ interface SaveResult {
    * 巻き込んでクリアしないようにできる。
    */
   savedPageSnapshots: Map<number, PageData>;
+  /**
+   * previewMode 時のみ設定。生成した PDF bytes（ファイルには書き出さない）。
+   * 呼び出し側 (previewOcrOffset) が Rust の open_pdf_preview へ渡して
+   * temp_dir 直書き + 既定ビューア起動を行う。
+   */
+  previewBytes?: Uint8Array;
 }
 
 function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
@@ -656,16 +660,12 @@ export function useFileOperations(
     if (skippedChars.length > 0) {
       console.warn('[save] Skipped PDF text-layer chars:', skippedChars);
     }
-    const writePath = targetPath ?? document.filePath;
 
-    // issue #164: 安全置換フェーズに遷移
-    setSaveStep?.('safe-replace');
-    await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
-
-    // プレビュー: 一時ファイルへ書き出すのみ。以降のディスク差し替え後処理
-    // (proxy 破棄 / キャッシュ無効化 / pageOrder normalize / remap / epoch bump /
-    //  originalBytes キャッシュ更新) は開いているドキュメントを動かしてしまうため全てスキップし、
-    // dirty もそのまま温存する（呼び出し側も resetDirty を呼ばない）。
+    // プレビュー: ファイルへは書き出さず bytes を返す。書き出し + 既定ビューア起動は
+    // Rust (open_pdf_preview) が temp_dir 直書きで行い、fs/opener スコープ検証
+    // (#285 の \\?\ 正規化問題で $TEMP がマッチしない) を回避する。
+    // 開いているドキュメントの状態 (proxy / dirty / epoch / pageOrder / キャッシュ) は
+    // 一切変更しない。
     if (executeOptions.previewMode) {
       return {
         size: savedBytes.length,
@@ -673,9 +673,15 @@ export function useFileOperations(
         savedPageSnapshots,
         savedActionIndex,
         hasPostSnapshotChanges: false,
+        previewBytes: savedBytes,
       };
     }
 
+    const writePath = targetPath ?? document.filePath;
+
+    // issue #164: 安全置換フェーズに遷移
+    setSaveStep?.('safe-replace');
+    await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
     await withStep('clearPageCache', 10_000, () => clearCachedPages(writePath))
       .catch((e) => { console.warn('[save] clearPageCache failed (ignored):', e); });
     // replace_pdf_file でディスク上の PDF バイト列が差し替わったため、それを開いていた
@@ -1070,14 +1076,18 @@ export function useFileOperations(
     isSavingRef.current = true;
     setIsSaving?.(true);
     try {
-      // 一意名（タイムスタンプ）で毎回別ファイル → ビューアのキャッシュ回避。
-      const previewPath = await join(await tempDir(), `peco_ocr_preview_${Date.now()}.pdf`);
-      const result = await _executeSave(previewPath, { compression: 'none' }, {
+      const result = await _executeSave(undefined, { compression: 'none' }, {
         previewMode: true,
         normalizePageOrderForCurrentDocument: false,
       });
-      if (result === null) return false;
-      await openPath(previewPath);
+      if (result === null || !result.previewBytes) return false;
+      // Rust の open_pdf_preview が temp_dir へ一意名で直書き + 既定ビューア起動を行う
+      // (fs/opener スコープ検証 #285 を回避)。bytes は raw IPC body で渡す。
+      const bytes = result.previewBytes;
+      const body = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes.buffer
+        : bytes.slice().buffer;
+      await invoke('open_pdf_preview', body);
       showToast('プレビューを既定のPDFビューアで開きました（保存はされていません）。');
       return true;
     } catch (err) {
