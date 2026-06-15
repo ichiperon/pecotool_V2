@@ -260,4 +260,41 @@ describe('buildCurveBlockOperators', () => {
     // emoji glyph + word-break U+0020 = 2 回 (issue #1)
     expect(font.encodeText).toHaveBeenCalledTimes(2);
   });
+
+  it('offset 未指定 → オフセット cm は挿入されない (既存挙動と同一)', () => {
+    const font = makeMockFont();
+    const fontKey = makeMockFontKey();
+    const ops = buildCurveBlockOperators('AB', arcCurve, font, fontKey, FONT_SIZE, PAGE_HEIGHT, []);
+    // [0]=q, [1]=BT(rotationCm 無し) ... cm は 1 個も無い
+    expect(ops.map(String).filter((s) => s.includes('cm'))).toHaveLength(0);
+  });
+
+  it('offset {0,0} → オフセット cm は挿入されない (無シフト)', () => {
+    const font = makeMockFont();
+    const fontKey = makeMockFontKey();
+    const ops = buildCurveBlockOperators('AB', arcCurve, font, fontKey, FONT_SIZE, PAGE_HEIGHT, [], { dx: 0, dy: 0 });
+    expect(ops.map(String).filter((s) => s.includes('cm'))).toHaveLength(0);
+  });
+
+  it('offset 指定 (右4/下2pt) → q の直後に translate cm (1 0 0 1 dx -dy) が挿入される', () => {
+    const font = makeMockFont();
+    const fontKey = makeMockFontKey();
+    const ops = buildCurveBlockOperators('AB', arcCurve, font, fontKey, FONT_SIZE, PAGE_HEIGHT, [], { dx: 4, dy: 2 });
+    // [0]=q, [1]=offset cm (rotationCm 無しのため offset cm が直後に来る)
+    expect(String(ops[0])).toBe('q');
+    // dy は下方向なので f 成分は -2 (y-up 座標で下へずらす)
+    expect(String(ops[1])).toMatch(/^1 0 0 1 4 -2 cm$/);
+    expect(String(ops[ops.length - 1])).toBe('Q');
+  });
+
+  it('offset 指定 + rotationCm あり → cm が 2 個 (rotation → offset の順) 挿入される', () => {
+    const font = makeMockFont();
+    const fontKey = makeMockFontKey();
+    const rotCm = buildPageRotationCm(90, 595, 842);
+    const ops = buildCurveBlockOperators('XY', arcCurve, font, fontKey, FONT_SIZE, PAGE_HEIGHT, rotCm, { dx: 4, dy: 2 });
+    // [0]=q, [1]=rotation cm, [2]=offset cm
+    expect(String(ops[0])).toBe('q');
+    expect(String(ops[1])).toMatch(/cm/);
+    expect(String(ops[2])).toMatch(/^1 0 0 1 4 -2 cm$/);
+  });
 });

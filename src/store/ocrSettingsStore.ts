@@ -46,6 +46,16 @@ interface OcrSettingsState extends OcrSortSettings {
   ocrConfidenceThreshold: number;
   /** OCR 低信頼ハイライトの表示 ON/OFF (#192) */
   showLowConfidenceHighlight: boolean;
+  /**
+   * 保存 PDF の OCR テキスト層（Acrobat の Ctrl+A 選択範囲）を表示上どれだけ右へずらすか (mm)。
+   * 正値で右、負値で左。既定 4mm。アプリ内のキャンバス表示や BB 枠には影響しない（保存出力のみ）。
+   */
+  pdfTextOffsetRightMm: number;
+  /**
+   * 保存 PDF の OCR テキスト層を表示上どれだけ下へずらすか (mm)。
+   * 正値で下、負値で上。既定 2mm。
+   */
+  pdfTextOffsetDownMm: number;
   setHorizontalRowOrder: (order: RowOrder) => void;
   setHorizontalColumnOrder: (order: ColumnOrder) => void;
   setVerticalColumnOrder: (order: ColumnOrder) => void;
@@ -56,6 +66,8 @@ interface OcrSettingsState extends OcrSortSettings {
   setAvailableLanguages: (langs: OcrLanguageInfo[]) => void;
   setOcrConfidenceThreshold: (val: number) => void;
   setShowLowConfidenceHighlight: (val: boolean) => void;
+  setPdfTextOffsetRightMm: (val: number) => void;
+  setPdfTextOffsetDownMm: (val: number) => void;
 }
 
 export const useOcrSettingsStore = create<OcrSettingsState>()(
@@ -75,6 +87,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       availableLanguages: [],
       ocrConfidenceThreshold: 0.7,
       showLowConfidenceHighlight: true,
+      pdfTextOffsetRightMm: 4,
+      pdfTextOffsetDownMm: 2,
       setHorizontalRowOrder: (order) =>
         set((s) => ({ horizontal: { ...s.horizontal, rowOrder: order } })),
       setHorizontalColumnOrder: (order) =>
@@ -89,6 +103,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       setAvailableLanguages: (langs) => set({ availableLanguages: langs }),
       setOcrConfidenceThreshold: (val) => set({ ocrConfidenceThreshold: val }),
       setShowLowConfidenceHighlight: (val) => set({ showLowConfidenceHighlight: val }),
+      setPdfTextOffsetRightMm: (val) => set({ pdfTextOffsetRightMm: val }),
+      setPdfTextOffsetDownMm: (val) => set({ pdfTextOffsetDownMm: val }),
     }),
     {
       name: 'peco-ocr-settings',
@@ -101,6 +117,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
         ocrLanguage: s.ocrLanguage,
         ocrConfidenceThreshold: s.ocrConfidenceThreshold,
         showLowConfidenceHighlight: s.showLowConfidenceHighlight,
+        pdfTextOffsetRightMm: s.pdfTextOffsetRightMm,
+        pdfTextOffsetDownMm: s.pdfTextOffsetDownMm,
       }),
     }
   )
