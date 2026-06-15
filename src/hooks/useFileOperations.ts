@@ -1,6 +1,8 @@
 import { useRef } from 'react';
 import { ask, open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, stat } from '@tauri-apps/plugin-fs';
+import { tempDir, join } from '@tauri-apps/api/path';
+import { openPath } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { writeFileAtomically, isWriteAccessError } from '../utils/tauriFileIO';
 
@@ -268,6 +270,12 @@ type SaveInvocationOptions = {
 
 type ExecuteSaveOptions = {
   normalizePageOrderForCurrentDocument?: boolean;
+  /**
+   * プレビュー保存: targetPath（一時ファイル）へ書き出すだけで、開いているドキュメントの
+   * 状態（pdfjs proxy / dirty / documentEpoch / pageOrder / 各種キャッシュ）を一切変更しない。
+   * OCR 位置補正の calibration 用。書き出し後に呼び出し側が既定ビューアで開く。
+   */
+  previewMode?: boolean;
 };
 
 export function useFileOperations(
@@ -653,6 +661,21 @@ export function useFileOperations(
     // issue #164: 安全置換フェーズに遷移
     setSaveStep?.('safe-replace');
     await withStep('writeFile', 180_000, () => writeFileAtomically(writePath, savedBytes));
+
+    // プレビュー: 一時ファイルへ書き出すのみ。以降のディスク差し替え後処理
+    // (proxy 破棄 / キャッシュ無効化 / pageOrder normalize / remap / epoch bump /
+    //  originalBytes キャッシュ更新) は開いているドキュメントを動かしてしまうため全てスキップし、
+    // dirty もそのまま温存する（呼び出し側も resetDirty を呼ばない）。
+    if (executeOptions.previewMode) {
+      return {
+        size: savedBytes.length,
+        skippedChars,
+        savedPageSnapshots,
+        savedActionIndex,
+        hasPostSnapshotChanges: false,
+      };
+    }
+
     await withStep('clearPageCache', 10_000, () => clearCachedPages(writePath))
       .catch((e) => { console.warn('[save] clearPageCache failed (ignored):', e); });
     // replace_pdf_file でディスク上の PDF バイト列が差し替わったため、それを開いていた
@@ -1022,9 +1045,55 @@ export function useFileOperations(
     }
   };
 
+  /**
+   * OCR テキスト層の位置補正 calibration 用プレビュー。
+   * 現在の補正値（OCR 序列設定）で一時 PDF を**毎回一意名で**書き出し、既定の PDF
+   * ビューアで開く。一意名なので Acrobat 等のファイルキャッシュに当たらず、補正値は
+   * 保存時に都度ストアから読むためツール側のキャッシュにも依存しない。
+   * 開いているドキュメントの状態（dirty / proxy / pageOrder）は一切変更しない。
+   */
+  const previewOcrOffset = async (): Promise<boolean> => {
+    const { document } = usePecoStore.getState();
+    if (!document) {
+      showToast('プレビューするPDFが開かれていません。', true);
+      return false;
+    }
+    if (isSavingRef.current) {
+      showToast('保存処理が進行中です。完了してからプレビューしてください。');
+      return false;
+    }
+    if (isOcrRunningRef?.current) {
+      showToast('OCR実行中はプレビューできません。OCRを中止または完了してください。', true);
+      return false;
+    }
+    commitActiveOcrCardEdit();
+    isSavingRef.current = true;
+    setIsSaving?.(true);
+    try {
+      // 一意名（タイムスタンプ）で毎回別ファイル → ビューアのキャッシュ回避。
+      const previewPath = await join(await tempDir(), `peco_ocr_preview_${Date.now()}.pdf`);
+      const result = await _executeSave(previewPath, { compression: 'none' }, {
+        previewMode: true,
+        normalizePageOrderForCurrentDocument: false,
+      });
+      if (result === null) return false;
+      await openPath(previewPath);
+      showToast('プレビューを既定のPDFビューアで開きました（保存はされていません）。');
+      return true;
+    } catch (err) {
+      console.error('[previewOcrOffset] failed:', err);
+      showToast(`プレビューに失敗しました: ${err}`, true);
+      return false;
+    } finally {
+      isSavingRef.current = false;
+      setIsSaving?.(false);
+      setSaveStep?.(null);
+    }
+  };
+
   // issue #137: useAutoBackup から保存中ガードに使う共有 ref。
   // 旧実装は useAutoBackup 内で独自の isSavingRef を持っていたため、
   // useFileOperations の保存中に autoBackup の performBackup が並走しうる
   // (Rust 側の writeFileAtomically と save_backup が同一ファイルを取り合う) 状態だった。
-  return { handleOpen, handleSave, executeSaveAs, handleSaveTo, isSavingRef };
+  return { handleOpen, handleSave, executeSaveAs, handleSaveTo, previewOcrOffset, isSavingRef };
 }

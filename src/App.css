@@ -2022,6 +2022,25 @@ body, #root {
   opacity: 0.7;
 }
 
+/* OCR 位置補正プレビュー */
+.ocr-settings-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.ocr-settings-preview-btn {
+  padding: 4px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ocr-settings-preview-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 /* #192: 低信頼ハイライト設定 UI */
 .ocr-confidence-toggle-label {
   display: flex;

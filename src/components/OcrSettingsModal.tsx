@@ -14,9 +14,14 @@ const MIXED_OPTIONS: MixedOrder[] = ['vertical-first', 'horizontal-first'];
 
 interface OcrSettingsModalProps {
   onClose: () => void;
+  /**
+   * 位置補正 calibration 用プレビュー。現在の補正値で一時 PDF を書き出し既定ビューアで開く。
+   * 未指定なら「プレビュー」ボタンを表示しない。
+   */
+  onPreview?: () => void | Promise<unknown>;
 }
 
-export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) => {
+export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onPreview }) => {
   const {
     horizontal, vertical, groupTolerance, mixedOrder,
     ocrLanguage, availableLanguages,
@@ -33,6 +38,17 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) =
   const [toleranceInput, setToleranceInput] = useState(String(groupTolerance));
   const [offsetRightInput, setOffsetRightInput] = useState(String(pdfTextOffsetRightMm));
   const [offsetDownInput, setOffsetDownInput] = useState(String(pdfTextOffsetDownMm));
+  const [previewing, setPreviewing] = useState(false);
+
+  const handlePreview = async () => {
+    if (!onPreview || previewing) return;
+    setPreviewing(true);
+    try {
+      await onPreview();
+    } finally {
+      setPreviewing(false);
+    }
+  };
   const [langLoading, setLangLoading] = useState(false);
   const titleId = useModalTitleId();
 
@@ -296,6 +312,21 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose }) =
             </tr>
           </tbody>
         </table>
+        {onPreview && (
+          <div className="ocr-settings-preview-row">
+            <button
+              type="button"
+              className="ocr-settings-preview-btn"
+              onClick={handlePreview}
+              disabled={previewing}
+            >
+              {previewing ? 'プレビュー生成中…' : 'この補正値でプレビュー'}
+            </button>
+            <span className="ocr-settings-tolerance-hint">
+              一時PDFを書き出して既定ビューアで開きます（保存はされません）
+            </span>
+          </div>
+        )}
         <div className="ocr-settings-note">
           位置補正は保存する PDF の透明テキスト層（Acrobat の Ctrl+A 選択範囲）にのみ反映されます。
           画面表示やテキスト枠の位置は変わりません。その他の設定はOCR実行時に適用されます。

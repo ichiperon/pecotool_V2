@@ -197,7 +197,7 @@ function App() {
   // setShowSaveDialog は useDialogState から取得済み。ref 化して常に最新を参照する。
   const setShowSaveDialogRef = useRef(setShowSaveDialog);
   setShowSaveDialogRef.current = setShowSaveDialog;
-  const { handleOpen, handleSave, executeSaveAs, handleSaveTo, isSavingRef: fileOpsIsSavingRef } = useFileOperations(
+  const { handleOpen, handleSave, executeSaveAs, handleSaveTo, previewOcrOffset, isSavingRef: fileOpsIsSavingRef } = useFileOperations(
     showToast, setIsSaving, setIsLoadingFile,
     (doc) => { checkAndPromptOcrZero(doc); },
     isOcrRunningRef,
@@ -739,7 +739,7 @@ function App() {
       {/* ヘルプモーダル */}
       {showOcrSettings && (
         <Suspense fallback={null}>
-          <OcrSettingsModal onClose={() => setShowOcrSettings(false)} />
+          <OcrSettingsModal onClose={() => setShowOcrSettings(false)} onPreview={previewOcrOffset} />
         </Suspense>
       )}
 
