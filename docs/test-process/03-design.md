@@ -3,7 +3,7 @@
 > Phase 3: テスト設計（How-to-Test 定義）
 > 作成日: 2026-06-03
 > 前提資料: `docs/test-process/02-analysis.md` / `docs/test-process/01-plan.md`
-> 対象バージョン: v1.6.9 系（Tauri v2 + React 19 + zustand）
+> 対象バージョン: v2.0.7（Tauri v2 + React 19 + zustand）※2026-06-03 作成時点。現行は v2.0.21
 
 ---
 

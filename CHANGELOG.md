@@ -301,5 +301,8 @@
 [2.0.21]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.20...v2.0.21
 [2.0.20]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.19...v2.0.20
 [2.0.19]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.18...v2.0.19
-[2.0.15]: https://github.com/Ryo_Jonishi/pecotool_v2/compare/v2.0.14...v2.0.15
-[2.0.14]: https://github.com/Ryo_Jonishi/pecotool_v2/compare/v1.6.3...v2.0.14
+[2.0.18]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.17...v2.0.18
+[2.0.17]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.16...v2.0.17
+[2.0.16]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.15...v2.0.16
+[2.0.15]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.14...v2.0.15
+[2.0.14]: https://github.com/ichiperon/pecotool_V2/compare/v1.6.3...v2.0.14
