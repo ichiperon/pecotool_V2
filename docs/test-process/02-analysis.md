@@ -3,7 +3,7 @@
 > Phase 2: テスト分析（What-to-Test 導出）
 > 作成日: 2026-06-03
 > 前提資料: `docs/TEST_REQUIREMENTS.md` / `CLAUDE.md`（global）/ `README.md` / `src/` 構造
-> 対象バージョン: v1.6.9 系（Tauri v2 + React 19 + zustand）
+> 対象バージョン: v2.0.7（Tauri v2 + React 19 + zustand）※2026-06-03 作成時点。現行は v2.0.21
 
 ---
 
