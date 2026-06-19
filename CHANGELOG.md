@@ -37,6 +37,38 @@
 
 ---
 
+## [2.0.21] - 2026-06-15
+
+### Added
+
+- **OCR位置補正を全ページに適用する手段を追加** (50a870a): プレビューは常に全ページを適用して一時 PDF を生成する。「全ページに適用して保存」ボタンを別途用意し、保存時の全ページ再描画を意図的に実行できる。通常の Ctrl+S 上書き保存は dirty ページのみのまま据え置き（全ページ再描画は重く、dirty-only 最適化の保存テストを壊すため自動化しない）。PecoToolメタを持たない素の OCR ページは再描画で抽出近似により僅かに座標が動く可能性があり、保存前にプレビューで確認する運用を想定。
+
+### Fixed
+
+- **プレビューが fs スコープ違反で失敗する不具合を修正** (#285 回避, d0586f3): Windows の `\\?\` prefix 正規化（#285）により `$TEMP` が Tauri file scope の glob にマッチしなくなっていたのが原因（"path is outside allowed Tauri file scope"）。Rust コマンド `open_pdf_preview` を新設し `temp_dir` 直書き＋opener 起動で回避。
+
+---
+
+## [2.0.20] - 2026-06-15
+
+### Added
+
+- **OCR位置補正に「この補正値でプレビュー」ボタンを追加** (d97dc40): 現在の補正値で一時 PDF を毎回一意名（`peco_ocr_preview_<ts>.pdf`、`$TEMP` 以下）で書き出し、既定の PDF ビューアで開く。一意名のためビューアのキャッシュに当たらず、数値変更→プレビューの反復で位置を追い込める。プレビューは開いているドキュメントの状態（dirty/表示）を変更しない。
+
+---
+
+## [2.0.19] - 2026-06-15
+
+### Added
+
+- **保存 PDF の透明テキスト層の位置補正機能を追加** (daa5dad): Acrobat の Ctrl+A 選択範囲に相当する透明テキスト層を、表示座標系で平行移動する。既定は下 2mm・右 4mm、OCR 序列設定で調整可能（負値で上・左）。横書き/縦書き/曲線テキストの全描画経路に適用。アプリ内の画像表示・BB 枠には影響せず、保存 PDF の透明テキスト層のみに反映。回転 90/180/270 でも表示上の下/右へ一様に適用。
+
+### Fixed
+
+- **本番ビルドで plugin-updater が E2E スタブに解決される不具合を修正** (#328/PCT-105, e9be892): `vite.config.ts` の `resolve.alias` が `command === 'serve'` か否かを問わず常にスタブ（`check = async () => null`）へ向けていたのが原因（`resolve` は `tauri build` にも適用される）。alias を `command === 'serve'` 限定にし、本番ビルドでは `node_modules` の実プラグインをバンドルするよう修正。v2.0.15〜2.0.18 の配布版はすべてスタブ入りでビルドされており自動更新が機能しないため、回復には本修正後のビルドを一度手動インストールする必要がある。
+
+---
+
 ## [2.0.18] - 2026-06-11
 
 > **アーキテクチャ強化リリース** — 「貧弱性解析→最強システム」ロードマップ 9 issue（PCT-096〜104）の成果一式。
@@ -298,5 +330,11 @@
 
 [Keep a Changelog]: https://keepachangelog.com/ja/1.1.0/
 [Semantic Versioning]: https://semver.org/lang/ja/
-[2.0.15]: https://github.com/Ryo_Jonishi/pecotool_v2/compare/v2.0.14...v2.0.15
-[2.0.14]: https://github.com/Ryo_Jonishi/pecotool_v2/compare/v1.6.3...v2.0.14
+[2.0.21]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.20...v2.0.21
+[2.0.20]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.19...v2.0.20
+[2.0.19]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.18...v2.0.19
+[2.0.18]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.17...v2.0.18
+[2.0.17]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.16...v2.0.17
+[2.0.16]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.15...v2.0.16
+[2.0.15]: https://github.com/ichiperon/pecotool_V2/compare/v2.0.14...v2.0.15
+[2.0.14]: https://github.com/ichiperon/pecotool_V2/compare/v1.6.3...v2.0.14
