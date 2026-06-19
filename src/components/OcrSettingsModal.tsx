@@ -359,6 +359,7 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onP
           </div>
         )}
         <div className="ocr-settings-note">
+          0/0 はツール表示の BB 枠と一致します（既定）。値を入れると Acrobat 等での選択ハイライト位置を微調整できます（指定可能な範囲は -20〜20mm）。
           位置補正は保存する PDF の透明テキスト層（Acrobat の Ctrl+A 選択範囲）にのみ反映されます。
           画面表示やテキスト枠の位置は変わりません。その他の設定はOCR実行時に適用されます。
         </div>

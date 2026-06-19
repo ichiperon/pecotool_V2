@@ -74,6 +74,9 @@ bbox → PDF 座標変換は viewport 寸法（`vw/vh`）と `getRotationCm` を
 **C-06 — bboxMeta は await して解決してから loadPage を呼ぶ**
 `usePageNavigation` で `bboxMetaRef` は `loadPage` の前に確実に resolve する（issue #99 主因対策, `usePageNavigation.ts` コメント）。fire-and-forget で後埋めすると bboxMeta=null のまま pdfjs fallback で bbox を再計算し、IDB に誤った bbox が固着する。
 
+**C-07 — OCR 位置補正の既定は 0/0**
+`ocrSettingsStore` の `pdfTextOffsetRightMm` / `pdfTextOffsetDownMm` の既定は 0/0（PCT-117）。補正は pdf-lib の出力座標を素で平行移動する処理であり、ビューア固有の癖を補正するものではない（どのビューアでも一律にずれる）。非 0 を既定にすると「ツール表示 BB == 保存テキスト層」（最低保証 #5）を生 PDF 座標の時点で破る。非 0 はユーザーが明示設定したときのみ。旧既定（右 4mm・下 2mm）を持つ既存ユーザーは persist `version: 1` の `migrate` で 0/0 にリセットする（`ocrSettingsStore.ts`）。補正適用ロジック（`pdfSaverCore.ts` の `textLayerOffsetPt`）自体は変更しない。
+
 ---
 
 ## 3. 状態同期・競合

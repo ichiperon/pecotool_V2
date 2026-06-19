@@ -10,8 +10,8 @@ beforeEach(() => {
     mixedOrder: 'vertical-first',
     ocrConfidenceThreshold: 0.7,
     showLowConfidenceHighlight: true,
-    pdfTextOffsetRightMm: 4,
-    pdfTextOffsetDownMm: 2,
+    pdfTextOffsetRightMm: 0,
+    pdfTextOffsetDownMm: 0,
   })
 })
 
@@ -42,12 +42,12 @@ describe('ocrSettingsStore', () => {
       expect(useOcrSettingsStore.getState().mixedOrder).toBe('vertical-first')
     })
 
-    it('pdfTextOffsetRightMm defaults to 4 (右 4mm)', () => {
-      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(4)
+    it('pdfTextOffsetRightMm defaults to 0 (補正なし＝BB枠と一致)', () => {
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(0)
     })
 
-    it('pdfTextOffsetDownMm defaults to 2 (下 2mm)', () => {
-      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(2)
+    it('pdfTextOffsetDownMm defaults to 0 (補正なし)', () => {
+      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(0)
     })
   })
 
@@ -55,13 +55,13 @@ describe('ocrSettingsStore', () => {
     it('setPdfTextOffsetRightMm updates only pdfTextOffsetRightMm (負値も許容)', () => {
       useOcrSettingsStore.getState().setPdfTextOffsetRightMm(-1.5)
       expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(-1.5)
-      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(2)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(0)
     })
 
     it('setPdfTextOffsetDownMm updates only pdfTextOffsetDownMm', () => {
       useOcrSettingsStore.getState().setPdfTextOffsetDownMm(3)
       expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(3)
-      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(4)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(0)
     })
   })
 
@@ -142,6 +142,99 @@ describe('ocrSettingsStore', () => {
       // The persist middleware stores under this key; verify via the store's persist API
       const persistOptions = (useOcrSettingsStore as any).persist
       expect(persistOptions.getOptions().name).toBe('peco-ocr-settings')
+    })
+  })
+
+  describe('U-OS-23~25: persist migrate (PCT-117 — 旧既定 4/2 → 0/0)', () => {
+    // persist の migrate 関数を取り出す。version 未設定(=0)からの移行で
+    // 位置補正のみ 0/0 にリセットし、他の永続値は保持することを検証する。
+    const getMigrate = () =>
+      (useOcrSettingsStore as any).persist.getOptions().migrate as (
+        state: unknown,
+        version: number,
+      ) => Record<string, unknown>
+
+    it('U-OS-23: version 0 (旧既定 4/2) からの移行で位置補正が 0/0 にリセットされる', () => {
+      const migrate = getMigrate()
+      const legacy = {
+        horizontal: { rowOrder: 'top-to-bottom', columnOrder: 'left-to-right' },
+        vertical: { columnOrder: 'right-to-left', rowOrder: 'top-to-bottom' },
+        groupTolerance: 30,
+        mixedOrder: 'vertical-first',
+        ocrLanguage: 'en-US',
+        ocrConfidenceThreshold: 0.5,
+        showLowConfidenceHighlight: false,
+        pdfTextOffsetRightMm: 4,
+        pdfTextOffsetDownMm: 2,
+      }
+      const migrated = migrate(legacy, 0)
+
+      expect(migrated.pdfTextOffsetRightMm).toBe(0)
+      expect(migrated.pdfTextOffsetDownMm).toBe(0)
+    })
+
+    it('U-OS-24: 移行時に位置補正以外の永続値は保持される', () => {
+      const migrate = getMigrate()
+      const legacy = {
+        horizontal: { rowOrder: 'bottom-to-top', columnOrder: 'right-to-left' },
+        vertical: { columnOrder: 'left-to-right', rowOrder: 'bottom-to-top' },
+        groupTolerance: 30,
+        mixedOrder: 'horizontal-first',
+        ocrLanguage: 'en-US',
+        ocrConfidenceThreshold: 0.5,
+        showLowConfidenceHighlight: false,
+        pdfTextOffsetRightMm: 4,
+        pdfTextOffsetDownMm: 2,
+      }
+      const migrated = migrate(legacy, 0) as typeof legacy
+
+      expect(migrated.groupTolerance).toBe(30)
+      expect(migrated.mixedOrder).toBe('horizontal-first')
+      expect(migrated.ocrLanguage).toBe('en-US')
+      expect(migrated.ocrConfidenceThreshold).toBe(0.5)
+      expect(migrated.showLowConfidenceHighlight).toBe(false)
+      expect(migrated.horizontal).toEqual(legacy.horizontal)
+      expect(migrated.vertical).toEqual(legacy.vertical)
+    })
+
+    it('U-OS-25: version 1 以降は位置補正をリセットしない（ユーザー設定を尊重）', () => {
+      const migrate = getMigrate()
+      const current = {
+        groupTolerance: 20,
+        pdfTextOffsetRightMm: 3,
+        pdfTextOffsetDownMm: 1.5,
+      }
+      const migrated = migrate(current, 1) as typeof current
+
+      expect(migrated.pdfTextOffsetRightMm).toBe(3)
+      expect(migrated.pdfTextOffsetDownMm).toBe(1.5)
+    })
+  })
+
+  describe('U-OS-26~29: PCT-110 位置補正 offset の clamp（±20mm）', () => {
+    it('U-OS-26: 上限 20mm を超える値は 20 に clamp される', () => {
+      useOcrSettingsStore.getState().setPdfTextOffsetRightMm(9999)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(20)
+      useOcrSettingsStore.getState().setPdfTextOffsetDownMm(100)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(20)
+    })
+
+    it('U-OS-27: 下限 -20mm 未満の値は -20 に clamp される', () => {
+      useOcrSettingsStore.getState().setPdfTextOffsetRightMm(-50)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(-20)
+    })
+
+    it('U-OS-28: 範囲内の正常値はそのまま反映される', () => {
+      useOcrSettingsStore.getState().setPdfTextOffsetRightMm(4)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(4)
+      useOcrSettingsStore.getState().setPdfTextOffsetDownMm(-3.5)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetDownMm).toBe(-3.5)
+    })
+
+    it('U-OS-29: 非有限値（NaN）は現値を維持する', () => {
+      useOcrSettingsStore.getState().setPdfTextOffsetRightMm(7)
+      useOcrSettingsStore.getState().setPdfTextOffsetRightMm(Number.NaN)
+      expect(useOcrSettingsStore.getState().pdfTextOffsetRightMm).toBe(7)
     })
   })
 

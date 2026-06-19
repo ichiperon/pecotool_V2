@@ -604,12 +604,43 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static OCR_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// PCT-116: temp 直書きの上限サイズ。raw IPC body をそのまま書くため、Webview 侵害時に
+/// 巨大 body の連投で temp ディスクを圧迫されないよう上限を設ける。業務 PDF / OCR 画像の
+/// 現実的上限を踏まえ 500MB とする（正規 UI の経路では到達しない）。
+const MAX_TEMP_WRITE_BYTES: usize = 500 * 1024 * 1024;
+
+/// PCT-116: 起動時に前回セッションが残した OCR/プレビュー temp ファイルを掃除する。
+/// `open_pdf_preview` の一時 PDF は外部ビューアで開く性質上その場で削除できず残置するため、
+/// 起動時に自分が書く prefix のファイルのみを対象に削除する。開いている最中のファイルは
+/// 削除に失敗しうるが無視する（次回起動で消える）。
+fn cleanup_stale_ocr_temp_files() {
+    let temp_dir = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&temp_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("peco_ocr_preview_") || name.starts_with("peco_ocr_") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Write image bytes to a uniquely-named temp PNG and return its path.
 /// Uses `std::env::temp_dir()` directly, bypassing Tauri fs-scope checks.
 /// Uniqueness is guaranteed by combining PID, nanosecond timestamp, and a
 /// per-process monotonic counter — preventing collisions even when the same
 /// bytes (and therefore the same pointer) are written in rapid succession.
 pub(crate) fn write_ocr_temp_bytes(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    // PCT-116: temp 直書きのサイズ上限ガード。
+    if bytes.len() > MAX_TEMP_WRITE_BYTES {
+        return Err(format!(
+            "temp write rejected: {} bytes exceeds limit {}",
+            bytes.len(),
+            MAX_TEMP_WRITE_BYTES
+        ));
+    }
     let temp_dir = std::env::temp_dir();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -647,6 +678,15 @@ async fn open_pdf_preview(
         tauri::ipc::InvokeBody::Raw(b) => b.clone(),
         _ => return Err("[open_pdf_preview] expected raw body".to_string()),
     };
+
+    // PCT-116: temp 直書きのサイズ上限ガード。
+    if bytes.len() > MAX_TEMP_WRITE_BYTES {
+        return Err(format!(
+            "[open_pdf_preview] body {} bytes exceeds limit {}",
+            bytes.len(),
+            MAX_TEMP_WRITE_BYTES
+        ));
+    }
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -907,9 +947,16 @@ async fn write_pdf_chunk(
 
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let path = normalize_child_path(&path)?;
+        // PCT-113: temp 名は UUID を含み毎回変わるため、ホワイトリスト照合は対応する
+        // 最終 PDF 名 (target) に対して行う。temp_target_path は path が正規の
+        // `.pecotool-...tmp` 形式であることも検証する。
         let target = temp_target_path(&path)?;
         validate_pdf_file_name(&target)?;
         validate_allowed_resolved_path(&app, &target)?;
+        // PCT-113: 実際の書込先 (path = temp 自身) もスコープ内であることを直接検証する。
+        // target がスコープ内なら同一ディレクトリの temp も実質スコープ内だが、
+        // 「validate した変数と書き込む変数が別」という誤読を避け、書込先そのものを自己完結で検証する。
+        validate_allowed_resolved_path(&app, &path)?;
 
         write_chunk_at(&path, offset, &bytes)
     })
@@ -1957,6 +2004,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri::Manager;
+            // PCT-116: 前回セッションが残した OCR/プレビュー temp を起動時に掃除する。
+            cleanup_stale_ocr_temp_files();
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(icon) = app.default_window_icon() {
                     let _ = window.set_icon(icon.clone());

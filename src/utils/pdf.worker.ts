@@ -24,6 +24,10 @@ async function handleSavePdf(
   }
 
   // D4: worker 殻は saveTimeoutMs:90_000 を渡す。
+  // PCT-114: main 殻 (pdfSaver.ts) は常に documentState.totalPages を渡す。worker 殻は
+  // シリアライズ境界を跨ぐため totalPages が欠落する経路（一部の直接呼び出し/テスト契約）
+  // が存在しうる。その場合のみ pagesMap.size にフォールバックする。本番 SAVE_PDF 経路では
+  // 常に totalPages が供給されるためフォールバックには到達しない（main と等価）。
   return buildPdfDocumentCore(
     originalPdfBytes,
     { totalPages: documentState.totalPages ?? pagesMap.size, pages: pagesMap },

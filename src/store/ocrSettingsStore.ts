@@ -26,6 +26,14 @@ export interface OcrLanguageInfo {
   display_name: string;
 }
 
+/** PCT-110: 位置補正 offset の許容範囲（mm）。これを超える値はページ外へテキスト層が飛ぶ。 */
+export const OFFSET_LIMIT_MM = 20;
+
+/** offset(mm) を ±OFFSET_LIMIT_MM へ clamp する。呼び出し側で有限性は確認済み前提。 */
+function clampOffsetMm(val: number): number {
+  return Math.max(-OFFSET_LIMIT_MM, Math.min(OFFSET_LIMIT_MM, val));
+}
+
 export interface OcrSortSettings {
   horizontal: {
     rowOrder: RowOrder;       // 行の読み順（主軸）
@@ -48,12 +56,13 @@ interface OcrSettingsState extends OcrSortSettings {
   showLowConfidenceHighlight: boolean;
   /**
    * 保存 PDF の OCR テキスト層（Acrobat の Ctrl+A 選択範囲）を表示上どれだけ右へずらすか (mm)。
-   * 正値で右、負値で左。既定 4mm。アプリ内のキャンバス表示や BB 枠には影響しない（保存出力のみ）。
+   * 正値で右、負値で左。既定 0mm（補正なし＝ツール表示の BB 枠と一致）。
+   * アプリ内のキャンバス表示や BB 枠には影響しない（保存出力のみ）。
    */
   pdfTextOffsetRightMm: number;
   /**
    * 保存 PDF の OCR テキスト層を表示上どれだけ下へずらすか (mm)。
-   * 正値で下、負値で上。既定 2mm。
+   * 正値で下、負値で上。既定 0mm（補正なし）。
    */
   pdfTextOffsetDownMm: number;
   setHorizontalRowOrder: (order: RowOrder) => void;
@@ -87,8 +96,8 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       availableLanguages: [],
       ocrConfidenceThreshold: 0.7,
       showLowConfidenceHighlight: true,
-      pdfTextOffsetRightMm: 4,
-      pdfTextOffsetDownMm: 2,
+      pdfTextOffsetRightMm: 0,
+      pdfTextOffsetDownMm: 0,
       setHorizontalRowOrder: (order) =>
         set((s) => ({ horizontal: { ...s.horizontal, rowOrder: order } })),
       setHorizontalColumnOrder: (order) =>
@@ -103,11 +112,37 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       setAvailableLanguages: (langs) => set({ availableLanguages: langs }),
       setOcrConfidenceThreshold: (val) => set({ ocrConfidenceThreshold: val }),
       setShowLowConfidenceHighlight: (val) => set({ showLowConfidenceHighlight: val }),
-      setPdfTextOffsetRightMm: (val) => set({ pdfTextOffsetRightMm: val }),
-      setPdfTextOffsetDownMm: (val) => set({ pdfTextOffsetDownMm: val }),
+      // PCT-110: 位置補正は素の座標平行移動のため、極端値だとテキスト層がページ外へ
+      // 飛んで実質テキスト消失に見える。物理的に妥当な ±OFFSET_LIMIT_MM へ clamp する。
+      // 非有限値（NaN 等の無効入力）は現値を維持する（既存のフォールバック挙動）。
+      setPdfTextOffsetRightMm: (val) =>
+        set((s) => ({
+          pdfTextOffsetRightMm: Number.isFinite(val) ? clampOffsetMm(val) : s.pdfTextOffsetRightMm,
+        })),
+      setPdfTextOffsetDownMm: (val) =>
+        set((s) => ({
+          pdfTextOffsetDownMm: Number.isFinite(val) ? clampOffsetMm(val) : s.pdfTextOffsetDownMm,
+        })),
     }),
     {
       name: 'peco-ocr-settings',
+      // version 1: 旧既定（右 4mm・下 2mm）から既定 0/0 への移行（PCT-117）。
+      // 旧既定はユーザーの明示設定ではなく開発時のデフォルト値だったため、
+      // 移行時に位置補正を 0/0 にリセットする。その他の永続値は保持する。
+      version: 1,
+      migrate: (persistedState, version) => {
+        const s = (persistedState ?? {}) as Partial<OcrSettingsState>;
+        // 返り値は rehydrate 時に既定値（initializer）とマージされるため、
+        // 永続化されていたフィールドのみを返せばよい（Partial で実体上問題ない）。
+        if (version < 1) {
+          return {
+            ...s,
+            pdfTextOffsetRightMm: 0,
+            pdfTextOffsetDownMm: 0,
+          } as OcrSettingsState;
+        }
+        return s as OcrSettingsState;
+      },
       // availableLanguages はランタイム取得値なので persist しない
       partialize: (s) => ({
         horizontal: s.horizontal,
