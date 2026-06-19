@@ -5,6 +5,16 @@
 
 ---
 
+## [2.0.23] - 2026-06-19
+
+> **2.0.22 のホットフィックス** — 実機手動テストで、すべての上書き/別名保存が `path is outside allowed Tauri file scope` で失敗するリグレッションを検出し修正。2.0.22 は外部未配布（署名なし）のため、保存が機能する最初のビルドは本版となる。cargo test 56 passed。
+
+### Fixed
+
+- **保存が「path is outside allowed Tauri file scope」で全面失敗する問題を修正** (PCT-118): 2.0.22 の PCT-113 で `write_pdf_chunk` が書込先の一時ファイル（`<target>.pecotool-<uuid>.tmp`）自身にも Tauri fs scope 検証を掛けていた。保存ダイアログが scope に登録するのはユーザーが選んだ最終PDF（`.pdf`）だけで、一時ファイルは scope に存在しないため `is_allowed` が false を返し、正規の保存先でも保存が拒否されていた。実書込は生の `std::fs` で行われ fs プラグインの scope を通らないため、一時ファイルへの scope 検証は元から不要だった。一時ファイルへの検証を除去し、最終PDF（`target`）への scope 検証のみを保持。`target` は scope 検証済みで、一時ファイルは `temp_target_path` により同一ディレクトリの兄弟であることが保証される（書込先の妥当性は維持）。回帰テスト6件を追加。
+
+---
+
 ## [2.0.22] - 2026-06-19
 
 > **最低保証5軸 アプリレビュー反映リリース** — v2.0.21 のアプリ全体レビュー（PDF読込/保存・OCR文字編集保存・OCR位置編集・無欠落保存・BB位置整合）で検出した P1 5件・P2 7件の修正一式。tsc clean / 広域 npm test 2109 passed / cargo test 50 passed / Playwright E2E 主要フロー 25 passed。詳細は `docs/review_issues_2026-06-19.md`。
