@@ -65,7 +65,7 @@ vi.mock('../../utils/pdfMetadataLoader', () => ({
 // pecoStore は本物を使うが、必要最小限の状態だけ。
 // loadPDF が返す doc を setDocument に流すので、副作用は無害。
 import { useFileOperations, __originalBytesCacheForTest, isWriteAccessError } from '../../hooks/useFileOperations';
-import { getAllTemporaryPageData, loadPDF, loadPage, clearTemporaryChanges, remapTemporaryPageEntries } from '../../utils/pdfLoader';
+import { getAllTemporaryPageData, loadPDF, loadPage, clearTemporaryChanges, remapTemporaryPageEntries, getSharedPdfProxy } from '../../utils/pdfLoader';
 import { savePDF } from '../../utils/pdfSaver';
 import { usePecoStore } from '../../store/pecoStore';
 import { useInfraStore } from '../../store/infraStore';
@@ -2142,5 +2142,158 @@ describe('PCT-104 R1: remap ターゲット順序ゲーティング', () => {
     const [, , remapNormalizedOrder] = remapMock.mock.calls[0] as [string, number[], number[], string[]];
     // 通常経路では normalizedPageOrder は post-normalize 順（この場合 identity）
     expect(remapNormalizedOrder).toEqual([0, 1, 2]);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// PCT-106 / PCT-109: 全ページ位置補正適用（applyOffsetAllPages）の
+// 可用性・進捗通知の回帰テスト。
+//   PCT-106: ループ内 loadPage の 1 ページ失敗で保存全体が中断しないこと。
+//   PCT-109: ページ進捗が showToast で通知されること。
+// previewOcrOffset 経路（applyOffsetAllPages=true）を入口に検証する。
+// ────────────────────────────────────────────────────────────────────────
+describe('useFileOperations 全ページ位置補正適用 (PCT-106 / PCT-109)', () => {
+  /**
+   * 全ページ位置補正の入口（previewOcrOffset）を駆動できる multi-page doc を投入する。
+   * 全ページ未抽出 (isTextExtracted=false) にして loadAllPagesWithTextBlocks の
+   * loadPage ループに入るようにする。
+   */
+  function setupMultiPageDoc(filePath: string, totalPages: number): PecoDocument {
+    const pages = new Map<number, PageData>();
+    for (let i = 0; i < totalPages; i += 1) {
+      pages.set(i, {
+        pageIndex: i,
+        width: 595,
+        height: 842,
+        textBlocks: [],
+        imageBlocks: [],
+        isDirty: false,
+        isTextExtracted: false,
+        thumbnail: null,
+      } as unknown as PageData);
+    }
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages,
+      metadata: {},
+      pages,
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: Array.from({ length: totalPages }, (_, i) => i),
+      currentPageIndex: 0,
+      isDirty: false,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  beforeEach(() => {
+    (getSharedPdfProxy as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    // open_pdf_preview を含む全 invoke を成功させる
+    (invoke as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve(undefined),
+    );
+  });
+
+  it('PCT-106: 1 ページの抽出が失敗しても保存（PDF生成）まで完走し、他ページは反映される', async () => {
+    setupMultiPageDoc('/offset/partial-fail.pdf', 3);
+
+    const loadPageMock = loadPage as unknown as ReturnType<typeof vi.fn>;
+    // displayIdx 1（source 1）のロードだけ失敗させ、残り 2 ページは成功させる。
+    loadPageMock.mockImplementation(
+      (_pdf: unknown, sourceIndex: number) => {
+        if (sourceIndex === 1) {
+          return Promise.reject(new Error('pdfjs extraction failed'));
+        }
+        return Promise.resolve({
+          pageIndex: sourceIndex,
+          textBlocks: [],
+          imageBlocks: [],
+          isDirty: false,
+          isTextExtracted: true,
+        });
+      },
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.previewOcrOffset();
+    });
+
+    // 1 ページ失敗でも全体は reject せず、PDF 生成（savePDF）まで到達する。
+    expect(savePDF).toHaveBeenCalled();
+    expect(ok).toBe(true);
+    // 3 ページ分の loadPage が試行された（失敗ページも try 内で呼ばれる）。
+    expect(loadPageMock).toHaveBeenCalledTimes(3);
+    // 失敗ページ数がエラートーストで可視化される。
+    const failToastCalls = showToast.mock.calls.filter(
+      ([msg, isError]) => isError === true && typeof msg === 'string' && msg.includes('位置補正適用に失敗'),
+    );
+    expect(failToastCalls.length).toBe(1);
+    expect(failToastCalls[0][0]).toContain('1ページ');
+  });
+
+  it('PCT-109: ページ進捗が showToast で通知される（最終ページは必ず通知）', async () => {
+    setupMultiPageDoc('/offset/progress.pdf', 3);
+
+    (loadPage as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      textBlocks: [],
+      imageBlocks: [],
+      isDirty: false,
+      isTextExtracted: true,
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.previewOcrOffset();
+    });
+
+    // 進捗トーストは間引かれるが、最終ページ (3/3) は必ず出る。
+    const progressToasts = showToast.mock.calls.filter(
+      ([msg]) => typeof msg === 'string' && msg.includes('全ページ位置補正を適用中'),
+    );
+    expect(progressToasts.length).toBeGreaterThanOrEqual(1);
+    const lastProgress = progressToasts[progressToasts.length - 1][0] as string;
+    expect(lastProgress).toContain('(3/3ページ)');
+  });
+
+  it('PCT-106: 全ページ成功時は失敗トーストを出さず保存完走する', async () => {
+    setupMultiPageDoc('/offset/all-ok.pdf', 2);
+
+    (loadPage as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      textBlocks: [],
+      imageBlocks: [],
+      isDirty: false,
+      isTextExtracted: true,
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.previewOcrOffset();
+    });
+
+    expect(ok).toBe(true);
+    expect(savePDF).toHaveBeenCalled();
+    const failToastCalls = showToast.mock.calls.filter(
+      ([, isError]) => isError === true,
+    );
+    // 位置補正失敗トーストは出ない（他のエラートーストも基本出ない経路）。
+    const offsetFail = failToastCalls.filter(
+      ([msg]) => typeof msg === 'string' && msg.includes('位置補正適用に失敗'),
+    );
+    expect(offsetFail.length).toBe(0);
   });
 });

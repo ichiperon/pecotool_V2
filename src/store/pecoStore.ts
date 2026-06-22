@@ -59,9 +59,18 @@ function clearedOcrPage(pageIndex: number, page: PageData): PageData {
  *
  * PCT-104 (A-lite 段階2): entries の pageIndex は displayIndex として扱い、
  * pageOrder を使って pageId に変換してから IDB に書く。
+ *
+ * PCT-108 (P1): pageOrder は呼び出し元が「action の set() 反映時点の値」を
+ * クロージャでキャプチャして渡す。書き込みは保存処理の長い await を跨いで
+ * 遅延実行されるため、ここで usePecoStore.getState().pageOrder を遅延参照すると
+ * 保存中に走った並べ替え undo/redo でライブ pageOrder が乖離し、書き込み先 pageId が
+ * 保存スナップショット体系とずれて remap の掃除対象から外れる (キー競合)。
+ * 呼び出し元が action 時点の pageOrder を固定して渡すことで、各書き込みが
+ * 自分の action の displayIndex 体系で一貫した pageId に着地する。
  */
 function schedulePendingIdbWrite(
   entries: Array<{ filePath: string; pageIndex: number; data: Partial<PageData> }>,
+  pageOrder: number[],
   options?: { afterPending?: boolean },
 ): void {
   if (entries.length === 0) return;
@@ -70,7 +79,7 @@ function schedulePendingIdbWrite(
   const work = pendingBeforeWrite
     .then(() => {
       // PCT-104: displayIndex -> pageId 変換
-      const pageOrder = usePecoStore.getState().pageOrder;
+      // PCT-108: pageOrder は呼び出し元キャプチャ値を使う (遅延 getState は禁止)
       const pageIdEntries = entries.map(({ filePath, pageIndex, data }) => ({
         filePath,
         pageId: resolvePageId(pageOrder, pageIndex),
@@ -101,17 +110,24 @@ function schedulePendingIdbWrite(
  * deletePageIds は呼び出し元で変換済みの pageId 文字列配列。
  * contentEntries.pageIndex は set() 後の新 pageOrder での displayIndex として扱い、
  * 内部で pageId に変換して書き込む。
+ *
+ * PCT-108 (P1): contentPageOrder は呼び出し元が set() 反映後の pageOrder を
+ * キャプチャして渡す。deletePageIds と同様に「呼び出し元で変換済み」へ揃え、
+ * 遅延実行中に保存と並走した undo/redo でライブ pageOrder が乖離しても、
+ * 書き込み先 pageId が action 時点の体系からずれないようにする。
  */
 function scheduleStructuralUndoRedoIdbSync(
   filePath: string,
   options: {
     deletePageIds?: string[];
     contentEntries?: Array<{ pageIndex: number; data: Partial<PageData> }>;
+    contentPageOrder: number[];
   },
 ): void {
   const deletes = options.deletePageIds ?? [];
   const contents = options.contentEntries ?? [];
   if (deletes.length === 0 && contents.length === 0) return;
+  const pageOrder = options.contentPageOrder;
   const work = waitForPendingIdbSaves()
     .then(() => {
       if (deletes.length === 0) return undefined;
@@ -119,8 +135,8 @@ function scheduleStructuralUndoRedoIdbSync(
     })
     .then(() => {
       if (contents.length === 0) return undefined;
-      // PCT-104: contentEntries.pageIndex は set() 後の最新 pageOrder での displayIndex
-      const pageOrder = usePecoStore.getState().pageOrder;
+      // PCT-104: contentEntries.pageIndex は set() 後の pageOrder での displayIndex
+      // PCT-108: pageOrder は呼び出し元キャプチャ値を使う (遅延 getState は禁止)
       return saveTemporaryPageDataBatch(
         contents.map(({ pageIndex, data }) => ({
           filePath,
@@ -914,7 +930,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   }),
 
   undo: () => {
-    const { undoStack, redoStack, document } = get();
+    const { undoStack, redoStack, document, pageOrder: pageOrderAtAction } = get();
     if (undoStack.length === 0 || !document) return;
 
     const action = undoStack[undoStack.length - 1];
@@ -934,7 +950,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // LRU 退避済みページが IDB に残っている可能性があるため、
       // 巻き戻し後の状態を IDB へも書き込んでメモリと完全同期させる。
       // (issue #3: undo が LRU 退避ページの IDB と非整合になる)
-      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }]);
+      // PCT-108: この action は pageOrder を変えないので action 時点の pageOrder を渡す
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }], pageOrderAtAction);
     } else if (action.type === 'update_pages') {
       // issue #93: 全ページスコープの置換等で複数ページを atomic に巻き戻す。
       const newPages = new Map(document.pages);
@@ -949,8 +966,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         isDirty: true,
       });
       // 全 entry を IDB へまとめて同期 (LRU 退避ページがあっても整合性を担保)
+      // PCT-108: update_pages は pageOrder を変えないので action 時点の pageOrder を渡す
       schedulePendingIdbWrite(
         action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.before })),
+        pageOrderAtAction,
       );
     } else if (action.type === 'delete_pages') {
       // issue #193: ページ削除を巻き戻す (削除前の状態に戻す)
@@ -968,11 +987,13 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       });
       // PCT-104 (A-lite 段階3): pageId が不変なため rename 巻き戻し不要。
       // beforePages の内容を書き込んで強制同期する。
+      // PCT-108: set() で pageOrder は action.beforeOrder に確定済み。その値を渡す。
       scheduleStructuralUndoRedoIdbSync(document.filePath, {
         contentEntries: Array.from(action.beforePages.entries()).map(([pi, page]) => ({
           pageIndex: pi,
           data: page,
         })),
+        contentPageOrder: action.beforeOrder,
       });
     } else if (action.type === 'reorder_pages') {
       // issue #193: ページ並べ替えを巻き戻す
@@ -1011,7 +1032,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   },
 
   redo: () => {
-    const { undoStack, redoStack, document } = get();
+    const { undoStack, redoStack, document, pageOrder: pageOrderAtAction } = get();
     if (redoStack.length === 0 || !document) return;
 
     const action = redoStack[0];
@@ -1029,7 +1050,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         isDirty: true
       });
       // undo と対称: redo 後の状態を IDB へも書き込んで整合性を担保
-      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }]);
+      // PCT-108: update_page は pageOrder を変えないので action 時点の pageOrder を渡す
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }], pageOrderAtAction);
     } else if (action.type === 'update_pages') {
       // issue #93: 全ページスコープの置換等で複数ページを atomic にやり直す。
       const newPages = new Map(document.pages);
@@ -1043,8 +1065,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         redoStack: newRedo,
         isDirty: true,
       });
+      // PCT-108: update_pages は pageOrder を変えないので action 時点の pageOrder を渡す
       schedulePendingIdbWrite(
         action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+        pageOrderAtAction,
       );
     } else if (action.type === 'delete_pages') {
       // issue #193: ページ削除をやり直す
@@ -1067,12 +1091,14 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         const redoDeletePageIds = (action.deletedPageIndices ?? []).map((di) =>
           resolvePageId(action.beforeOrder, di)
         );
+        // PCT-108: set() で pageOrder は action.afterOrder に確定済み。その値を渡す。
         scheduleStructuralUndoRedoIdbSync(document.filePath, {
           deletePageIds: redoDeletePageIds,
           contentEntries: Array.from(action.afterPages.entries()).map(([pi, page]) => ({
             pageIndex: pi,
             data: page,
           })),
+          contentPageOrder: action.afterOrder,
         });
       }
     } else if (action.type === 'reorder_pages') {
@@ -1319,8 +1345,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
 
     // LRU 退避済みページの IDB と整合させるため、変更ページ全部を IDB にも書き込む
+    // PCT-108: replaceText は pageOrder を変えない。set() 直後 (同一マイクロタスク内) の
+    // pageOrder を固定して渡し、書き込み遅延中の並べ替え undo/redo の影響を受けないようにする。
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+      get().pageOrder,
     );
 
     return { hits: totalHits, blocks: totalBlocks, pages: entries.length, skippedBlocks };
@@ -1466,8 +1495,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
 
     // IDB 書き込みは変更ページのみ 1 度ずつ
+    // PCT-108: replaceTextBatch も pageOrder を変えない。set() 直後の pageOrder を固定して渡す。
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+      get().pageOrder,
     );
 
     return { totalHits, perRuleHits };

@@ -221,12 +221,21 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
  *
  * 重い経路（ユーザー明示選択）: 単一 pdfjs worker を詰まらせないよう **逐次** 実行する。
  * 既にメモリ上で text 抽出済み (isTextExtracted) のページは再ロードしない。
+ *
+ * PCT-106: 1 ページの抽出失敗で全体を reject させない。失敗ページは既存メモリ値
+ * (existing) があればそれを流用し、無ければ再描画対象から外す（offset 非適用で
+ * 元のまま温存）。これにより 1 ページ失敗で保存全体が中断する事故を防ぐ。
+ * all-or-nothing なディスク書き込み保証は呼び出し側（savePDF→atomic replace）が
+ * 担うため、ここで一部ページを欠いても部分破損 PDF がディスクに残ることはない。
+ *
+ * PCT-109: 進捗を onProgress で通知し、長時間処理のフリーズ誤認を防ぐ。
  */
 async function loadAllPagesWithTextBlocks(
   filePath: string,
   pageOrder: number[],
   document: PecoDocument,
-): Promise<Map<number, PageData>> {
+  onProgress?: (processed: number, total: number, failed: number) => void,
+): Promise<{ pages: Map<number, PageData>; failedPages: number[] }> {
   const pdf = await getSharedPdfProxy(filePath);
   let bboxMeta: Awaited<ReturnType<typeof loadPecoToolBBoxMeta>> | null = null;
   try {
@@ -239,19 +248,40 @@ async function loadAllPagesWithTextBlocks(
     bboxMeta = null;
   }
   const all = new Map<number, PageData>();
-  for (let displayIdx = 0; displayIdx < document.totalPages; displayIdx += 1) {
+  const failedPages: number[] = [];
+  const total = document.totalPages;
+  for (let displayIdx = 0; displayIdx < total; displayIdx += 1) {
     const existing = document.pages.get(displayIdx);
     if (existing && existing.isTextExtracted) {
       all.set(displayIdx, existing);
+      onProgress?.(displayIdx + 1, total, failedPages.length);
       continue;
     }
     const sourceIndex = displayToSourcePageIndex(pageOrder, displayIdx);
-    const pd = await loadPage(pdf, sourceIndex, filePath, bboxMeta, document.mtime, {
-      displayPageIndex: displayIdx,
-    });
-    all.set(displayIdx, pd);
+    try {
+      const pd = await loadPage(pdf, sourceIndex, filePath, bboxMeta, document.mtime, {
+        displayPageIndex: displayIdx,
+      });
+      all.set(displayIdx, pd);
+    } catch (err) {
+      // PCT-106: 抽出失敗ページは全滅させずフォールバック。
+      // ここに来るページは isTextExtracted=false（true なら上で continue 済み）。
+      // 未抽出 PageData をそのまま renderPages に載せると、空/不完全な textBlocks で
+      // 既存テキスト層を strip 上書きしてデータ劣化させうる（マリン PCT-106 再指摘）。
+      // よって「実 textBlocks を持つ existing のみ流用」し、それ以外は Map に投入しない
+      // ＝ そのページは renderPages から外れ、元 PDF のテキスト層がそのまま温存される。
+      failedPages.push(displayIdx);
+      console.warn(
+        `[loadAllPages] page ${displayIdx} (source ${sourceIndex}) の抽出に失敗。フォールバックします:`,
+        err,
+      );
+      if (existing && existing.textBlocks && existing.textBlocks.length > 0) {
+        all.set(displayIdx, existing);
+      }
+    }
+    onProgress?.(displayIdx + 1, total, failedPages.length);
   }
-  return all;
+  return { pages: all, failedPages };
 }
 
 interface SaveResult {
@@ -679,15 +709,40 @@ export function useFileOperations(
     // 位置補正を未編集ページにも反映する。dirty ページの編集内容は overlay で優先する。
     let renderPages = dirtyOnlyPages;
     if (executeOptions.applyOffsetAllPages) {
-      const allPages = await withStep(
+      // PCT-109: 固定 600 秒の崖を廃し、ページ数に比例した動的タイムアウトにする。
+      // 1 ページあたりの想定処理時間 (ms) × 総ページ数を下限 600 秒にクランプ。
+      const PER_PAGE_TIMEOUT_MS = 1_500;
+      const totalPages = document.totalPages;
+      const loadAllPagesTimeout = Math.max(600_000, totalPages * PER_PAGE_TIMEOUT_MS);
+
+      // PCT-109: 進捗トーストはページ単位で頻発させず、一定間隔に間引く。
+      let lastProgressShownAt = 0;
+      const PROGRESS_TOAST_INTERVAL_MS = 1_000;
+      const onProgress = (processed: number, total: number) => {
+        const now = performance.now();
+        const isLast = processed >= total;
+        if (!isLast && now - lastProgressShownAt < PROGRESS_TOAST_INTERVAL_MS) return;
+        lastProgressShownAt = now;
+        showToast(`全ページ位置補正を適用中... (${processed}/${total}ページ)`);
+      };
+
+      const { pages: allPages, failedPages } = await withStep(
         'loadAllPages',
-        600_000,
-        () => loadAllPagesWithTextBlocks(sourceFilePath, savePageOrder, document),
+        loadAllPagesTimeout,
+        () => loadAllPagesWithTextBlocks(sourceFilePath, savePageOrder, document, onProgress),
       );
       for (const [idx, p] of mergedPages.entries()) {
         allPages.set(idx, p); // 編集済み（メモリ/IDB）ページの内容を優先
       }
       renderPages = allPages;
+
+      // PCT-106: 抽出失敗ページがあった場合はユーザーに可視化する（保存自体は続行）。
+      if (failedPages.length > 0) {
+        showToast(
+          `${failedPages.length}ページの位置補正適用に失敗したため、該当ページは元のまま保存されます。`,
+          true,
+        );
+      }
     }
     const mergedDoc: PecoDocument = { ...document, pages: renderPages };
     let skippedChars: SkippedPdfTextChar[] = [];

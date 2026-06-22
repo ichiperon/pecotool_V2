@@ -1087,8 +1087,13 @@ export async function buildPdfDocumentCore(
           if (isCurveDefinition((block as { curve?: unknown }).curve)) {
             out.curve = (block as { curve: CurveDefinition }).curve;
           }
-          // NOTE: confidence は repair 経路で引き継がない。次回保存時に bboxMeta 経由で再永続化されるため
-          // 一時的欠落に留まる（PCT-047 設計上の許容）。
+          // PCT-112: confidence も repair 経路で引き継ぐ。引き継がないと bloat 検知が
+          // fire した保存→再オープンの 1 サイクルで低信頼ハイライトが一時消失する。
+          // 値域 0..1 の有限数値のみ採用（永続化側 1146 と同じ条件）。
+          const conf = (block as { confidence?: unknown }).confidence;
+          if (typeof conf === 'number' && Number.isFinite(conf) && conf >= 0 && conf <= 1) {
+            out.confidence = conf;
+          }
           return out;
         });
       if (repairBlocks.length === 0) continue;

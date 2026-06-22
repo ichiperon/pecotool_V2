@@ -696,3 +696,150 @@ describe('PCT-070: 保存完了後のクリアは保存で回収したページ�
     expect(mocks.clearTemporaryChanges).not.toHaveBeenCalled();
   });
 });
+
+// ── PCT-108: 遅延 IDB 書き込み中に並べ替えが走っても action 時点の pageId に着地する ──
+
+describe('PCT-108: schedulePendingIdbWrite/scheduleStructuralUndoRedoIdbSync が遅延中の pageOrder 変化に影響されない', () => {
+  /**
+   * 背景 (P1 / 軸#2・#4):
+   *   schedulePendingIdbWrite と scheduleStructuralUndoRedoIdbSync は、保存処理の
+   *   長い await を跨いで .then() 内で遅延実行される。修正前はこの .then() 内で
+   *   usePecoStore.getState().pageOrder を遅延参照していたため、保存中にユーザーが
+   *   「ページ並べ替えを含む undo」を打つとライブ pageOrder が乖離し、書き込み先 pageId が
+   *   action 時点の体系とずれて remap の掃除対象から外れる (キー競合)。
+   *
+   *   本テストは saveTemporaryPageDataBatch を gate で堰き止め、書き込みが in-flight の
+   *   間に movePage で pageOrder を変化させる。修正により、各書き込みは action 実行時点で
+   *   キャプチャした pageOrder に基づく pageId に着地する (ライブ値を読まない)。
+   */
+  function installGatedStatefulIdbMocks(
+    fakeIdb: Map<string, Record<string, unknown>>,
+    gate: { promise: Promise<void> } | null,
+  ) {
+    mocks.saveTemporaryPageDataBatch.mockImplementation(
+      async (entries: Array<{ filePath: string; pageId: string; data: Record<string, unknown> }>) => {
+        if (gate) await gate.promise;
+        for (const { filePath, pageId, data } of entries) {
+          const { thumbnail: _t, ...clean } = data;
+          fakeIdb.set(`${filePath}:${pageId}`, clean);
+        }
+      });
+    mocks.deleteTemporaryPageKeys.mockImplementation(async (filePath: string, pageIds: string[]) => {
+      for (const pageId of pageIds) fakeIdb.delete(`${filePath}:${pageId}`);
+    });
+    mocks.getAllTemporaryPageData.mockResolvedValue(new Map());
+  }
+
+  it('update_pages の undo 書き込み中に movePage が走っても、書き込みは action 時点の pageId (src:2) に着地する', async () => {
+    const { waitForPendingIdbSaves } = await import('../../store/pecoStore');
+    const fakeIdb = new Map<string, Record<string, unknown>>();
+    const gate = deferred<void>();
+    installGatedStatefulIdbMocks(fakeIdb, gate);
+
+    // pageOrder = [0,1,2] (identity)。displayIndex 2 → src:2。
+    const p0 = { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0-a', text: 'P0' })], isDirty: false, thumbnail: null };
+    const p1 = { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p1-a', text: 'P1' })], isDirty: false, thumbnail: null };
+    const p2 = { pageIndex: 2, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p2-a', text: 'P2_AFTER' })], isDirty: true, thumbnail: null };
+    const doc: PecoDocument = {
+      filePath: '/c108.pdf', fileName: 'c108.pdf', totalPages: 3, metadata: {},
+      pages: new Map([[0, p0], [1, p1], [2, p2]]),
+    };
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0, 1, 2],
+      originalBytes: new Uint8Array([1, 2, 3]),
+      currentPageIndex: 2,
+      isDirty: true,
+      // update_pages action: undo すると page 2 を before に戻し IDB へ書き込む
+      undoStack: [{
+        type: 'update_pages' as const,
+        entries: [{
+          pageIndex: 2,
+          before: { ...p2, textBlocks: [makeBlock({ id: 'p2-a', text: 'P2_BEFORE' })] },
+          after: p2,
+        }],
+      }],
+      redoStack: [],
+    } as any);
+
+    // undo を発火 → schedulePendingIdbWrite([... pageIndex:2 ...], pageOrderAtAction=[0,1,2])。
+    // saveTemporaryPageDataBatch は gate で堰き止められ、書き込みは in-flight のまま。
+    usePecoStore.getState().undo();
+
+    // 書き込みが in-flight の間に並べ替えを実行 → ライブ pageOrder が [1,2,0] に変化。
+    // ライブ参照だった場合、displayIndex 2 は src:0 に解決され誤ったキーへ着地する。
+    // onIdbWork を渡して movePage 内の waitForPendingIdbSaves() による待機をスキップする
+    // (gate で堰き止めた in-flight 書き込みを待つとデッドロックするため)。
+    await usePecoStore.getState().movePage(0, 2, () => {});
+    expect(usePecoStore.getState().pageOrder).toEqual([1, 2, 0]);
+
+    // gate を解放して in-flight 書き込みを完了させる。
+    gate.resolve();
+    await waitForPendingIdbSaves();
+
+    // 修正後: action 時点の pageOrder=[0,1,2] でキャプチャ済みのため src:2 に着地する。
+    expect(fakeIdb.has('/c108.pdf:src:2')).toBe(true);
+    expect((fakeIdb.get('/c108.pdf:src:2') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P2_BEFORE');
+    // ライブ参照だった場合に着地していたであろう src:0 は汚染されていない。
+    expect(fakeIdb.has('/c108.pdf:src:0')).toBe(false);
+  });
+
+  it('delete_pages の undo 構造同期中に並べ替えが走っても contentEntries は beforeOrder の pageId に着地する', async () => {
+    const { waitForPendingIdbSaves } = await import('../../store/pecoStore');
+    const fakeIdb = new Map<string, Record<string, unknown>>();
+    const gate = deferred<void>();
+    installGatedStatefulIdbMocks(fakeIdb, gate);
+
+    // 現状 pageOrder=[0,2] (page 1 が削除済み)。undo で beforeOrder=[0,1,2] に復元される。
+    const beforePages = new Map<number, PageData>([
+      [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0', text: 'P0_RESTORED' })], isDirty: true, thumbnail: null }],
+      [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p1', text: 'P1_RESTORED' })], isDirty: true, thumbnail: null }],
+      [2, { pageIndex: 2, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p2', text: 'P2_RESTORED' })], isDirty: true, thumbnail: null }],
+    ]);
+    const doc: PecoDocument = {
+      filePath: '/c108b.pdf', fileName: 'c108b.pdf', totalPages: 2, metadata: {},
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0', text: 'P0' })], isDirty: false, thumbnail: null }],
+        [1, { pageIndex: 1, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p2', text: 'P2' })], isDirty: false, thumbnail: null }],
+      ]),
+    };
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0, 2],
+      originalBytes: new Uint8Array([1, 2, 3]),
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [{
+        type: 'delete_pages' as const,
+        beforePages,
+        beforeOrder: [0, 1, 2],
+        beforeTotalPages: 3,
+        beforeCurrentPageIndex: 0,
+        afterPages: doc.pages,
+        afterOrder: [0, 2],
+        afterTotalPages: 2,
+        afterCurrentPageIndex: 0,
+        deletedPageIndices: [1],
+      }],
+      redoStack: [],
+    } as any);
+
+    // undo を発火 → set() で pageOrder=[0,1,2] に確定し、構造同期が
+    // contentPageOrder=[0,1,2] をキャプチャして in-flight に入る (gate で堰き止め)。
+    usePecoStore.getState().undo();
+    expect(usePecoStore.getState().pageOrder).toEqual([0, 1, 2]);
+
+    // in-flight 中に並べ替え → ライブ pageOrder を [2,0,1] に変化させる。
+    // (onIdbWork で in-flight 待機をスキップし、デッドロックを避ける)
+    await usePecoStore.getState().movePage(2, 0, () => {});
+    expect(usePecoStore.getState().pageOrder).toEqual([2, 0, 1]);
+
+    gate.resolve();
+    await waitForPendingIdbSaves();
+
+    // beforeOrder=[0,1,2] のキャプチャ値で書かれるため、displayIndex 0/1/2 → src:0/1/2 に正しく着地。
+    expect((fakeIdb.get('/c108b.pdf:src:0') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P0_RESTORED');
+    expect((fakeIdb.get('/c108b.pdf:src:1') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P1_RESTORED');
+    expect((fakeIdb.get('/c108b.pdf:src:2') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P2_RESTORED');
+  });
+});
