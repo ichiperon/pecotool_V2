@@ -51,6 +51,18 @@ vi.mock('@cantoo/pdf-lib', () => ({
   scale:             m.scaleFn,
   PDFRawStream:     m.PDFRawStream,
   PDFArray:         m.PDFArray,
+  // 案A (buildBlockSeparatorOperators) が使う text-state operators のスタブ。
+  // pdfSaver.test.ts は page.pushOperators を m.pushOperators でモックし、
+  // drawText には本文テキストのみが渡るようになった（スペース境界は pushOperators 経由）。
+  beginText:         () => ({ type: 'BT' }),
+  endText:           () => ({ type: 'ET' }),
+  setFontAndSize:    (key: unknown, size: number) => ({ type: 'Tf', key, size }),
+  showText:          (hex: unknown) => ({ type: 'Tj', hex }),
+  setTextMatrix:     (a: number, b: number, c: number, d: number, e: number, f: number) => ({ type: 'Tm', a, b, c, d, e, f }),
+  setTextRenderingMode: (mode: number) => ({ type: 'Tr', mode }),
+  setWordSpacing:    (w: number) => ({ type: 'Tw', w }),
+  TextRenderingMode: { Invisible: 3 },
+  concatTransformationMatrix: (a: number, b: number, c: number, d: number, e: number, f: number) => ({ type: 'cm', a, b, c, d, e, f }),
 }))
 
 vi.mock('@pdf-lib/fontkit', () => ({ default: {} }))
@@ -421,13 +433,17 @@ describe('pdfSaver / savePDF', () => {
         expect.any(Error),
       )
       // 2件ともdrawText が呼ばれる（1件目は例外で落ちた後もループ継続）。
-      // issue #100: 各ブロック描画後に invisible スペース 1 文字を追加するため、
-      //             1 件目 (throw) で 1 回 + 2 件目 (成功) で text+space で 2 回 = 計 3 回。
+      // 案A以降: invisible スペース境界マーカーは page.pushOperators() 経由の
+      // buildBlockSeparatorOperators で発行されるため、drawText には本文のみが渡る。
+      // 1件目 (throw) は try/catch で separator も skip。2件目 (成功) は separator が
+      // pushOperators 経由で出る（ただしこのテストのモック環境ではフォントキー登録
+      // が成立しないため separator の pushOperators 呼び出しは発生しない）。
+      // drawText の呼び出し = 2回（本文のみ）。
+      // separator の Tw/BT/ET 発行は blockSeparatorOperators.test.ts で独立して検証済み。
       const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
       expect(drawnTexts).toContain('壊れたテキスト')
       expect(drawnTexts).toContain('正常なテキスト')
-      expect(drawnTexts).toContain(' ')
-      expect(m.drawText).toHaveBeenCalledTimes(3)
+      expect(m.drawText).toHaveBeenCalledTimes(2)
 
       warnSpy.mockRestore()
     })
@@ -469,11 +485,12 @@ describe('pdfSaver / savePDF', () => {
       withPageCount(3)
       await savePDF(new Uint8Array(), doc)
 
-      // dirty な page 1 のみ描画される。issue #100 で各ブロック末尾に invisible
-      // スペース (U+0020) を 1 文字追加するため、1 ブロックにつき text + space で 2 回。
-      expect(m.drawText).toHaveBeenCalledTimes(2)
+      // dirty な page 1 のみ描画される。案A以降、invisible スペース境界マーカーは
+      // page.pushOperators() 経由の buildBlockSeparatorOperators で発行されるため、
+      // drawText には本文テキストのみが渡る（1 ブロックにつき drawText 1 回）。
+      // separator の Tw/BT/ET 発行は blockSeparatorOperators.test.ts で独立して検証済み。
+      expect(m.drawText).toHaveBeenCalledTimes(1)
       expect(m.drawText.mock.calls[0][0]).toBe('Page1')
-      expect(m.drawText.mock.calls[1][0]).toBe(' ')
     })
   })
 
@@ -978,8 +995,11 @@ describe('pdfSaver / savePDF', () => {
       const drawnTexts = m.drawText.mock.calls.map((c: any[]) => c[0])
       expect(drawnTexts).toContain('PageZero')
       expect(drawnTexts).toContain('PageOne')
-      // 2 dirty page × (text 1 回 + issue #100 の invisible スペース 1 回) = 4 回。
-      expect(m.drawText).toHaveBeenCalledTimes(4)
+      // 案A以降: invisible スペース境界マーカーは pushOperators 経由の
+      // buildBlockSeparatorOperators で発行されるため、drawText の呼び出しは本文のみ。
+      // 2 dirty page × text 1 回 = 2 回。
+      // separator の Tw/BT/ET 発行は blockSeparatorOperators.test.ts で独立して検証済み。
+      expect(m.drawText).toHaveBeenCalledTimes(2)
     })
   })
 
@@ -1171,6 +1191,83 @@ describe('pdfSaver / savePDF', () => {
       }
       await savePDF(new Uint8Array(), doc)
       expect(m.embedFont).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('U-SV-34: separator wiring — fontKey が解決されると pushOperators に BT/Tw(>0)/Tj/ET/Tw(0) が渡る (P1-1)', () => {
+    it('page.node.newFontDictionary が fontKey を返す場合、横書き separator が pushOperators 経由で発行される', async () => {
+      // P1-1: getOrRegisterPageFontKey が fontKey を解決できる環境を構築し、
+      // buildBlockSeparatorOperators が実際に page.pushOperators に渡ることを検証する。
+      //
+      // デフォルトの mockPage.node は newFontDictionary を持たないため fontKey が
+      // 常に undefined になる。このテストでは page.node.newFontDictionary を stub して
+      // fontKey を解決させ、separator 結線を保証する。
+
+      const fakeFontKey = 'PecoTool-F1'           // PDFName.of() stub は文字列を返す
+
+      // fontKey を返す newFontDictionary stub。この node が使われることで
+      // getOrRegisterPageFontKey が cacheable な key を返す。
+      const p1Page = {
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),   // findExistingFontKey → undefined
+          newFontDictionary: vi.fn().mockReturnValue(fakeFontKey), // fontKey を返す
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }
+
+      // embedFont が返す font に ref と encodeText を追加
+      // (getOrRegisterPageFontKey は font.ref を newFontDictionary に渡す)
+      const fakeRef = { objectNumber: 1, generationNumber: 0, toString: () => '1 0 R' }
+      m.embedFont.mockResolvedValueOnce({
+        widthOfTextAtSize: vi.fn().mockReturnValue(10),
+        heightAtSize: vi.fn().mockImplementation((_size: number, opts?: { descender?: boolean }) => {
+          return opts?.descender === false ? 1.448 * 0.8 : 1.448
+        }),
+        ref: fakeRef,
+        encodeText: vi.fn().mockReturnValue('<2020>'),  // U+0020 の PDFHexString
+      })
+
+      // p1Page を insertPage/addPage/getPage/getPages から返すよう上書き
+      m.insertPage.mockReturnValue(p1Page)
+      m.addPage.mockReturnValue(p1Page)
+      defaultPdfDocMock.getPage.mockReturnValue(p1Page)
+      defaultPdfDocMock.getPages.mockReturnValue([p1Page])
+
+      const doc = makeDoc([{
+        writingMode: 'horizontal',
+        text: 'テスト',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      // pushOperators に渡された全 operator を flat に展開して検証
+      const allOps = m.pushOperators.mock.calls.flat(Infinity)
+
+      // BT/ET が存在すること（separator の外枠）
+      expect(allOps).toContainEqual({ type: 'BT' })
+      expect(allOps).toContainEqual({ type: 'ET' })
+
+      // Tw > 0 が出ること（送り幅拡大）
+      const twOps = allOps.filter((op: any) => op?.type === 'Tw')
+      expect(twOps.length).toBeGreaterThanOrEqual(2)
+      const positveTwOps = twOps.filter((op: any) => op.w > 0)
+      expect(positveTwOps.length).toBeGreaterThanOrEqual(1)
+
+      // Tw = 0 のリセットが出ること
+      const zeroTwOps = twOps.filter((op: any) => op.w === 0)
+      expect(zeroTwOps.length).toBeGreaterThanOrEqual(1)
+
+      // Tj が出ること（スペースの showText）
+      expect(allOps).toContainEqual(expect.objectContaining({ type: 'Tj' }))
     })
   })
 
