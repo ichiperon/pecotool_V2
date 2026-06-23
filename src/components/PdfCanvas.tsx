@@ -27,6 +27,7 @@ import { isCurveDefinition } from "../utils/curveDefinition";
 import { arcHandlePositions } from "../utils/arcFromThreePoints";
 import { renderStaticLayer, drawStaticBlockCurve } from "../utils/pdfCanvasRender";
 import { getSplitRatioSnapped } from "../utils/splitBlock";
+import { applyRotationTransform, rotatedScreenToBbox } from "../utils/canvasRotation";
 import type { TextBlock, BoundingBox } from "../types";
 
 // #236: resize/curve handle sizes
@@ -46,6 +47,11 @@ interface PdfCanvasProps {
   /** #226: 低信頼ハイライト設定を親から受け取る (直接 store 購読を避ける) */
   confidenceThreshold?: number;
   showLowConfidenceHighlight?: boolean;
+  /**
+   * フィット表示（autoFit）が有効かどうか。usePdfRendering に転送してページ切替 debounce を制御する。
+   * autoFit OFF のときはページ切替時の 50ms 待機を 0ms に短縮する。省略時は true（従来挙動を維持）。
+   */
+  isAutoFit?: boolean;
 }
 
 export function PdfCanvas({
@@ -56,6 +62,7 @@ export function PdfCanvas({
   onRangeOcr,
   confidenceThreshold: ocrConfidenceThreshold,
   showLowConfidenceHighlight,
+  isAutoFit,
 }: PdfCanvasProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   // 静的層: 全 BB の塗・枠・テキスト (非選択分のみ)
@@ -71,6 +78,10 @@ export function PdfCanvas({
   // primitive selector に分解する。
   const documentFilePath = usePecoStore(selectDocumentFilePath);
   const documentTotalPages = usePecoStore(selectDocumentTotalPages);
+  // 現在ページの UI 回転角度を購読する。rotation は 0/90/180/270 の整数値。
+  // 元PDF の /Rotate は pdfPage.rotate で別途取れるため、store の値はあくまで
+  // 「ユーザーが UI 操作で加えた追加回転」として扱う。
+  const pageRotation = usePecoStore((s) => s.document?.pages.get(pageIndex)?.rotation ?? 0);
   const documentEpoch = useInfraStore(selectDocumentEpoch);
   // overlay 再描画 effect は textBlocks のみを依存とし、PageData の他フィールド
   // (isDirty / thumbnail / isTextExtracted 等) や同ページ内の bbox 以外の変更で
@@ -152,9 +163,11 @@ export function PdfCanvas({
     pageIndex,
     documentEpoch,
     zoom,
+    pageRotation,
     onFirstRender,
     onRenderComplete,
     renderOverlaysRef,
+    isAutoFit,
   });
 
   const drawing = useCanvasDrawing({
@@ -202,12 +215,18 @@ export function PdfCanvas({
   } = curveEditor;
 
   const getMousePos = (e: React.MouseEvent) => {
-    const rect = overlayCanvasRef.current?.getBoundingClientRect();
+    const canvas = overlayCanvasRef.current;
+    const rect = canvas?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-    };
+    const rx = e.clientX - rect.left;
+    const ry = e.clientY - rect.top;
+    if (pageRotation === 0) return { x: rx, y: ry };
+    // UI rotation がかかっているとき、rotated screen 座標を bbox 空間 (= scale 済み) に逆変換する。
+    // canvas.width/height は composedRotation 後の実ピクセルサイズで、
+    // usePdfRendering が設定した値（rotation=90/270 なら元の w/h が swap 済み）。
+    const vw = canvas?.width ?? rect.width;
+    const vh = canvas?.height ?? rect.height;
+    return rotatedScreenToBbox(rx, ry, { rotation: pageRotation, vw, vh });
   };
 
   // 選択されたブロックへの自動スクロール。
@@ -278,6 +297,10 @@ export function PdfCanvas({
       const context = canvas.getContext("2d");
       if (!context) return;
 
+      const rotParams = pageRotation !== 0
+        ? { rotation: pageRotation, vw: canvas.width, vh: canvas.height }
+        : undefined;
+
       renderStaticLayer(
         context,
         canvas,
@@ -290,6 +313,7 @@ export function PdfCanvas({
         searchHitIndex,
         ocrConfidenceThreshold,
         showLowConfidenceHighlight,
+        rotParams,
       );
     };
 
@@ -305,7 +329,7 @@ export function PdfCanvas({
         staticOverlayRafRef.current = null;
       }
     };
-  }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage, searchTerm, searchHitIndex, ocrConfidenceThreshold, showLowConfidenceHighlight]);
+  }, [zoom, currentTextBlocks, pageIndex, showOcr, ocrOpacity, pdfPage, searchTerm, searchHitIndex, ocrConfidenceThreshold, showLowConfidenceHighlight, pageRotation]);
 
   // 動的層: 選択 BB ハイライト + drawing/altDrag プレビュー
   useEffect(() => {
@@ -317,7 +341,17 @@ export function PdfCanvas({
       const context = canvas.getContext("2d");
       if (!context) return;
 
+      // clearRect は transform の影響を受けないよう identity で行う。
+      context.save();
+      context.setTransform(1, 0, 0, 1, 0, 0);
       context.clearRect(0, 0, canvas.width, canvas.height);
+      context.restore();
+
+      // UI rotation がある場合は描画全体に変換を適用する (r=0 は恒等 = 従来動作と同一)。
+      context.save();
+      if (pageRotation !== 0) {
+        applyRotationTransform(context, { rotation: pageRotation, vw: canvas.width, vh: canvas.height });
+      }
 
       // #288: split mode hover preview guide line
       if (isSplitMode) {
@@ -661,6 +695,9 @@ export function PdfCanvas({
           context.fillText(label, drag.altDragEnd.x + 15, drag.altDragEnd.y);
         }
       }
+
+      // rotation transform の save() を閉じる (r=0 のときは save/restore のみで恒等)。
+      context.restore();
     };
 
     renderOverlaysRef.current = renderOverlays;
@@ -702,6 +739,7 @@ export function PdfCanvas({
     rangeOcrDrag,
     polylineDraftActive,
     polylineDraftPoints,
+    pageRotation,
     // issue #172: dragPreviewBboxes は ref 経由で読み、購読 effect で
     // RAF redraw を直接スケジュールする。ここでは依存に含めないことで
     // BB 500+ 環境での毎フレーム再 render を回避する。
@@ -739,6 +777,9 @@ export function PdfCanvas({
     if (staticOverlayRafRef.current) cancelAnimationFrame(staticOverlayRafRef.current);
     staticOverlayRafRef.current = requestAnimationFrame(() => {
       staticOverlayRafRef.current = null;
+      const rotParams = pageRotation !== 0
+        ? { rotation: pageRotation, vw: canvas.width, vh: canvas.height }
+        : undefined;
       renderStaticLayer(
         context,
         canvas,
@@ -751,6 +792,7 @@ export function PdfCanvas({
         searchHitIndex,
         ocrConfidenceThreshold,
         showLowConfidenceHighlight,
+        rotParams,
       );
     });
 
@@ -762,8 +804,9 @@ export function PdfCanvas({
     };
     // 注: 主な依存は selectedIds。ocrConfidenceThreshold / showLowConfidenceHighlight は
     // renderStaticLayer に渡しているため依存配列に含める (#244)。
+    // pageRotation は RAF 内で読み込むため依存配列に含める。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedIds, ocrConfidenceThreshold, showLowConfidenceHighlight]);
+  }, [selectedIds, ocrConfidenceThreshold, showLowConfidenceHighlight, pageRotation]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (disableDrawing) return;

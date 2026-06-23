@@ -19,6 +19,12 @@ interface UsePdfRenderingParams {
   pageIndex: number;
   documentEpoch?: number;
   zoom: number;
+  /**
+   * UI で設定したページ回転角度 (0/90/180/270)。
+   * pdfjs の getViewport は rotation 引数に絶対値を取り、PDF の /Rotate を上書きする。
+   * そのため (pdfPage.rotate + pageRotation) % 360 を渡して合成回転を実現する。
+   */
+  pageRotation?: number;
   onFirstRender?: () => void;
   /**
    * 実 render() が完了したタイミングで呼ばれる。
@@ -27,6 +33,16 @@ interface UsePdfRenderingParams {
    */
   onRenderComplete?: () => void;
   renderOverlaysRef: MutableRefObject<(() => void) | null>;
+  /**
+   * フィット表示（autoFit）が有効かどうか。
+   * autoFit ON のとき、ページ切替直後に ResizeObserver 経由で zoom が後続して
+   * 確定するまで最大 ~50ms かかる。この間に古い zoom で render を開始すると
+   * pdfjs worker が無駄に占有されるため、ページ切替時は 50ms 待機する。
+   * autoFit OFF のとき（固定 zoom）は zoom がすでに確定しているため、
+   * ページ切替の debounce を 0ms に短縮して体感遷移速度を改善する。
+   * デフォルト true（省略時は従来の 50ms を維持・後方互換）。
+   */
+  isAutoFit?: boolean;
 }
 
 interface UsePdfRenderingResult {
@@ -60,9 +76,11 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     pageIndex,
     documentEpoch = 0,
     zoom,
+    pageRotation = 0,
     onFirstRender,
     onRenderComplete,
     renderOverlaysRef,
+    isAutoFit = true,
   } = params;
 
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
@@ -100,8 +118,9 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     pdfPage: pdfjsLib.PDFPageProxy | null;
     renderMeta: RenderPageMeta | null;
     zoom: number;
-  }>({ pdfPage: null, renderMeta: null, zoom });
-  latestParamsRef.current = { pdfPage, renderMeta: pdfPageMeta, zoom };
+    pageRotation: number;
+  }>({ pdfPage: null, renderMeta: null, zoom, pageRotation });
+  latestParamsRef.current = { pdfPage, renderMeta: pdfPageMeta, zoom, pageRotation };
 
   // PDFページの取得
   // ファイル or ページ切替時: 旧 pdfPage は即座にクリアせず、新ページ proxy の
@@ -197,7 +216,11 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     // 代入は canvas を白でクリアするので画像は一瞬空白になりうるが、後続の
     // render or bitmapCache 描画が同期 or 数フレーム以内に上書きするため、
     // 「BB overlay が新 zoom、画像が古い zoom サイズ」という乖離は起きない。
-    const viewport = pdfPage.getViewport({ scale: zoom / 100 });
+    //
+    // pdfjs getViewport の rotation 引数は絶対値（PDF の /Rotate を上書き）。
+    // UI rotation と元PDF /Rotate を合成した値を渡す。
+    const composedRotation = ((pdfPage.rotate ?? 0) + pageRotation) % 360;
+    const viewport = pdfPage.getViewport({ scale: zoom / 100, rotation: composedRotation });
     const w = Math.floor(viewport.width);
     const h = Math.floor(viewport.height);
     const pdfCanvas = pdfCanvasRef.current;
@@ -212,7 +235,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
 
     // bitmapCache ヒット時は debounce を待たず同期で完了させる (issue #94 (3))。
     // 進行中の古い render があればキャンセルしてからキャッシュ画像を貼る。
-    const cacheKey = renderCacheKey(pdfPageMeta, zoom);
+    const cacheKey = renderCacheKey(pdfPageMeta, zoom, pageRotation);
     const cached = getBitmapCache(cacheKey);
     if (cached && cached.width === w && cached.height === h) {
       if (renderTaskRef.current) {
@@ -251,15 +274,17 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
       const curMeta = latest.renderMeta;
       if (!curPage || !curMeta || !pdfCanvasRef.current) return;
       const curZoom = latest.zoom;
+      const curPageRotation = latest.pageRotation;
 
       const canvas = pdfCanvasRef.current;
       const context = canvas.getContext("2d", { alpha: false, willReadFrequently: false })!;
 
-      const liveViewport = curPage.getViewport({ scale: curZoom / 100 });
+      const curComposedRotation = ((curPage.rotate ?? 0) + curPageRotation) % 360;
+      const liveViewport = curPage.getViewport({ scale: curZoom / 100, rotation: curComposedRotation });
       const lw = Math.floor(liveViewport.width);
       const lh = Math.floor(liveViewport.height);
 
-      const liveCacheKey = renderCacheKey(curMeta, curZoom);
+      const liveCacheKey = renderCacheKey(curMeta, curZoom, curPageRotation);
       const liveCached = getBitmapCache(liveCacheKey);
       if (liveCached && liveCached.width === lw && liveCached.height === lh) {
         // debounce 中にキャッシュが用意された (他経路) or 既に上の同期パスで
@@ -338,7 +363,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
         // 直近 latestParams が更に変わっているならその差分を再描画させる
         // (effect の次回 run か、または既にスケジュールされた debounce が拾う)。
         const after = latestParamsRef.current;
-        if (after.pdfPage !== curPage || after.renderMeta !== curMeta || after.zoom !== curZoom) {
+        if (after.pdfPage !== curPage || after.renderMeta !== curMeta || after.zoom !== curZoom || after.pageRotation !== curPageRotation) {
           // 古い render 結果は捨てる。新しい parameter での render は次の effect run
           // / 既存 timeout の発火で改めて開始される。
           return;
@@ -414,13 +439,19 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     // render 開始が遅延する。そのため page 切替時は 50ms 待って zoom が
     // 確定してから 1 回だけ render する。
     //
+    // isAutoFit OFF（固定 zoom）のときはページ切替時も zoom が確定済みのため、
+    // debounce を 0ms に短縮して体感遷移速度を改善する。
+    //
     // 通常の zoom 操作 (wheel / button) も 30ms の短 debounce で連続入力を
     // 束ねて 1 回の render にする。
     //
     // issue #94: 既に timer が走っている場合は新規スケジュールしない。
     // timer は発火時に latestParamsRef から最新 zoom を読む。
     if (!renderDebounceRef.current) {
-      const delay = isPageChange ? 50 : 30;
+      // isAutoFit ON かつページ切替: zoom 確定を待つ 50ms
+      // isAutoFit OFF かつページ切替: zoom 確定済みのため 0ms（即時実行）
+      // zoom 操作（ページ切替なし）: 連続入力を束ねる 30ms
+      const delay = isPageChange ? (isAutoFit ? 50 : 0) : 30;
       renderDebounceRef.current = setTimeout(() => {
         renderDebounceRef.current = null;
         if (!mountedRef.current) return;
@@ -434,7 +465,7 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
     // discard する) ため、ここでは何もしない。unmount 時の最終 cleanup は
     // mount-only effect が担う。
     return undefined;
-  }, [pdfPage, pdfPageMeta, zoom]);
+  }, [pdfPage, pdfPageMeta, zoom, pageRotation, isAutoFit]);
 
   return {
     pdfPage,
@@ -444,12 +475,16 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
   };
 }
 
-function renderCacheKey(meta: RenderPageMeta, zoom: number): string {
+function renderCacheKey(meta: RenderPageMeta, zoom: number, rotation: number = 0): string {
   // issue #143: devicePixelRatio をキーに含める。DPR 変化 (HiDPI モニタ
   // 差し替え / ブラウザズーム) 時に同一 zoom でも実 pixel が変わるため、
   // 古い解像度の bitmap を再利用するとボケる。
+  // rotation を含めることで回転前後の bitmap が混在しない。
+  // 注意: bitmapCache.parseKey は最後の ':' 区切りセグメントを数値(内部 LRU キー)
+  // として Number() する。rotation を末尾に置くと "r0" 等が NaN になりキャッシュが
+  // 全ミスするため (PCT-119)、rotation は dpr の手前に挿入して末尾は数値 dpr を保つ。
   const dpr = typeof window !== "undefined" ? Math.round(window.devicePixelRatio * 100) : 100;
-  return `${meta.filePath}:${meta.sourcePageIndex}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}:${dpr}`;
+  return `${meta.filePath}:${meta.sourcePageIndex}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}:r${rotation}:${dpr}`;
 }
 
 // 全 Canvas (pdfCanvas + overlay + 静的 overlay + wrapper) のサイズを

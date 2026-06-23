@@ -437,8 +437,9 @@ body, #root {
 }
 
 .thumbnail-box {
-  width: 120px;
-  height: 160px;
+  /* issue #207 rotation: 90/270 の場合 --thumb-box-w/h が JS から設定される。デフォルトは縦長 */
+  width: var(--thumb-box-w, 120px);
+  height: var(--thumb-box-h, 160px);
   background-color: white;
   border: 1px solid var(--border-color);
   display: flex;

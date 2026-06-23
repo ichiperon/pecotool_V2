@@ -548,13 +548,58 @@ export function useThumbnailPanel() {
       return;
     }
 
+    // Differential cache invalidation (PCT-perf-delete):
+    // Instead of revoking all N thumbnails and re-generating N-1 from scratch,
+    // we only revoke the removed pages' entries and remap surviving pages to their
+    // new display indices. This reduces the cost from O(N) revoke + O(N-1) re-gen
+    // to O(deleted) revoke + O(survived) key-remap.
+    const oldPageOrder = pageOrderRef.current;
+    const oldEpoch = thumbnailEpochRef.current;
+    const newEpoch = oldEpoch + 1;
+
+    // Build sourcePageIndex → { oldDisplayIndex, url } lookup from the old cache.
+    // Keys in thumbnailsRef are "epoch:displayIndex".
+    const sourceToEntry = new Map<number, { oldDisplayIdx: number; url: string }>();
+    for (let oldIdx = 0; oldIdx < oldPageOrder.length; oldIdx++) {
+      const srcPage = oldPageOrder[oldIdx];
+      const key = makeKey(oldEpoch, oldIdx);
+      const url = thumbnailsRef.current.get(key);
+      if (url !== undefined) {
+        sourceToEntry.set(srcPage, { oldDisplayIdx: oldIdx, url });
+      }
+    }
+
+    // Build the new cache map: for each new display index, try to reuse the
+    // cached URL that was generated for the same source page.
+    const newMap = new Map<string, string>();
+    const reusedSources = new Set<number>();
+    for (let newIdx = 0; newIdx < pageOrder.length; newIdx++) {
+      const srcPage = pageOrder[newIdx];
+      const entry = sourceToEntry.get(srcPage);
+      if (entry !== undefined) {
+        newMap.set(makeKey(newEpoch, newIdx), entry.url);
+        reusedSources.add(srcPage);
+      }
+    }
+
+    // Revoke only the URLs that could not be remapped (deleted pages).
+    sourceToEntry.forEach((entry, srcPage) => {
+      if (!reusedSources.has(srcPage)) {
+        URL.revokeObjectURL(entry.url);
+      }
+    });
+
     pageOrderRef.current = pageOrder;
     pageOrderKeyRef.current = pageOrderKey;
-    thumbnailEpochRef.current++;
+    thumbnailEpochRef.current = newEpoch;
+    thumbnailsRef.current = newMap;
+
     queueRef.current = [];
     queueSetRef.current.clear();
     isProcessingRef.current = false;
 
+    // Cancel all in-flight worker requests (their sourcePageIndex mapping may
+    // have changed; re-requests will be issued via setLoadEpoch → requestThumbnail).
     pendingsByWorkerRef.current.forEach(p => {
       p.forEach(pending => {
         clearTimeout(pending.timeout);
@@ -567,8 +612,8 @@ export function useThumbnailPanel() {
     pendingBatchRef.current = [];
     if (batchTimerRef.current) { clearTimeout(batchTimerRef.current); batchTimerRef.current = null; }
 
-    thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
-    thumbnailsRef.current = new Map();
+    // Notify all item listeners so each item pulls its (possibly remapped) thumbnail.
+    // Items with a cache hit will render immediately; items without will re-request.
     itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
     setLoadEpoch(prev => prev + 1);
   }, [pageOrder]);

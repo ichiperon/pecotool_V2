@@ -915,7 +915,7 @@ function App() {
               setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
             }}
           >
-            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} onRangeOcr={(canvas, rect) => { void runOcrOnRegion(canvas, rect, currentPageIndex, zoom); }} confidenceThreshold={ocrConfidenceThreshold} showLowConfidenceHighlight={showLowConfidenceHighlight} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
+            {isFileLoaded ? <PdfCanvas pageIndex={currentPageIndex} disableDrawing={isSpacePressed} onFirstRender={triggerThumbnailLoad} onRenderComplete={markRenderComplete} onRangeOcr={(canvas, rect) => { void runOcrOnRegion(canvas, rect, currentPageIndex, zoom); }} confidenceThreshold={ocrConfidenceThreshold} showLowConfidenceHighlight={showLowConfidenceHighlight} isAutoFit={isAutoFit} /> : <div className="empty-state"><p>PDFファイルを [開く] から読み込んでください</p></div>}
           </div>
           {(isLoadingFile || isLoadingPageMeta) && (
             <div className="loading-overlay">

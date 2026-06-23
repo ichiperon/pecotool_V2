@@ -578,13 +578,13 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
     // bitmap cache が hit する状況を作る: getBitmapCache を真に返すよう mock 上書き
     const cacheModule = await import('../../utils/bitmapCache')
     const bitmap = { close: vi.fn() } as unknown as ImageBitmap
-    // renderCacheKey は filePath:sourcePageIndex:displayPageIndex:documentEpoch:zoom:dpr の形式。
+    // renderCacheKey は filePath:sourcePageIndex:displayPageIndex:documentEpoch:zoom:dpr:r<rotation> の形式。
     // jsdom では window.devicePixelRatio が undefined になるため 1 に固定して dpr=100 にする。
     const origDpr = window.devicePixelRatio
     Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true, writable: true })
-    // viewport(scale=1) は 200x100 になる; key の dpr 部分は Math.round(1*100)=100
+    // viewport(scale=1) は 200x100 になる; key の dpr 部分は Math.round(1*100)=100, rotation=0
     vi.mocked(cacheModule.getBitmapCache).mockImplementation((key) => {
-      if (key === 'file-A.pdf:0:0:0:100:100') {
+      if (key === 'file-A.pdf:0:0:0:100:r0:100') {
         return { bitmap, zoom: 100, width: 200, height: 100 } as any
       }
       return undefined
@@ -689,6 +689,188 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
       } else {
         delete (globalThis as any).createImageBitmap
       }
+    }
+  })
+})
+
+// ── S-01-debounce: isAutoFit × isPageChange の debounce delay 選択ロジック ──
+//
+// 変更概要:
+//   isPageChange && isAutoFit=true  → delay=50ms（ResizeObserver が zoom 確定するまで待機）
+//   isPageChange && isAutoFit=false → delay=0ms （固定 zoom は確定済みのため即時）
+//   !isPageChange（zoom 操作のみ）  → delay=30ms（連続入力を束ねる・isAutoFit 無関係）
+//
+// テスト方針:
+//   vi.useFakeTimers() で setTimeout を制御する。
+//   - waitFor は fake timer と相性が悪いため使わず、act + runAllTimers + Promise flush で管理。
+//   - 非同期 Promise（getCachedPageProxy）は Promise.resolve() で返るため、
+//     vi.advanceTimersByTimeAsync(0) or Promise flush で解決できる。
+//   - pdfPage の state 変化は React の setState (async) のため、
+//     act(async () => { vi.runAllTimers(); for(flush) }) のループで確認する。
+describe('S-01-debounce: isAutoFit × isPageChange によるデバウンス delay 選択', () => {
+  // S-01-94 と同様の page（render は即 resolve）
+  function makeLocalScalingPage(id: string): FakePage {
+    return {
+      __id: id,
+      getViewport: vi.fn().mockReturnValue({ width: 200, height: 100 }),
+      render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [] }),
+      destroy: vi.fn(),
+    }
+  }
+
+  // Promise を N 回 flush するヘルパ（microtask queue を draining）
+  async function flushPromises(n = 6) {
+    for (let i = 0; i < n; i++) {
+      await act(async () => { await Promise.resolve() })
+    }
+  }
+
+  // 共通ヘルパ: staticOverlayRef も渡し S-01-94 と同等の環境を再現
+  function renderWithIsAutoFit(
+    initialProps: HookProps & { isAutoFit?: boolean },
+    onRenderComplete?: ReturnType<typeof vi.fn>
+  ) {
+    const refs = makeRefs()
+    const staticOverlay = window.document.createElement('canvas')
+    const extRefs = {
+      ...refs,
+      staticOverlayCanvasRef: { current: staticOverlay } as React.RefObject<HTMLCanvasElement | null>,
+    }
+    const hookResult = renderHook(
+      (props: HookProps & { isAutoFit?: boolean }) =>
+        usePdfRendering({
+          ...extRefs,
+          filePath: props.filePath,
+          totalPages: 3,
+          pageIndex: props.pageIndex,
+          zoom: props.zoom,
+          isAutoFit: props.isAutoFit,
+          onRenderComplete,
+          renderOverlaysRef: extRefs.renderOverlaysRef,
+        }),
+      { initialProps }
+    )
+    return { ...hookResult, refs: extRefs }
+  }
+
+  it('isAutoFit=false, ページ切替 → delay=0ms: 直後(0ms後)に onRenderComplete が呼ばれる', async () => {
+    vi.useFakeTimers()
+    try {
+      const pageA = makeLocalScalingPage('D:0')
+      const pageB = makeLocalScalingPage('D:1')
+      getCachedPageProxyMock.mockImplementation((_fp: string, idx: number) => {
+        if (idx === 0) return Promise.resolve(pageA)
+        if (idx === 1) return Promise.resolve(pageB)
+        return Promise.reject(new Error(`unexpected idx=${idx}`))
+      })
+
+      const onRenderComplete = vi.fn()
+      const { result, rerender } = renderWithIsAutoFit(
+        { filePath: 'file-A.pdf', pageIndex: 0, zoom: 100, isAutoFit: false },
+        onRenderComplete
+      )
+
+      // 初回 pdfPage 解決: timer を進めて Promise を flush
+      await act(async () => { vi.runAllTimers(); await Promise.resolve() })
+      await flushPromises(8)
+      expect(result.current.pdfPage).toBe(pageA)
+
+      // ページ切替（isAutoFit=false → delay=0ms）
+      onRenderComplete.mockClear()
+      rerender({ filePath: 'file-A.pdf', pageIndex: 1, zoom: 100, isAutoFit: false })
+
+      // pdfPage=B の proxy 取得（Promise.resolve なので microtask flush で解決）
+      await flushPromises(4)
+      expect(result.current.pdfPage).toBe(pageB)
+
+      // delay=0ms の setTimeout → vi.runAllTimers() で即時発火
+      await act(async () => { vi.runAllTimers(); await Promise.resolve() })
+      await flushPromises(6)
+
+      // onRenderComplete が呼ばれている
+      expect(onRenderComplete.mock.calls.length).toBeGreaterThanOrEqual(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('isAutoFit=true, ページ切替 → delay=50ms: 49ms では未発火、50ms で発火する', async () => {
+    vi.useFakeTimers()
+    try {
+      const pageA = makeLocalScalingPage('E:0')
+      const pageB = makeLocalScalingPage('E:1')
+      getCachedPageProxyMock.mockImplementation((_fp: string, idx: number) => {
+        if (idx === 0) return Promise.resolve(pageA)
+        if (idx === 1) return Promise.resolve(pageB)
+        return Promise.reject(new Error(`unexpected idx=${idx}`))
+      })
+
+      const onRenderComplete = vi.fn()
+      const { result, rerender } = renderWithIsAutoFit(
+        { filePath: 'file-A.pdf', pageIndex: 0, zoom: 100, isAutoFit: true },
+        onRenderComplete
+      )
+
+      // 初回 pdfPage 解決
+      await act(async () => { vi.runAllTimers(); await Promise.resolve() })
+      await flushPromises(8)
+      expect(result.current.pdfPage).toBe(pageA)
+
+      // ページ切替（isAutoFit=true → delay=50ms）
+      onRenderComplete.mockClear()
+      rerender({ filePath: 'file-A.pdf', pageIndex: 1, zoom: 100, isAutoFit: true })
+      await flushPromises(4)
+      expect(result.current.pdfPage).toBe(pageB)
+
+      // 49ms では debounce 未発火
+      await act(async () => { vi.advanceTimersByTime(49) })
+      await flushPromises(4)
+      expect(onRenderComplete.mock.calls.length).toBe(0)
+
+      // 1ms 追加（計 50ms）で debounce 発火
+      await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve() })
+      await flushPromises(6)
+      expect(onRenderComplete.mock.calls.length).toBeGreaterThan(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('zoom のみ変更（isPageChange=false）→ delay=30ms: 30ms 経過後に onRenderComplete が呼ばれる', async () => {
+    // zoom 操作時の 30ms debounce は isAutoFit によらず同じ。
+    // ただし初回ページ解決後の debounce timer が vi.runAllTimers() で消化された後に
+    // zoom 変更 rerender を行うため、zoom 変更後の debounce のみを観測できる。
+    // 「29ms では未発火」の境界テストはタイマー精度の問題で安定しないため、
+    // 「30ms 後に確実に発火する」ことを確認する形にする。
+    vi.useFakeTimers()
+    try {
+      const page = makeLocalScalingPage('F:0')
+      getCachedPageProxyMock.mockResolvedValue(page)
+
+      const onRenderComplete = vi.fn()
+      const { result, rerender } = renderWithIsAutoFit(
+        { filePath: 'file-A.pdf', pageIndex: 0, zoom: 100, isAutoFit: false },
+        onRenderComplete
+      )
+
+      // 初回解決（isPageChange=true, isAutoFit=false → delay=0ms timer）
+      await act(async () => { vi.runAllTimers(); await Promise.resolve() })
+      await flushPromises(8)
+      expect(result.current.pdfPage).toBe(page)
+
+      // zoom のみ変更（同ページ → isPageChange=false → delay=30ms）
+      onRenderComplete.mockClear()
+      rerender({ filePath: 'file-A.pdf', pageIndex: 0, zoom: 150, isAutoFit: false })
+
+      // 30ms 経過で debounce 発火
+      await act(async () => { vi.advanceTimersByTime(30); await Promise.resolve() })
+      await flushPromises(6)
+      expect(onRenderComplete.mock.calls.length).toBeGreaterThan(0)
+      // 同ページ維持
+      expect(result.current.pdfPage).toBe(page)
+    } finally {
+      vi.useRealTimers()
     }
   })
 })

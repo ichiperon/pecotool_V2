@@ -9,10 +9,12 @@ import {
   pushGraphicsState,
   popGraphicsState,
   concatTransformationMatrix,
+  setWordSpacing,
 } from '@cantoo/pdf-lib';
 import type { PDFFont, PDFName, PDFOperator } from '@cantoo/pdf-lib';
 import type { CurveDefinition } from '../types';
 import { layoutTextOnCurve } from './curveGlyphLayout';
+import { BLOCK_SEPARATOR_EXTRA_ADVANCE_EM } from './blockSeparatorConstants';
 
 /**
  * issue #187: curve TextBlock を per-glyph Tm/Tj operator 列に展開する。
@@ -62,16 +64,23 @@ export function buildCurveGlyphOperators(
     ops.push(showText(font.encodeText(g.char)));
   }
 
-  // issue #1 (Ctrl+A copy): axis-aligned 経路 (issue #100) と同じく、BT...ET の末尾に
+  // issue #1 / 案A (Ctrl+A copy): axis-aligned 経路 (issue #100) と同じく、BT...ET の末尾に
   // invisible U+0020 を 1 文字追加する。Acrobat の全選択テキスト抽出は座標ヒューリスティクス
   // で隣接 BT ブロックを連結するため、word-break スペースが無いと隣接ブロックの文字が結合され
   // 欠落や文字化けが発生する。最後の glyph と同じ Tm 位置でスペースを発行する（Acrobat 7 互換）。
+  //
+  // 案A: setWordSpacing (Tw) で末尾スペースの advance を拡大し、近接 BB を Acrobat が
+  // 「語/行境界」と認識しやすくする。Tw は ET 直前に 0 リセットする（漏れ防止）。
+  // チューニング定数は blockSeparatorConstants.ts で一元管理。
   if (transforms.length > 0) {
     const last = transforms[transforms.length - 1];
     const cos = Math.cos(last.rotation);
     const sin = Math.sin(last.rotation);
+    const extraAdvancePt = fontSize * BLOCK_SEPARATOR_EXTRA_ADVANCE_EM;
+    ops.push(setWordSpacing(extraAdvancePt));
     ops.push(setTextMatrix(cos, sin, -sin, cos, last.x, last.y));
     ops.push(showText(font.encodeText(' ')));
+    ops.push(setWordSpacing(0));
   }
 
   ops.push(endText());

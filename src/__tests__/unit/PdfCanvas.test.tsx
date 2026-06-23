@@ -39,6 +39,8 @@ function makeMockContext() {
     translate: vi.fn(),
     scale: vi.fn(),
     rotate: vi.fn(),
+    transform: vi.fn(),
+    setTransform: vi.fn(),
     setLineDash: vi.fn(),
   };
 }

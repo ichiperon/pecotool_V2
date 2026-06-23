@@ -9,6 +9,7 @@
 import { isCurveDefinition } from "./curveDefinition";
 import { layoutTextOnCurveViewport } from "./curveGlyphLayout";
 import { getProblematicBlockIds } from "./blockQuality";
+import { applyRotationTransform, type CanvasRotationParams } from "./canvasRotation";
 import type { TextBlock } from "../types";
 
 /**
@@ -246,13 +247,27 @@ export function renderStaticLayer(
   /** @deprecated Ignored (PCT-048). Kept for call-site compatibility. */
   _confidenceThreshold?: number,
   showLowConfidenceHighlight?: boolean,
+  /** UI rotation params。省略時は rotation=0 (既存動作と完全に同一)。 */
+  rotationParams?: CanvasRotationParams,
 ): void {
   // 注: 以前は block 単位の offscreen canvas キャッシュ + drawImage 経由で描画していたが、
   // drawImage の非整数 dst 座標でサブピクセル補間が発生し、OCR overlay が
   // 実テキストより上方向に 2-4px ズレて見える視覚的回帰を起こしたため、
   // v2.0.4 以前の直接描画に戻している。
+  //
+  // clearRect は transform の影響を受けないよう、canvas 全体を identity で消去する。
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
   context.clearRect(0, 0, canvas.width, canvas.height);
+  context.restore();
+
   if (!showOcr || !textBlocks) return;
+
+  // rotation がある場合は描画前に変換を適用する (r=0 は恒等変換 = 従来動作と同一)。
+  context.save();
+  if (rotationParams && rotationParams.rotation !== 0) {
+    applyRotationTransform(context, rotationParams);
+  }
 
   const scale = zoom / 100;
   // issue #196: searchTerm が空でない場合、ヒットするブロックを収集して activeHit を決定する
@@ -278,4 +293,6 @@ export function renderStaticLayer(
     const isProblematic = problematicIds.has(block.id);
     drawStaticBlock(context, block, scale, opacity, termLower, isActiveHit, undefined, showLowConfidenceHighlight, isProblematic);
   }
+
+  context.restore();
 }

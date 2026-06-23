@@ -21,6 +21,14 @@ import {
   translate,
   scale,
   PDFHexString,
+  setWordSpacing,
+  beginText,
+  endText,
+  setFontAndSize,
+  showText,
+  setTextMatrix,
+  setTextRenderingMode,
+  TextRenderingMode,
 } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { deflate, inflate } from 'pako';
@@ -53,6 +61,7 @@ import {
 import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
 import { isCurveDefinition } from './curveDefinition';
 import { buildCurveBlockOperators } from './pdfCurveTextRender';
+import { BLOCK_SEPARATOR_EXTRA_ADVANCE_EM } from './blockSeparatorConstants';
 import type { PDFRef, PDFFont, PDFObject } from '@cantoo/pdf-lib';
 import type { CurveDefinition } from '../types';
 import type { SerializedPageData, SkippedPdfTextChar } from './pdfWorkerTypes';
@@ -866,6 +875,111 @@ function remapBBoxMetaForPageOrderCore(
 }
 
 // ---------------------------------------------------------------------------
+// buildBlockSeparatorOperators
+// ---------------------------------------------------------------------------
+
+/**
+ * 各 BB（テキストブロック）の末尾に挿入する「境界区切りスペース」を BT...ET operator 列として返す。
+ *
+ * ## 目的
+ * Acrobat のテキスト抽出ヒューリスティクスは座標と文字幅を使って隣接 BT ブロックを連結する
+ * (issue #100)。各 BB の末尾に invisible U+0020 を 1 文字発行して「語/行境界」とみなさせる
+ * ことで連結を回避する。
+ *
+ * ## 案A: 境界スペースの送り幅拡大
+ * 近接した別 BB に対して Acrobat が「字間」とみなすケースを緩和するため、末尾スペースの
+ * 直前に Tw (setWordSpacing) で送り幅を拡大し、直後に必ず 0 にリセットする。
+ *
+ * - renderMode は必ず 3 (invisible) ＝ 画面・印刷に出力しない。
+ * - Tw は BT...ET の内側で発行し、ET 直前に 0 リセットする。
+ *   BT の外側では pushGraphicsState による text-state の隔離で意図しないリセットが
+ *   起こりうるため、このヘルパーは BT...ET を丸ごと組み立てて返す。
+ * - 本文グリフ列 (run.text) は一切変更しない。
+ * - Tw/Tc をこのフレーム外に漏らさないため、ET 前に必ず 0 リセット。
+ *
+ * ## チューニング定数
+ * `BLOCK_SEPARATOR_EXTRA_ADVANCE_EM` (`src/utils/blockSeparatorConstants.ts`) はフォントサイズに
+ * 対する追加送り幅の倍率。初期値 0.8em は「隣接 BB を Acrobat が語境界と判断する閾値」の保守的な
+ * 下限として選択。Acrobat 実機テストでチューニング推奨。
+ * - 大きすぎると同一行の語が余分な空白で分断される (#4 一字一句保存)
+ * - 小さすぎると連結抑止が不十分になる
+ *
+ * @param font     末尾スペースを描画するフォント（最後の run フォント）
+ * @param fontKey  Resources.Font dict 内のキー（setPageFontWithStableKey で登録済み）
+ * @param fontSize フォントサイズ (pt)
+ * @param x        BT 内の描画 x 座標（スペースを置く位置）
+ * @param y        BT 内の描画 y 座標
+ * @returns BT...ET operator 列
+ */
+
+export function buildBlockSeparatorOperators(
+  font: PDFFont,
+  fontKey: PDFName,
+  fontSize: number,
+  x: number,
+  y: number,
+): import('@cantoo/pdf-lib').PDFOperator[] {
+  // Tw: word spacing (pt)。U+0020 を showText すると Tw が advance に加算される。
+  // BT 直前の setWordSpacing は pushGraphicsState でリセットされる可能性があるため、
+  // このヘルパーは BT...ET を自己完結した単位として組み立てる。
+  const extraAdvancePt = fontSize * BLOCK_SEPARATOR_EXTRA_ADVANCE_EM;
+  return [
+    beginText(),
+    setFontAndSize(fontKey, fontSize),
+    setTextRenderingMode(TextRenderingMode.Invisible),
+    setWordSpacing(extraAdvancePt),
+    setTextMatrix(1, 0, 0, 1, x, y),
+    showText(font.encodeText(' ')),
+    // Tw を必ず 0 にリセット。ET で text state は破棄されるが、
+    // 仕様上 ET 後もページレベルの Tw は残るため明示リセットする。
+    setWordSpacing(0),
+    endText(),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// buildBlockSeparatorOperators (vertical / -90° variant)
+// ---------------------------------------------------------------------------
+
+/**
+ * 縦書きブロックの末尾境界スペース用 operator 列。
+ *
+ * 縦書きは各 run が独立した GS フレーム (pushGraphicsState / popGraphicsState) を持つ。
+ * 末尾スペース用の GS フレームも独立して push/pop するため、translate + scale は
+ * 呼び出し側で pushGraphicsState / popGraphicsState / translate / scale を発行し、
+ * このヘルパーは BT...ET の中身のみを返す。
+ *
+ * Tw で追加送り幅を与えても縦書きの行方向は PDF Tm 内で回転 (-90°) で表現されており、
+ * Tw は横方向の word spacing なので縦書きの行送りに作用しない（PDF 仕様 §9.3.3）。
+ * 縦書き末尾スペースの連結抑止は主として BT...ET 境界の存在に依存し、追加送り幅の
+ * 効果は横書きより限定的。それでも一貫性のため同じ Tw を発行する。
+ *
+ * @param font     末尾スペースフォント
+ * @param fontKey  Resources.Font dict キー
+ * @param fontSize フォントサイズ
+ * @returns BT...ET operator 列（GS ラッパーは呼び出し側で発行）
+ */
+export function buildBlockSeparatorOperatorsVertical(
+  font: PDFFont,
+  fontKey: PDFName,
+  fontSize: number,
+): import('@cantoo/pdf-lib').PDFOperator[] {
+  const extraAdvancePt = fontSize * BLOCK_SEPARATOR_EXTRA_ADVANCE_EM;
+  // 縦書きは drawText(..., {rotate: degrees(-90)}) が発行していた Tm を再現する。
+  // degrees(-90) → rotationMatrix: cos(-90°)=0, sin(-90°)=-1 → Tm: 0 -1 1 0 0 0 (x=0,y=0)
+  return [
+    beginText(),
+    setFontAndSize(fontKey, fontSize),
+    setTextRenderingMode(TextRenderingMode.Invisible),
+    setWordSpacing(extraAdvancePt),
+    setTextMatrix(0, -1, 1, 0, 0, 0),
+    showText(font.encodeText(' ')),
+    setWordSpacing(0),
+    endText(),
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // buildPdfDocumentCore
 // ---------------------------------------------------------------------------
 
@@ -1286,21 +1400,27 @@ export async function buildPdfDocumentCore(
             lastBaselineX = baselineX_run;
           }
           if (!renderedAny) continue;
-          // issue #100: 横書きと同じく invisible スペース (U+0020) を 1 文字、最後の run の続きに
-          // 描画して Acrobat の word-break heuristic を成立させる (Ctrl+A コピペで隣接 BB が
-          // 連結されるのを回避)。縦書きは run ごとに独立した GS フレームを持つため、空白用の
-          // フレームをもう 1 つ push する。U+0020 は writingMode に依らず word break として機能する。
+          // issue #100 / 案A: 縦書きも横書きと同様に、最後の run の続きに invisible スペース
+          // (U+0020) を描画して Acrobat の word-break heuristic を成立させる。縦書きは run ご
+          // とに独立した GS フレームを持つため、境界スペース用に別フレームを push する。
+          // 案A: buildBlockSeparatorOperatorsVertical で Tw 拡大済みの BT...ET を組み込む。
+          // 縦書きの行方向への Tw 効果は PDF 仕様上限定的だが、一貫性のため同じ定数を使用。
           if (lastRunFont) {
             const trailingBaselineY = vh - block.bbox.y - offsetInPage;
             setPageFontWithStableKey(page, lastRunFont, pageFontKeys);
-            page.pushOperators(
-              pushGraphicsState(),
-              ...rotationCm,
-              translate(lastBaselineX + textOffsetDx, trailingBaselineY - textOffsetDy),
-              scale(sx_outer, sy_outer),
-            );
-            page.drawText(' ', { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
-            page.pushOperators(popGraphicsState());
+            const fontKey = pageFontKeys.get(lastRunFont);
+            if (fontKey) {
+              page.pushOperators(
+                pushGraphicsState(),
+                ...rotationCm,
+                translate(lastBaselineX + textOffsetDx, trailingBaselineY - textOffsetDy),
+                scale(sx_outer, sy_outer),
+                ...buildBlockSeparatorOperatorsVertical(lastRunFont, fontKey, fontSize),
+                popGraphicsState(),
+              );
+            } else {
+              console.warn('[pdfSaver] separator skipped (vertical): fontKey unresolved', { pageIndex, font: lastRunFont });
+            }
           }
         } else {
           const sx = block.bbox.width / textWidth;
@@ -1335,13 +1455,22 @@ export async function buildPdfDocumentCore(
             offset += run.font.widthOfTextAtSize(run.text, fontSize);
             lastRunFont = run.font;
           }
-          // issue #100: Acrobat の text extraction は座標と文字幅の heuristic で隣接 BB を連結する
-          // (BT...ET 境界を無視)。各 BB の末尾に invisible スペース (U+0020) を 1 文字描画して
-          // Acrobat の word-break heuristic を成立させ、Ctrl+A → コピペで「あいう」「えお」が
-          // 「あいうえお」に連結されるのを回避する。renderMode 3 (invisible) なので画面表示や
-          // 印刷は完全に同等。最後の run のフォントで描画 (U+0020 は全 Latin/CJK フォントで対応)。
+          // issue #100 / 案A: Acrobat の text extraction は座標と文字幅の heuristic で
+          // 隣接 BB を連結する (BT...ET 境界を無視)。各 BB の末尾に invisible スペース
+          // (U+0020) を 1 文字描画して word-break heuristic を成立させ、隣接 BB の連結を
+          // 回避する。renderMode 3 (invisible) なので画面・印刷への影響なし。
+          // 案A: setWordSpacing (Tw) で末尾スペースの advance を拡大し「語境界」と Acrobat
+          // に認識させる。buildBlockSeparatorOperators は BT...ET を自己完結した単位で組む
+          // ため Tw が外部に漏れない (ET 直前に 0 リセット済み)。
           if (lastRunFont) {
-            page.drawText(' ', { x: offset, y: 0, size: fontSize, renderMode: 3 });
+            const fontKey = pageFontKeys.get(lastRunFont);
+            if (fontKey) {
+              page.pushOperators(
+                ...buildBlockSeparatorOperators(lastRunFont, fontKey, fontSize, offset, 0),
+              );
+            } else {
+              console.warn('[pdfSaver] separator skipped: fontKey unresolved', { pageIndex, font: lastRunFont });
+            }
           }
           page.pushOperators(popGraphicsState());
         }

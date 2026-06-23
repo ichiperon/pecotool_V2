@@ -687,14 +687,16 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     }
   })
 
-  it('S-07-04: pageOrder remap sends sourcePageIndex and invalidates old display thumbnail', async () => {
+  it('S-07-04: pageOrder remap reuses surviving caches and invalidates only deleted-page thumbnails', async () => {
     const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
     const { usePecoStore } = await import('../../store/pecoStore')
+    // pageOrder [0,1,2]: displayIndex → sourcePageIndex マッピング
     await setDoc('/path/A.pdf', 3, [0, 1, 2])
 
     const { result, unmount } = renderHook(() => useThumbnailPanel())
     await flush()
 
+    // displayIndex=0 (sourcePageIndex=0) のサムネイルをキャッシュに入れる
     act(() => {
       result.current.requestThumbnail(0)
     })
@@ -707,14 +709,24 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     const oldThumb = result.current.getThumbnail(0)
     expect(oldThumb).toBeDefined()
 
+    revokedUrls = []
+
+    // pageOrder を [2,0,1] に変更（削除なし・並べ替えのみ）
+    // sourcePageIndex=0 のキャッシュは新 displayIndex=1 へ付け替えられる
+    // sourcePageIndex=2 は未キャッシュ → 新 displayIndex=0 は undefined
     act(() => {
       usePecoStore.setState({ pageOrder: [2, 0, 1] })
     })
     await flush()
 
+    // 新 displayIndex=0 (sourcePageIndex=2) はまだキャッシュにない
     expect(result.current.getThumbnail(0)).toBeUndefined()
-    expect(revokedUrls).toContain(oldThumb!)
+    // 差分無効化: 削除されたページはないので oldThumb は revoke されない
+    expect(revokedUrls).not.toContain(oldThumb!)
+    // sourcePageIndex=0 のキャッシュは新 displayIndex=1 に付け替えられている
+    expect(result.current.getThumbnail(1)).toBe(oldThumb)
 
+    // 新 displayIndex=0 のサムネイルをリクエストすると sourcePageIndex=2 で Worker に送られる
     act(() => {
       result.current.requestThumbnail(0)
     })
@@ -732,6 +744,7 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     await flush()
 
     expect(result.current.getThumbnail(0)).toBeDefined()
+    // displayIndex=2 (sourcePageIndex=1) はまだ未生成
     expect(result.current.getThumbnail(2)).toBeUndefined()
 
     unmount()
@@ -962,6 +975,261 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     expect(result.current.getThumbnail(0)).toBeUndefined()
     // B のサムネイル URL は revoke されている
     expect(revokedUrls).toContain(bThumb!)
+
+    unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PCT-perf-delete: 差分無効化（ページ削除・並べ替え時のキャッシュ再利用）
+// ---------------------------------------------------------------------------
+describe('PCT-perf-delete: differential cache invalidation on pageOrder change', () => {
+  const createdWorkers: Array<any> = []
+  let urlCounter = 0
+  let createdUrls: string[] = []
+  let revokedUrls: string[] = []
+
+  class MockWorker {
+    onmessage: ((e: MessageEvent<any>) => void) | null = null
+    onerror: ((e: any) => void) | null = null
+    onmessageerror: ((e: any) => void) | null = null
+    messages: any[] = []
+    pendingGenerates: Array<{ pageIndex: number; sourcePageIndex?: number; requestId?: number; resolve: () => void }> = []
+    terminated = false
+
+    constructor() {
+      createdWorkers.push(this)
+    }
+
+    postMessage(req: any) {
+      this.messages.push(req)
+      if (req?.type === 'LOAD_PDF') {
+        queueMicrotask(() => this.deliver({ type: 'LOAD_COMPLETE', numPages: 10, requestId: req.requestId }))
+        return
+      }
+      if (req?.type === 'GENERATE_THUMBNAIL') {
+        const { pageIndex, sourcePageIndex, requestId } = req
+        this.pendingGenerates.push({
+          pageIndex, sourcePageIndex, requestId,
+          resolve: () => this.deliver({ type: 'THUMBNAIL_DONE', pageIndex, bytes: new Uint8Array([1, 2, 3]), requestId }),
+        })
+        return
+      }
+    }
+
+    flushAllThumbnails() {
+      this.pendingGenerates.splice(0).forEach(p => p.resolve())
+    }
+
+    private deliver(msg: any) {
+      if (this.onmessage) this.onmessage({ data: msg } as MessageEvent<any>)
+    }
+
+    addEventListener() {}
+    removeEventListener() {}
+    terminate() { this.terminated = true }
+  }
+
+  let originalWorker: any
+  let originalCreate: any
+  let originalRevoke: any
+  let originalFetch: any
+  let originalRIC: any
+
+  beforeEach(async () => {
+    createdWorkers.length = 0
+    urlCounter = 0
+    createdUrls = []
+    revokedUrls = []
+
+    originalWorker = (globalThis as any).Worker
+    ;(globalThis as any).Worker = MockWorker
+
+    originalRIC = (globalThis as any).requestIdleCallback
+    ;(globalThis as any).requestIdleCallback = (cb: () => void) => { queueMicrotask(() => cb()); return 0 }
+
+    originalCreate = (URL as any).createObjectURL
+    originalRevoke = (URL as any).revokeObjectURL
+    ;(URL as any).createObjectURL = vi.fn((blob: Blob) => {
+      const u = `blob:mock-${++urlCounter}`
+      if (blob && (blob as any).type === 'image/jpeg') createdUrls.push(u)
+      return u
+    })
+    ;(URL as any).revokeObjectURL = vi.fn((u: string) => { revokedUrls.push(u) })
+
+    originalFetch = (globalThis as any).fetch
+    ;(globalThis as any).fetch = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }))
+
+    const { usePecoStore } = await import('../../store/pecoStore')
+    const { useInfraStore } = await import('../../store/infraStore')
+    usePecoStore.setState({ document: null, currentPageIndex: 0, pageOrder: [] })
+    useInfraStore.setState({ documentEpoch: 0 })
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).Worker = originalWorker
+    ;(URL as any).createObjectURL = originalCreate
+    ;(URL as any).revokeObjectURL = originalRevoke
+    ;(globalThis as any).fetch = originalFetch
+    if (originalRIC === undefined) delete (globalThis as any).requestIdleCallback
+    else (globalThis as any).requestIdleCallback = originalRIC
+  })
+
+  async function setDoc(filePath: string, totalPages: number, pageOrder: number[]) {
+    const { usePecoStore } = await import('../../store/pecoStore')
+    usePecoStore.setState({
+      document: {
+        filePath, fileName: filePath, totalPages,
+        metadata: { title: undefined, author: undefined },
+        pages: new Map(),
+      } as any,
+      pageOrder,
+    })
+  }
+
+  async function flush() {
+    await Promise.resolve()
+    await Promise.resolve()
+    await new Promise(r => setTimeout(r, 60))
+    await Promise.resolve()
+  }
+
+  it('PCT-perf-01: deleted page URL is revoked, surviving pages are not revoked', async () => {
+    // pageOrder [0,1,2] → [0,2] (ページ1を削除)
+    // sourcePageIndex=0,2 のキャッシュは生き残る、sourcePageIndex=1 のみ revoke される
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { usePecoStore } = await import('../../store/pecoStore')
+    await setDoc('/path/A.pdf', 3, [0, 1, 2])
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    // ページ 0, 1, 2 のサムネイルを全て生成してキャッシュに入れる
+    act(() => {
+      result.current.requestThumbnail(0)
+      result.current.requestThumbnail(1)
+      result.current.requestThumbnail(2)
+    })
+    await flush()
+    act(() => { createdWorkers.forEach(w => w.flushAllThumbnails()) })
+    await flush()
+
+    const thumb0 = result.current.getThumbnail(0)
+    const thumb1 = result.current.getThumbnail(1)
+    const thumb2 = result.current.getThumbnail(2)
+    expect(thumb0).toBeDefined()
+    expect(thumb1).toBeDefined()
+    expect(thumb2).toBeDefined()
+
+    revokedUrls = []
+
+    // ページ1を削除: pageOrder [0,1,2] → [0,2]
+    act(() => { usePecoStore.setState({ pageOrder: [0, 2] }) })
+    await flush()
+
+    // sourcePageIndex=1 (thumb1) のみ revoke
+    expect(revokedUrls).toContain(thumb1!)
+    // sourcePageIndex=0 と sourcePageIndex=2 は revoke されない
+    expect(revokedUrls).not.toContain(thumb0!)
+    expect(revokedUrls).not.toContain(thumb2!)
+
+    // 新 displayIndex=0 → sourcePageIndex=0 → キャッシュ再利用
+    expect(result.current.getThumbnail(0)).toBe(thumb0)
+    // 新 displayIndex=1 → sourcePageIndex=2 → キャッシュ再利用（旧 displayIndex=2 から付け替え）
+    expect(result.current.getThumbnail(1)).toBe(thumb2)
+    // 旧 displayIndex=2 は存在しない（ページ数が減ったため）
+    expect(result.current.getThumbnail(2)).toBeUndefined()
+
+    unmount()
+  })
+
+  it('PCT-perf-02: page reorder remaps cache without any revoke', async () => {
+    // pageOrder [0,1,2] → [1,0,2] (ページ0と1を入れ替え)
+    // 削除なし → revoke は発生しない
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { usePecoStore } = await import('../../store/pecoStore')
+    await setDoc('/path/A.pdf', 3, [0, 1, 2])
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    act(() => {
+      result.current.requestThumbnail(0)
+      result.current.requestThumbnail(1)
+      result.current.requestThumbnail(2)
+    })
+    await flush()
+    act(() => { createdWorkers.forEach(w => w.flushAllThumbnails()) })
+    await flush()
+
+    const thumb0 = result.current.getThumbnail(0) // sourcePageIndex=0
+    const thumb1 = result.current.getThumbnail(1) // sourcePageIndex=1
+    const thumb2 = result.current.getThumbnail(2) // sourcePageIndex=2
+    expect(thumb0).toBeDefined()
+    expect(thumb1).toBeDefined()
+    expect(thumb2).toBeDefined()
+
+    revokedUrls = []
+
+    // ページ0と1を入れ替え: pageOrder → [1,0,2]
+    act(() => { usePecoStore.setState({ pageOrder: [1, 0, 2] }) })
+    await flush()
+
+    // 削除ページなし → revoke はゼロ（既キャッシュの image/jpeg URL は revoke されない）
+    const revokedThumbUrls = revokedUrls.filter(u => createdUrls.includes(u))
+    expect(revokedThumbUrls).toHaveLength(0)
+
+    // 並べ替え後のキャッシュ再利用
+    expect(result.current.getThumbnail(0)).toBe(thumb1) // 新 displayIndex=0 → sourcePageIndex=1
+    expect(result.current.getThumbnail(1)).toBe(thumb0) // 新 displayIndex=1 → sourcePageIndex=0
+    expect(result.current.getThumbnail(2)).toBe(thumb2) // 新 displayIndex=2 → sourcePageIndex=2 (不変)
+
+    unmount()
+  })
+
+  it('PCT-perf-03: multiple page deletion only revokes deleted pages', async () => {
+    // pageOrder [0,1,2,3,4] → [1,3] (3ページを同時削除)
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { usePecoStore } = await import('../../store/pecoStore')
+    await setDoc('/path/A.pdf', 5, [0, 1, 2, 3, 4])
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    for (let i = 0; i < 5; i++) {
+      act(() => { result.current.requestThumbnail(i) })
+    }
+    // CONCURRENCY=4 のため 5 件は 2 バッチに分割される。
+    // 1 回目のバッチ (4 件) を flush → 残り 1 件
+    await flush()
+    act(() => { createdWorkers.forEach(w => w.flushAllThumbnails()) })
+    await flush()
+    // 2 回目のバッチ (残り 1 件) を flush
+    act(() => { createdWorkers.forEach(w => w.flushAllThumbnails()) })
+    await flush()
+
+    const thumbs = [0,1,2,3,4].map(i => result.current.getThumbnail(i))
+    thumbs.forEach(t => expect(t).toBeDefined())
+
+    revokedUrls = []
+
+    // sourcePageIndex=0,2,4 を削除
+    act(() => { usePecoStore.setState({ pageOrder: [1, 3] }) })
+    await flush()
+
+    // 削除された 0,2,4 の URL は revoke される
+    expect(revokedUrls).toContain(thumbs[0]!) // sourcePageIndex=0
+    expect(revokedUrls).toContain(thumbs[2]!) // sourcePageIndex=2
+    expect(revokedUrls).toContain(thumbs[4]!) // sourcePageIndex=4
+
+    // 生き残った 1,3 は revoke されない
+    expect(revokedUrls).not.toContain(thumbs[1]!)
+    expect(revokedUrls).not.toContain(thumbs[3]!)
+
+    // 新キャッシュ: displayIndex=0 → sourcePageIndex=1、displayIndex=1 → sourcePageIndex=3
+    expect(result.current.getThumbnail(0)).toBe(thumbs[1])
+    expect(result.current.getThumbnail(1)).toBe(thumbs[3])
+    expect(result.current.getThumbnail(2)).toBeUndefined()
 
     unmount()
   })
