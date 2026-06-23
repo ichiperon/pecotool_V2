@@ -16,6 +16,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { ask, message } from '@tauri-apps/plugin-dialog';
 import type { PecoDocument } from '../../types';
 
 // ─── コンテキストメニュー状態 ──────────────────────────────────
@@ -166,9 +167,19 @@ export const ThumbnailItemNode = React.memo(({
     [index, onContextMenu],
   );
 
-  // issue #207: CSS variable で回転を表示。thumbnail-box の aspect ratio を
-  // 維持しつつ画像だけ回転させる (90/270 度では高さ/幅が入れ替わる視覚になる)。
-  // inline style は CSS variable の設定のみに限定し、具体的な transform は CSS クラスで定義。
+  // issue #207: CSS variable で回転と box サイズを制御する。
+  // 90/270 度では元の縦横比が入れ替わるため、CSS variable --thumb-box-w/h を
+  // スワップして .thumbnail-box の枠を回転後の向きに合わせる。
+  // r=0 と r=180 は縦横比が変わらないので variable を設定しない（CSS デフォルトを使用）。
+  // rotation と同じく CSS variable のみ inline style で渡し、具体的なスタイルは CSS クラスで定義。
+  const THUMB_W = 120; // r=0 のデフォルト幅 (CSS .thumbnail-box 参照)
+  const THUMB_H = 160; // r=0 のデフォルト高さ
+  const isLandscape = rotation === 90 || rotation === 270;
+  // thumbnail-box に渡す CSS variable (landscape 時のみ幅高さをスワップ)
+  const boxVarStyle: React.CSSProperties | undefined = isLandscape
+    ? { '--thumb-box-w': `${THUMB_H}px`, '--thumb-box-h': `${THUMB_W}px` } as React.CSSProperties
+    : undefined;
+
   const rotationVarStyle = rotation !== 0
     ? { '--thumbnail-rotation': `${rotation}deg` } as React.CSSProperties
     : undefined;
@@ -176,7 +187,7 @@ export const ThumbnailItemNode = React.memo(({
 
   const body = (
     <>
-      <div className="thumbnail-box">
+      <div className="thumbnail-box" style={boxVarStyle}>
         {thumbnailData ? (
           <img className={imgClassName} src={thumbnailData} alt={`Page ${index + 1}`} style={rotationVarStyle} />
         ) : (
@@ -297,15 +308,16 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
     [],
   );
 
-  const handleDeleteSingle = useCallback(() => {
+  const handleDeleteSingle = useCallback(async () => {
     if (contextMenu.targetDisplayIndex < 0) return;
+    const targetIndex = contextMenu.targetDisplayIndex;
     setContextMenu(CONTEXT_MENU_INITIAL);
     if (!document || document.totalPages <= 1) {
-      alert('最後のページは削除できません。');
+      await message('最後のページは削除できません。', { title: '削除不可', kind: 'warning' });
       return;
     }
-    const ok = window.confirm(`ページ ${contextMenu.targetDisplayIndex + 1} を削除しますか？`);
-    if (ok) onDeletePages([contextMenu.targetDisplayIndex]);
+    const ok = await ask(`ページ ${targetIndex + 1} を削除しますか？`, { title: '削除確認', kind: 'warning' });
+    if (ok) onDeletePages([targetIndex]);
   }, [contextMenu, document, onDeletePages]);
 
   // issue #208: 抽出ハンドラ
