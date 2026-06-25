@@ -1,6 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import App from "../App";
+
+// PdfViewer は pdfjs-dist をモジュールレベルで import し、jsdom 環境では
+// DOMMatrix 未定義エラーが発生する。App.test.tsx では PdfViewer の描画内容を
+// テスト対象としないため、コンポーネントごとモックに置き換える。
+vi.mock("../components/PdfViewer", () => ({
+  default: () => <div data-testid="pdf-viewer-mock">PDF Viewer Mock</div>,
+}));
 
 describe("App", () => {
   it("アプリタイトルを表示する", () => {

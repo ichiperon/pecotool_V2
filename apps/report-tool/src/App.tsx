@@ -4,6 +4,7 @@ import StepBar from "./components/StepBar";
 import FieldListPanel from "./components/FieldListPanel";
 import CsvPreviewTable from "./components/CsvPreviewTable";
 import CsvExportButton from "./components/CsvExportButton";
+import PdfViewer from "./components/PdfViewer";
 import { useReportStore } from "./store/reportStore";
 
 type RightTab = "template" | "preview";
@@ -59,10 +60,7 @@ const App: FC = () => {
 
         {/* 中央: PDFビューア */}
         <section className="app__pane app__pane--center" aria-label="PDF ビューア">
-          <div className="placeholder-pane placeholder-pane--large">
-            <p className="placeholder-pane__label">PDF ビューア</p>
-            <p className="placeholder-pane__sub">PDF 描画は次バージョンで実装予定です</p>
-          </div>
+          <PdfViewer />
         </section>
 
         {/* 右: タブパネル */}

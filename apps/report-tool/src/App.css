@@ -620,6 +620,201 @@ button {
   color: #4a6070;
 }
 
+/* ===== PDF ビューア ===== */
+.pdf-viewer {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: #e8ecf0;
+}
+
+.pdf-viewer__empty,
+.pdf-viewer__loading,
+.pdf-viewer__error {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  text-align: center;
+  color: #718096;
+}
+
+.pdf-viewer__empty-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #a0aec0;
+}
+
+.pdf-viewer__empty-sub {
+  font-size: 0.75rem;
+  color: #b8c4cf;
+  line-height: 1.6;
+}
+
+.pdf-viewer__error-message {
+  font-size: 0.8rem;
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #feb2b2;
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  max-width: 320px;
+  word-break: break-word;
+}
+
+/* ===== PDF ビューア: ツールバー ===== */
+.pdf-viewer__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  background-color: #2d3748;
+  border-bottom: 1px solid #1a202c;
+  flex-shrink: 0;
+}
+
+.pdf-viewer__open-btn {
+  padding: 0.35rem 0.75rem;
+  background-color: #4299e1;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.pdf-viewer__open-btn:hover {
+  background-color: #3182ce;
+}
+
+.pdf-viewer__open-btn--small {
+  font-size: 0.73rem;
+  padding: 0.28rem 0.6rem;
+}
+
+.pdf-viewer__divider {
+  width: 1px;
+  height: 1.25rem;
+  background-color: #4a5568;
+  flex-shrink: 0;
+}
+
+.pdf-viewer__nav-btn {
+  background: none;
+  border: 1px solid #4a5568;
+  color: #e2e8f0;
+  border-radius: 3px;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.pdf-viewer__nav-btn:hover:not(:disabled) {
+  background-color: #4a5568;
+}
+
+.pdf-viewer__nav-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pdf-viewer__page-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: #e2e8f0;
+}
+
+.pdf-viewer__page-input {
+  width: 2.5rem;
+  text-align: center;
+  border: 1px solid #4a5568;
+  background-color: #1a202c;
+  color: #e2e8f0;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.25rem;
+}
+
+.pdf-viewer__page-input:focus {
+  outline: none;
+  border-color: #4299e1;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.3);
+}
+
+.pdf-viewer__page-total {
+  white-space: nowrap;
+  color: #a0aec0;
+}
+
+.pdf-viewer__zoom-btn {
+  background: none;
+  border: 1px solid #4a5568;
+  color: #e2e8f0;
+  border-radius: 3px;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+
+.pdf-viewer__zoom-btn:hover:not(:disabled) {
+  background-color: #4a5568;
+}
+
+.pdf-viewer__zoom-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pdf-viewer__zoom-label {
+  font-size: 0.75rem;
+  color: #e2e8f0;
+  min-width: 2.5rem;
+  text-align: center;
+}
+
+/* ===== PDF ビューア: canvas エリア ===== */
+.pdf-viewer__canvas-area {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.pdf-viewer__canvas-wrapper {
+  position: relative;
+  display: inline-block;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
+.pdf-viewer__overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.pdf-viewer__canvas {
+  display: block;
+}
+
 /* ===== スクリーンリーダー専用（視覚的に非表示） ===== */
 .sr-only {
   position: absolute;
