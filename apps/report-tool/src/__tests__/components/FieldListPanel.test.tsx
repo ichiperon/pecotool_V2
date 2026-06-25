@@ -18,35 +18,59 @@ describe("FieldListPanel", () => {
     expect(screen.getByText(/まだ欄がありません/)).toBeInTheDocument();
   });
 
-  it("「＋ 欄を追加」ボタンが表示される", () => {
+  it("「＋ 欄を追加」ボタンが表示される（idle モード）", () => {
     render(<FieldListPanel />);
     expect(screen.getByRole("button", { name: /欄を追加/ })).toBeInTheDocument();
   });
 
-  it("追加ボタンをクリックすると欄が 1 件増える", () => {
+  it("追加ボタンをクリックすると defineField モードになる", () => {
     render(<FieldListPanel />);
     const addBtn = screen.getByRole("button", { name: /欄を追加/ });
     fireEvent.click(addBtn);
-    expect(useReportStore.getState().template.fields).toHaveLength(1);
+    expect(useReportStore.getState().mode).toBe("defineField");
   });
 
-  it("追加後に欄名がリストに表示される", () => {
+  it("defineField モード中はボタンラベルが「定義中…」に変わる", () => {
     render(<FieldListPanel />);
     fireEvent.click(screen.getByRole("button", { name: /欄を追加/ }));
-    // 自動命名「欄 1」が表示される（aria-label の完全一致でピンポイントに取得）
+    expect(screen.getByRole("button", { name: /定義中/ })).toBeInTheDocument();
+  });
+
+  it("「定義中…」ボタンをクリックすると idle モードに戻る", () => {
+    useReportStore.setState({ mode: "defineField" });
+    render(<FieldListPanel />);
+    const activeBtn = screen.getByRole("button", { name: /定義中/ });
+    fireEvent.click(activeBtn);
+    expect(useReportStore.getState().mode).toBe("idle");
+  });
+
+  it("idle モードのボタンは aria-pressed=false", () => {
+    render(<FieldListPanel />);
+    const btn = screen.getByRole("button", { name: /欄を追加/ });
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("defineField モードのボタンは aria-pressed=true", () => {
+    useReportStore.setState({ mode: "defineField" });
+    render(<FieldListPanel />);
+    const btn = screen.getByRole("button", { name: /定義中/ });
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("欄が追加されるとリストに欄名が表示される", () => {
+    useReportStore.getState().addField({ x: 10, y: 20, width: 100, height: 30 });
+    render(<FieldListPanel />);
     expect(
       screen.getByRole("button", { name: "欄 1（クリックで名前を編集）" })
     ).toBeInTheDocument();
   });
 
-  it("複数回追加すると複数行が表示される", () => {
+  it("複数欄が追加されると複数行が表示される", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 });
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 });
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 });
     render(<FieldListPanel />);
-    const addBtn = screen.getByRole("button", { name: /欄を追加/ });
-    fireEvent.click(addBtn);
-    fireEvent.click(addBtn);
-    fireEvent.click(addBtn);
     expect(useReportStore.getState().template.fields).toHaveLength(3);
-    // 空状態メッセージは消える
     expect(screen.queryByText(/まだ欄がありません/)).not.toBeInTheDocument();
   });
 
@@ -90,7 +114,6 @@ describe("FieldListPanel", () => {
     fireEvent.change(input, { target: { value: "変更後" } });
     fireEvent.keyDown(input, { key: "Escape" });
     expect(useReportStore.getState().template.fields[0].name).toBe("元の名前");
-    // 編集UIが閉じる
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
@@ -123,11 +146,8 @@ describe("FieldListPanel", () => {
     render(<FieldListPanel />);
     const chip = screen.getByRole("button", { name: /Escテスト欄 の色を変更/ });
     fireEvent.click(chip);
-    // パレットが開いている
     const palette = screen.getByRole("listbox");
     expect(palette).toBeInTheDocument();
-
-    // Escape でパレットを閉じる
     fireEvent.keyDown(palette, { key: "Escape" });
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
@@ -137,12 +157,9 @@ describe("FieldListPanel", () => {
     render(<FieldListPanel />);
     const chip = screen.getByRole("button", { name: /連番テスト欄 の色を変更/ });
     fireEvent.click(chip);
-
-    // 「色 1」〜「色 8」の連番ラベルが存在すること
     expect(screen.getByRole("option", { name: "色 1" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "色 2" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "色 8" })).toBeInTheDocument();
-    // HEX 値がラベルに含まれないこと
     expect(screen.queryByRole("option", { name: /^色 #/ })).not.toBeInTheDocument();
   });
 });

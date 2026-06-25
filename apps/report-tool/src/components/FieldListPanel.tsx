@@ -2,9 +2,6 @@ import { useState, useRef, type FC, type KeyboardEvent } from "react";
 import { useReportStore, FIELD_COLOR_PALETTE } from "../store/reportStore";
 import type { ReportField } from "../types/report";
 
-// TODO: ドラッグ定義実装時にここを差し替える（次段）
-const PLACEHOLDER_RECT = { x: 0, y: 0, width: 100, height: 30 };
-
 interface FieldRowProps {
   field: ReportField;
   onRename: (id: string, name: string) => void;
@@ -131,22 +128,33 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
 
 const FieldListPanel: FC = () => {
   const fields = useReportStore((s) => s.template.fields);
-  const addField = useReportStore((s) => s.addField);
   const removeField = useReportStore((s) => s.removeField);
   const renameField = useReportStore((s) => s.renameField);
   const setFieldColor = useReportStore((s) => s.setFieldColor);
+  const mode = useReportStore((s) => s.mode);
+  const setMode = useReportStore((s) => s.setMode);
 
-  const handleAdd = () => {
-    // TODO: PDF上のドラッグ操作で矩形を取得する実装に差し替える（次段・PDF描画実装時）
-    addField(PLACEHOLDER_RECT);
+  const handleModeToggle = () => {
+    setMode(mode === "defineField" ? "idle" : "defineField");
   };
+
+  const isDefining = mode === "defineField";
 
   return (
     <div className="field-list-panel">
       <div className="field-list-panel__header">
         <h3 className="field-list-panel__title">欄テンプレート</h3>
-        <button className="field-list-panel__add-btn" onClick={handleAdd}>
-          ＋ 欄を追加
+        <button
+          type="button"
+          className={
+            isDefining
+              ? "field-list-panel__add-btn field-list-panel__add-btn--active"
+              : "field-list-panel__add-btn"
+          }
+          onClick={handleModeToggle}
+          aria-pressed={isDefining ? "true" : "false"}
+        >
+          {isDefining ? "定義中…（クリックで終了）" : "＋ 欄を追加"}
         </button>
       </div>
 

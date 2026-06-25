@@ -815,6 +815,29 @@ button {
   display: block;
 }
 
+/* ===== 欄定義モードのヒント帯 ===== */
+.pdf-viewer__define-hint {
+  background-color: #ebf8ff;
+  border-bottom: 1px solid #bee3f8;
+  color: #2b6cb0;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.75rem;
+  text-align: center;
+  /* Chrome 114+ / 未対応ブラウザ（Firefox・Safari）では通常折り返しにフォールバック。
+     Tauri webview は Chromium 系のため実運用上の問題なし。 */
+  text-wrap: pretty;
+  flex-shrink: 0;
+}
+
+/* ===== 欄追加ボタン: 定義中強調状態 ===== */
+.field-list-panel__add-btn--active {
+  background-color: #d69e2e;
+}
+
+.field-list-panel__add-btn--active:hover {
+  background-color: #b7791f;
+}
+
 /* ===== スクリーンリーダー専用（視覚的に非表示） ===== */
 .sr-only {
   position: absolute;

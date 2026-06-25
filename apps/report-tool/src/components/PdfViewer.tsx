@@ -11,6 +11,9 @@ import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { usePdfStore } from "../store/pdfStore";
+import { useReportStore } from "../store/reportStore";
+import FieldOverlayCanvas from "./FieldOverlayCanvas";
+import type { OverlayGeom } from "../types/overlay";
 
 // workerSrc の設定（本体 pdfLoader.ts と同じ ?url import パターン）
 // Vite が .mjs を URL として解決する。
@@ -43,6 +46,11 @@ const PdfViewer: FC = () => {
   // handleOpenPdf が連続して呼ばれた場合に古い非同期処理を識別して破棄する。
   // 本体 pdfLoader.ts の globalLoadId 相当のローカル版。
   const loadGenRef = useRef<number>(0);
+
+  // overlay canvas に渡すジオメトリ（viewport 確定後に更新）
+  const [overlayGeom, setOverlayGeom] = useState<OverlayGeom | null>(null);
+
+  const mode = useReportStore((s) => s.mode);
 
   const {
     filePath,
@@ -159,6 +167,14 @@ const PdfViewer: FC = () => {
         // CSS 上の表示サイズ
         canvas.style.width = `${viewport.width / devicePixelRatio}px`;
         canvas.style.height = `${viewport.height / devicePixelRatio}px`;
+
+        // overlay canvas に viewport ジオメトリを渡す（PDF canvas と完全同期）
+        setOverlayGeom({
+          deviceWidth: viewport.width,
+          deviceHeight: viewport.height,
+          dpr: devicePixelRatio,
+          zoom,
+        });
 
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
@@ -353,11 +369,18 @@ const PdfViewer: FC = () => {
         </button>
       </div>
 
+      {/* defineField モード中のヒント帯 */}
+      {mode === "defineField" && (
+        <div className="pdf-viewer__define-hint" role="status">
+          PDF 上でドラッグして欄の範囲を指定してください（Escape でキャンセル）
+        </div>
+      )}
+
       {/* Canvas エリア */}
       <div className="pdf-viewer__canvas-area">
         {/*
           canvas-wrapper: canvas + オーバーレイ層を relative で包む。
-          段階3で .pdf-viewer__overlay に欄定義矩形（絶対配置）を重ねる。
+          FieldOverlayCanvas が PDF canvas と同一サイズで絶対配置される。
         */}
         <div className="pdf-viewer__canvas-wrapper">
           <canvas
@@ -365,15 +388,7 @@ const PdfViewer: FC = () => {
             className="pdf-viewer__canvas"
             aria-label={`PDF ページ ${currentPage}`}
           />
-          {/*
-            TODO (段階3): overlay div の座標系が canvas 物理px（DPR 込み）と不一致。
-            段階3で overlay を canvas 化し width/height を物理px に統一すること
-            （本体 syncCanvasSizes 相当）。現時点は空の div を配置のみ。
-          */}
-          <div
-            className="pdf-viewer__overlay"
-            aria-hidden="true"
-          />
+          <FieldOverlayCanvas geom={overlayGeom} />
         </div>
       </div>
     </div>
