@@ -32,12 +32,14 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onP
     ocrLanguage, availableLanguages,
     ocrConfidenceThreshold, showLowConfidenceHighlight,
     pdfTextOffsetRightMm, pdfTextOffsetDownMm,
+    forceFullRewriteOnSave,
     setHorizontalRowOrder, setHorizontalColumnOrder,
     setVerticalColumnOrder, setVerticalRowOrder,
     setGroupTolerance, setMixedOrder,
     setOcrLanguage, setAvailableLanguages,
     setOcrConfidenceThreshold, setShowLowConfidenceHighlight,
     setPdfTextOffsetRightMm, setPdfTextOffsetDownMm,
+    setForceFullRewriteOnSave,
   } = useOcrSettingsStore();
 
   const [toleranceInput, setToleranceInput] = useState(String(groupTolerance));
@@ -283,6 +285,35 @@ export const OcrSettingsModal: React.FC<OcrSettingsModalProps> = ({ onClose, onP
             </tr>
           </tbody>
         </table>
+
+        {/* 緊急対応: 保存時に必ずクリーンアップ（no-op 短絡を無効化） */}
+        <div className="modal-section-title ocr-settings-section-title">保存時のクリーンアップ</div>
+        <table className="ocr-settings-table">
+          <tbody>
+            <tr>
+              <td className="label">毎回クリーンアップ</td>
+              <td className="value">
+                <label className="ocr-confidence-toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={forceFullRewriteOnSave}
+                    onChange={(e) => setForceFullRewriteOnSave(e.target.checked)}
+                    aria-label="保存時に毎回クリーンアップを実行する"
+                  />
+                  {forceFullRewriteOnSave ? 'ON' : 'OFF'}
+                </label>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="ocr-settings-note">
+          ON にすると、編集していなくても保存（Ctrl+S・別名保存とも）のたびに、PDF の透明テキスト層に
+          溜まったゴミ（空グラフィックスブロックや BT 外の不正な Tj 演算子）を必ず除去します。
+          Acrobat の「このページにはエラーがあります」や Acrobat 7 の Tj エラーが出る PDF を、
+          開いて保存し直すだけで修復するための設定です。
+          ※エラーのあるページでは、検索用の透明テキスト層が再生成されず失われる場合があります（見た目の画像はそのまま）。
+          OFF（既定）では、無編集でメタの無い無傷ファイルはバイトを変えずに保存します（従来どおり）。
+        </div>
 
         {/* PDF テキスト層の位置オフセット（Acrobat の Ctrl+A 選択範囲） */}
         <div className="modal-section-title ocr-settings-section-title">テキスト層の位置補正</div>

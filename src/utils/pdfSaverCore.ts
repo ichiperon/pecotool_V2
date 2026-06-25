@@ -1014,6 +1014,13 @@ export async function buildPdfDocumentCore(
   const textOffsetDx = options?.textLayerOffsetPt?.dx ?? 0;
   const textOffsetDy = options?.textLayerOffsetPt?.dy ?? 0;
 
+  // 緊急対応 (escape hatch): true のとき、下記 Acrobat dirty-flag 回避 short-circuit を
+  // 無効化して、編集が無く PecoTool メタも無いファイルでも通常パス（sweepNonDirtyPage に
+  // よる空 q-Q 除去・BT 外テキスト演算子 strip、stripCatalogVersion 等）を必ず通す。
+  // 過去保存ゴミ起因の Acrobat エラー / Acrobat 7 Tj エラーを、開いて保存し直すだけで
+  // 修復するための逃げ道。OFF（既定）では従来どおり無傷ファイルはバイト温存する。
+  const forceFullRewrite = options?.forceFullRewrite ?? false;
+
   const originalVersion = extractPdfVersion(originalPdfBytes);
   // Acrobat dirty-flag 回避: 入力 PDF の trailer /ID を保存後に書き戻す。
   const originalTrailerId = extractTrailerId(originalPdfBytes);
@@ -1088,6 +1095,7 @@ export async function buildPdfDocumentCore(
   // D-after: worker の旧 short-circuit は earlySweep を呼ばず即 return していたが、
   // この core では main 版 (earlySweep あり・invariants A-06 準拠) を採用する。
   if (
+    !forceFullRewrite &&
     isDefaultOrder &&
     dirtyPages.length === 0 &&
     !hadLegacyBBoxMeta &&
