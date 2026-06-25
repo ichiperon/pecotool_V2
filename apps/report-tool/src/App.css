@@ -1,0 +1,617 @@
+/* ===== リセット ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ===== 基本 ===== */
+body {
+  font-family: "Meiryo", "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif;
+  background-color: #f0f2f5;
+  color: #333;
+  line-height: 1.6;
+  font-size: 14px;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ===== アプリ全体レイアウト ===== */
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+/* ===== ヘッダ ===== */
+.app__header {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  background-color: #1e2a38;
+  color: #fff;
+  padding: 0.625rem 1.25rem;
+  border-bottom: 1px solid #0d1b2a;
+}
+
+.app__title {
+  font-size: 1rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: #e8edf2;
+}
+
+/* ===== ステップバー ===== */
+.step-bar {
+  flex: 1;
+}
+
+.step-bar__list {
+  display: flex;
+  align-items: center;
+  list-style: none;
+  gap: 0;
+}
+
+.step-bar__item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  position: relative;
+  white-space: nowrap;
+}
+
+.step-bar__connector {
+  display: block;
+  width: 2rem;
+  height: 1px;
+  background-color: #4a5568;
+  margin-right: 0.5rem;
+}
+
+.step-bar__number {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1.5px solid currentColor;
+  flex-shrink: 0;
+}
+
+.step-bar__label {
+  font-size: 0.78rem;
+}
+
+/* アクティブ */
+.step-bar__item--active .step-bar__number {
+  background-color: #4299e1;
+  border-color: #4299e1;
+  color: #fff;
+}
+.step-bar__item--active .step-bar__label {
+  color: #90cdf4;
+  font-weight: 600;
+}
+
+/* 完了 */
+.step-bar__item--completed .step-bar__number {
+  background-color: #48bb78;
+  border-color: #48bb78;
+  color: #fff;
+}
+.step-bar__item--completed .step-bar__label {
+  color: #9ae6b4;
+}
+
+/* 未着手 */
+.step-bar__item--pending .step-bar__number {
+  background-color: transparent;
+  border-color: #718096;
+  color: #718096;
+}
+.step-bar__item--pending .step-bar__label {
+  color: #718096;
+}
+
+/* ===== 3ペインボディ ===== */
+.app__body {
+  display: grid;
+  grid-template-columns: 160px 1fr 300px;
+  overflow: hidden;
+}
+
+.app__pane {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.app__pane--left {
+  border-right: 1px solid #d1d9e0;
+  background-color: #f7f9fb;
+}
+
+.app__pane--center {
+  background-color: #e8ecf0;
+}
+
+.app__pane--right {
+  border-left: 1px solid #d1d9e0;
+  background-color: #fff;
+  overflow-y: auto;
+}
+
+/* ===== プレースホルダペイン ===== */
+.placeholder-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  text-align: center;
+  color: #8a9ab0;
+  gap: 0.5rem;
+}
+
+.placeholder-pane--large {
+  height: 100%;
+}
+
+.placeholder-pane__label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #a0aec0;
+}
+
+.placeholder-pane__sub {
+  font-size: 0.75rem;
+  color: #b8c4cf;
+  line-height: 1.5;
+}
+
+/* ===== 右パネル: タブ ===== */
+.right-panel__tabs {
+  display: flex;
+  border-bottom: 1px solid #e2e8f0;
+  background-color: #f7f9fb;
+  flex-shrink: 0;
+}
+
+.right-panel__tab {
+  flex: 1;
+  padding: 0.6rem 0.5rem;
+  border: none;
+  background: none;
+  font-size: 0.8rem;
+  color: #718096;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.right-panel__tab:hover {
+  color: #4a5568;
+  background-color: #edf2f7;
+}
+
+.right-panel__tab--active {
+  color: #2b6cb0;
+  border-bottom-color: #4299e1;
+  font-weight: 600;
+  background-color: #fff;
+}
+
+.right-panel__content {
+  padding: 0.875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overflow-y: auto;
+}
+
+/* ===== 欄リストパネル ===== */
+.field-list-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.field-list-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.field-list-panel__title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #2d3748;
+}
+
+.field-list-panel__add-btn {
+  padding: 0.35rem 0.7rem;
+  background-color: #4299e1;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.field-list-panel__add-btn:hover {
+  background-color: #3182ce;
+}
+
+.field-list-panel__empty {
+  font-size: 0.8rem;
+  color: #a0aec0;
+  padding: 1rem 0.5rem;
+  text-align: center;
+  background-color: #f7fafc;
+  border: 1px dashed #e2e8f0;
+  border-radius: 6px;
+  line-height: 1.6;
+}
+
+.field-list-panel__list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+/* ===== 欄行 ===== */
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  background-color: #fdfdfe;
+  position: relative;
+}
+
+.field-row:hover {
+  border-color: #bee3f8;
+  background-color: #f0f8ff;
+}
+
+.field-row__color-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.field-row__color-chip {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1.5px solid rgba(0, 0, 0, 0.15);
+  display: block;
+  padding: 0;
+}
+
+.field-row__color-chip:hover {
+  border-color: rgba(0, 0, 0, 0.35);
+  transform: scale(1.1);
+}
+
+.field-row__palette {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 100;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  padding: 6px;
+  background-color: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  width: 100px;
+}
+
+.field-row__palette-chip {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  border: 1.5px solid rgba(0, 0, 0, 0.1);
+  padding: 0;
+}
+
+.field-row__palette-chip:hover {
+  transform: scale(1.15);
+  border-color: rgba(0, 0, 0, 0.3);
+}
+
+.field-row__name {
+  flex: 1;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 0.82rem;
+  color: #2d3748;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-row__name:hover {
+  color: #2b6cb0;
+  text-decoration: underline dotted;
+}
+
+.field-row__name-input {
+  flex: 1;
+  border: 1px solid #4299e1;
+  border-radius: 3px;
+  font-size: 0.82rem;
+  padding: 0.1rem 0.3rem;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25);
+}
+
+.field-row__remove {
+  background: none;
+  border: none;
+  color: #a0aec0;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.25rem;
+  border-radius: 3px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.field-row__remove:hover {
+  background-color: #fed7d7;
+  color: #c53030;
+}
+
+/* ===== CSV プレビュー ===== */
+.csv-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.csv-preview--empty {
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  text-align: center;
+  gap: 0.875rem;
+}
+
+.csv-preview--empty p {
+  font-size: 0.82rem;
+  color: #a0aec0;
+}
+
+.csv-preview__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: #718096;
+}
+
+.csv-preview__info {
+  font-size: 0.78rem;
+}
+
+.csv-preview__sample-btn {
+  padding: 0.3rem 0.65rem;
+  background-color: #e2e8f0;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: #4a5568;
+}
+
+.csv-preview__sample-btn:hover {
+  background-color: #edf2f7;
+}
+
+.csv-preview__table-wrapper {
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+}
+
+.csv-preview__table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.78rem;
+}
+
+.csv-preview__th {
+  background-color: #f7fafc;
+  border-bottom: 1.5px solid #e2e8f0;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  white-space: nowrap;
+  font-weight: 600;
+  color: #4a5568;
+}
+
+.csv-preview__th--page {
+  color: #718096;
+  font-weight: 500;
+}
+
+.csv-preview__field-badge {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.csv-preview__td {
+  border-bottom: 1px solid #edf2f7;
+  padding: 0.35rem 0.6rem;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #2d3748;
+}
+
+.csv-preview__td--page {
+  color: #718096;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.csv-preview__td--empty {
+  background-color: #fff5f5;
+}
+
+.csv-preview__empty-mark {
+  color: #fc8181;
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+/* ===== CSV 出力 ===== */
+.csv-export {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 0.75rem;
+}
+
+.csv-export__options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.csv-export__options-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #4a5568;
+  margin-bottom: 0.25rem;
+}
+
+.csv-export__option-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: #4a5568;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.csv-export__option-row input[type="checkbox"] {
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.csv-export__option-row--text {
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.csv-export__empty-value-input {
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.78rem;
+  width: 80px;
+  color: #4a5568;
+  font-family: inherit;
+}
+
+.csv-export__empty-value-input:focus {
+  outline: none;
+  border-color: #4299e1;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.2);
+}
+
+.csv-export__btn {
+  padding: 0.55rem 1rem;
+  background-color: #38a169;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  width: 100%;
+  transition: background-color 0.15s;
+}
+
+.csv-export__btn:hover:not(:disabled) {
+  background-color: #2f855a;
+}
+
+.csv-export__btn:disabled {
+  background-color: #a0aec0;
+  cursor: not-allowed;
+}
+
+.csv-export__btn--saving {
+  background-color: #4299e1;
+}
+
+.csv-export__error {
+  font-size: 0.78rem;
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #feb2b2;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+}
+
+.csv-export__hint {
+  font-size: 0.75rem;
+  color: #a0aec0;
+  text-align: center;
+}
+
+/* ===== フッタ: ステータスバー ===== */
+.app__footer {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.375rem 1rem;
+  background-color: #1e2a38;
+  color: #90a4b8;
+  font-size: 0.75rem;
+  border-top: 1px solid #0d1b2a;
+}
+
+.app__status-item {
+  white-space: nowrap;
+}
+
+.app__status-item--phase {
+  color: #718fa8;
+  font-style: italic;
+}
+
+.app__status-divider {
+  color: #4a6070;
+}

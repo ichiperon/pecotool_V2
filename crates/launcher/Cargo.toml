@@ -1,0 +1,22 @@
+[package]
+name = "peco-launcher"
+version = "2.0.24"
+description = "Peco unified launcher (Ctrl-branch to PecoTool or ReportTool)"
+edition = "2021"
+
+# 独立 crate。ルート cargo workspace には属さない (本体 Cargo.lock 非干渉。計画書 §4.2)。
+# crates/launcher/ 単独で `cargo build --release` する。
+
+[[bin]]
+name = "PecoLauncher"
+path = "src/main.rs"
+
+[dependencies]
+windows = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
