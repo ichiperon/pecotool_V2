@@ -20,7 +20,7 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
   const template = useReportStore((s) => s.template);
   const cells = useReportStore((s) => s.cells);
   const [opts, setOpts] = useState<CsvOptions>(DEFAULT_OPTIONS);
-  const [status, setStatus] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "saving" | "done" | "error" | "unavailable">("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
 
   const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
@@ -44,29 +44,44 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
       if (onSave) {
         // テスト・非Tauri環境: 外部からモックを注入
         await onSave(data, csv);
+        setStatus("done");
+        setTimeout(() => setStatus("idle"), 2000);
       } else {
         // Tauriランタイム環境: plugin-dialog + plugin-fs で保存
+        let tauriAvailable = true;
+        let saveModule: typeof import("@tauri-apps/plugin-dialog") | null = null;
+        let fsModule: typeof import("@tauri-apps/plugin-fs") | null = null;
         try {
-          const { save } = await import("@tauri-apps/plugin-dialog");
-          const { writeFile } = await import("@tauri-apps/plugin-fs");
-
-          const filePath = await save({
-            defaultPath: "report.csv",
-            filters: [{ name: "CSV", extensions: ["csv"] }],
-          });
-
-          if (filePath) {
-            await writeFile(filePath, data);
-          }
+          saveModule = await import("@tauri-apps/plugin-dialog");
+          fsModule = await import("@tauri-apps/plugin-fs");
         } catch {
-          // Tauriランタイム外（ブラウザ等）では保存をスキップ
+          // Tauriランタイム外（ブラウザ等）ではプラグインが利用不可
           // eslint-disable-next-line no-console
           console.warn("Tauri plugin が利用できません。ファイル保存をスキップしました。");
+          tauriAvailable = false;
         }
-      }
 
-      setStatus("done");
-      setTimeout(() => setStatus("idle"), 2000);
+        if (!tauriAvailable || saveModule === null || fsModule === null) {
+          setStatus("unavailable");
+          setTimeout(() => setStatus("idle"), 3000);
+          return;
+        }
+
+        const filePath = await saveModule.save({
+          defaultPath: "report.csv",
+          filters: [{ name: "CSV", extensions: ["csv"] }],
+        });
+
+        if (filePath === null || filePath === undefined) {
+          // ユーザーがキャンセルした → 成功表示せずにidle へ戻す
+          setStatus("idle");
+          return;
+        }
+
+        await fsModule.writeFile(filePath, data);
+        setStatus("done");
+        setTimeout(() => setStatus("idle"), 2000);
+      }
     } catch (err) {
       setErrorMessage(
         err instanceof Error
@@ -121,7 +136,6 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
             value={opts.emptyValue}
             onChange={(e) => toggle("emptyValue", e.target.value)}
             placeholder="（空のまま）"
-            aria-label="空セルの出力値"
           />
         </label>
       </section>
@@ -136,7 +150,9 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
           ? "出力中..."
           : status === "done"
             ? "保存しました"
-            : "CSV を出力"}
+            : status === "unavailable"
+              ? "この環境では保存できません"
+              : "CSV を出力"}
       </button>
 
       {status === "error" && (

@@ -109,4 +109,40 @@ describe("FieldListPanel", () => {
       screen.getByRole("button", { name: /ラベル欄 を削除/ })
     ).toBeInTheDocument();
   });
+
+  it("色チップをクリックするとパレットが開く", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "色テスト欄");
+    render(<FieldListPanel />);
+    const chip = screen.getByRole("button", { name: /色テスト欄 の色を変更/ });
+    fireEvent.click(chip);
+    expect(screen.getByRole("listbox", { name: /色を選択/ })).toBeInTheDocument();
+  });
+
+  it("パレット展開中に Escape を押すとパレットが閉じる", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "Escテスト欄");
+    render(<FieldListPanel />);
+    const chip = screen.getByRole("button", { name: /Escテスト欄 の色を変更/ });
+    fireEvent.click(chip);
+    // パレットが開いている
+    const palette = screen.getByRole("listbox");
+    expect(palette).toBeInTheDocument();
+
+    // Escape でパレットを閉じる
+    fireEvent.keyDown(palette, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("色チップ（パレット内）の aria-label が連番になっている", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "連番テスト欄");
+    render(<FieldListPanel />);
+    const chip = screen.getByRole("button", { name: /連番テスト欄 の色を変更/ });
+    fireEvent.click(chip);
+
+    // 「色 1」〜「色 8」の連番ラベルが存在すること
+    expect(screen.getByRole("option", { name: "色 1" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "色 2" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "色 8" })).toBeInTheDocument();
+    // HEX 値がラベルに含まれないこと
+    expect(screen.queryByRole("option", { name: /^色 #/ })).not.toBeInTheDocument();
+  });
 });

@@ -31,7 +31,14 @@ const StepBar: FC<StepBarProps> = ({ activeStep }) => {
                 className="step-bar__number"
                 aria-current={isActive ? "step" : undefined}
               >
-                {isCompleted ? "✓" : step.number}
+                {isCompleted ? (
+                  <>
+                    <span aria-hidden="true">✓</span>
+                    <span className="sr-only">完了</span>
+                  </>
+                ) : (
+                  step.number
+                )}
               </span>
               <span className="step-bar__label">{step.label}</span>
             </li>

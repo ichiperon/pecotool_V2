@@ -5,6 +5,14 @@ import { useReportStore } from "../../store/reportStore";
 import { buildTemplateCsv } from "../../logic/templateCsv";
 import { encodeCsvUtf8Bom } from "../../logic/csvEncode";
 
+// Tauriプラグインのモック（#378用）
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn(),
+}));
+vi.mock("@tauri-apps/plugin-fs", () => ({
+  writeFile: vi.fn(),
+}));
+
 const SAMPLE_RECT = { x: 0, y: 0, width: 100, height: 30 };
 
 beforeEach(() => {
@@ -178,5 +186,64 @@ describe("CsvExportButton", () => {
 
     const rows = capturedCsv.split("\r\n");
     expect(rows[1]).toBe("N/A");
+  });
+});
+
+// #378: Tauri経路のキャンセル・成功・import失敗の検証
+describe("CsvExportButton (Tauri 経路)", () => {
+  beforeEach(async () => {
+    useReportStore.setState({
+      template: { fields: [] },
+      cells: new Map(),
+      mode: "idle",
+      selectedFieldId: null,
+    });
+    // モックをリセット
+    const dialogMod = await import("@tauri-apps/plugin-dialog");
+    const fsMod = await import("@tauri-apps/plugin-fs");
+    vi.mocked(dialogMod.save).mockReset();
+    vi.mocked(fsMod.writeFile).mockReset();
+  });
+
+  it("save() が null を返す（キャンセル）とき「保存しました」が表示されない", async () => {
+    const dialogMod = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(dialogMod.save).mockResolvedValue(null);
+
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "金額");
+    render(<CsvExportButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+
+    // キャンセル後はボタンが「CSV を出力」のまま（done にならない）
+    // save呼び出しを待ってから確認
+    await waitFor(() => {
+      expect(dialogMod.save).toHaveBeenCalled();
+    });
+
+    // 「保存しました」が表示されないこと
+    expect(screen.queryByText("保存しました")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "CSV を出力" })).toBeInTheDocument();
+  });
+
+  it("save() がパスを返し writeFile が成功するとき「保存しました」が表示される", async () => {
+    const dialogMod = await import("@tauri-apps/plugin-dialog");
+    const fsMod = await import("@tauri-apps/plugin-fs");
+    vi.mocked(dialogMod.save).mockResolvedValue("/tmp/report.csv");
+    vi.mocked(fsMod.writeFile).mockResolvedValue(undefined);
+
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "金額");
+    render(<CsvExportButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("保存しました")).toBeInTheDocument();
+    });
+
+    // writeFile が Uint8Array を渡して呼ばれていること
+    expect(fsMod.writeFile).toHaveBeenCalledTimes(1);
+    const [calledPath, calledData] = vi.mocked(fsMod.writeFile).mock.calls[0];
+    expect(calledPath).toBe("/tmp/report.csv");
+    expect(calledData).toBeInstanceOf(Uint8Array);
   });
 });

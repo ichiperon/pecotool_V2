@@ -1,4 +1,4 @@
-import { useState, type FC, type KeyboardEvent } from "react";
+import { useState, useRef, type FC, type KeyboardEvent } from "react";
 import { useReportStore, FIELD_COLOR_PALETTE } from "../store/reportStore";
 import type { ReportField } from "../types/report";
 
@@ -16,6 +16,7 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(field.name);
   const [showPalette, setShowPalette] = useState(false);
+  const colorChipRef = useRef<HTMLButtonElement>(null);
 
   const commitRename = () => {
     const trimmed = draft.trim();
@@ -35,10 +36,30 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
     }
   };
 
+  const closePalette = () => {
+    setShowPalette(false);
+    colorChipRef.current?.focus();
+  };
+
+  const handlePaletteKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape") {
+      closePalette();
+    }
+  };
+
   return (
     <li className="field-row">
-      <div className="field-row__color-wrapper">
+      <div
+        className="field-row__color-wrapper"
+        onBlur={(e) => {
+          // フォーカスがcolor-wrapper外に移ったらパレットを閉じる
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            setShowPalette(false);
+          }
+        }}
+      >
         <button
+          ref={colorChipRef}
           className="field-row__color-chip"
           style={{ backgroundColor: field.color }}
           onClick={() => setShowPalette((v) => !v)}
@@ -47,8 +68,13 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
           aria-haspopup="listbox"
         />
         {showPalette && (
-          <div className="field-row__palette" role="listbox" aria-label="色を選択">
-            {FIELD_COLOR_PALETTE.map((color) => (
+          <div
+            className="field-row__palette"
+            role="listbox"
+            aria-label="色を選択"
+            onKeyDown={handlePaletteKeyDown}
+          >
+            {FIELD_COLOR_PALETTE.map((color, index) => (
               <button
                 key={color}
                 className="field-row__palette-chip"
@@ -60,7 +86,7 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
                   onColorChange(field.id, color);
                   setShowPalette(false);
                 }}
-                aria-label={`色 ${color}`}
+                aria-label={`色 ${index + 1}`}
                 role="option"
                 aria-selected={color === field.color}
               />

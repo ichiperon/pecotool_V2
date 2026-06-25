@@ -1,4 +1,4 @@
-import { useState, type FC } from "react";
+import { useState, useRef, type FC, type KeyboardEvent } from "react";
 import "./App.css";
 import StepBar from "./components/StepBar";
 import FieldListPanel from "./components/FieldListPanel";
@@ -8,10 +8,33 @@ import { useReportStore } from "./store/reportStore";
 
 type RightTab = "template" | "preview";
 
+const TAB_ORDER: readonly RightTab[] = ["template", "preview"] as const;
+
 const App: FC = () => {
   const [rightTab, setRightTab] = useState<RightTab>("template");
+  const tabRefs = useRef<Record<RightTab, HTMLButtonElement | null>>({
+    template: null,
+    preview: null,
+  });
   const fields = useReportStore((s) => s.template.fields);
   const cells = useReportStore((s) => s.cells);
+
+  const handleTabKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const currentIndex = TAB_ORDER.indexOf(rightTab);
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      const nextIndex = (currentIndex + 1) % TAB_ORDER.length;
+      const nextTab = TAB_ORDER[nextIndex];
+      setRightTab(nextTab);
+      tabRefs.current[nextTab]?.focus();
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      const prevIndex = (currentIndex - 1 + TAB_ORDER.length) % TAB_ORDER.length;
+      const prevTab = TAB_ORDER[prevIndex];
+      setRightTab(prevTab);
+      tabRefs.current[prevTab]?.focus();
+    }
+  };
 
   const fieldCount = fields.length;
   const pageCount = cells.size;
@@ -45,25 +68,34 @@ const App: FC = () => {
         {/* 右: タブパネル */}
         <aside className="app__pane app__pane--right" aria-label="設定パネル">
           {/* タブ切り替え */}
-          <div className="right-panel__tabs" role="tablist" aria-label="右パネルのタブ">
+          <div
+            className="right-panel__tabs"
+            role="tablist"
+            aria-label="右パネルのタブ"
+            onKeyDown={handleTabKeyDown}
+          >
             <button
+              ref={(el) => { tabRefs.current.template = el; }}
               type="button"
               role="tab"
               className={`right-panel__tab ${rightTab === "template" ? "right-panel__tab--active" : ""}`}
-              aria-selected={rightTab === "template" ? "true" : "false"}
+              aria-selected={rightTab === "template"}
               aria-controls="panel-template"
               id="tab-template"
+              tabIndex={rightTab === "template" ? 0 : -1}
               onClick={() => setRightTab("template")}
             >
               欄テンプレート
             </button>
             <button
+              ref={(el) => { tabRefs.current.preview = el; }}
               type="button"
               role="tab"
               className={`right-panel__tab ${rightTab === "preview" ? "right-panel__tab--active" : ""}`}
-              aria-selected={rightTab === "preview" ? "true" : "false"}
+              aria-selected={rightTab === "preview"}
               aria-controls="panel-preview"
               id="tab-preview"
+              tabIndex={rightTab === "preview" ? 0 : -1}
               onClick={() => setRightTab("preview")}
             >
               CSV プレビュー

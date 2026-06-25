@@ -362,8 +362,12 @@ button {
   border-radius: 3px;
   font-size: 0.82rem;
   padding: 0.1rem 0.3rem;
-  outline: none;
   box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25);
+}
+
+.field-row__name-input:focus-visible {
+  outline: 2px solid #4299e1;
+  outline-offset: -2px;
 }
 
 .field-row__remove {
@@ -614,4 +618,17 @@ button {
 
 .app__status-divider {
   color: #4a6070;
+}
+
+/* ===== スクリーンリーダー専用（視覚的に非表示） ===== */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }
