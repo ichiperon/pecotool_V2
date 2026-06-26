@@ -27,11 +27,12 @@ beforeEach(() => {
 function setupTable() {
   useReportStore.getState().addField(SAMPLE_RECT, "金額");
   const fields = useReportStore.getState().template.fields;
+  // 新形: Map<number, ReportRow[]> — 各ページを 1 段配列として設定
   useReportStore.getState().setCells(
     new Map([
-      [1, new Map([[fields[0].id, "100"]])],
-      [2, new Map([[fields[0].id, "200"]])],
-      [3, new Map([[fields[0].id, "300"]])],
+      [1, [new Map([[fields[0].id, "100"]])]],
+      [2, [new Map([[fields[0].id, "200"]])]],
+      [3, [new Map([[fields[0].id, "300"]])]],
     ])
   );
 }

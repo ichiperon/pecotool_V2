@@ -136,6 +136,41 @@ describe("setFieldColor", () => {
   });
 });
 
+describe("setFieldLineItem", () => {
+  it("isLineItem を true に設定できる", () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "明細欄");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.getState().setFieldLineItem(id, true);
+    expect(useReportStore.getState().template.fields[0].isLineItem).toBe(true);
+  });
+
+  it("isLineItem を false に設定できる（固定欄に戻す）", () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "明細欄");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.getState().setFieldLineItem(id, true);
+    useReportStore.getState().setFieldLineItem(id, false);
+    expect(useReportStore.getState().template.fields[0].isLineItem).toBe(false);
+  });
+
+  it("他フィールドの isLineItem には影響しない", () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "A");
+    useReportStore.getState().addField(SAMPLE_RECT, "B");
+    const fields = useReportStore.getState().template.fields;
+    useReportStore.getState().setFieldLineItem(fields[0].id, true);
+    const updated = useReportStore.getState().template.fields;
+    expect(updated[0].isLineItem).toBe(true);
+    expect(updated[1].isLineItem).toBeUndefined();
+  });
+
+  it("不変更新: template は新しい参照になる", () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "A");
+    const id = useReportStore.getState().template.fields[0].id;
+    const prev = useReportStore.getState().template;
+    useReportStore.getState().setFieldLineItem(id, true);
+    expect(useReportStore.getState().template).not.toBe(prev);
+  });
+});
+
 describe("clearTemplate", () => {
   it("全フィールドをクリアする", () => {
     useReportStore.getState().addField(SAMPLE_RECT, "A");
@@ -171,12 +206,12 @@ describe("setMode / selectField", () => {
 });
 
 describe("setCells", () => {
-  it("CellMatrix をストアに設定できる", () => {
-    const matrix: Map<number, Map<string, string>> = new Map([
-      [1, new Map([["f1", "100"]])],
+  it("CellMatrix をストアに設定できる（新形 Map<number, ReportRow[]>）", () => {
+    const matrix: Map<number, Map<string, string>[]> = new Map([
+      [1, [new Map([["f1", "100"]])]],
     ]);
     useReportStore.getState().setCells(matrix);
     const stored = useReportStore.getState().cells;
-    expect(stored.get(1)?.get("f1")).toBe("100");
+    expect(stored.get(1)?.[0]?.get("f1")).toBe("100");
   });
 });

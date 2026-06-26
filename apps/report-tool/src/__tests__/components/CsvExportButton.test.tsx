@@ -74,7 +74,8 @@ describe("CsvExportButton", () => {
   it("クリックすると onSave が呼ばれ、buildTemplateCsv+encodeCsvUtf8Bom の結果が渡る", async () => {
     addField("金額");
     const fields = useReportStore.getState().template.fields;
-    const matrix = new Map([[1, new Map([[fields[0].id, "1000"]])]]);
+    // 新形: Map<number, ReportRow[]>
+    const matrix = new Map([[1, [new Map([[fields[0].id, "1000"]])]]]);
     useReportStore.getState().setCells(matrix);
 
     const mockSave = vi.fn().mockResolvedValue(undefined);
@@ -110,7 +111,7 @@ describe("CsvExportButton", () => {
   it("includeFileName を OFF にするとヘッダにファイル名列が含まれない CSV が生成される", async () => {
     addField("摘要");
     const fields = useReportStore.getState().template.fields;
-    useReportStore.getState().setCells(new Map([[1, new Map([[fields[0].id, "テスト"]])]]));
+    useReportStore.getState().setCells(new Map([[1, [new Map([[fields[0].id, "テスト"]])]]]));
 
     let capturedCsv = "";
     const mockSave = vi.fn().mockImplementation(async (_data: Uint8Array, csv: string) => {
@@ -134,7 +135,7 @@ describe("CsvExportButton", () => {
     addField("金額");
     const fields = useReportStore.getState().template.fields;
     // △50,000 → 正規化すると -50000
-    useReportStore.getState().setCells(new Map([[1, new Map([[fields[0].id, "△50,000"]])]]));
+    useReportStore.getState().setCells(new Map([[1, [new Map([[fields[0].id, "△50,000"]])]]]));
 
     let capturedCsv = "";
     const mockSave = vi.fn().mockImplementation(async (_data: Uint8Array, csv: string) => {
@@ -171,7 +172,7 @@ describe("CsvExportButton", () => {
   it("空セル値の入力フィールドを変更すると CSV に反映される", async () => {
     addField("金額");
     // cells に値を入れない → emptyValue が使われる
-    useReportStore.getState().setCells(new Map([[1, new Map()]]));
+    useReportStore.getState().setCells(new Map([[1, [new Map()]]]));
 
     let capturedCsv = "";
     const mockSave = vi.fn().mockImplementation(async (_data: Uint8Array, csv: string) => {

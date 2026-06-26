@@ -14,6 +14,11 @@ export interface ReportField {
   color: string;
   /** ページ座標 (scale=1.0, y 軸は下方向) */
   rect: BoundingBox;
+  /**
+   * 明細欄フラグ。true のとき縦持ち展開の対象になる。
+   * 省略時 false = 固定欄（従来挙動）。
+   */
+  isLineItem?: boolean;
 }
 
 export interface ReportTemplate {
@@ -35,10 +40,19 @@ export interface ReportBlock {
 }
 
 /**
- * ページ番号 → (fieldId → セル値) の抽出結果マトリクス。
- * ページ番号は 1 始まりの実ページ番号。
+ * 1 段（明細行）のセル値マップ。fieldId → セル値。
+ * 固定欄も明細欄も同じ Map 内に格納する。
  */
-export type CellMatrix = Map<number, Map<string, string>>;
+export type ReportRow = Map<string, string>;
+
+/**
+ * ページ番号 → 段配列 の抽出結果マトリクス。
+ * ページ番号は 1 始まりの実ページ番号。
+ *
+ * - 明細欄が無いテンプレートでは length=1 の配列（従来の 1 ページ 1 行と等価）。
+ * - 明細欄ありでは各段が 1 エントリ。
+ */
+export type CellMatrix = Map<number, ReportRow[]>;
 
 /**
  * ページごとの座標オフセット (scale=1.0 のページ座標系)。

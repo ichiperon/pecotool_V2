@@ -163,3 +163,71 @@ describe("FieldListPanel", () => {
     expect(screen.queryByRole("option", { name: /^色 #/ })).not.toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 明細欄トグルテスト
+// ---------------------------------------------------------------------------
+
+describe("FieldListPanel: 明細欄トグル", () => {
+  it("明細欄チェックボックスが表示される", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "品名");
+    render(<FieldListPanel />);
+    expect(screen.getByRole("checkbox", { name: /品名 を明細欄にする/ })).toBeInTheDocument();
+  });
+
+  it("初期状態でチェックボックスは未チェック（固定欄）", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "品名");
+    render(<FieldListPanel />);
+    const checkbox = screen.getByRole("checkbox", { name: /品名 を明細欄にする/ });
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it("チェックボックスをONにすると isLineItem が true になる", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "品名");
+    render(<FieldListPanel />);
+    const checkbox = screen.getByRole("checkbox", { name: /品名 を明細欄にする/ });
+    fireEvent.click(checkbox);
+    const fields = useReportStore.getState().template.fields;
+    expect(fields[0].isLineItem).toBe(true);
+  });
+
+  it("チェックボックスをOFFにすると isLineItem が false になる", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "品名");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.getState().setFieldLineItem(id, true);
+    render(<FieldListPanel />);
+    const checkbox = screen.getByRole("checkbox", { name: /品名 を明細欄にする/ });
+    expect(checkbox).toBeChecked();
+    fireEvent.click(checkbox);
+    const fields = useReportStore.getState().template.fields;
+    expect(fields[0].isLineItem).toBe(false);
+  });
+
+  it("isLineItem=true の欄は初期レンダでチェックボックスがチェック済み", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "明細品名");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.getState().setFieldLineItem(id, true);
+    render(<FieldListPanel />);
+    const checkbox = screen.getByRole("checkbox", { name: /明細品名 を明細欄にする/ });
+    expect(checkbox).toBeChecked();
+  });
+
+  it("複数欄があるとき各欄に独立したチェックボックスがある", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "欄A");
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "欄B");
+    render(<FieldListPanel />);
+    expect(screen.getByRole("checkbox", { name: /欄A を明細欄にする/ })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /欄B を明細欄にする/ })).toBeInTheDocument();
+  });
+
+  it("欄Aをチェックしても欄Bの isLineItem は変わらない", () => {
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "欄A");
+    useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "欄B");
+    render(<FieldListPanel />);
+    const checkboxA = screen.getByRole("checkbox", { name: /欄A を明細欄にする/ });
+    fireEvent.click(checkboxA);
+    const fields = useReportStore.getState().template.fields;
+    expect(fields[0].isLineItem).toBe(true);
+    expect(fields[1].isLineItem).toBeUndefined();
+  });
+});

@@ -14,6 +14,9 @@ import { usePdfStore } from "../store/pdfStore";
 import { useReportStore } from "../store/reportStore";
 import FieldOverlayCanvas from "./FieldOverlayCanvas";
 import type { OverlayGeom } from "../types/overlay";
+import { computeFitZoom } from "../lib/fitZoom";
+import { usePdfShortcuts } from "../hooks/usePdfShortcuts";
+import { usePdfPanZoom } from "../hooks/usePdfPanZoom";
 
 // workerSrc の設定（本体 pdfLoader.ts と同じ ?url import パターン）
 // Vite が .mjs を URL として解決する。
@@ -33,6 +36,7 @@ const ZOOM_STEP = 25;
  */
 const PdfViewer: FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasAreaRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<ReturnType<PDFPageProxy["render"]> | null>(null);
 
   // PCT-153 (blocker): pdfDocRef(useRef) を pdfDoc(useState) に変更。
@@ -50,6 +54,9 @@ const PdfViewer: FC = () => {
   // overlay canvas に渡すジオメトリ（viewport 確定後に更新）
   const [overlayGeom, setOverlayGeom] = useState<OverlayGeom | null>(null);
 
+  // scale:1 のページサイズ（フィット計算に使用）
+  const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
+
   const mode = useReportStore((s) => s.mode);
 
   const {
@@ -57,6 +64,7 @@ const PdfViewer: FC = () => {
     numPages,
     currentPage,
     zoom,
+    fitMode,
     isLoading,
     error,
     setLoading,
@@ -64,6 +72,7 @@ const PdfViewer: FC = () => {
     setPdf,
     setCurrentPage,
     setZoom,
+    setFitMode,
     goToPrevPage,
     goToNextPage,
   } = usePdfStore();
@@ -189,6 +198,15 @@ const PdfViewer: FC = () => {
         // PCT-153 (minor): getPage await 後のキャンセル確認を追加。
         if (cancelled) return;
 
+        // scale:1 のページサイズを取得し、フィット計算に使う
+        const base = page.getViewport({ scale: 1 });
+        setPageSize((prev) => {
+          if (prev && prev.width === base.width && prev.height === base.height) {
+            return prev; // 同値なら更新しない（無限ループ防止）
+          }
+          return { width: base.width, height: base.height };
+        });
+
         const scale = zoom / 100;
         const devicePixelRatio = window.devicePixelRatio || 1;
         const viewport = page.getViewport({ scale: scale * devicePixelRatio });
@@ -254,6 +272,43 @@ const PdfViewer: FC = () => {
     // 同一 filePath 再読込で effect が再実行されなかった）。
   }, [filePath, pdfDoc, currentPage, zoom, setError]);
 
+  // ResizeObserver でコンテナサイズを監視し、fitMode に応じてズームを自動調整する
+  useEffect(() => {
+    const container = canvasAreaRef.current;
+    // ResizeObserver 非対応環境（jsdom 等）ではスキップ
+    if (!container || typeof ResizeObserver === "undefined") return;
+    if (!pageSize) return;
+
+    const applyFit = () => {
+      if (fitMode === "custom") return;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      const newZoom = computeFitZoom({
+        fitMode,
+        containerWidth: w,
+        containerHeight: h,
+        pageWidth: pageSize.width,
+        pageHeight: pageSize.height,
+      });
+      // jsdomガード: 0 は「適用しない」サイン
+      if (newZoom === 0) return;
+      if (newZoom !== usePdfStore.getState().zoom) {
+        setZoom(newZoom);
+      }
+    };
+
+    applyFit();
+
+    const observer = new ResizeObserver(() => {
+      applyFit();
+    });
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [fitMode, pageSize, currentPage, setZoom]);
+
   const handlePageInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     setPageInput(e.target.value);
   };
@@ -275,8 +330,20 @@ const PdfViewer: FC = () => {
     }
   };
 
-  const handleZoomIn = () => setZoom(zoom + ZOOM_STEP);
-  const handleZoomOut = () => setZoom(zoom - ZOOM_STEP);
+  const handleZoomIn = () => {
+    setZoom(zoom + ZOOM_STEP);
+    setFitMode("custom");
+  };
+
+  const handleZoomOut = () => {
+    setZoom(zoom - ZOOM_STEP);
+    setFitMode("custom");
+  };
+
+  // キーボードショートカットの登録
+  usePdfShortcuts();
+  // パン（スペース+ドラッグ）と Ctrl+ホイールズームの登録
+  usePdfPanZoom(canvasAreaRef);
 
   // 空状態（PDF 未読込）
   if (!filePath && !isLoading && !error) {
@@ -399,6 +466,28 @@ const PdfViewer: FC = () => {
         >
           ＋
         </button>
+
+        <div className="pdf-viewer__divider" aria-hidden="true" />
+
+        {/* フィットモードボタン */}
+        <button
+          type="button"
+          className={`pdf-viewer__fit-btn${fitMode === "width" ? " pdf-viewer__fit-btn--active" : ""}`}
+          onClick={() => setFitMode("width")}
+          aria-pressed={fitMode === "width" ? ("true" as const) : ("false" as const)}
+          aria-label="幅に合わせる"
+        >
+          幅
+        </button>
+        <button
+          type="button"
+          className={`pdf-viewer__fit-btn${fitMode === "page" ? " pdf-viewer__fit-btn--active" : ""}`}
+          onClick={() => setFitMode("page")}
+          aria-pressed={fitMode === "page" ? ("true" as const) : ("false" as const)}
+          aria-label="全体表示"
+        >
+          全体
+        </button>
       </div>
 
       {/* defineField モード中のヒント帯 */}
@@ -409,7 +498,7 @@ const PdfViewer: FC = () => {
       )}
 
       {/* Canvas エリア */}
-      <div className="pdf-viewer__canvas-area">
+      <div className="pdf-viewer__canvas-area" ref={canvasAreaRef}>
         {/*
           canvas-wrapper: canvas + オーバーレイ層を relative で包む。
           FieldOverlayCanvas が PDF canvas と同一サイズで絶対配置される。

@@ -7,9 +7,16 @@ interface FieldRowProps {
   onRename: (id: string, name: string) => void;
   onRemove: (id: string) => void;
   onColorChange: (id: string, color: string) => void;
+  onLineItemChange: (id: string, value: boolean) => void;
 }
 
-const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange }) => {
+const FieldRow: FC<FieldRowProps> = ({
+  field,
+  onRename,
+  onRemove,
+  onColorChange,
+  onLineItemChange,
+}) => {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(field.name);
   const [showPalette, setShowPalette] = useState(false);
@@ -44,12 +51,13 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
     }
   };
 
+  const isLineItem = field.isLineItem === true;
+
   return (
     <li className="field-row">
       <div
         className="field-row__color-wrapper"
         onBlur={(e) => {
-          // フォーカスがcolor-wrapper外に移ったらパレットを閉じる
           if (!e.currentTarget.contains(e.relatedTarget as Node)) {
             setShowPalette(false);
           }
@@ -57,11 +65,15 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
       >
         <button
           ref={colorChipRef}
+          type="button"
           className="field-row__color-chip"
-          style={{ backgroundColor: field.color }}
+          // CSS カスタムプロパティ経由で色を渡す（インラインスタイル回避できないケース:
+          // 動的色値のため外部 CSS では記述不可。既存の field-badge と同一パターン）
+          // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+          style={{ "--chip-color": field.color } as React.CSSProperties}
           onClick={() => setShowPalette((v) => !v)}
           aria-label={`${field.name} の色を変更`}
-          aria-expanded={showPalette}
+          aria-expanded={showPalette ? "true" : "false"}
           aria-haspopup="listbox"
         />
         {showPalette && (
@@ -74,18 +86,22 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
             {FIELD_COLOR_PALETTE.map((color, index) => (
               <button
                 key={color}
-                className="field-row__palette-chip"
-                style={{
-                  backgroundColor: color,
-                  outline: color === field.color ? "2px solid #333" : undefined,
-                }}
+                type="button"
+                className={[
+                  "field-row__palette-chip",
+                  color === field.color ? "field-row__palette-chip--selected" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+                style={{ "--chip-color": color } as React.CSSProperties}
                 onClick={() => {
                   onColorChange(field.id, color);
                   setShowPalette(false);
                 }}
                 aria-label={`色 ${index + 1}`}
                 role="option"
-                aria-selected={color === field.color}
+                aria-selected={color === field.color ? "true" : "false"}
               />
             ))}
           </div>
@@ -104,6 +120,7 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
         />
       ) : (
         <button
+          type="button"
           className="field-row__name"
           onClick={() => {
             setDraft(field.name);
@@ -115,7 +132,20 @@ const FieldRow: FC<FieldRowProps> = ({ field, onRename, onRemove, onColorChange 
         </button>
       )}
 
+      {/* 明細欄トグル */}
+      <label className="field-row__lineitem-label" title="明細欄（段ごとに繰り返す）">
+        <input
+          type="checkbox"
+          className="field-row__lineitem-checkbox"
+          checked={isLineItem}
+          onChange={(e) => onLineItemChange(field.id, e.target.checked)}
+          aria-label={`${field.name} を明細欄にする`}
+        />
+        <span className="field-row__lineitem-text">明細</span>
+      </label>
+
       <button
+        type="button"
         className="field-row__remove"
         onClick={() => onRemove(field.id)}
         aria-label={`${field.name} を削除`}
@@ -131,6 +161,7 @@ const FieldListPanel: FC = () => {
   const removeField = useReportStore((s) => s.removeField);
   const renameField = useReportStore((s) => s.renameField);
   const setFieldColor = useReportStore((s) => s.setFieldColor);
+  const setFieldLineItem = useReportStore((s) => s.setFieldLineItem);
   const mode = useReportStore((s) => s.mode);
   const setMode = useReportStore((s) => s.setMode);
 
@@ -171,6 +202,7 @@ const FieldListPanel: FC = () => {
               onRename={renameField}
               onRemove={removeField}
               onColorChange={setFieldColor}
+              onLineItemChange={setFieldLineItem}
             />
           ))}
         </ul>

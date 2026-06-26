@@ -63,7 +63,7 @@ export function csvQuote(s: string): string {
 }
 
 /**
- * 横持ち CSV 文字列を生成する。
+ * 横持ち CSV 文字列を生成する。明細欄ありの場合は縦持ち展開する。
  *
  * 列順（固定・変更不可）:
  *   [元ファイル名 (includeFileName=true 時)] ,
@@ -72,8 +72,17 @@ export function csvQuote(s: string): string {
  *
  * 固定列を先頭にすることで、欄の追加時に会計ソフト側の列位置がずれない。
  *
+ * 縦持ち展開ルール（明細欄が 1 個以上の場合）:
+ *   - 固定欄の列値は常に rows[0] から取る（各行に複製）。
+ *   - 明細欄の列値はその段（row）から取る。
+ *   - 全明細欄が空の段はスキップする。
+ *   - スキップ後に 0 段になった場合は rows[0] から 1 行だけ出力（固定欄のみ・ページを落とさない）。
+ *
+ * 明細欄が 0 個の場合:
+ *   rows[0]（無ければ空 Map）から 1 行だけ生成する。現行と完全一致（バイト等価）。
+ *
  * @param template    帳票テンプレート（fields の順序が列順を決める）
- * @param cells       抽出結果マトリクス（ページ番号 → fieldId → セル値）
+ * @param cells       抽出結果マトリクス（ページ番号 → ReportRow[] ）
  * @param opts        CSV 出力オプション
  * @param meta        メタ情報（ファイル名・出力対象ページ番号の配列）
  */
@@ -99,9 +108,20 @@ export function buildTemplateCsv(
 
   const headerRow = headerCols.map(csvQuote).join(",");
 
-  // データ行の構築
-  const dataRows = meta.pageNumbers.map((pageNum) => {
-    const pageMap = cells.get(pageNum);
+  // 明細欄の有無を判定
+  const lineItemFields = template.fields.filter((f) => f.isLineItem === true);
+  const hasLineItems = lineItemFields.length > 0;
+
+  /**
+   * 1 段（row）から CSV 列配列を生成するヘルパー。
+   * fixedRow: 固定欄の値を取得するための段（rows[0]）
+   * itemRow:  明細欄の値を取得するための段（現在の段）
+   */
+  function buildRowCols(
+    pageNum: number,
+    fixedRow: Map<string, string>,
+    itemRow: Map<string, string>
+  ): string[] {
     const cols: string[] = [];
 
     // 固定列（正規化しない）
@@ -114,13 +134,47 @@ export function buildTemplateCsv(
 
     // 各フィールドのセル値
     for (const field of template.fields) {
-      const raw = pageMap?.get(field.id) ?? emptyValue;
+      // 固定欄は fixedRow から、明細欄は itemRow から取得
+      const sourceRow = (hasLineItems && field.isLineItem) ? itemRow : fixedRow;
+      const raw = sourceRow.get(field.id) ?? emptyValue;
       const value = normalizeNumbers ? normalizeNumeric(raw) : raw;
       cols.push(csvQuote(value));
     }
 
-    return cols.join(",");
-  });
+    return cols;
+  }
+
+  // データ行の構築
+  const dataRows: string[] = [];
+
+  for (const pageNum of meta.pageNumbers) {
+    const pageRows = cells.get(pageNum);
+
+    if (!hasLineItems) {
+      // 明細欄なし: 従来どおり rows[0]（無ければ空 Map）から 1 行
+      const row = pageRows?.[0] ?? new Map<string, string>();
+      dataRows.push(buildRowCols(pageNum, row, row).join(","));
+    } else {
+      // 明細欄あり: 縦持ち展開
+      const rows = pageRows ?? [new Map<string, string>()];
+      const fixedRow = rows[0] ?? new Map<string, string>();
+
+      // 全明細欄が空の段をスキップ
+      const effectiveRows = rows.filter((row) =>
+        lineItemFields.some((f) => (row.get(f.id) ?? "") !== "")
+      );
+
+      if (effectiveRows.length === 0) {
+        // スキップ後 0 段 → rows[0] から 1 行（固定欄のみ・ページを落とさない）
+        dataRows.push(buildRowCols(pageNum, fixedRow, new Map<string, string>()).join(","));
+      } else {
+        // 有効な段ごとに 1 行出力
+        for (const itemRow of effectiveRows) {
+          dataRows.push(buildRowCols(pageNum, fixedRow, itemRow).join(","));
+        }
+      }
+    }
+  }
 
   // RFC4180: 改行コードは \r\n
   const lines = [headerRow, ...dataRows];

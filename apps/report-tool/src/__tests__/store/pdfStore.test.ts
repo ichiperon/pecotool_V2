@@ -114,3 +114,32 @@ describe("pdfStore", () => {
     expect(s.error).toBeNull();
   });
 });
+
+describe("pdfStore: fitMode", () => {
+  it("初期値は 'width'", () => {
+    expect(usePdfStore.getState().fitMode).toBe("width");
+  });
+
+  it("setFitMode で fitMode が変わる", () => {
+    usePdfStore.getState().setFitMode("page");
+    expect(usePdfStore.getState().fitMode).toBe("page");
+
+    usePdfStore.getState().setFitMode("custom");
+    expect(usePdfStore.getState().fitMode).toBe("custom");
+
+    usePdfStore.getState().setFitMode("width");
+    expect(usePdfStore.getState().fitMode).toBe("width");
+  });
+
+  it("reset 後は fitMode が 'width' に戻る", () => {
+    usePdfStore.getState().setFitMode("page");
+    usePdfStore.getState().reset();
+    expect(usePdfStore.getState().fitMode).toBe("width");
+  });
+
+  it("setZoom は fitMode を変えない", () => {
+    usePdfStore.getState().setFitMode("page");
+    usePdfStore.getState().setZoom(150);
+    expect(usePdfStore.getState().fitMode).toBe("page");
+  });
+});

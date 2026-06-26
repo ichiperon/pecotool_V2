@@ -1,16 +1,26 @@
-import { useState, useRef, useCallback, useEffect, type FC, type KeyboardEvent, type PointerEvent } from "react";
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  type FC,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import { useReportStore } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 
-/** フォーカス位置 */
+/** フォーカス位置（段対応） */
 interface FocusPos {
   pageNum: number;
+  rowIndex: number;
   fieldIndex: number;
 }
 
 /** ポインタードラッグの進行状態を保持する ref の型 */
 interface DragRefState {
   pageNum: number;
+  rowIndex: number;
   fieldId: string;
   pointerId: number;
   startX: number;
@@ -22,8 +32,7 @@ interface DragRefState {
 /**
  * ゼロ幅スペース (U+200B)。不可視かつスクリーンリーダーも無視するため表示に影響しない。
  * aria-live の再アナウンスを保証するため、同一テキストでも DOM の textContent を変化させる
- * トグル文字として使う。スクリーンリーダーは同一文字列を連続してセットすると再読み上げしない
- * ため、末尾を微細に変化させることで確実に変更イベントを発火させる。
+ * トグル文字として使う。
  */
 // eslint-disable-next-line no-irregular-whitespace
 const ZWSP = "​";
@@ -53,61 +62,72 @@ interface CsvPreviewTableProps {
 const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) => {
   const fields = useReportStore((s) => s.template.fields);
   const cells = useReportStore((s) => s.cells);
+  const confidences = useReportStore((s) => s.confidences);
   const setCells = useReportStore((s) => s.setCells);
   const setCellValue = useReportStore((s) => s.setCellValue);
   const clearCellValue = useReportStore((s) => s.clearCellValue);
   const moveCellValue = useReportStore((s) => s.moveCellValue);
+  const insertRowAt = useReportStore((s) => s.insertRowAt);
+  const removeRowAt = useReportStore((s) => s.removeRowAt);
+  const splitCellToNextRow = useReportStore((s) => s.splitCellToNextRow);
+  const splitCellByNewlines = useReportStore((s) => s.splitCellByNewlines);
   const setCurrentPage = usePdfStore((s) => s.setCurrentPage);
 
   const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
   const hasData = pageNumbers.length > 0;
   const hasFields = fields.length > 0;
 
-  // 編集状態
-  const [editPos, setEditPos] = useState<{ pageNum: number; fieldId: string } | null>(null);
+  // 編集状態（段対応）
+  const [editPos, setEditPos] = useState<{ pageNum: number; rowIndex: number; fieldId: string } | null>(null);
   const [editValue, setEditValue] = useState("");
-  // フォーカス位置（グリッドナビ用）
+  // フォーカス位置（グリッドナビ用・段対応）
   const [focusPos, setFocusPos] = useState<FocusPos | null>(null);
   // ドラッグ状態（Pointer Events ベース）
-  const [dragSource, setDragSource] = useState<{ pageNum: number; fieldId: string } | null>(null);
+  const [dragSource, setDragSource] = useState<{ pageNum: number; rowIndex: number; fieldId: string } | null>(null);
   const [dragOverPos, setDragOverPos] = useState<{ pageNum: number; fieldId: string } | null>(null);
   // aria-live 通知（toggle で同一テキスト連続セット時も再アナウンスを保証）
   const [announcement, setAnnouncement] = useState("");
   const announcementToggleRef = useRef(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cellRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
-  /** activePage 対応行の tr ref（scrollIntoView 用） */
+  /** activePage 対応行の tr ref（scrollIntoView 用）— ページ先頭段のみ */
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
 
   /**
    * ドラッグ進行状態を ref で保持する（setState を介さない）。
-   * Chromium(Tauri webview) では dragstart 直後の setState が
-   * ネイティブ HTML5 DnD を潰すため、Pointer Events で代替し
-   * 進行状態は ref に格納して再レンダを起こさない。
    */
   const dragRef = useRef<DragRefState | null>(null);
 
-  const getCellKey = (pageNum: number, fieldIndex: number) => `${pageNum}:${fieldIndex}`;
+  /** セルキー: ページ:段:欄インデックス */
+  const getCellKey = (pageNum: number, rowIndex: number, fieldIndex: number) =>
+    `${pageNum}:${rowIndex}:${fieldIndex}`;
 
   /**
-   * focusPos のフィールドインデックスとページインデックスを有効範囲にクランプする。
-   * fields や pageNumbers が縮小した後に範囲外を指すことを防ぐ。
+   * focusPos のフィールドインデックス・段インデックス・ページを有効範囲にクランプする。
    */
   const clampFocusPos = useCallback(
-    (pos: FocusPos, currentFields: typeof fields, currentPageNumbers: typeof pageNumbers): FocusPos | null => {
+    (
+      pos: FocusPos,
+      currentFields: typeof fields,
+      currentPageNumbers: typeof pageNumbers
+    ): FocusPos | null => {
       if (currentFields.length === 0 || currentPageNumbers.length === 0) return null;
       const clampedFieldIndex = Math.min(pos.fieldIndex, currentFields.length - 1);
       const pageIdx = currentPageNumbers.indexOf(pos.pageNum);
       const resolvedPageIdx = pageIdx >= 0 ? pageIdx : Math.min(0, currentPageNumbers.length - 1);
-      const clampedPageNum = currentPageNumbers[Math.min(resolvedPageIdx, currentPageNumbers.length - 1)];
-      return { pageNum: clampedPageNum, fieldIndex: clampedFieldIndex };
+      const clampedPageNum =
+        currentPageNumbers[Math.min(resolvedPageIdx, currentPageNumbers.length - 1)];
+      const pageRows = cells.get(clampedPageNum) ?? [];
+      const maxRowIndex = Math.max(0, pageRows.length - 1);
+      const clampedRowIndex = Math.min(pos.rowIndex, maxRowIndex);
+      return { pageNum: clampedPageNum, rowIndex: clampedRowIndex, fieldIndex: clampedFieldIndex };
     },
-    []
+    [cells]
   );
 
-  // activePage が変化したとき該当行を scrollIntoView（無限ループ防止: フォーカス移動はしない）
-  // scrollIntoView は jsdom では未実装のため防御的に呼ぶ
+  // activePage が変化したとき該当行を scrollIntoView
   useEffect(() => {
     if (activePage == null) return;
     const rowEl = rowRefs.current.get(activePage);
@@ -116,17 +136,21 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
     }
   }, [activePage]);
 
-  // 通知を発火するヘルパー（toggle を内部管理して同一文字列でも再アナウンス）
+  // 通知を発火するヘルパー
   const announce = useCallback((text: string) => {
     announcementToggleRef.current = !announcementToggleRef.current;
     setAnnouncement(makeAnnouncement(text, announcementToggleRef.current));
   }, []);
 
-  // 編集開始
+  /**
+   * 編集開始。isLineItem フィールドは textarea、固定欄は input で開く。
+   */
   const startEdit = useCallback(
-    (pageNum: number, fieldId: string) => {
-      const value = cells.get(pageNum)?.get(fieldId) ?? "";
-      setEditPos({ pageNum, fieldId });
+    (pageNum: number, rowIndex: number, fieldId: string) => {
+      const rows = cells.get(pageNum) ?? [];
+      const row = rows[rowIndex] ?? new Map<string, string>();
+      const value = row.get(fieldId) ?? "";
+      setEditPos({ pageNum, rowIndex, fieldId });
       setEditValue(value);
     },
     [cells]
@@ -135,7 +159,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   // 編集確定
   const commitEdit = useCallback(() => {
     if (!editPos) return;
-    setCellValue(editPos.pageNum, editPos.fieldId, editValue);
+    setCellValue(editPos.pageNum, editPos.fieldId, editValue, editPos.rowIndex);
     setEditPos(null);
   }, [editPos, editValue, setCellValue]);
 
@@ -148,25 +172,34 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
     const fieldIndex = fields.findIndex((f) => f.id === editPos.fieldId);
     const safeFieldIndex = fieldIndex >= 0 ? fieldIndex : 0;
     setEditPos(null);
-    // 次フレームで td にフォーカスを戻す（input のアンマウント完了後）
-    const targetKey = getCellKey(editPos.pageNum, safeFieldIndex);
+    const targetKey = getCellKey(editPos.pageNum, editPos.rowIndex, safeFieldIndex);
     requestAnimationFrame(() => {
       cellRefs.current.get(targetKey)?.focus();
     });
   }, [editPos, fields]);
 
-  // input がマウントされたらフォーカス
+  // input/textarea がマウントされたらフォーカス
   useEffect(() => {
-    if (editPos && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
+    if (editPos) {
+      const field = fields.find((f) => f.id === editPos.fieldId);
+      if (field?.isLineItem) {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+          textareaRef.current.select();
+        }
+      } else {
+        if (inputRef.current) {
+          inputRef.current.focus();
+          inputRef.current.select();
+        }
+      }
     }
-  }, [editPos]);
+  }, [editPos, fields]);
 
   // セル削除
   const handleDelete = useCallback(
-    (pageNum: number, fieldId: string, fieldName: string) => {
-      clearCellValue(pageNum, fieldId);
+    (pageNum: number, rowIndex: number, fieldId: string, fieldName: string) => {
+      clearCellValue(pageNum, fieldId, rowIndex);
       announce(`${pageNum}ページ目 ${fieldName} を削除しました`);
     },
     [clearCellValue, announce]
@@ -175,7 +208,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   // 開発用: サンプルデータを注入
   const injectSampleData = () => {
     if (fields.length === 0) return;
-    const sample = new Map<number, Map<string, string>>();
+    const sample = new Map<number, Map<string, string>[]>();
     for (let page = 1; page <= 3; page++) {
       const row = new Map<string, string>();
       fields.forEach((field, idx) => {
@@ -185,57 +218,146 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
           row.set(field.id, `サンプル-P${page}-${field.name}`);
         }
       });
-      sample.set(page, row);
+      sample.set(page, [row]);
     }
     setCells(sample);
   };
 
-  // グリッドキーボードナビ
+  /**
+   * ページ内の全段を走査してフラットな (pageNum, rowIndex) ペアのリストを返す。
+   * ↑↓ナビゲーションで段・ページを連続移動するために使う。
+   */
+  const getAllRows = useCallback((): { pageNum: number; rowIndex: number }[] => {
+    const result: { pageNum: number; rowIndex: number }[] = [];
+    for (const pageNum of pageNumbers) {
+      const rows = cells.get(pageNum) ?? [];
+      const rowCount = Math.max(rows.length, 1);
+      for (let r = 0; r < rowCount; r++) {
+        result.push({ pageNum, rowIndex: r });
+      }
+    }
+    return result;
+  }, [pageNumbers, cells]);
+
+  // グリッドキーボードナビ（段対応）
   const handleCellKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLTableCellElement>, pageNum: number, fieldIndex: number) => {
+    (
+      e: KeyboardEvent<HTMLTableCellElement>,
+      pageNum: number,
+      rowIndex: number,
+      fieldIndex: number
+    ) => {
       const fieldId = fields[fieldIndex]?.id;
       const fieldName = fields[fieldIndex]?.name ?? "";
+      const isLineItem = fields[fieldIndex]?.isLineItem === true;
+
+      // 固定欄かつ2段目以降（〃セル）は編集・削除・段操作を無視する。
+      // 矢印キーによるナビゲーションは通常フローへ素通しする。
+      const isDittoCellHere = !isLineItem && rowIndex > 0;
+      if (isDittoCellHere) {
+        const isNavKey = ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"].includes(e.key);
+        if (!isNavKey) {
+          e.preventDefault();
+          return;
+        }
+        // 矢印は下の通常ナビロジックへ素通し
+      }
 
       if (e.key === "Enter" || e.key === "F2") {
         e.preventDefault();
-        startEdit(pageNum, fieldId);
+        startEdit(pageNum, rowIndex, fieldId);
         return;
       }
 
+      // Alt 修飾キー付きは先に判定する（単体 Delete より前）
+      // Alt+ArrowDown: 直下に空段挿入
+      if (e.altKey && e.key === "ArrowDown") {
+        e.preventDefault();
+        insertRowAt(pageNum, rowIndex);
+        const newRowIndex = rowIndex + 1;
+        // 明細欄の最初のフィールドにフォーカス
+        const firstLineItemIdx = fields.findIndex((f) => f.isLineItem);
+        const targetFieldIdx = firstLineItemIdx >= 0 ? firstLineItemIdx : fieldIndex;
+        setFocusPos({ pageNum, rowIndex: newRowIndex, fieldIndex: targetFieldIdx });
+        announce(`${pageNum}ページ目 段${newRowIndex + 1}を挿入しました`);
+        return;
+      }
+
+      // Alt+ArrowUp: 直上に空段挿入
+      if (e.altKey && e.key === "ArrowUp") {
+        e.preventDefault();
+        insertRowAt(pageNum, rowIndex - 1);
+        // 挿入された段はそのまま rowIndex の位置
+        const firstLineItemIdx = fields.findIndex((f) => f.isLineItem);
+        const targetFieldIdx = firstLineItemIdx >= 0 ? firstLineItemIdx : fieldIndex;
+        setFocusPos({ pageNum, rowIndex, fieldIndex: targetFieldIdx });
+        announce(`${pageNum}ページ目 段${rowIndex + 1}を挿入しました`);
+        return;
+      }
+
+      // Alt+Delete: 段削除
+      if (e.altKey && e.key === "Delete") {
+        e.preventDefault();
+        const rows = cells.get(pageNum) ?? [];
+        if (rows.length <= 1) {
+          announce(`${pageNum}ページ目 最後の段は削除できません`);
+          return;
+        }
+        removeRowAt(pageNum, rowIndex);
+        // 削除後のフォーカス: 同位置 or 前段
+        const newRows = (cells.get(pageNum) ?? []).filter((_, i) => i !== rowIndex);
+        const newRowIndex = Math.min(rowIndex, Math.max(0, newRows.length - 1));
+        setFocusPos({ pageNum, rowIndex: newRowIndex, fieldIndex });
+        announce(`${pageNum}ページ目 段${rowIndex + 1}を削除しました`);
+        return;
+      }
+
+      // Delete/Backspace: セル値クリア（Alt なし）
       if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
-        handleDelete(pageNum, fieldId, fieldName);
+        handleDelete(pageNum, rowIndex, fieldId, fieldName);
         return;
       }
-
-      const pageIdx = pageNumbers.indexOf(pageNum);
 
       if (e.key === "ArrowRight") {
         e.preventDefault();
         const nextFieldIdx = Math.min(fieldIndex + 1, fields.length - 1);
-        setFocusPos({ pageNum, fieldIndex: nextFieldIdx });
+        setFocusPos({ pageNum, rowIndex, fieldIndex: nextFieldIdx });
         return;
       }
       if (e.key === "ArrowLeft") {
         e.preventDefault();
         const prevFieldIdx = Math.max(fieldIndex - 1, 0);
-        setFocusPos({ pageNum, fieldIndex: prevFieldIdx });
+        setFocusPos({ pageNum, rowIndex, fieldIndex: prevFieldIdx });
         return;
       }
+
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        const nextPageIdx = Math.min(pageIdx + 1, pageNumbers.length - 1);
-        setFocusPos({ pageNum: pageNumbers[nextPageIdx], fieldIndex });
+        const allRows = getAllRows();
+        const currentIdx = allRows.findIndex(
+          (r) => r.pageNum === pageNum && r.rowIndex === rowIndex
+        );
+        if (currentIdx >= 0 && currentIdx < allRows.length - 1) {
+          const next = allRows[currentIdx + 1];
+          setFocusPos({ pageNum: next.pageNum, rowIndex: next.rowIndex, fieldIndex });
+        }
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        const prevPageIdx = Math.max(pageIdx - 1, 0);
-        setFocusPos({ pageNum: pageNumbers[prevPageIdx], fieldIndex });
+        const allRows = getAllRows();
+        const currentIdx = allRows.findIndex(
+          (r) => r.pageNum === pageNum && r.rowIndex === rowIndex
+        );
+        if (currentIdx > 0) {
+          const prev = allRows[currentIdx - 1];
+          setFocusPos({ pageNum: prev.pageNum, rowIndex: prev.rowIndex, fieldIndex });
+        }
         return;
       }
     },
-    [fields, pageNumbers, startEdit, handleDelete]
+    [fields, cells, getAllRows, startEdit, handleDelete, insertRowAt, removeRowAt, announce]
   );
 
   // focusPos が範囲外になったとき(欄/ページ削除後等)クランプする
@@ -246,7 +368,11 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       setFocusPos(null);
       return;
     }
-    if (clamped.fieldIndex !== focusPos.fieldIndex || clamped.pageNum !== focusPos.pageNum) {
+    if (
+      clamped.fieldIndex !== focusPos.fieldIndex ||
+      clamped.pageNum !== focusPos.pageNum ||
+      clamped.rowIndex !== focusPos.rowIndex
+    ) {
       setFocusPos(clamped);
     }
   }, [focusPos, fields, pageNumbers, clampFocusPos]);
@@ -254,22 +380,21 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   // フォーカス位置が変わったとき対応セルにフォーカスを当てる
   useEffect(() => {
     if (focusPos && !editPos) {
-      const key = getCellKey(focusPos.pageNum, focusPos.fieldIndex);
+      const key = getCellKey(focusPos.pageNum, focusPos.rowIndex, focusPos.fieldIndex);
       const el = cellRefs.current.get(key);
       el?.focus();
     }
   }, [focusPos, editPos]);
 
-  // input でのキー操作
+  // input でのキー操作（固定欄）
   const handleInputKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLInputElement>, pageNum: number, fieldIndex: number) => {
+    (e: KeyboardEvent<HTMLInputElement>, pageNum: number, rowIndex: number, fieldIndex: number) => {
       if (e.key === "Enter") {
         e.preventDefault();
         commitEdit();
-        // Tab相当: 次の欄へ
         const nextFieldIdx = fieldIndex + 1;
         if (nextFieldIdx < fields.length) {
-          setFocusPos({ pageNum, fieldIndex: nextFieldIdx });
+          setFocusPos({ pageNum, rowIndex, fieldIndex: nextFieldIdx });
         }
         return;
       }
@@ -284,11 +409,79 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
         const dir = e.shiftKey ? -1 : 1;
         const nextFieldIdx = fieldIndex + dir;
         if (nextFieldIdx >= 0 && nextFieldIdx < fields.length) {
-          setFocusPos({ pageNum, fieldIndex: nextFieldIdx });
+          setFocusPos({ pageNum, rowIndex, fieldIndex: nextFieldIdx });
         }
       }
     },
     [commitEdit, cancelEdit, fields.length]
+  );
+
+  /**
+   * textarea でのキー操作（明細欄）。
+   * Ctrl+Enter で段分割、Escape でキャンセル、Tab で次欄へ。
+   * 通常の Enter は改行（textarea デフォルト）。
+   */
+  const handleTextareaKeyDown = useCallback(
+    (
+      e: KeyboardEvent<HTMLTextAreaElement>,
+      pageNum: number,
+      rowIndex: number,
+      fieldIndex: number,
+      fieldId: string
+    ) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        cancelEdit();
+        return;
+      }
+
+      if (e.key === "Tab") {
+        e.preventDefault();
+        commitEdit();
+        const dir = e.shiftKey ? -1 : 1;
+        const nextFieldIdx = fieldIndex + dir;
+        if (nextFieldIdx >= 0 && nextFieldIdx < fields.length) {
+          setFocusPos({ pageNum, rowIndex, fieldIndex: nextFieldIdx });
+        }
+        return;
+      }
+
+      // Ctrl+Enter: 段分割
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        const textarea = e.currentTarget;
+        const cursorPos = textarea.selectionStart ?? 0;
+        const selectionEnd = textarea.selectionEnd ?? 0;
+        const currentValue = editValue;
+
+        // まず編集中の値を確定してから分割アクションを呼ぶ
+        setCellValue(pageNum, fieldId, currentValue, rowIndex);
+
+        const hasNewlines = currentValue.includes("\n");
+        // 全選択またはカーソルが先頭かつ改行あり → 一括分割
+        if (hasNewlines && (cursorPos === 0 && selectionEnd === currentValue.length || cursorPos === selectionEnd && cursorPos === 0)) {
+          splitCellByNewlines(pageNum, rowIndex, fieldId);
+          // 一括分割後: 最後の新段の同欄へフォーカス
+          requestAnimationFrame(() => {
+            const rows = useReportStore.getState().cells.get(pageNum) ?? [];
+            const lastRowIndex = rows.length - 1;
+            setFocusPos({ pageNum, rowIndex: lastRowIndex, fieldIndex });
+            setEditPos(null);
+            announce(`${rows.length}段に分割しました`);
+          });
+        } else {
+          // 逐次分割: カーソル位置で割る
+          splitCellToNextRow(pageNum, rowIndex, fieldId, cursorPos);
+          // 逐次分割後: 新段の同欄へフォーカス
+          const newRowIndex = rowIndex + 1;
+          setEditPos(null);
+          setFocusPos({ pageNum, rowIndex: newRowIndex, fieldIndex });
+          announce(`2段に分割しました`);
+        }
+        return;
+      }
+    },
+    [editValue, commitEdit, cancelEdit, fields.length, setCellValue, splitCellByNewlines, splitCellToNextRow, announce]
   );
 
   // ドラッグ終了の共通クリーンアップ
@@ -299,31 +492,25 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   }, []);
 
   /**
-   * Pointer Events ベースのドラッグ実装。
-   *
-   * HTML5 DnD（draggable/onDragStart 等）は Chromium(Tauri webview) で
-   * dragstart 直後の setState が再レンダを起こしドラッグを潰す問題がある。
-   * Pointer Events に置き換えることでその競合を回避する。
-   *
-   * - onPointerDown: ドラッグ候補として dragRef に記録 + setPointerCapture
-   * - onPointerMove: 閾値超えでドラッグ開始、elementFromPoint でドロップ先を特定
-   * - onPointerUp: 同一ページなら moveCellValue を実行
-   * - onPointerCancel: クリーンアップ
+   * Pointer Events ベースのドラッグ実装（段対応）。
+   * 同一ページ・同一段内のみドロップ可能。
    */
   const handlePointerDown = useCallback(
-    (e: PointerEvent<HTMLTableCellElement>, pageNum: number, fieldId: string) => {
-      // 編集中（input フォーカス中）は早期 return
+    (
+      e: PointerEvent<HTMLTableCellElement>,
+      pageNum: number,
+      rowIndex: number,
+      fieldId: string
+    ) => {
       if (editPos !== null) return;
-      // × ボタン上なら早期 return（クリックに任せる）
       if ((e.target as HTMLElement).closest("button")) return;
-      // 左ボタン（0）以外は無視
       if (e.button !== 0) return;
 
-      // jsdom 環境では setPointerCapture が未実装の場合があるため防御的に呼ぶ
       e.currentTarget.setPointerCapture?.(e.pointerId);
 
       dragRef.current = {
         pageNum,
+        rowIndex,
         fieldId,
         pointerId: e.pointerId,
         startX: e.clientX,
@@ -343,16 +530,13 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       const dy = e.clientY - drag.startY;
       const dist = Math.hypot(dx, dy);
 
-      // 閾値を超えたらドラッグ開始フラグを立てる
       if (!drag.started && dist >= DRAG_THRESHOLD) {
         drag.started = true;
-        setDragSource({ pageNum: drag.pageNum, fieldId: drag.fieldId });
+        setDragSource({ pageNum: drag.pageNum, rowIndex: drag.rowIndex, fieldId: drag.fieldId });
       }
 
       if (!drag.started) return;
 
-      // ポインターキャプチャ中は e.target が常に捕捉元のため
-      // elementFromPoint でカーソル下の実際の要素を特定する
       const el = document.elementFromPoint(e.clientX, e.clientY);
       const tdEl = el?.closest("td[data-field-id]") as HTMLElement | null;
 
@@ -362,10 +546,11 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       }
 
       const overPageNum = Number(tdEl.dataset.pageNum);
+      const overRowIndex = Number(tdEl.dataset.rowIndex);
       const overFieldId = tdEl.dataset.fieldId ?? "";
 
-      // ページ跨ぎ禁止
-      if (overPageNum !== drag.pageNum) {
+      // ページ跨ぎ禁止・段跨ぎ禁止
+      if (overPageNum !== drag.pageNum || overRowIndex !== drag.rowIndex) {
         setDragOverPos(null);
         return;
       }
@@ -380,12 +565,13 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       const drag = dragRef.current;
       if (!drag) return;
 
-      // ドラッグが開始済みかつドロップ先が同一ページの場合のみ移動を実行
       if (drag.started && dragOverPos && dragOverPos.pageNum === drag.pageNum) {
-        moveCellValue(drag.pageNum, drag.fieldId, dragOverPos.fieldId);
+        moveCellValue(drag.pageNum, drag.fieldId, dragOverPos.fieldId, "swap", drag.rowIndex);
         const fromField = fields.find((f) => f.id === drag.fieldId)?.name ?? "";
         const toField = fields.find((f) => f.id === dragOverPos.fieldId)?.name ?? "";
-        announce(`${drag.pageNum}ページ目: ${fromField} と ${toField} の値を移動しました`);
+        announce(
+          `${drag.pageNum}ページ目 段${drag.rowIndex + 1}: ${fromField} と ${toField} の値を移動しました`
+        );
       }
 
       try {
@@ -425,21 +611,19 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
     return (
       <div className="csv-preview csv-preview--empty">
         <p>OCR 後に値が表示されます。</p>
-        <button type="button" className="csv-preview__sample-btn" onClick={injectSampleData}>
-          サンプルデータを挿入（開発用）
-        </button>
+        {import.meta.env.DEV && (
+          <button type="button" className="csv-preview__sample-btn" onClick={injectSampleData}>
+            サンプルデータを挿入（開発用）
+          </button>
+        )}
       </div>
     );
   }
 
   return (
     <div className="csv-preview">
-      {/* aria-live 領域（削除・移動のアナウンス） */}
-      <div
-        aria-live="polite"
-        aria-atomic="true"
-        className="sr-only"
-      >
+      {/* aria-live 領域（削除・移動・分割のアナウンス） */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
         {announcement}
       </div>
 
@@ -447,9 +631,11 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
         <span className="csv-preview__info">
           {pageNumbers.length} ページ / {fields.length} 欄
         </span>
-        <button type="button" className="csv-preview__sample-btn" onClick={injectSampleData}>
-          サンプル再挿入（開発用）
-        </button>
+        {import.meta.env.DEV && (
+          <button type="button" className="csv-preview__sample-btn" onClick={injectSampleData}>
+            サンプル再挿入（開発用）
+          </button>
+        )}
       </div>
 
       <div className="csv-preview__table-wrapper">
@@ -467,144 +653,245 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
               >
                 ページ
               </th>
+              <th
+                className="csv-preview__th csv-preview__th--rownum"
+                role="columnheader"
+                scope="col"
+                aria-label="段番号"
+              >
+                段
+              </th>
               {fields.map((field) => (
-                <th
-                  key={field.id}
-                  className="csv-preview__th"
-                  role="columnheader"
-                  scope="col"
-                >
+                <th key={field.id} className="csv-preview__th" role="columnheader" scope="col">
                   <span
                     className="csv-preview__field-badge"
-                    // CSS カスタムプロパティ経由で色を渡す（インラインスタイル回避）
                     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
                     style={{ "--field-color": field.color } as React.CSSProperties}
                     aria-hidden="true"
                   />
                   {field.name}
+                  {field.isLineItem && (
+                    <span className="csv-preview__lineitem-pill" aria-label="明細欄">
+                      明細
+                    </span>
+                  )}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {pageNumbers.map((pageNum) => {
-              const pageMap = cells.get(pageNum);
+              const pageRows = cells.get(pageNum) ?? [new Map<string, string>()];
               const isDimmedPage = dragSource !== null && dragSource.pageNum !== pageNum;
               const isCurrentPage = activePage != null && activePage === pageNum;
               const isReocrLoading = reocrTarget != null && reocrTarget === pageNum;
-              return (
-                <tr
-                  key={pageNum}
-                  ref={(el) => {
-                    if (el) rowRefs.current.set(pageNum, el);
-                    else rowRefs.current.delete(pageNum);
-                  }}
-                  role="row"
-                  className={[
-                    isDimmedPage ? "csv-preview__row--dimmed" : "",
-                    isCurrentPage ? "csv-preview__row--current" : "",
-                    isReocrLoading ? "csv-preview__row--reocr-loading" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ") || undefined}
-                  aria-description={isDimmedPage ? "このページへはドロップできません" : undefined}
-                  onClick={() => {
-                    if (activePage != null) {
-                      setCurrentPage(pageNum);
-                    }
-                  }}
-                >
-                  <td
-                    className="csv-preview__td csv-preview__td--page"
-                    role="rowheader"
-                    aria-label={`${pageNum}ページ目`}
-                  >
-                    {pageNum}
-                  </td>
-                  {fields.map((field, fieldIndex) => {
-                    const value = pageMap?.get(field.id) ?? "";
-                    const isEmpty = value === "";
-                    const isEditing =
-                      editPos?.pageNum === pageNum && editPos?.fieldId === field.id;
-                    const isDragOver =
-                      dragOverPos?.pageNum === pageNum && dragOverPos?.fieldId === field.id;
-                    const isDragSource =
-                      dragSource?.pageNum === pageNum && dragSource?.fieldId === field.id;
-                    const cellKey = getCellKey(pageNum, fieldIndex);
 
-                    return (
+              return pageRows.map((rowMap, rowIndex) => {
+                const isFirstRow = rowIndex === 0;
+
+                return (
+                  <tr
+                    key={`${pageNum}-${rowIndex}`}
+                    ref={
+                      isFirstRow
+                        ? (el) => {
+                            if (el) rowRefs.current.set(pageNum, el);
+                            else rowRefs.current.delete(pageNum);
+                          }
+                        : undefined
+                    }
+                    role="row"
+                    className={[
+                      isDimmedPage ? "csv-preview__row--dimmed" : "",
+                      isCurrentPage && isFirstRow ? "csv-preview__row--current" : "",
+                      isReocrLoading ? "csv-preview__row--reocr-loading" : "",
+                      !isFirstRow ? "csv-preview__row--continuation" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ") || undefined}
+                    aria-description={isDimmedPage ? "このページへはドロップできません" : undefined}
+                    onClick={() => {
+                      if (activePage != null) {
+                        setCurrentPage(pageNum);
+                      }
+                    }}
+                  >
+                    {/* ページ番号セル: 先頭段のみ表示 */}
+                    {isFirstRow ? (
                       <td
-                        key={field.id}
-                        ref={(el) => {
-                          if (el) cellRefs.current.set(cellKey, el);
-                          else cellRefs.current.delete(cellKey);
-                        }}
-                        className={[
-                          "csv-preview__td",
-                          isEmpty ? "csv-preview__td--empty" : "",
-                          isDragOver ? "csv-preview__td--drag-over" : "",
-                          isDragSource ? "csv-preview__td--drag-source" : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ")}
-                        role="gridcell"
-                        aria-label={`${pageNum}ページ目 ${field.name} ${isEmpty ? "空" : value}。Delete キーで削除`}
-                        aria-disabled={isDimmedPage || undefined}
-                        tabIndex={
-                          focusPos?.pageNum === pageNum && focusPos?.fieldIndex === fieldIndex
-                            ? 0
-                            : pageNum === pageNumbers[0] && fieldIndex === 0
-                            ? 0
-                            : -1
-                        }
-                        // Pointer Events ベースのドラッグ (draggable 属性は削除)
-                        data-page-num={pageNum}
-                        data-field-id={field.id}
-                        title={isEmpty ? "空" : value}
-                        onDoubleClick={() => startEdit(pageNum, field.id)}
-                        onKeyDown={(e) => handleCellKeyDown(e, pageNum, fieldIndex)}
-                        onFocus={() => setFocusPos({ pageNum, fieldIndex })}
-                        onPointerDown={(e) => handlePointerDown(e, pageNum, field.id)}
-                        onPointerMove={handlePointerMove}
-                        onPointerUp={handlePointerUp}
-                        onPointerCancel={handlePointerCancel}
+                        className="csv-preview__td csv-preview__td--page"
+                        role="rowheader"
+                        aria-label={`${pageNum}ページ目`}
                       >
-                        {isEditing ? (
-                          <input
-                            ref={inputRef}
-                            className="csv-preview__cell-input"
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onBlur={commitEdit}
-                            onKeyDown={(e) => handleInputKeyDown(e, pageNum, fieldIndex)}
-                            aria-label={`${pageNum}ページ目 ${field.name} 編集中`}
-                          />
-                        ) : (
-                          <>
-                            {isEmpty ? (
-                              <span className="csv-preview__empty-mark">(空)</span>
-                            ) : (
-                              value
-                            )}
-                            <button
-                              type="button"
-                              className="csv-preview__cell-clear-btn"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDelete(pageNum, field.id, field.name);
-                              }}
-                              tabIndex={-1}
-                              aria-label={`${pageNum}ページ目 ${field.name} を削除`}
-                            >
-                              ×
-                            </button>
-                          </>
-                        )}
+                        {pageNum}
                       </td>
-                    );
-                  })}
-                </tr>
-              );
+                    ) : (
+                      <td
+                        className="csv-preview__td csv-preview__td--page csv-preview__td--page-continuation"
+                        aria-hidden="true"
+                      />
+                    )}
+                    {/* 段番号セル */}
+                    <td
+                      className="csv-preview__td csv-preview__td--rownum"
+                      role="rowheader"
+                      aria-label={`段${rowIndex + 1}`}
+                    >
+                      {rowIndex + 1}
+                    </td>
+                    {fields.map((field, fieldIndex) => {
+                      const value = rowMap?.get(field.id) ?? "";
+                      const isEmpty = value === "";
+                      const isEditing =
+                        editPos?.pageNum === pageNum &&
+                        editPos?.rowIndex === rowIndex &&
+                        editPos?.fieldId === field.id;
+                      const isDragOver =
+                        dragOverPos?.pageNum === pageNum &&
+                        dragOverPos?.fieldId === field.id &&
+                        dragSource?.rowIndex === rowIndex;
+                      const isDragSource =
+                        dragSource?.pageNum === pageNum &&
+                        dragSource?.rowIndex === rowIndex &&
+                        dragSource?.fieldId === field.id;
+                      const cellKey = getCellKey(pageNum, rowIndex, fieldIndex);
+                      const isLineItem = field.isLineItem === true;
+                      // 固定欄かつ2段目以降: 〃表示（編集不可）
+                      const isDittoCell = !isLineItem && rowIndex > 0;
+
+                      // OCR 信頼度: 閾値(<=0.5)かつ〃セル・空セル以外のとき低信頼強調
+                      const pageConfRows = confidences.get(pageNum);
+                      const cellConf = pageConfRows?.[rowIndex]?.get(field.id);
+                      const isLowConfidence =
+                        cellConf !== undefined &&
+                        cellConf <= 0.5 &&
+                        !isDittoCell &&
+                        !isEmpty;
+
+                      // isFocused: roving tabindex 判定
+                      const isFocused =
+                        focusPos?.pageNum === pageNum &&
+                        focusPos?.rowIndex === rowIndex &&
+                        focusPos?.fieldIndex === fieldIndex;
+                      const isInitialTabStop =
+                        pageNum === pageNumbers[0] && rowIndex === 0 && fieldIndex === 0;
+
+                      return (
+                        <td
+                          key={`${field.id}-${rowIndex}`}
+                          ref={(el) => {
+                            if (el) cellRefs.current.set(cellKey, el);
+                            else cellRefs.current.delete(cellKey);
+                          }}
+                          className={[
+                            "csv-preview__td",
+                            isEmpty && !isDittoCell ? "csv-preview__td--empty" : "",
+                            isDragOver ? "csv-preview__td--drag-over" : "",
+                            isDragSource ? "csv-preview__td--drag-source" : "",
+                            isDittoCell ? "csv-preview__td--ditto" : "",
+                            isLineItem ? "csv-preview__td--lineitem" : "",
+                            isLowConfidence ? "csv-preview__td--low-confidence" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          role="gridcell"
+                          aria-label={
+                            isDittoCell
+                              ? `${pageNum}ページ目 段${rowIndex + 1} ${field.name} 同上`
+                              : `${pageNum}ページ目 段${rowIndex + 1} ${field.name} ${isEmpty ? "空" : value}${isLowConfidence ? "。信頼度低・要確認" : ""}${isDittoCell ? "" : "。Delete キーで削除"}`
+                          }
+                          {...(isDimmedPage ? { "aria-disabled": "true" } : {})}
+                          {...(isDittoCell ? { "aria-readonly": "true" } : {})}
+                          tabIndex={
+                            isFocused ? 0 : isInitialTabStop && !focusPos ? 0 : -1
+                          }
+                          data-page-num={pageNum}
+                          data-row-index={rowIndex}
+                          data-field-id={field.id}
+                          title={isDittoCell ? "〃（固定欄は先頭段のみ編集可）" : isEmpty ? "空" : value}
+                          onDoubleClick={() => {
+                            if (!isDittoCell) startEdit(pageNum, rowIndex, field.id);
+                          }}
+                          onKeyDown={(e) =>
+                            handleCellKeyDown(e, pageNum, rowIndex, fieldIndex)
+                          }
+                          onFocus={() =>
+                            setFocusPos({ pageNum, rowIndex, fieldIndex })
+                          }
+                          onPointerDown={(e) => {
+                            if (!isDittoCell) handlePointerDown(e, pageNum, rowIndex, field.id);
+                          }}
+                          onPointerMove={handlePointerMove}
+                          onPointerUp={handlePointerUp}
+                          onPointerCancel={handlePointerCancel}
+                        >
+                          {isDittoCell ? (
+                            // 固定欄の2段目以降は〃（同上）表示
+                            <span className="csv-preview__ditto-mark" aria-hidden="true">
+                              〃
+                            </span>
+                          ) : isEditing ? (
+                            isLineItem ? (
+                              // 明細欄: textarea で複数行編集
+                              <textarea
+                                ref={textareaRef}
+                                className="csv-preview__cell-textarea"
+                                value={editValue}
+                                rows={Math.max(2, (editValue.match(/\n/g) ?? []).length + 1)}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                onBlur={commitEdit}
+                                onKeyDown={(e) =>
+                                  handleTextareaKeyDown(
+                                    e,
+                                    pageNum,
+                                    rowIndex,
+                                    fieldIndex,
+                                    field.id
+                                  )
+                                }
+                                aria-label={`${pageNum}ページ目 段${rowIndex + 1} ${field.name} 編集中（Ctrl+Enter で段分割）`}
+                              />
+                            ) : (
+                              // 固定欄: 単一行 input
+                              <input
+                                ref={inputRef}
+                                className="csv-preview__cell-input"
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                onBlur={commitEdit}
+                                onKeyDown={(e) =>
+                                  handleInputKeyDown(e, pageNum, rowIndex, fieldIndex)
+                                }
+                                aria-label={`${pageNum}ページ目 段${rowIndex + 1} ${field.name} 編集中`}
+                              />
+                            )
+                          ) : (
+                            <>
+                              {isEmpty ? (
+                                <span className="csv-preview__empty-mark">(空)</span>
+                              ) : (
+                                <span className="csv-preview__cell-value">{value}</span>
+                              )}
+                              <button
+                                type="button"
+                                className="csv-preview__cell-clear-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDelete(pageNum, rowIndex, field.id, field.name);
+                                }}
+                                tabIndex={-1}
+                                aria-label={`${pageNum}ページ目 段${rowIndex + 1} ${field.name} を削除`}
+                              >
+                                ×
+                              </button>
+                            </>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              });
             })}
           </tbody>
         </table>

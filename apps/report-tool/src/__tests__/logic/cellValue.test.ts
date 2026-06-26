@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decideCellValue } from "../../logic/cellValue";
+import { decideCellValue, decideCellConfidence } from "../../logic/cellValue";
 import type { ReportBlock } from "../../types/report";
 
 function makeBlock(
@@ -111,5 +111,55 @@ describe("decideCellValue", () => {
     // threshold=25 → y 差 20 <= 25 → 同行 → x 昇順（左が x=0 なので左が先）
     const r2 = decideCellValue(blocks, { lineThreshold: 25 });
     expect(r2).toBe("左右");
+  });
+});
+
+function makeBlockWithConf(
+  text: string,
+  confidence?: number
+): ReportBlock {
+  return {
+    text,
+    bbox: { x: 0, y: 0, width: 100, height: 20 },
+    fieldId: "F1",
+    confidence,
+  };
+}
+
+describe("decideCellConfidence", () => {
+  it("confidence を持つブロックが 1 件のみ → その値を返す", () => {
+    const result = decideCellConfidence([makeBlockWithConf("A", 0.9)]);
+    expect(result).toBe(0.9);
+  });
+
+  it("複数ブロックがある場合、最小値を返す（保守的）", () => {
+    const blocks = [
+      makeBlockWithConf("A", 0.9),
+      makeBlockWithConf("B", 0.5),
+      makeBlockWithConf("C", 0.3),
+    ];
+    expect(decideCellConfidence(blocks)).toBe(0.3);
+  });
+
+  it("confidence なしのブロックのみ → undefined を返す", () => {
+    const blocks = [makeBlock("A", 0, 0), makeBlock("B", 10, 0)];
+    expect(decideCellConfidence(blocks)).toBeUndefined();
+  });
+
+  it("confidence あり / なし が混在 → confidence 付きブロックの最小値を返す", () => {
+    const blocks = [
+      makeBlockWithConf("A", 0.9),
+      makeBlock("B", 10, 0), // confidence なし
+      makeBlockWithConf("C", 0.5),
+    ];
+    expect(decideCellConfidence(blocks)).toBe(0.5);
+  });
+
+  it("空配列 → undefined を返す", () => {
+    expect(decideCellConfidence([])).toBeUndefined();
+  });
+
+  it("confidence=0.3（空判定値）のブロック → 0.3 を返す", () => {
+    expect(decideCellConfidence([makeBlockWithConf("", 0.3)])).toBe(0.3);
   });
 });

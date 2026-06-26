@@ -21,12 +21,37 @@ function makeTemplate(...names: string[]): ReportTemplate {
   };
 }
 
-function makeMatrix(entries: [number, [string, string][]][]): CellMatrix {
+/** 明細欄テンプレート生成ヘルパー */
+function makeTemplateWithLineItems(defs: { name: string; isLineItem?: boolean }[]): ReportTemplate {
+  return {
+    fields: defs.map((d, i) => ({
+      id: `f${i + 1}`,
+      name: d.name,
+      color: "#000",
+      rect: { x: 0, y: 0, width: 100, height: 100 },
+      isLineItem: d.isLineItem,
+    })),
+  };
+}
+
+/**
+ * 新形 CellMatrix（Map<number, ReportRow[]>）を構築するヘルパー。
+ * entries: [pageNum, [ [key, val][] ][]] の配列
+ */
+function makeMatrix(entries: [number, [string, string][][]][]): CellMatrix {
   const m: CellMatrix = new Map();
-  for (const [page, cells] of entries) {
-    m.set(page, new Map(cells));
+  for (const [page, rows] of entries) {
+    m.set(page, rows.map((pairs) => new Map(pairs)));
   }
   return m;
+}
+
+/**
+ * 後方互換: 各ページが 1 段（単一 Map）の場合に使うシムヘルパー。
+ * [pageNum, [key, val][]] の配列を受け取り、新形に変換する。
+ */
+function makeMatrix1(entries: [number, [string, string][]][]): CellMatrix {
+  return makeMatrix(entries.map(([page, pairs]) => [page, [pairs]] as [number, [string, string][][]]));
 }
 
 describe("csvQuote", () => {
@@ -171,7 +196,7 @@ describe("csvQuote", () => {
 describe("buildTemplateCsv - Formula Injection 中和の統合確認", () => {
   it("normalizeNumbers=OFF 時: セル値が数式トリガなら ' 前置される", () => {
     const tmpl = makeTemplate("摘要");
-    const cells = makeMatrix([[1, [["f1", "=1+1"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "=1+1"]]]]);
     const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, { pageNumbers: [1] });
     const [, dataRow] = csv.split("\r\n");
     expect(dataRow).toBe("'=1+1");
@@ -180,7 +205,7 @@ describe("buildTemplateCsv - Formula Injection 中和の統合確認", () => {
   it("normalizeNumbers=ON 時: 正規化後の負数 -50000 は中和されない", () => {
     // △50000 → normalizeNumeric → -50000 → csvQuote で中和されないことを確認
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([[1, [["f1", "△50,000"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "△50,000"]]]]);
     const opts: CsvOptions = { ...DEFAULT_OPTS, normalizeNumbers: true };
     const csv = buildTemplateCsv(tmpl, cells, opts, { pageNumbers: [1] });
     const [, dataRow] = csv.split("\r\n");
@@ -191,7 +216,7 @@ describe("buildTemplateCsv - Formula Injection 中和の統合確認", () => {
 describe("buildTemplateCsv", () => {
   it("列順: 固定列(ファイル名・ページ) → fields 定義順", () => {
     const tmpl = makeTemplate("金額", "摘要");
-    const cells = makeMatrix([[1, [["f1", "1000"], ["f2", "テスト"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "1000"], ["f2", "テスト"]]]]);
     const opts: CsvOptions = {
       ...DEFAULT_OPTS,
       includeFileName: true,
@@ -208,7 +233,7 @@ describe("buildTemplateCsv", () => {
 
   it("includeFileName=false のとき → ファイル名列がない", () => {
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([[1, [["f1", "500"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "500"]]]]);
     const opts: CsvOptions = {
       ...DEFAULT_OPTS,
       includePageNumber: true,
@@ -223,7 +248,7 @@ describe("buildTemplateCsv", () => {
 
   it("includePageNumber=false のとき → ページ列がない", () => {
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([[1, [["f1", "500"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "500"]]]]);
     const opts: CsvOptions = {
       ...DEFAULT_OPTS,
       includeFileName: true,
@@ -238,7 +263,7 @@ describe("buildTemplateCsv", () => {
 
   it("固定列 ON/OFF どちらもない場合 → フィールド列のみ", () => {
     const tmpl = makeTemplate("金額", "摘要");
-    const cells = makeMatrix([[1, [["f1", "100"], ["f2", "メモ"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "100"], ["f2", "メモ"]]]]);
     const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, {
       pageNumbers: [1],
     });
@@ -249,7 +274,7 @@ describe("buildTemplateCsv", () => {
 
   it("空セル → opts.emptyValue を出力する", () => {
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([[1, []]]); // f1 なし
+    const cells = makeMatrix1([[1, []]]); // f1 なし
     const opts: CsvOptions = { ...DEFAULT_OPTS, emptyValue: "N/A" };
     const csv = buildTemplateCsv(tmpl, cells, opts, { pageNumbers: [1] });
     const [, dataRow] = csv.split("\r\n");
@@ -258,7 +283,7 @@ describe("buildTemplateCsv", () => {
 
   it("カンマを含む値は引用符で囲まれる", () => {
     const tmpl = makeTemplate("摘要");
-    const cells = makeMatrix([[1, [["f1", "A,B,C"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "A,B,C"]]]]);
     const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, {
       pageNumbers: [1],
     });
@@ -268,7 +293,7 @@ describe("buildTemplateCsv", () => {
 
   it("セル内改行は引用符で保持される（Excel 行ズレ防止）", () => {
     const tmpl = makeTemplate("摘要");
-    const cells = makeMatrix([[1, [["f1", "行1\n行2"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "行1\n行2"]]]]);
     const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, {
       pageNumbers: [1],
     });
@@ -279,7 +304,7 @@ describe("buildTemplateCsv", () => {
 
   it("ダブルクオートのエスケープ", () => {
     const tmpl = makeTemplate("摘要");
-    const cells = makeMatrix([[1, [["f1", 'say "hi"']]]]);
+    const cells = makeMatrix1([[1, [["f1", 'say "hi"']]]]);
     const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, {
       pageNumbers: [1],
     });
@@ -289,7 +314,7 @@ describe("buildTemplateCsv", () => {
 
   it("normalizeNumbers=true のとき → 数値列を正規化する", () => {
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([[1, [["f1", "¥1,234"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "¥1,234"]]]]);
     const opts: CsvOptions = { ...DEFAULT_OPTS, normalizeNumbers: true };
     const csv = buildTemplateCsv(tmpl, cells, opts, { pageNumbers: [1] });
     const [, dataRow] = csv.split("\r\n");
@@ -298,7 +323,7 @@ describe("buildTemplateCsv", () => {
 
   it("normalizeNumbers=true でも固定列（ファイル名）は正規化されない", () => {
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([[1, [["f1", "¥1,234"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "¥1,234"]]]]);
     const opts: CsvOptions = {
       includeFileName: true,
       includePageNumber: false,
@@ -321,7 +346,7 @@ describe("buildTemplateCsv", () => {
         { id: "f2", name: "  ", color: "#000", rect: { x: 0, y: 0, width: 10, height: 10 } },
       ],
     };
-    const cells = makeMatrix([[1, []]]);
+    const cells = makeMatrix1([[1, []]]);
     const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, {
       pageNumbers: [1],
     });
@@ -331,7 +356,7 @@ describe("buildTemplateCsv", () => {
 
   it("改行コードは \\r\\n（RFC4180 準拠）", () => {
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([
+    const cells = makeMatrix1([
       [1, [["f1", "100"]]],
       [2, [["f1", "200"]]],
     ]);
@@ -352,7 +377,7 @@ describe("buildTemplateCsv", () => {
         { id: "f2", name: "金額", color: "#000", rect: { x: 0, y: 0, width: 10, height: 10 } },
       ],
     };
-    const cells = makeMatrix([[1, [["f1", "100"], ["f2", "200"]]]]);
+    const cells = makeMatrix1([[1, [["f1", "100"], ["f2", "200"]]]]);
     const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, {
       pageNumbers: [1],
     });
@@ -363,7 +388,7 @@ describe("buildTemplateCsv", () => {
 
   it("pageNumbers の表示順で行を出力する", () => {
     const tmpl = makeTemplate("金額");
-    const cells = makeMatrix([
+    const cells = makeMatrix1([
       [1, [["f1", "100"]]],
       [3, [["f1", "300"]]],
     ]);
@@ -373,5 +398,117 @@ describe("buildTemplateCsv", () => {
     const rows = csv.split("\r\n");
     expect(rows[1]).toBe("300"); // pageNumbers[0]=3 が先
     expect(rows[2]).toBe("100");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 縦持ち展開テスト（明細欄あり）
+// ---------------------------------------------------------------------------
+
+describe("buildTemplateCsv - 明細欄なし（段=1 バイト等価確認）", () => {
+  it("isLineItem なしのテンプレートでは従来と完全一致（1 段 1 行）", () => {
+    const tmpl = makeTemplate("固定欄A", "固定欄B");
+    const cells = makeMatrix1([[1, [["f1", "AAA"], ["f2", "BBB"]]]]);
+    const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, { pageNumbers: [1] });
+    const rows = csv.split("\r\n");
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toBe("AAA,BBB");
+  });
+
+  it("複数ページ・明細欄なしで従来と同一の出力", () => {
+    const tmpl = makeTemplate("金額");
+    const cells = makeMatrix1([
+      [1, [["f1", "100"]]],
+      [2, [["f1", "200"]]],
+    ]);
+    const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, { pageNumbers: [1, 2] });
+    const rows = csv.split("\r\n");
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toBe("100");
+    expect(rows[2]).toBe("200");
+  });
+});
+
+describe("buildTemplateCsv - 明細欄あり（縦持ち展開）", () => {
+  it("明細欄が 1 個: 各段が 1 行に展開される", () => {
+    const tmpl = makeTemplateWithLineItems([
+      { name: "固定欄" },
+      { name: "明細欄", isLineItem: true },
+    ]);
+    // 1 ページ・2 段: 段0=(fixed=X, item=A)、段1=(item=B)
+    const cells = makeMatrix([[1, [
+      [["f1", "X"], ["f2", "A"]],
+      [["f2", "B"]],
+    ]]]);
+    const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, { pageNumbers: [1] });
+    const rows = csv.split("\r\n");
+    // ヘッダ + 2 行
+    expect(rows).toHaveLength(3);
+    // 固定欄は常に rows[0] から（= X）、明細欄は各段から
+    expect(rows[1]).toBe("X,A");
+    expect(rows[2]).toBe("X,B");
+  });
+
+  it("固定欄の値は各行に複製される（rows[0] から取得）", () => {
+    const tmpl = makeTemplateWithLineItems([
+      { name: "ページ", isLineItem: false },
+      { name: "品名", isLineItem: true },
+      { name: "金額", isLineItem: true },
+    ]);
+    const cells = makeMatrix([[1, [
+      [["f1", "固定値"], ["f2", "品名A"], ["f3", "100"]],
+      [["f2", "品名B"], ["f3", "200"]],
+    ]]]);
+    const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, { pageNumbers: [1] });
+    const rows = csv.split("\r\n");
+    expect(rows[1]).toBe("固定値,品名A,100");
+    expect(rows[2]).toBe("固定値,品名B,200");
+  });
+
+  it("全明細欄が空の段はスキップされる", () => {
+    const tmpl = makeTemplateWithLineItems([
+      { name: "固定欄" },
+      { name: "明細欄", isLineItem: true },
+    ]);
+    // 段1 の明細欄が空 → スキップ
+    const cells = makeMatrix([[1, [
+      [["f1", "X"], ["f2", "A"]],
+      [["f1", "ignored"], ["f2", ""]],
+    ]]]);
+    const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, { pageNumbers: [1] });
+    const rows = csv.split("\r\n");
+    // スキップで 1 行だけ
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toBe("X,A");
+  });
+
+  it("スキップ後に 0 段になったとき rows[0] から 1 行出力（ページを落とさない）", () => {
+    const tmpl = makeTemplateWithLineItems([
+      { name: "固定欄" },
+      { name: "明細欄", isLineItem: true },
+    ]);
+    // 全段の明細欄が空 → スキップ後 0 段 → rows[0] から 1 行（固定欄のみ）
+    const cells = makeMatrix([[1, [
+      [["f1", "固定値"], ["f2", ""]],
+    ]]]);
+    const csv = buildTemplateCsv(tmpl, cells, DEFAULT_OPTS, { pageNumbers: [1] });
+    const rows = csv.split("\r\n");
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toBe("固定値,");
+  });
+
+  it("normalizeNumbers は明細欄にも適用される", () => {
+    const tmpl = makeTemplateWithLineItems([
+      { name: "金額", isLineItem: true },
+    ]);
+    const cells = makeMatrix([[1, [
+      [["f1", "¥1,000"]],
+      [["f1", "¥2,000"]],
+    ]]]);
+    const opts: CsvOptions = { ...DEFAULT_OPTS, normalizeNumbers: true };
+    const csv = buildTemplateCsv(tmpl, cells, opts, { pageNumbers: [1] });
+    const rows = csv.split("\r\n");
+    expect(rows[1]).toBe("1000");
+    expect(rows[2]).toBe("2000");
   });
 });

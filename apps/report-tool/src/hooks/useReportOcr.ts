@@ -1,13 +1,14 @@
 import { useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useReportStore } from "../store/reportStore";
+import type { ConfidenceMatrix } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 import { parseOcrResponse } from "../lib/ocrAdapter";
 import { computeCropRect, cropCanvasToPng, renderPageOffscreen } from "../lib/ocrCrop";
-import { decideCellValue } from "../logic/cellValue";
+import { decideCellValue, decideCellConfidence } from "../logic/cellValue";
 import { effectiveRectForPage } from "../logic/pageOffset";
 import { ZERO_OFFSET } from "../types/report";
-import type { CellMatrix, PageOffset } from "../types/report";
+import type { CellMatrix, PageOffset, ReportRow } from "../types/report";
 
 /** OCR の描画スケール。値が大きいほど高精度だがメモリ消費が増える。 */
 const REPORT_OCR_RENDER_SCALE = 3.0;
@@ -33,15 +34,21 @@ export interface UseReportOcrReturn {
   runOcrForPage: (pageNum: number) => Promise<void>;
 }
 
+/** runOcrSinglePage の戻り値: セル値と信頼度の両 Map をまとめる。 */
+interface OcrSinglePageResult {
+  fieldMap: ReportRow;
+  confMap: Map<string, number>;
+}
+
 /**
- * 単一ページの OCR を実行し、fieldId → セル値の Map を返す内部ヘルパー。
+ * 単一ページの OCR を実行し、fieldId → セル値 と fieldId → confidence の Map を返す内部ヘルパー。
  *
  * @param pdfDoc      pdfjs ドキュメントオブジェクト
  * @param pageNumber  対象ページ番号 (1 始まり)
  * @param fields      欄定義の配列
  * @param offset      ページ補正オフセット
  * @param isCancelled キャンセル判定コールバック
- * @returns           fieldId → セル値の Map、キャンセル時は null
+ * @returns           セル値と信頼度の Map のペア、キャンセル時は null
  */
 async function runOcrSinglePage(
   pdfDoc: Awaited<ReturnType<typeof import("pdfjs-dist").getDocument>["promise"]>,
@@ -49,7 +56,7 @@ async function runOcrSinglePage(
   fields: ReturnType<typeof useReportStore.getState>["template"]["fields"],
   offset: PageOffset,
   isCancelled: () => boolean
-): Promise<Map<string, string> | null> {
+): Promise<OcrSinglePageResult | null> {
   let canvas: HTMLCanvasElement | null = null;
 
   try {
@@ -57,7 +64,8 @@ async function runOcrSinglePage(
     canvas = rendered.canvas;
     const pageWidth = rendered.pageWidth;
 
-    const fieldMap = new Map<string, string>();
+    const fieldMap: ReportRow = new Map<string, string>();
+    const confMap: Map<string, number> = new Map<string, number>();
 
     for (const field of fields) {
       if (isCancelled()) return null;
@@ -117,9 +125,15 @@ async function runOcrSinglePage(
       // クロップ＝この欄の領域なので、認識ブロックは全てこの欄に属する。
       // 座標再割り当てを挟まず decideCellValue で直接セル値を決める。
       fieldMap.set(field.id, decideCellValue(blocks));
+
+      // confidence: ブロック群の最小値を欄単位で記録する
+      const conf = decideCellConfidence(blocks);
+      if (conf !== undefined) {
+        confMap.set(field.id, conf);
+      }
     }
 
-    return fieldMap;
+    return { fieldMap, confMap };
   } finally {
     if (canvas) {
       canvas.width = 0;
@@ -153,7 +167,7 @@ export function useReportOcr(): UseReportOcrReturn {
   const cancelledRef = useRef(false);
 
   const runOcr = useCallback(async () => {
-    const { template, setCells, pageOffsets } = useReportStore.getState();
+    const { template, setCells, setConfidences, pageOffsets } = useReportStore.getState();
     const { filePath, numPages } = usePdfStore.getState();
 
     if (!filePath || numPages === 0) return;
@@ -173,6 +187,7 @@ export function useReportOcr(): UseReportOcrReturn {
     const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
 
     const matrix: CellMatrix = new Map();
+    const confMatrix: ConfidenceMatrix = new Map();
 
     const isCancelled = () =>
       cancelledRef.current || epochRef.current !== currentEpoch;
@@ -185,7 +200,7 @@ export function useReportOcr(): UseReportOcrReturn {
         const offset = pageOffsets.get(pageNumber) ?? ZERO_OFFSET;
 
         try {
-          const fieldMap = await runOcrSinglePage(
+          const result = await runOcrSinglePage(
             pdfDoc,
             pageNumber,
             template.fields,
@@ -193,10 +208,16 @@ export function useReportOcr(): UseReportOcrReturn {
             isCancelled
           );
 
-          if (fieldMap === null) break; // キャンセル
+          if (result === null) break; // キャンセル
 
+          const { fieldMap, confMap } = result;
           if (fieldMap.size > 0) {
-            matrix.set(pageNumber, fieldMap);
+            // 新形: ReportRow[] (1段配列) として格納
+            matrix.set(pageNumber, [fieldMap]);
+          }
+          if (confMap.size > 0) {
+            // confidence も 1 段配列として並走格納
+            confMatrix.set(pageNumber, [confMap]);
           }
         } catch (e) {
           console.error(`[ReportOCR] ページ ${pageNumber} 処理エラー:`, e);
@@ -215,6 +236,8 @@ export function useReportOcr(): UseReportOcrReturn {
 
       if (!cancelledRef.current && epochRef.current === currentEpoch) {
         setCells(matrix);
+        // setCells が confidences をクリアするので後から setConfidences を呼ぶ
+        setConfidences(confMatrix);
         setProgress(null);
       } else {
         setProgress(null);
@@ -227,7 +250,7 @@ export function useReportOcr(): UseReportOcrReturn {
   }, []);
 
   const runOcrForPage = useCallback(async (pageNum: number) => {
-    const { template, pageOffsets, setCellsForPage } = useReportStore.getState();
+    const { template, pageOffsets, setCellsForPage, setConfidencesForPage } = useReportStore.getState();
     const { filePath } = usePdfStore.getState();
 
     if (!filePath) return;
@@ -252,7 +275,7 @@ export function useReportOcr(): UseReportOcrReturn {
 
       try {
         const offset = pageOffsets.get(pageNum) ?? ZERO_OFFSET;
-        const fieldMap = await runOcrSinglePage(
+        const result = await runOcrSinglePage(
           pdfDoc,
           pageNum,
           template.fields,
@@ -260,9 +283,12 @@ export function useReportOcr(): UseReportOcrReturn {
           isCancelled
         );
 
-        if (fieldMap !== null && !isCancelled()) {
-          // 全置換せず対象ページのみ部分更新する
-          setCellsForPage(pageNum, fieldMap);
+        if (result !== null && !isCancelled()) {
+          const { fieldMap, confMap } = result;
+          // 全置換せず対象ページのみ部分更新する（新形: [fieldMap] で 1 段配列）
+          setCellsForPage(pageNum, [fieldMap]);
+          // setCellsForPage が confidences をクリアするので後から setConfidencesForPage を呼ぶ
+          setConfidencesForPage(pageNum, [confMap]);
         }
       } finally {
         pdfDoc.destroy().catch(() => {});

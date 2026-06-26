@@ -94,19 +94,29 @@ describe("clearTemplate", () => {
 });
 
 describe("setCellsForPage", () => {
-  it("指定ページの cells 行を設定する", () => {
+  it("指定ページの cells 行を設定する（ReportRow 単体は [row] に正規化）", () => {
     const row = new Map([["field-1", "value1"]]);
     useReportStore.getState().setCellsForPage(1, row);
-    expect(useReportStore.getState().cells.get(1)?.get("field-1")).toBe("value1");
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("value1");
+  });
+
+  it("ReportRow[] を渡すと複数段として設定される", () => {
+    const rows = [
+      new Map([["field-1", "row0"]]),
+      new Map([["field-1", "row1"]]),
+    ];
+    useReportStore.getState().setCellsForPage(1, rows);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("row0");
+    expect(useReportStore.getState().cells.get(1)?.[1]?.get("field-1")).toBe("row1");
   });
 
   it("他ページの cells は保持される", () => {
     useReportStore.setState({
-      cells: new Map([[2, new Map([["field-a", "page2val"]])]]),
+      cells: new Map([[2, [new Map([["field-a", "page2val"]])]]]),
     });
     useReportStore.getState().setCellsForPage(1, new Map([["field-1", "new"]]));
-    expect(useReportStore.getState().cells.get(2)?.get("field-a")).toBe("page2val");
-    expect(useReportStore.getState().cells.get(1)?.get("field-1")).toBe("new");
+    expect(useReportStore.getState().cells.get(2)?.[0]?.get("field-a")).toBe("page2val");
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("new");
   });
 
   it("setCellsForPage は渡した row の新規コピーを格納する（元 Map の変更が伝播しない）", () => {
@@ -115,7 +125,7 @@ describe("setCellsForPage", () => {
     // 呼び出し元の row を変更
     row.set("field-1", "mutated");
     // store の値は変化しない
-    expect(useReportStore.getState().cells.get(1)?.get("field-1")).toBe("original");
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("original");
   });
 
   it("cells をイミュータブルに更新する（新規 Map を返す）", () => {

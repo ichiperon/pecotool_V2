@@ -13,6 +13,9 @@ import { usePdfStore } from "../store/pdfStore";
 import { useReportStore } from "../store/reportStore";
 import OffsetAdjustOverlay from "./OffsetAdjustOverlay";
 import type { OverlayGeom } from "../types/overlay";
+import { computeFitZoom } from "../lib/fitZoom";
+import { usePdfShortcuts } from "../hooks/usePdfShortcuts";
+import { usePdfPanZoom } from "../hooks/usePdfPanZoom";
 
 // workerSrc の設定（PdfViewer と同パターン）
 import PdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -39,22 +42,26 @@ interface Props {
  */
 const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onReocrRetry }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasAreaRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<ReturnType<PDFPageProxy["render"]> | null>(null);
   const loadGenRef = useRef<number>(0);
 
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [overlayGeom, setOverlayGeom] = useState<OverlayGeom | null>(null);
   const [pageInput, setPageInput] = useState<string>("1");
+  const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
 
   const {
     filePath,
     numPages,
     currentPage,
     zoom,
+    fitMode,
     isLoading,
     error,
     setCurrentPage,
     setZoom,
+    setFitMode,
     goToPrevPage,
     goToNextPage,
   } = usePdfStore();
@@ -137,6 +144,15 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
         page = await pdfDoc.getPage(currentPage);
         if (cancelled) return;
 
+        // scale:1 のページサイズを取得し、フィット計算に使う
+        const base = page.getViewport({ scale: 1 });
+        setPageSize((prev) => {
+          if (prev && prev.width === base.width && prev.height === base.height) {
+            return prev; // 同値なら更新しない（無限ループ防止）
+          }
+          return { width: base.width, height: base.height };
+        });
+
         const scale = zoom / 100;
         const devicePixelRatio = window.devicePixelRatio || 1;
         const viewport = page.getViewport({ scale: scale * devicePixelRatio });
@@ -189,6 +205,43 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
     };
   }, [filePath, pdfDoc, currentPage, zoom]);
 
+  // ResizeObserver でコンテナサイズを監視し、fitMode に応じてズームを自動調整する
+  useEffect(() => {
+    const container = canvasAreaRef.current;
+    // ResizeObserver 非対応環境（jsdom 等）ではスキップ
+    if (!container || typeof ResizeObserver === "undefined") return;
+    if (!pageSize) return;
+
+    const applyFit = () => {
+      if (fitMode === "custom") return;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      const newZoom = computeFitZoom({
+        fitMode,
+        containerWidth: w,
+        containerHeight: h,
+        pageWidth: pageSize.width,
+        pageHeight: pageSize.height,
+      });
+      // jsdomガード: 0 は「適用しない」サイン
+      if (newZoom === 0) return;
+      if (newZoom !== usePdfStore.getState().zoom) {
+        setZoom(newZoom);
+      }
+    };
+
+    applyFit();
+
+    const observer = new ResizeObserver(() => {
+      applyFit();
+    });
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [fitMode, pageSize, currentPage, setZoom]);
+
   const handlePageInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     setPageInput(e.target.value);
   };
@@ -210,8 +263,15 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
     }
   };
 
-  const handleZoomIn = () => setZoom(zoom + ZOOM_STEP);
-  const handleZoomOut = () => setZoom(zoom - ZOOM_STEP);
+  const handleZoomIn = () => {
+    setZoom(zoom + ZOOM_STEP);
+    setFitMode("custom");
+  };
+
+  const handleZoomOut = () => {
+    setZoom(zoom - ZOOM_STEP);
+    setFitMode("custom");
+  };
 
   const handleToggleAdjust = () => {
     if (isAdjusting) {
@@ -228,6 +288,11 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
   const handleReocrClick = () => {
     void runOcrForPage(currentPage);
   };
+
+  // キーボードショートカットの登録
+  usePdfShortcuts();
+  // パン（スペース+ドラッグ）と Ctrl+ホイールズームの登録
+  usePdfPanZoom(canvasAreaRef);
 
   if (!filePath && !isLoading && !error) {
     return (
@@ -309,12 +374,34 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
 
         <div className="pdf-viewer__divider" aria-hidden="true" />
 
+        {/* フィットモードボタン */}
+        <button
+          type="button"
+          className={`pdf-viewer__fit-btn${fitMode === "width" ? " pdf-viewer__fit-btn--active" : ""}`}
+          onClick={() => setFitMode("width")}
+          aria-pressed={fitMode === "width" ? ("true" as const) : ("false" as const)}
+          aria-label="幅に合わせる"
+        >
+          幅
+        </button>
+        <button
+          type="button"
+          className={`pdf-viewer__fit-btn${fitMode === "page" ? " pdf-viewer__fit-btn--active" : ""}`}
+          onClick={() => setFitMode("page")}
+          aria-pressed={fitMode === "page" ? ("true" as const) : ("false" as const)}
+          aria-label="全体表示"
+        >
+          全体
+        </button>
+
+        <div className="pdf-viewer__divider" aria-hidden="true" />
+
         {/* 欄をずらすトグル */}
         <button
           type="button"
           className={`confirm-pdf-pane__adjust-btn${isAdjusting ? " confirm-pdf-pane__adjust-btn--active" : ""}`}
           onClick={handleToggleAdjust}
-          aria-pressed={isAdjusting}
+          aria-pressed={isAdjusting ? ("true" as const) : ("false" as const)}
           title="欄をずらす（オフセット調整）"
         >
           欄をずらす
@@ -378,7 +465,7 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
       )}
 
       {/* Canvas エリア */}
-      <div className="pdf-viewer__canvas-area">
+      <div className="pdf-viewer__canvas-area" ref={canvasAreaRef}>
         <div className="pdf-viewer__canvas-wrapper">
           <canvas
             ref={canvasRef}

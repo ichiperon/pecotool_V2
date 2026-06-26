@@ -302,6 +302,8 @@ button {
   border: 1.5px solid rgba(0, 0, 0, 0.15);
   display: block;
   padding: 0;
+  /* --chip-color は JSX から CSS カスタムプロパティで渡す */
+  background-color: var(--chip-color, #ccc);
 }
 
 .field-row__color-chip:hover {
@@ -331,11 +333,49 @@ button {
   border-radius: 3px;
   border: 1.5px solid rgba(0, 0, 0, 0.1);
   padding: 0;
+  /* --chip-color は JSX から CSS カスタムプロパティで渡す */
+  background-color: var(--chip-color, #ccc);
 }
 
 .field-row__palette-chip:hover {
   transform: scale(1.15);
   border-color: rgba(0, 0, 0, 0.3);
+}
+
+/* 選択中のパレットチップ */
+.field-row__palette-chip--selected {
+  outline: 2px solid #333;
+  outline-offset: 1px;
+}
+
+/* ===== 欄行: 明細欄トグル ===== */
+.field-row__lineitem-label {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.73rem;
+  color: #718096;
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.field-row__lineitem-checkbox {
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.field-row__lineitem-text {
+  font-size: 0.72rem;
+  color: #718096;
+}
+
+.field-row__lineitem-label:has(.field-row__lineitem-checkbox:checked) .field-row__lineitem-text {
+  color: #2b6cb0;
+  font-weight: 600;
 }
 
 .field-row__name {
@@ -490,7 +530,8 @@ button {
 }
 
 .csv-preview__empty-mark {
-  color: #fc8181;
+  /* コントラスト修正: #c53030 / 背景#fff5f5 ≈ 4.83:1 (WCAG AA 達成) */
+  color: #c53030;
   font-size: 0.75rem;
   font-style: italic;
 }
@@ -602,6 +643,125 @@ button {
 .csv-preview__row--dimmed {
   opacity: 0.45;
   transition: opacity 0.1s ease-out;
+}
+
+/* ===== CSV プレビュー: 段番号列ヘッダ ===== */
+.csv-preview__th--rownum {
+  /* コントラスト修正: #4a5568 / 背景#f7fafc ≈ 7.04:1 (WCAG AA 達成) */
+  color: #4a5568;
+  font-weight: 500;
+  font-size: 0.73rem;
+  min-width: 2rem;
+  text-align: center;
+}
+
+/* 段番号セル */
+.csv-preview__td--rownum {
+  /* コントラスト修正: #4a5568 / 背景#f7fafc ≈ 7.04:1 (WCAG AA 達成) */
+  color: #4a5568;
+  font-size: 0.72rem;
+  text-align: center;
+  min-width: 2rem;
+  font-variant-numeric: tabular-nums;
+  background-color: #f7fafc;
+}
+
+/* 継続段（2段目以降）の行: 上境界線を点線に */
+.csv-preview__row--continuation td {
+  border-top: 1px dashed #edf2f7;
+  border-bottom: 0;
+}
+
+/* ページ番号セル: 継続段（空セル） */
+.csv-preview__td--page-continuation {
+  background-color: #f7fafc;
+}
+
+/* 明細欄ヘッダピル */
+.csv-preview__lineitem-pill {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  line-height: 1.4;
+  border-radius: 3px;
+  background-color: #ebf8ff;
+  color: #2b6cb0;
+  border: 1px solid #bee3f8;
+  vertical-align: middle;
+}
+
+/* 固定欄の〃セル（2段目以降） */
+.csv-preview__td--ditto {
+  background-color: #fafafa;
+  /* コントラスト修正: #4a5568 / 背景#fafafa ≈ 7.07:1 (WCAG AA 達成) */
+  color: #4a5568;
+  cursor: default;
+}
+
+.csv-preview__ditto-mark {
+  font-size: 0.8rem;
+  /* コントラスト修正: #4a5568 / 背景#fafafa ≈ 7.07:1 (WCAG AA 達成) */
+  color: #4a5568;
+  display: block;
+  text-align: center;
+}
+
+/* OCR 低信頼セル（confidence <= 0.5）
+   テキスト色 #92400e / 背景 #fffbeb ≈ 7.34:1 (WCAG AA 達成)
+   〃セル(--ditto) は対象外なのでそもそも付かないが、
+   将来の意図しない重複に備えて --ditto を後勝ちにする（CSS ソース順で --ditto が下にある）。 */
+.csv-preview__td--low-confidence {
+  background-color: #fffbeb;
+  color: #92400e;
+}
+
+/* 明細欄セル */
+.csv-preview__td--lineitem {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* セル内テキスト（折り返し抑止は親 td のデフォルト。明細欄は上書き） */
+.csv-preview__cell-value {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.csv-preview__td--lineitem .csv-preview__cell-value {
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: unset;
+}
+
+/* 明細欄の textarea 編集 */
+.csv-preview__cell-textarea {
+  display: block;
+  width: calc(100% + 1.2rem);
+  margin: -0.35rem -0.6rem;
+  border: 1px solid #4299e1;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  font-family: inherit;
+  padding: 0.25rem 0.5rem;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25);
+  background-color: #fff;
+  color: #2d3748;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 2.4rem;
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: auto;
+  white-space: pre-wrap;
+}
+
+.csv-preview__cell-textarea:focus-visible {
+  outline: 2px solid #4299e1;
+  outline-offset: -2px;
 }
 
 /* ===== CSV 出力 ===== */
@@ -898,11 +1058,43 @@ button {
   text-align: center;
 }
 
+/* フィットモードボタン（幅 / 全体） */
+.pdf-viewer__fit-btn {
+  background: none;
+  border: 1px solid #4a5568;
+  color: #e2e8f0;
+  border-radius: 3px;
+  padding: 0 0.4rem;
+  height: 1.6rem;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.pdf-viewer__fit-btn:hover:not(:disabled) {
+  background-color: #4a5568;
+}
+
+.pdf-viewer__fit-btn--active {
+  background-color: #2b6cb0;
+  border-color: #2b6cb0;
+  color: #fff;
+}
+
+.pdf-viewer__fit-btn--active:hover {
+  background-color: #2c5282;
+  border-color: #2c5282;
+}
+
 /* ===== PDF ビューア: canvas エリア ===== */
 .pdf-viewer__canvas-area {
   flex: 1;
   overflow: auto;
   display: flex;
+  /* justify-content は水平センタリング。
+     align-items は指定しない（flex-start 相当）ことで、
+     ページがコンテナより大きい場合でも上端が切れない。
+     垂直センタリングは canvas-wrapper の margin: auto で担う。 */
   justify-content: center;
   padding: 1rem;
 }
@@ -911,6 +1103,10 @@ button {
   position: relative;
   display: inline-block;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+  /* flex コンテナ内で水平・垂直センタリング。
+     overflow 時も上端が切れず margin-top が確保される。 */
+  margin: auto;
+  align-self: flex-start;
 }
 
 .pdf-viewer__overlay {

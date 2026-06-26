@@ -1,4 +1,7 @@
 import { create } from "zustand";
+import type { FitMode } from "../lib/fitZoom";
+
+export type { FitMode };
 
 export interface PdfState {
   /** ロード済み PDF のファイルパス。未ロードなら null */
@@ -13,6 +16,8 @@ export interface PdfState {
   isLoading: boolean;
   /** エラーメッセージ。正常時は null */
   error: string | null;
+  /** フィットモード。"width"=幅フィット / "page"=全体フィット / "custom"=手動 */
+  fitMode: FitMode;
 
   // actions
   setLoading: (loading: boolean) => void;
@@ -20,6 +25,7 @@ export interface PdfState {
   setPdf: (filePath: string, numPages: number) => void;
   setCurrentPage: (page: number) => void;
   setZoom: (zoom: number) => void;
+  setFitMode: (mode: FitMode) => void;
   goToPrevPage: () => void;
   goToNextPage: () => void;
   reset: () => void;
@@ -35,6 +41,7 @@ export const usePdfStore = create<PdfState>((set, get) => ({
   zoom: 100,
   isLoading: false,
   error: null,
+  fitMode: "width",
 
   setLoading: (loading) => set({ isLoading: loading }),
 
@@ -61,6 +68,8 @@ export const usePdfStore = create<PdfState>((set, get) => ({
     set({ zoom: clamped });
   },
 
+  setFitMode: (mode) => set({ fitMode: mode }),
+
   goToPrevPage: () => {
     const { currentPage, setCurrentPage } = get();
     setCurrentPage(currentPage - 1);
@@ -79,5 +88,6 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       zoom: 100,
       isLoading: false,
       error: null,
+      fitMode: "width",
     }),
 }));

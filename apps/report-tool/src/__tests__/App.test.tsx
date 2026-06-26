@@ -125,7 +125,7 @@ describe("App – OCR 完了時の自動ステップ③遷移", () => {
 
     // cells に値をセット（OCR 完了を模擬）
     await act(async () => {
-      useReportStore.getState().setCells(new Map([[1, new Map([["f1", "値"]])]]));
+      useReportStore.getState().setCells(new Map([[1, [new Map([["f1", "値"]])]]]));
     });
 
     expect(screen.getByRole("contentinfo")).toHaveTextContent("ステップ 3/4: 確認");
@@ -136,7 +136,7 @@ describe("App – OCR 完了時の自動ステップ③遷移", () => {
     // 初期から cells が非空
     useReportStore.setState({
       template: { fields: [] },
-      cells: new Map([[1, new Map([["f1", "初期値"]])]]),
+      cells: new Map([[1, [new Map([["f1", "初期値"]])]]]),
       mode: "idle",
       selectedFieldId: null,
     });

@@ -125,7 +125,7 @@ describe("useReportOcr", () => {
     // page=1 に field-1 の値が入っている
     const page1 = cells.get(1);
     expect(page1).toBeDefined();
-    expect(page1?.has("field-1")).toBe(true);
+    expect(page1?.[0]?.has("field-1")).toBe(true);
   });
 
   it("原点から離れた欄でもクロップOCR結果が正しいセルに入る（クロップローカル座標回帰）", async () => {
@@ -163,7 +163,7 @@ describe("useReportOcr", () => {
     });
 
     const page1 = useReportStore.getState().cells.get(1);
-    expect(page1?.get("field-far")).toBe("遠い欄の値");
+    expect(page1?.[0]?.get("field-far")).toBe("遠い欄の値");
   });
 
   it("runOcr 完了後 isRunning=false に戻る", async () => {
@@ -322,8 +322,8 @@ describe("useReportOcr: runOcrForPage", () => {
         ],
       },
       cells: new Map([
-        [1, new Map([["field-1", "旧値"]])],
-        [2, new Map([["field-1", "ページ2の値"]])],
+        [1, [new Map([["field-1", "旧値"]])]],
+        [2, [new Map([["field-1", "ページ2の値"]])]],
       ]),
       pageOffsets: new Map(),
     });
@@ -350,7 +350,7 @@ describe("useReportOcr: runOcrForPage", () => {
     });
 
     const page1 = useReportStore.getState().cells.get(1);
-    expect(page1?.get("field-1")).toBe("再OCR値");
+    expect(page1?.[0]?.get("field-1")).toBe("再OCR値");
   });
 
   it("runOcrForPage は他ページの cells を変更しない", async () => {
@@ -361,7 +361,7 @@ describe("useReportOcr: runOcrForPage", () => {
     });
 
     const page2 = useReportStore.getState().cells.get(2);
-    expect(page2?.get("field-1")).toBe("ページ2の値");
+    expect(page2?.[0]?.get("field-1")).toBe("ページ2の値");
   });
 
   it("runOcrForPage 完了後 isRunning=false / reocrTarget=null に戻る", async () => {
@@ -385,7 +385,7 @@ describe("useReportOcr: runOcrForPage", () => {
 
     expect(result.current.isRunning).toBe(false);
     // cells は変化しない
-    expect(useReportStore.getState().cells.get(1)?.get("field-1")).toBe("旧値");
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("旧値");
   });
 
   it("欄が 0 件のとき runOcrForPage は即座に終了して cells を変えない", async () => {
@@ -412,6 +412,104 @@ describe("useReportOcr: runOcrForPage", () => {
 
     // OCR は invoke を通して完了する（オフセット有でもエラーなく完了すること）
     const page1 = useReportStore.getState().cells.get(1);
-    expect(page1?.has("field-1")).toBe(true);
+    expect(page1?.[0]?.has("field-1")).toBe(true);
+  });
+
+  it("runOcrForPage 完了後に指定ページの confidences が投入される", async () => {
+    // invokeStub は confidence=0.95 を返すよう beforeEach で設定済み
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    const pageConf = useReportStore.getState().confidences.get(1);
+    expect(pageConf).toBeDefined();
+    expect(pageConf?.[0]?.get("field-1")).toBe(0.95);
+    // 他ページは影響しない
+    expect(useReportStore.getState().confidences.has(2)).toBe(false);
+  });
+});
+
+describe("useReportOcr: runOcr の confidences 投入", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+
+    invokeStub.mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [
+          { text: "値A", bbox: { x: 10, y: 10, width: 50, height: 20 }, confidence: 0.5 },
+        ],
+      })
+    );
+
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "field-1",
+            name: "欄1",
+            color: "#7cb9e8",
+            rect: { x: 10, y: 10, width: 100, height: 50 },
+          },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 2,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("runOcr 完了後に全ページの confidences が投入される", async () => {
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const conf = useReportStore.getState().confidences;
+    // 2ページ分の confidences が格納される（invokeStub が confidence=0.5 を返す）
+    expect(conf.size).toBeGreaterThan(0);
+    const page1Conf = conf.get(1);
+    expect(page1Conf).toBeDefined();
+    expect(page1Conf?.[0]?.get("field-1")).toBe(0.5);
+  });
+
+  it("confidence なしのブロックだけを返す場合、confidences に値が格納されない", async () => {
+    invokeStub.mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [
+          // confidence フィールドなし
+          { text: "値B", bbox: { x: 10, y: 10, width: 50, height: 20 } },
+        ],
+      })
+    );
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const conf = useReportStore.getState().confidences;
+    // confMap.size === 0 なので matrix に格納されない
+    expect(conf.size).toBe(0);
   });
 });

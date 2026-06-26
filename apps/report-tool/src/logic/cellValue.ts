@@ -1,5 +1,23 @@
 import type { ReportBlock } from "../types/report";
 
+/**
+ * 同一フィールドに属するブロック群から信頼度を決める。
+ *
+ * confidence を持つブロックの最小値を返す（保守的: 1 つでも低ければ低扱い）。
+ * confidence 付きブロックが 1 件も無い場合は undefined を返す。
+ *
+ * @param blocks 同一フィールドのブロック群
+ */
+export function decideCellConfidence(blocks: ReportBlock[]): number | undefined {
+  let min: number | undefined = undefined;
+  for (const b of blocks) {
+    if (b.confidence !== undefined) {
+      min = min === undefined ? b.confidence : Math.min(min, b.confidence);
+    }
+  }
+  return min;
+}
+
 export interface CellValueOptions {
   /**
    * y 座標の差がこの値以内ならば「同一行」と見なす閾値（ピクセル相当）。
