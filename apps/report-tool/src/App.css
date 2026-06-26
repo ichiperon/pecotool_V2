@@ -850,3 +850,87 @@ button {
   white-space: nowrap;
   border-width: 0;
 }
+
+/* ===== OCR 実行パネル ===== */
+.ocr-run-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border-top: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0.625rem 0;
+  margin: 0.25rem 0;
+}
+
+.ocr-run-panel__actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ocr-run-panel__run-btn {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  background-color: #4299e1;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: background-color 0.15s;
+}
+
+.ocr-run-panel__run-btn:hover:not(:disabled) {
+  background-color: #2b6cb0;
+}
+
+.ocr-run-panel__run-btn:disabled {
+  background-color: #a0aec0;
+  cursor: not-allowed;
+}
+
+.ocr-run-panel__cancel-btn {
+  padding: 0.5rem 0.65rem;
+  background-color: #fff;
+  color: #c53030;
+  border: 1px solid #fc8181;
+  border-radius: 5px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  transition: background-color 0.15s;
+}
+
+.ocr-run-panel__cancel-btn:hover {
+  background-color: #fff5f5;
+}
+
+.ocr-run-panel__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ocr-run-panel__progress-bar {
+  height: 6px;
+  background-color: #e2e8f0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.ocr-run-panel__progress-fill {
+  height: 100%;
+  background-color: #4299e1;
+  border-radius: 3px;
+  transition: width 0.2s ease-out;
+}
+
+.ocr-run-panel__progress-label {
+  font-size: 0.75rem;
+  color: #718096;
+  text-align: right;
+}
+
+.ocr-run-panel__hint {
+  font-size: 0.75rem;
+  color: #a0aec0;
+}

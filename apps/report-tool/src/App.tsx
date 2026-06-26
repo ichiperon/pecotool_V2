@@ -5,6 +5,7 @@ import FieldListPanel from "./components/FieldListPanel";
 import CsvPreviewTable from "./components/CsvPreviewTable";
 import CsvExportButton from "./components/CsvExportButton";
 import PdfViewer from "./components/PdfViewer";
+import OcrRunPanel from "./components/OcrRunPanel";
 import { useReportStore } from "./store/reportStore";
 
 type RightTab = "template" | "preview";
@@ -109,6 +110,7 @@ const App: FC = () => {
             className="right-panel__content"
           >
             <FieldListPanel />
+            <OcrRunPanel />
             <CsvExportButton />
           </div>
 
