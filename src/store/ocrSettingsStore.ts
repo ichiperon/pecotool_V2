@@ -65,6 +65,14 @@ interface OcrSettingsState extends OcrSortSettings {
    * 正値で下、負値で上。既定 0mm（補正なし）。
    */
   pdfTextOffsetDownMm: number;
+  /**
+   * 緊急対応 (escape hatch): 保存時に no-op 短絡を無効化し、編集が無くても
+   * content stream のクリーンアップ（空 q-Q 除去・BT 外テキスト演算子 strip 等）を
+   * 必ず走らせる。Acrobat の「このページにはエラーがあります」/ Acrobat 7 の Tj
+   * エラーの原因になる過去保存ゴミを、開いて保存し直すだけで除去するためのトグル。
+   * 既定 false（無傷ファイルはバイト温存＝従来の no-op 保存を維持）。
+   */
+  forceFullRewriteOnSave: boolean;
   setHorizontalRowOrder: (order: RowOrder) => void;
   setHorizontalColumnOrder: (order: ColumnOrder) => void;
   setVerticalColumnOrder: (order: ColumnOrder) => void;
@@ -77,6 +85,7 @@ interface OcrSettingsState extends OcrSortSettings {
   setShowLowConfidenceHighlight: (val: boolean) => void;
   setPdfTextOffsetRightMm: (val: number) => void;
   setPdfTextOffsetDownMm: (val: number) => void;
+  setForceFullRewriteOnSave: (val: boolean) => void;
 }
 
 export const useOcrSettingsStore = create<OcrSettingsState>()(
@@ -98,6 +107,7 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
       showLowConfidenceHighlight: true,
       pdfTextOffsetRightMm: 0,
       pdfTextOffsetDownMm: 0,
+      forceFullRewriteOnSave: false,
       setHorizontalRowOrder: (order) =>
         set((s) => ({ horizontal: { ...s.horizontal, rowOrder: order } })),
       setHorizontalColumnOrder: (order) =>
@@ -123,6 +133,7 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
         set((s) => ({
           pdfTextOffsetDownMm: Number.isFinite(val) ? clampOffsetMm(val) : s.pdfTextOffsetDownMm,
         })),
+      setForceFullRewriteOnSave: (val) => set({ forceFullRewriteOnSave: val }),
     }),
     {
       name: 'peco-ocr-settings',
@@ -154,6 +165,7 @@ export const useOcrSettingsStore = create<OcrSettingsState>()(
         showLowConfidenceHighlight: s.showLowConfidenceHighlight,
         pdfTextOffsetRightMm: s.pdfTextOffsetRightMm,
         pdfTextOffsetDownMm: s.pdfTextOffsetDownMm,
+        forceFullRewriteOnSave: s.forceFullRewriteOnSave,
       }),
     }
   )

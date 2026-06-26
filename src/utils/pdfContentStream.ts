@@ -751,3 +751,149 @@ export function stripTextBlocks(decoded: Uint8Array): Uint8Array {
   const intermediate = result.slice(0, resultIdx);
   return stripEmptyGraphicsStateBlocks(intermediate);
 }
+
+/**
+ * BT...ET の「外側」に漏れたテキスト演算子だけを除去する（テキストレイヤーは保持する）。
+ *
+ * stripTextBlocks が BT...ET ブロックごと削除する（PecoTool はメタから再描画する前提）のに対し、
+ * 本関数は **BT...ET をバイト等価で温存** し、テキストオブジェクトの外 (textDepth===0) に
+ * 現れたテキスト演算子（Tj / TJ / Tf / TL / T* / Td / TD / Tm / Tc / Tw / Tz / Tr / Ts / ' / "）
+ * とその operand だけを落とす。孤児 ET も落とす。
+ *
+ * 用途: Acrobat の "text operator outside text object" エラー（「このページにはエラーが
+ * あります」/ Acrobat 7 の Tj エラー）を、**原本の OCR/手補正済みテキストレイヤーを一切
+ * 失わずに** 除去する。PecoTool メタが無く再描画できないファイル（他ツール由来の OCR 層など）
+ * 向けの非破壊修復。実害の原因は「空 q...Q ラッパー内に紛れ込んだ Tf/TL/T* 等の漏れ演算子」で、
+ * 実テキスト（Tj/TJ）は健全な BT...ET 内にあるため、外側演算子の除去でテキストは失われない。
+ *
+ * 仕上げに空 q-Q ラッパー除去（stripEmptyGraphicsStateBlocksOnly）も適用する。
+ */
+export function stripStrayTextOperatorsOutsideTextObjects(decoded: Uint8Array): Uint8Array {
+  const len = decoded.length;
+  const result = new Uint8Array(len);
+  let resultIdx = 0;
+
+  let state: State = 'NORMAL';
+  let stringDepth = 0;
+  let i = 0;
+
+  while (i < len) {
+    if (state === 'NORMAL') {
+      // BT を検出したら、対応する ET までを **バイト等価でコピー**（テキストレイヤー温存）。
+      // 文字列リテラル等に紛れた "ET" を誤認しないよう内部状態機械を維持する。
+      if (matchesToken(decoded, i, 0x42, 0x54 /* BT */)) {
+        result[resultIdx++] = decoded[i];
+        result[resultIdx++] = decoded[i + 1];
+        i += 2;
+        let innerState: State = 'NORMAL';
+        let innerDepth = 0;
+        while (i < len) {
+          if (innerState === 'NORMAL') {
+            if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
+              result[resultIdx++] = decoded[i];
+              result[resultIdx++] = decoded[i + 1];
+              i += 2;
+              break;
+            }
+            const entry = enterNonNormalState(decoded, i);
+            if (entry) {
+              result[resultIdx++] = decoded[i];
+              innerState = entry.state;
+              innerDepth = entry.stringDepth;
+              i += entry.advance;
+              continue;
+            }
+            result[resultIdx++] = decoded[i];
+            i += 1;
+          } else if (innerState === 'STRING') {
+            const r = scanString(decoded, i, innerDepth);
+            for (let k = 0; k < r.advance && i + k < len; k++) result[resultIdx++] = decoded[i + k];
+            innerState = r.state;
+            innerDepth = r.stringDepth;
+            i += r.advance;
+          } else if (innerState === 'HEX') {
+            const r = scanHex(decoded, i);
+            result[resultIdx++] = decoded[i];
+            innerState = r.state;
+            innerDepth = 0;
+            i += r.advance;
+          } else {
+            const r = scanComment(decoded, i);
+            result[resultIdx++] = decoded[i];
+            innerState = r.state;
+            innerDepth = 0;
+            i += r.advance;
+          }
+        }
+        continue;
+      }
+
+      if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+        const copied = copyInlineImage(decoded, i, result, resultIdx);
+        i = copied.inputIdx;
+        resultIdx = copied.resultIdx;
+        continue;
+      }
+
+      // 外側の孤児 ET は破棄
+      if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
+        i += 2;
+        continue;
+      }
+
+      // 外側のテキスト表示演算子 Tj / TJ は operand ごと破棄
+      if (matchesToken(decoded, i, 0x54, 0x6a /* Tj */)) {
+        resultIdx = dropTrailingTjOperand(result, resultIdx);
+        i += 2;
+        continue;
+      }
+      if (matchesToken(decoded, i, 0x54, 0x4a /* TJ */)) {
+        resultIdx = dropTrailingTJOperand(result, resultIdx);
+        i += 2;
+        continue;
+      }
+
+      // 外側のテキスト状態/配置演算子（Tf/TL/T*/Td/TD/Tm/Tc/Tw/Tz/Tr/Ts/'/"）を operand ごと破棄
+      const textOperator = textOperatorOperandCount(decoded, i);
+      if (textOperator) {
+        resultIdx = dropTrailingOperands(result, resultIdx, textOperator.operands);
+        i += textOperator.length;
+        continue;
+      }
+
+      const entry = enterNonNormalState(decoded, i);
+      if (entry) {
+        result[resultIdx++] = decoded[i];
+        state = entry.state;
+        stringDepth = entry.stringDepth;
+        i += entry.advance;
+        continue;
+      }
+      result[resultIdx++] = decoded[i];
+      i += 1;
+    } else if (state === 'STRING') {
+      const r = scanString(decoded, i, stringDepth);
+      for (let k = 0; k < r.advance && i + k < len; k++) {
+        result[resultIdx++] = decoded[i + k];
+      }
+      state = r.state;
+      stringDepth = r.stringDepth;
+      i += r.advance;
+    } else if (state === 'HEX') {
+      const r = scanHex(decoded, i);
+      result[resultIdx++] = decoded[i];
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    } else {
+      const r = scanComment(decoded, i);
+      result[resultIdx++] = decoded[i];
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    }
+  }
+
+  const intermediate = result.slice(0, resultIdx);
+  return stripEmptyGraphicsStateBlocksOnly(intermediate);
+}

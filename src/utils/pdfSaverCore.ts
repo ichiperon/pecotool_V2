@@ -36,6 +36,7 @@ import {
   stripTextBlocks,
   stripEmptyGraphicsStateBlocksOnly,
   hasTextOperatorsOutsideTextObjects,
+  stripStrayTextOperatorsOutsideTextObjects,
 } from './pdfContentStream';
 import {
   PECO_FONT_KEY_TAG,
@@ -483,30 +484,25 @@ export function stripEmptyQBlocksOnPage(
 // ---------------------------------------------------------------------------
 
 /**
- * 未編集 (non-dirty) ページの 1 パススイープ (PCT-059)。
+ * 未編集 (non-dirty) ページの content stream を **非破壊修復** する。
  *
- * 適用する 2 つの処理 (従来は pdfSaver.ts / pdf.worker.ts の保存ループが個別に呼んでいた):
- *  - issue #96 要件2: 「空 q-Q ラッパー除去」。フルパス (pruneStalePecoToolResources +
- *    replacePageTextContentStreams + drawText 再描画) と異なり、BT...ET には触れず
- *    フォント辞書も触らないため、原本 OCR レイヤーは保持される。過去の保存で累積した
- *    空 q-Q ブロックを安全に除去でき、再読み込み→保存だけで容量が縮む。
- *  - issue #1 (Acrobat 7 TJ 互換 仮修正): BT 外にテキスト演算子が漏れているページに対し、
- *    replacePageTextContentStreams で BT...ET ブロックを strip する。再描画は行わない
- *    （フォント辞書・existingBBoxMeta には触れない）ため、原本 OCR テキストレイヤーは
- *    消去される。bloat detection と異なり fontBytes 有無に依存しない。実機検証
- *    (Acrobat 7.0) が完了するまでは仮修正として維持する。
+ * 目的: Acrobat の "text operator outside text object" エラー（「このページにはエラーが
+ * あります」/ Acrobat 7 の Tj エラー）の原因＝BT...ET の外に漏れたテキスト演算子（Tf/TL/T*
+ * 等）と、過去保存で累積した空 q-Q ラッパーを除去する。一方で **BT...ET（OCR/手補正済みの
+ * テキストレイヤー）はバイト等価で温存** する。
  *
- * PCT-059 (性能): 従来は pageHasTextOperatorDamage → (損傷時) replacePageTextContentStreams →
- * stripEmptyQBlocksOnPage が同一 content stream を各々 decode しており、
- * 損傷なしページでも stream あたり 2 回の pako.inflate が走っていた。
- * 本関数は decode 結果を共有して 1 回に削減する。挙動は従来経路と完全等価:
- *  - 損傷判定は pageHasTextOperatorDamage と同一 (stream 順 / 判定条件 / early-exit)
- *  - 損傷ありページは従来どおり replacePageTextContentStreams + stripEmptyQBlocksOnPage
- *    へ委譲する（decode 回数も従来と同一）。replacePageTextContentStreams は Contents を
- *    差し替えるため、その後の空 q-Q strip は置換後 stream の再 decode が必要 —
- *    ここは共有してはならない
- *  - 損傷なしページの空 q-Q strip は stripEmptyQBlocksOnPage 本体と同一の
- *    書き戻しロジック (bytesEqual ガード / Filter 再設定 / DecodeParms 削除)
+ * 修復は stripStrayTextOperatorsOutsideTextObjects に委譲。損傷の有無に依存しない冪等処理:
+ *  - 損傷あり (BT 外にテキスト演算子が漏れている): 漏れ演算子＋空 q-Q を除去、BT...ET は保持。
+ *  - 損傷なし: 空 q-Q ラッパーのみ除去（従来 stripEmptyGraphicsStateBlocksOnly と同結果）。
+ *
+ * 旧実装 (PCT-059) は損傷ページで replacePageTextContentStreams を呼び BT...ET ごと strip して
+ * いたが、未編集ページには再描画材料 (existingBBoxMeta) が無いため、メタを持たないファイル
+ * （他ツール由来 OCR 層など）では原本テキストが復元されず消失していた。本実装はテキストを
+ * 失わずにエラーだけ除去する。dirty ページの strip→再描画は呼び出し側メインループ
+ * (pruneStalePecoToolResources + replacePageTextContentStreams + drawText) が従来どおり担う。
+ *
+ * decode は stream あたり 1 回（PCT-059 の decode 削減を維持）。decode 不能 stream は無変更。
+ * （contentRefCounts / logPrefix は呼び出し側互換のため引数に残すが現実装では未使用。）
  */
 export function sweepNonDirtyPage(
   pageNode: {
@@ -515,8 +511,8 @@ export function sweepNonDirtyPage(
     set: (key: PDFName, value: PDFObject) => void;
   },
   context: typeof PDFDocument.prototype.context,
-  contentRefCounts: Map<string, number>,
-  logPrefix = '[pdfSaverCore]',
+  _contentRefCounts: Map<string, number>,
+  _logPrefix = '[pdfSaverCore]',
 ): void {
   const contentsKey = PDFName.of('Contents');
   const rawContents = pageNode.get?.(contentsKey) ?? pageNode.Contents?.();
@@ -525,28 +521,13 @@ export function sweepNonDirtyPage(
   const resolved = context.lookup(rawContents);
   const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
 
-  // 1パス目: decode しながら issue #1 損傷 (BT 外テキスト演算子) を検査する。
-  // stream の列挙・skip 条件 (非 PDFRawStream / decode 不能) ・early-exit は
-  // pageHasTextOperatorDamage と同一。
-  const decodedEntries: Array<{ stream: PDFRawStream; decoded: Uint8Array }> = [];
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
     if (!(stream instanceof PDFRawStream)) continue;
     const decoded = decodeStreamContents(stream);
     if (decoded === null) continue;
-    if (hasTextOperatorsOutsideTextObjects(decoded)) {
-      // 損傷あり: 従来 2 関数へ委譲。replacePageTextContentStreams が Contents を
-      // 差し替える可能性があるため、ここまでの decode 結果は再利用できない。
-      replacePageTextContentStreams(pageNode, context, contentRefCounts, logPrefix);
-      stripEmptyQBlocksOnPage(pageNode, context);
-      return;
-    }
-    decodedEntries.push({ stream, decoded });
-  }
-
-  // 損傷なし: decode 済みバイト列を再利用して空 q-Q ラッパーのみ除去する (issue #96 要件2)。
-  for (const { stream, decoded } of decodedEntries) {
-    const cleaned = stripEmptyGraphicsStateBlocksOnly(decoded);
+    // 非破壊修復: BT...ET（テキスト層）を温存し、BT 外の漏れテキスト演算子＋空 q-Q のみ除去。
+    const cleaned = stripStrayTextOperatorsOutsideTextObjects(decoded);
     if (bytesEqual(cleaned, decoded)) continue;
     stream.updateContents(deflate(cleaned));
     stream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
@@ -1014,6 +995,13 @@ export async function buildPdfDocumentCore(
   const textOffsetDx = options?.textLayerOffsetPt?.dx ?? 0;
   const textOffsetDy = options?.textLayerOffsetPt?.dy ?? 0;
 
+  // 緊急対応 (escape hatch): true のとき、下記 Acrobat dirty-flag 回避 short-circuit を
+  // 無効化して、編集が無く PecoTool メタも無いファイルでも通常パス（sweepNonDirtyPage に
+  // よる空 q-Q 除去・BT 外テキスト演算子 strip、stripCatalogVersion 等）を必ず通す。
+  // 過去保存ゴミ起因の Acrobat エラー / Acrobat 7 Tj エラーを、開いて保存し直すだけで
+  // 修復するための逃げ道。OFF（既定）では従来どおり無傷ファイルはバイト温存する。
+  const forceFullRewrite = options?.forceFullRewrite ?? false;
+
   const originalVersion = extractPdfVersion(originalPdfBytes);
   // Acrobat dirty-flag 回避: 入力 PDF の trailer /ID を保存後に書き戻す。
   const originalTrailerId = extractTrailerId(originalPdfBytes);
@@ -1088,6 +1076,7 @@ export async function buildPdfDocumentCore(
   // D-after: worker の旧 short-circuit は earlySweep を呼ばず即 return していたが、
   // この core では main 版 (earlySweep あり・invariants A-06 準拠) を採用する。
   if (
+    !forceFullRewrite &&
     isDefaultOrder &&
     dirtyPages.length === 0 &&
     !hadLegacyBBoxMeta &&

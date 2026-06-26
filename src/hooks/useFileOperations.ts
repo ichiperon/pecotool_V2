@@ -342,6 +342,12 @@ export interface SaveDialogOptions {
    * worker / main 両経路ともこの options を素通しで buildPdfDocumentCore へ運ぶ。
    */
   textLayerOffsetPt?: { dx: number; dy: number };
+  /**
+   * 緊急対応 (escape hatch): true のとき buildPdfDocumentCore の no-op 短絡を
+   * スキップし、編集が無くても content stream のクリーンアップを必ず実行する。
+   * OCR 設定の forceFullRewriteOnSave（永続トグル）由来で全保存経路に乗る。
+   */
+  forceFullRewrite?: boolean;
 }
 
 type SaveInvocationOptions = {
@@ -758,6 +764,10 @@ export function useFileOperations(
     const effectiveSaveOptions: SaveDialogOptions = {
       ...(saveOptions ?? { compression: 'none' }),
       textLayerOffsetPt,
+      // 緊急対応: OCR 設定の永続トグルが ON なら、編集が無くても保存時クリーンアップを強制する。
+      // 明示的な per-call 指定があればそれも尊重する（OR）。
+      // 改竄された localStorage の truthy ゴミ（"false"/1 等）で誤発火しないよう厳密 true 比較する。
+      forceFullRewrite: ocrSettings.forceFullRewriteOnSave === true || saveOptions?.forceFullRewrite === true,
     };
 
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
