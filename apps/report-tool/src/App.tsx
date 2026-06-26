@@ -130,6 +130,39 @@ const App: FC = () => {
                   <CsvExportButton />
                 </div>
               )}
+
+              {/* ステップ前進/戻る導線（右エリアで次の操作を明示） */}
+              <div className="step-nav">
+                {currentStep > 1 && (
+                  <button
+                    type="button"
+                    className="step-nav__btn step-nav__btn--prev"
+                    onClick={() =>
+                      handleStepSelect((currentStep - 1) as StepNumber)
+                    }
+                    disabled={!stepEnabled[(currentStep - 1) as StepNumber]}
+                  >
+                    ◀ 戻る（{STEP_LABELS[(currentStep - 1) as StepNumber]}）
+                  </button>
+                )}
+                {currentStep < 4 && (
+                  <button
+                    type="button"
+                    className="step-nav__btn step-nav__btn--next"
+                    onClick={() =>
+                      handleStepSelect((currentStep + 1) as StepNumber)
+                    }
+                    disabled={!stepEnabled[(currentStep + 1) as StepNumber]}
+                    title={
+                      !stepEnabled[(currentStep + 1) as StepNumber]
+                        ? "先に欄を定義してください"
+                        : undefined
+                    }
+                  >
+                    次へ：{STEP_LABELS[(currentStep + 1) as StepNumber]} ▶
+                  </button>
+                )}
+              </div>
             </div>
           </aside>
         </main>

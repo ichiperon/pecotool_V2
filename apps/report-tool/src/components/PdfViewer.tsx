@@ -132,6 +132,38 @@ const PdfViewer: FC = () => {
     }
   };
 
+  // 再マウント時（ステップ③の2カラム確認へ往復した後など）に filePath は
+  // store に残っているが pdfDoc(ローカル state) が失われているケースで、
+  // filePath から PDF を自動再読込する。setPdf は呼ばず currentPage/numPages を
+  // 維持する（同一ファイルの復元なのでページ位置を保つ）。
+  const autoLoadingRef = useRef(false);
+  useEffect(() => {
+    if (!filePath || pdfDoc || autoLoadingRef.current) return;
+    autoLoadingRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const currentGen = ++loadGenRef.current;
+        const bytes = await readFile(filePath);
+        if (cancelled || loadGenRef.current !== currentGen) return;
+        const newDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+        if (cancelled || loadGenRef.current !== currentGen) {
+          newDoc.destroy().catch(() => {});
+          return;
+        }
+        setPdfDoc(newDoc);
+      } catch {
+        // 自動再読込失敗は握る（ユーザーは「PDF を開く」で再試行できる）
+      } finally {
+        autoLoadingRef.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      autoLoadingRef.current = false;
+    };
+  }, [filePath, pdfDoc]);
+
   // canvas に現在ページを描画する
   useEffect(() => {
     // PCT-153 (blocker): 依存配列に pdfDoc を追加。

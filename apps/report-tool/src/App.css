@@ -1074,6 +1074,54 @@ button {
   line-height: 1.5;
 }
 
+/* ===== ステップ前進/戻る導線 ===== */
+.step-nav {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.step-nav__btn {
+  padding: 0.55rem 0.85rem;
+  border-radius: 5px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.step-nav__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.step-nav__btn--prev {
+  background-color: #fff;
+  color: #4a5568;
+  border-color: #cbd5e0;
+}
+
+.step-nav__btn--prev:not(:disabled):hover {
+  background-color: #f7fafc;
+}
+
+.step-nav__btn--next {
+  margin-left: auto;
+  background-color: #4299e1;
+  color: #fff;
+}
+
+.step-nav__btn--next:not(:disabled):hover {
+  background-color: #3182ce;
+}
+
+.step-nav__btn:focus-visible {
+  outline: 2px solid #4299e1;
+  outline-offset: 2px;
+}
+
 /* ===== StepBar クリック可能なステップボタン ===== */
 .step-bar__step-btn {
   display: flex;
