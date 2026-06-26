@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { CellMatrix, ReportField, ReportTemplate } from "../types/report";
+import type { CellMatrix, ReportField, ReportTemplate, PageOffset } from "../types/report";
+import { ZERO_OFFSET } from "../types/report";
 import { applyCellMove } from "../logic/cellEdit";
 import type { CellMoveMode } from "../logic/cellEdit";
 
@@ -17,13 +18,18 @@ export const FIELD_COLOR_PALETTE: readonly string[] = [
   "#b8c8a0", // オリーブグリーン
 ] as const;
 
-export type EditorMode = "idle" | "defineField";
+export type EditorMode = "idle" | "defineField" | "adjustOffset";
 
 interface ReportState {
   template: ReportTemplate;
   cells: CellMatrix;
   mode: EditorMode;
   selectedFieldId: string | null;
+  /**
+   * ページごとの座標補正オフセット。
+   * 既定 (0,0) のページはキーを持たない疎保持（Map に不在 = ZERO_OFFSET）。
+   */
+  pageOffsets: Map<number, PageOffset>;
 
   // actions
   addField: (rect: ReportField["rect"], name?: string) => void;
@@ -40,6 +46,25 @@ interface ReportState {
   clearCellValue: (pageNum: number, fieldId: string) => void;
   /** ドラッグ値移動: 指定ページ内で from の値を to へ移動（既定 swap） */
   moveCellValue: (pageNum: number, fromFieldId: string, toFieldId: string, mode?: CellMoveMode) => void;
+  /**
+   * 指定ページのオフセットを設定する。
+   * (dx, dy) が両方 0 のときはキーを削除して疎保持を維持する。
+   * 前回と同値の場合は no-op（再描画なし）。
+   */
+  setPageOffset: (pageNum: number, dx: number, dy: number) => void;
+  /**
+   * 指定ページのオフセットを (ddx, ddy) だけ加算する。
+   * 結果が (0, 0) になる場合はキーを削除する。
+   */
+  nudgePageOffset: (pageNum: number, ddx: number, ddy: number) => void;
+  /** 指定ページのオフセットを削除して既定 (0, 0) に戻す。 */
+  clearPageOffset: (pageNum: number) => void;
+  /**
+   * 指定ページの cells 行を新しい Map で全置換する。
+   * 他ページの cells は保持される。
+   * 単一ページ再 OCR 後の部分更新に使用する。
+   */
+  setCellsForPage: (pageNum: number, row: Map<string, string>) => void;
 }
 
 /**
@@ -60,6 +85,7 @@ export const useReportStore = create<ReportState>((set) => ({
   cells: new Map(),
   mode: "idle",
   selectedFieldId: null,
+  pageOffsets: new Map(),
 
   addField: (rect, name) => {
     set((state) => {
@@ -109,7 +135,7 @@ export const useReportStore = create<ReportState>((set) => ({
   },
 
   clearTemplate: () => {
-    set({ template: { fields: [] } });
+    set({ template: { fields: [] }, pageOffsets: new Map() });
   },
 
   setCells: (matrix) => {
@@ -157,6 +183,55 @@ export const useReportStore = create<ReportState>((set) => ({
       if (nextRow === prevRow) return {};
       const nextCells = new Map(state.cells);
       nextCells.set(pageNum, nextRow);
+      return { cells: nextCells };
+    });
+  },
+
+  setPageOffset: (pageNum, dx, dy) => {
+    set((state) => {
+      const prev = state.pageOffsets.get(pageNum);
+      // no-op: 前回と同値
+      if (prev && prev.dx === dx && prev.dy === dy) return {};
+      // no-op: 既にキーなし かつ (0,0) を設定しようとしている
+      if (!prev && dx === 0 && dy === 0) return {};
+      const next = new Map(state.pageOffsets);
+      if (dx === 0 && dy === 0) {
+        next.delete(pageNum);
+      } else {
+        next.set(pageNum, { dx, dy });
+      }
+      return { pageOffsets: next };
+    });
+  },
+
+  nudgePageOffset: (pageNum, ddx, ddy) => {
+    set((state) => {
+      const prev = state.pageOffsets.get(pageNum) ?? ZERO_OFFSET;
+      const nextDx = prev.dx + ddx;
+      const nextDy = prev.dy + ddy;
+      const next = new Map(state.pageOffsets);
+      if (nextDx === 0 && nextDy === 0) {
+        next.delete(pageNum);
+      } else {
+        next.set(pageNum, { dx: nextDx, dy: nextDy });
+      }
+      return { pageOffsets: next };
+    });
+  },
+
+  clearPageOffset: (pageNum) => {
+    set((state) => {
+      if (!state.pageOffsets.has(pageNum)) return {};
+      const next = new Map(state.pageOffsets);
+      next.delete(pageNum);
+      return { pageOffsets: next };
+    });
+  },
+
+  setCellsForPage: (pageNum, row) => {
+    set((state) => {
+      const nextCells = new Map(state.cells);
+      nextCells.set(pageNum, new Map(row));
       return { cells: nextCells };
     });
   },

@@ -172,7 +172,7 @@ describe("CsvPreviewTable: PCT-156 — ドラッグ中のドロップ不可行�
     });
   });
 
-  it("ドラッグ中にドロップ不可行の gridcell が aria-disabled を持つ", async () => {
+  it("Pointer Events ドラッグ中にドロップ不可行の gridcell が aria-disabled を持つ", async () => {
     setFields(["金額"]);
     const fields = useReportStore.getState().template.fields;
     setCells([
@@ -181,14 +181,14 @@ describe("CsvPreviewTable: PCT-156 — ドラッグ中のドロップ不可行�
     ]);
     render(<CsvPreviewTable />);
 
-    // ページ1のセルでドラッグ開始
     const cells = screen.getAllByRole("gridcell");
     // cells[0]=p1/金額, cells[1]=p2/金額 の順（rowheader は gridcell でない）
     const sourceCell = cells[0];
 
-    fireEvent.dragStart(sourceCell, {
-      dataTransfer: { setData: () => {}, effectAllowed: "move" },
-    });
+    // Pointer Events: pointerdown で捕捉開始、pointermove で閾値超えのドラッグ開始
+    fireEvent.pointerDown(sourceCell, { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+    // DRAG_THRESHOLD (5px) を超える移動
+    fireEvent.pointerMove(sourceCell, { clientX: 110, clientY: 100, pointerId: 1 });
 
     // ドラッグ中: ページ2の行が dimmed になり aria-description が付く
     await waitFor(() => {
@@ -201,8 +201,8 @@ describe("CsvPreviewTable: PCT-156 — ドラッグ中のドロップ不可行�
     const targetCell = cells[1];
     expect(targetCell).toHaveAttribute("aria-disabled", "true");
 
-    // ドラッグ終了で解除される
-    fireEvent.dragEnd(sourceCell);
+    // pointerup でドラッグ終了 → クリーンアップされる
+    fireEvent.pointerUp(sourceCell, { clientX: 110, clientY: 100, pointerId: 1 });
 
     await waitFor(() => {
       const rows = screen.getAllByRole("row");

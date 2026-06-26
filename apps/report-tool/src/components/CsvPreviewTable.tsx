@@ -1,10 +1,21 @@
-import { useState, useRef, useCallback, useEffect, type FC, type KeyboardEvent, type DragEvent } from "react";
+import { useState, useRef, useCallback, useEffect, type FC, type KeyboardEvent, type PointerEvent } from "react";
 import { useReportStore } from "../store/reportStore";
 
 /** フォーカス位置 */
 interface FocusPos {
   pageNum: number;
   fieldIndex: number;
+}
+
+/** ポインタードラッグの進行状態を保持する ref の型 */
+interface DragRefState {
+  pageNum: number;
+  fieldId: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  /** 移動量が閾値を超えたらドラッグ開始と判定 */
+  started: boolean;
 }
 
 /**
@@ -19,6 +30,9 @@ const ZWSP = "​";
 function makeAnnouncement(text: string, toggle: boolean): string {
   return toggle ? `${text}${ZWSP}` : text;
 }
+
+/** ドラッグ開始と判定するポインター移動量の閾値 (px) */
+const DRAG_THRESHOLD = 5;
 
 const CsvPreviewTable: FC = () => {
   const fields = useReportStore((s) => s.template.fields);
@@ -37,7 +51,7 @@ const CsvPreviewTable: FC = () => {
   const [editValue, setEditValue] = useState("");
   // フォーカス位置（グリッドナビ用）
   const [focusPos, setFocusPos] = useState<FocusPos | null>(null);
-  // ドラッグ状態
+  // ドラッグ状態（Pointer Events ベース）
   const [dragSource, setDragSource] = useState<{ pageNum: number; fieldId: string } | null>(null);
   const [dragOverPos, setDragOverPos] = useState<{ pageNum: number; fieldId: string } | null>(null);
   // aria-live 通知（toggle で同一テキスト連続セット時も再アナウンスを保証）
@@ -46,6 +60,15 @@ const CsvPreviewTable: FC = () => {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const cellRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
+
+  /**
+   * ドラッグ進行状態を ref で保持する（setState を介さない）。
+   * Chromium(Tauri webview) では dragstart 直後の setState が
+   * ネイティブ HTML5 DnD を潰すため、Pointer Events で代替し
+   * 進行状態は ref に格納して再レンダを起こさない。
+   */
+  const dragRef = useRef<DragRefState | null>(null);
+
   const getCellKey = (pageNum: number, fieldIndex: number) => `${pageNum}:${fieldIndex}`;
 
   /**
@@ -239,58 +262,127 @@ const CsvPreviewTable: FC = () => {
     [commitEdit, cancelEdit, fields.length]
   );
 
-  // ドラッグ開始
-  const handleDragStart = useCallback(
-    (e: DragEvent<HTMLTableCellElement>, pageNum: number, fieldId: string) => {
-      setDragSource({ pageNum, fieldId });
-      e.dataTransfer.setData("text/plain", `${pageNum}:${fieldId}`);
-      e.dataTransfer.effectAllowed = "move";
+  // ドラッグ終了の共通クリーンアップ
+  const cleanupDrag = useCallback(() => {
+    dragRef.current = null;
+    setDragSource(null);
+    setDragOverPos(null);
+  }, []);
+
+  /**
+   * Pointer Events ベースのドラッグ実装。
+   *
+   * HTML5 DnD（draggable/onDragStart 等）は Chromium(Tauri webview) で
+   * dragstart 直後の setState が再レンダを起こしドラッグを潰す問題がある。
+   * Pointer Events に置き換えることでその競合を回避する。
+   *
+   * - onPointerDown: ドラッグ候補として dragRef に記録 + setPointerCapture
+   * - onPointerMove: 閾値超えでドラッグ開始、elementFromPoint でドロップ先を特定
+   * - onPointerUp: 同一ページなら moveCellValue を実行
+   * - onPointerCancel: クリーンアップ
+   */
+  const handlePointerDown = useCallback(
+    (e: PointerEvent<HTMLTableCellElement>, pageNum: number, fieldId: string) => {
+      // 編集中（input フォーカス中）は早期 return
+      if (editPos !== null) return;
+      // × ボタン上なら早期 return（クリックに任せる）
+      if ((e.target as HTMLElement).closest("button")) return;
+      // 左ボタン（0）以外は無視
+      if (e.button !== 0) return;
+
+      // jsdom 環境では setPointerCapture が未実装の場合があるため防御的に呼ぶ
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+
+      dragRef.current = {
+        pageNum,
+        fieldId,
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        started: false,
+      };
+    },
+    [editPos]
+  );
+
+  const handlePointerMove = useCallback(
+    (e: PointerEvent<HTMLTableCellElement>) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+
+      const dx = e.clientX - drag.startX;
+      const dy = e.clientY - drag.startY;
+      const dist = Math.hypot(dx, dy);
+
+      // 閾値を超えたらドラッグ開始フラグを立てる
+      if (!drag.started && dist >= DRAG_THRESHOLD) {
+        drag.started = true;
+        setDragSource({ pageNum: drag.pageNum, fieldId: drag.fieldId });
+      }
+
+      if (!drag.started) return;
+
+      // ポインターキャプチャ中は e.target が常に捕捉元のため
+      // elementFromPoint でカーソル下の実際の要素を特定する
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const tdEl = el?.closest("td[data-field-id]") as HTMLElement | null;
+
+      if (!tdEl) {
+        setDragOverPos(null);
+        return;
+      }
+
+      const overPageNum = Number(tdEl.dataset.pageNum);
+      const overFieldId = tdEl.dataset.fieldId ?? "";
+
+      // ページ跨ぎ禁止
+      if (overPageNum !== drag.pageNum) {
+        setDragOverPos(null);
+        return;
+      }
+
+      setDragOverPos({ pageNum: overPageNum, fieldId: overFieldId });
     },
     []
   );
 
-  // ドラッグ中（ドロップ可否制御）
-  const handleDragOver = useCallback(
-    (e: DragEvent<HTMLTableCellElement>, pageNum: number, fieldId: string) => {
-      if (!dragSource) return;
-      // ページ跨ぎ禁止
-      if (dragSource.pageNum !== pageNum) {
-        e.dataTransfer.dropEffect = "none";
-        return;
+  const handlePointerUp = useCallback(
+    (e: PointerEvent<HTMLTableCellElement>) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+
+      // ドラッグが開始済みかつドロップ先が同一ページの場合のみ移動を実行
+      if (drag.started && dragOverPos && dragOverPos.pageNum === drag.pageNum) {
+        moveCellValue(drag.pageNum, drag.fieldId, dragOverPos.fieldId);
+        const fromField = fields.find((f) => f.id === drag.fieldId)?.name ?? "";
+        const toField = fields.find((f) => f.id === dragOverPos.fieldId)?.name ?? "";
+        announce(`${drag.pageNum}ページ目: ${fromField} と ${toField} の値を移動しました`);
       }
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      setDragOverPos({ pageNum, fieldId });
+
+      try {
+        e.currentTarget.releasePointerCapture(drag.pointerId);
+      } catch {
+        // キャプチャが既に解放されている場合は無視
+      }
+      cleanupDrag();
     },
-    [dragSource]
+    [dragOverPos, moveCellValue, fields, announce, cleanupDrag]
   );
 
-  // ドラッグ離脱
-  const handleDragLeave = useCallback(() => {
-    setDragOverPos(null);
-  }, []);
-
-  // ドロップ
-  const handleDrop = useCallback(
-    (e: DragEvent<HTMLTableCellElement>, toPageNum: number, toFieldId: string) => {
-      e.preventDefault();
-      setDragOverPos(null);
-      setDragSource(null);
-      if (!dragSource) return;
-      // ページ跨ぎは無視
-      if (dragSource.pageNum !== toPageNum) return;
-      moveCellValue(toPageNum, dragSource.fieldId, toFieldId);
-      const fromField = fields.find((f) => f.id === dragSource.fieldId)?.name ?? "";
-      const toField = fields.find((f) => f.id === toFieldId)?.name ?? "";
-      announce(`${toPageNum}ページ目: ${fromField} と ${toField} の値を移動しました`);
+  const handlePointerCancel = useCallback(
+    (e: PointerEvent<HTMLTableCellElement>) => {
+      const drag = dragRef.current;
+      if (drag) {
+        try {
+          e.currentTarget.releasePointerCapture(drag.pointerId);
+        } catch {
+          // キャプチャが既に解放されている場合は無視
+        }
+      }
+      cleanupDrag();
     },
-    [dragSource, moveCellValue, fields, announce]
+    [cleanupDrag]
   );
-
-  const handleDragEnd = useCallback(() => {
-    setDragSource(null);
-    setDragOverPos(null);
-  }, []);
 
   if (!hasFields) {
     return (
@@ -355,7 +447,9 @@ const CsvPreviewTable: FC = () => {
                 >
                   <span
                     className="csv-preview__field-badge"
-                    style={{ backgroundColor: field.color }}
+                    // CSS カスタムプロパティ経由で色を渡す（インラインスタイル回避）
+                    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+                    style={{ "--field-color": field.color } as React.CSSProperties}
                     aria-hidden="true"
                   />
                   {field.name}
@@ -409,7 +503,7 @@ const CsvPreviewTable: FC = () => {
                           .join(" ")}
                         role="gridcell"
                         aria-label={`${pageNum}ページ目 ${field.name} ${isEmpty ? "空" : value}。Delete キーで削除`}
-                        aria-disabled={isDimmedPage || undefined}
+                        aria-disabled={isDimmedPage ? "true" : undefined}
                         tabIndex={
                           focusPos?.pageNum === pageNum && focusPos?.fieldIndex === fieldIndex
                             ? 0
@@ -417,16 +511,17 @@ const CsvPreviewTable: FC = () => {
                             ? 0
                             : -1
                         }
-                        draggable
+                        // Pointer Events ベースのドラッグ (draggable 属性は削除)
+                        data-page-num={pageNum}
+                        data-field-id={field.id}
                         title={isEmpty ? "空" : value}
                         onDoubleClick={() => startEdit(pageNum, field.id)}
                         onKeyDown={(e) => handleCellKeyDown(e, pageNum, fieldIndex)}
                         onFocus={() => setFocusPos({ pageNum, fieldIndex })}
-                        onDragStart={(e) => handleDragStart(e, pageNum, field.id)}
-                        onDragOver={(e) => handleDragOver(e, pageNum, field.id)}
-                        onDragLeave={handleDragLeave}
-                        onDrop={(e) => handleDrop(e, pageNum, field.id)}
-                        onDragEnd={handleDragEnd}
+                        onPointerDown={(e) => handlePointerDown(e, pageNum, field.id)}
+                        onPointerMove={handlePointerMove}
+                        onPointerUp={handlePointerUp}
+                        onPointerCancel={handlePointerCancel}
                       >
                         {isEditing ? (
                           <input

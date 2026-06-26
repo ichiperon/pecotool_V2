@@ -465,6 +465,8 @@ button {
   border-radius: 2px;
   margin-right: 4px;
   vertical-align: middle;
+  /* --field-color は JSX から CSS カスタムプロパティで渡す */
+  background-color: var(--field-color, #ccc);
 }
 
 .csv-preview__td {
@@ -566,6 +568,20 @@ button {
   outline: 2px solid #4299e1;
   outline-offset: -2px;
   background-color: #ebf8ff;
+}
+
+/* セル: Pointer Events ドラッグ中のテキスト選択防止・タッチ操作安定 */
+.csv-preview__td {
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+
+/* セル内の input はテキスト選択を維持する */
+.csv-preview__cell-input {
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: auto;
 }
 
 /* セル: ドラッグオーバー（同ページ・ドロップ可能） */

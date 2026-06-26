@@ -40,6 +40,18 @@ export interface ReportBlock {
  */
 export type CellMatrix = Map<number, Map<string, string>>;
 
+/**
+ * ページごとの座標オフセット (scale=1.0 のページ座標系)。
+ * 帳票の印刷ずれ補正のために欄 rect を平行移動する量を保持する。
+ */
+export interface PageOffset {
+  dx: number;
+  dy: number;
+}
+
+/** 未補正 (オフセットなし) を表す定数。Map に格納しない疎保持と対称的に使う。 */
+export const ZERO_OFFSET: PageOffset = { dx: 0, dy: 0 };
+
 export interface CsvOptions {
   /** 元ファイル名列を先頭に含めるか */
   includeFileName: boolean;

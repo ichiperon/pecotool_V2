@@ -5,7 +5,9 @@ import { usePdfStore } from "../store/pdfStore";
 import { parseOcrResponse } from "../lib/ocrAdapter";
 import { computeCropRect, cropCanvasToPng, renderPageOffscreen } from "../lib/ocrCrop";
 import { decideCellValue } from "../logic/cellValue";
-import type { CellMatrix } from "../types/report";
+import { effectiveRectForPage } from "../logic/pageOffset";
+import { ZERO_OFFSET } from "../types/report";
+import type { CellMatrix, PageOffset } from "../types/report";
 
 /** OCR の描画スケール。値が大きいほど高精度だがメモリ消費が増える。 */
 const REPORT_OCR_RENDER_SCALE = 3.0;
@@ -23,8 +25,107 @@ export interface ReportOcrProgress {
 export interface UseReportOcrReturn {
   isRunning: boolean;
   progress: ReportOcrProgress | null;
+  /** 単一ページ再 OCR の対象ページ番号。実行中以外は null。 */
+  reocrTarget: number | null;
   runOcr: () => Promise<void>;
   cancelOcr: () => void;
+  /** 指定ページのみを再 OCR して setCellsForPage で部分更新する。 */
+  runOcrForPage: (pageNum: number) => Promise<void>;
+}
+
+/**
+ * 単一ページの OCR を実行し、fieldId → セル値の Map を返す内部ヘルパー。
+ *
+ * @param pdfDoc      pdfjs ドキュメントオブジェクト
+ * @param pageNumber  対象ページ番号 (1 始まり)
+ * @param fields      欄定義の配列
+ * @param offset      ページ補正オフセット
+ * @param isCancelled キャンセル判定コールバック
+ * @returns           fieldId → セル値の Map、キャンセル時は null
+ */
+async function runOcrSinglePage(
+  pdfDoc: Awaited<ReturnType<typeof import("pdfjs-dist").getDocument>["promise"]>,
+  pageNumber: number,
+  fields: ReturnType<typeof useReportStore.getState>["template"]["fields"],
+  offset: PageOffset,
+  isCancelled: () => boolean
+): Promise<Map<string, string> | null> {
+  let canvas: HTMLCanvasElement | null = null;
+
+  try {
+    const rendered = await renderPageOffscreen(pdfDoc, pageNumber, REPORT_OCR_RENDER_SCALE);
+    canvas = rendered.canvas;
+    const pageWidth = rendered.pageWidth;
+
+    const fieldMap = new Map<string, string>();
+
+    for (const field of fields) {
+      if (isCancelled()) return null;
+
+      // オフセットを適用した補正済み rect でクロップ領域を計算する
+      const effectiveRect = effectiveRectForPage(field.rect, offset);
+      const crop = computeCropRect(
+        effectiveRect,
+        REPORT_OCR_RENDER_SCALE,
+        canvas.width,
+        canvas.height
+      );
+
+      if (crop.width <= 0 || crop.height <= 0) {
+        fieldMap.set(field.id, "");
+        continue;
+      }
+
+      const pngBytes = await cropCanvasToPng(canvas, crop);
+
+      const body =
+        pngBytes.byteOffset === 0 &&
+        pngBytes.byteLength === pngBytes.buffer.byteLength
+          ? pngBytes.buffer
+          : pngBytes.slice().buffer;
+
+      let raw: string;
+      try {
+        raw = await invoke<string>("run_report_ocr", body, {
+          headers: {
+            "x-render-scale": String(REPORT_OCR_RENDER_SCALE),
+            "x-language-tag": REPORT_OCR_LANGUAGE,
+            "x-page-width": String(pageWidth),
+          },
+        });
+      } catch (e) {
+        console.error(
+          `[ReportOCR] invoke エラー (page=${pageNumber}, field=${field.id}):`,
+          e
+        );
+        fieldMap.set(field.id, "");
+        continue;
+      }
+
+      let blocks: ReturnType<typeof parseOcrResponse>;
+      try {
+        blocks = parseOcrResponse(raw);
+      } catch (e) {
+        console.error(
+          `[ReportOCR] OCR レスポンスパースエラー (page=${pageNumber}, field=${field.id}):`,
+          e
+        );
+        fieldMap.set(field.id, "");
+        continue;
+      }
+
+      // クロップ＝この欄の領域なので、認識ブロックは全てこの欄に属する。
+      // 座標再割り当てを挟まず decideCellValue で直接セル値を決める。
+      fieldMap.set(field.id, decideCellValue(blocks));
+    }
+
+    return fieldMap;
+  } finally {
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  }
 }
 
 /**
@@ -32,13 +133,12 @@ export interface UseReportOcrReturn {
  *
  * 処理フロー:
  * 1. pdfjs でページをオフスクリーン canvas に render_scale 倍で描画
- * 2. 各欄 rect を computeCropRect でクロップ領域に変換
+ * 2. 各欄 rect を effectiveRectForPage でオフセット適用後 computeCropRect でクロップ領域に変換
  * 3. cropCanvasToPng でクロップ PNG bytes を生成
  * 4. run_report_ocr コマンドに invoke（bytes を raw body として送信）
  * 5. parseOcrResponse で ReportBlock[] に変換
- * 6. assignBlocksToFields で fieldId を付与
- * 7. decideCellValue でセル値を決定
- * 8. CellMatrix に蓄積後 setCells で store を更新
+ * 6. decideCellValue でセル値を決定
+ * 7. CellMatrix に蓄積後 setCells で store を更新
  *
  * キャンセル: cancelEpoch を比較してループを中断する。
  * 並列化: WindowsOCR のスレッド安全性懸念から MVP は直列実行。
@@ -46,13 +146,14 @@ export interface UseReportOcrReturn {
 export function useReportOcr(): UseReportOcrReturn {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState<ReportOcrProgress | null>(null);
+  const [reocrTarget, setReocrTarget] = useState<number | null>(null);
 
   // キャンセル制御: epoch が変わったらループを中断する
   const epochRef = useRef(0);
   const cancelledRef = useRef(false);
 
   const runOcr = useCallback(async () => {
-    const { template, setCells } = useReportStore.getState();
+    const { template, setCells, pageOffsets } = useReportStore.getState();
     const { filePath, numPages } = usePdfStore.getState();
 
     if (!filePath || numPages === 0) return;
@@ -65,121 +166,43 @@ export function useReportOcr(): UseReportOcrReturn {
     setIsRunning(true);
     setProgress({ done: 0, total: numPages });
 
-    // pdfjs-dist を動的インポート（コンポーネント外でも動作）
     const pdfjsLib = await import("pdfjs-dist");
     const { readFile } = await import("@tauri-apps/plugin-fs");
 
-    // PDF を独立したドキュメントとして開く（共有 proxy を汚染しない）
     const bytes = await readFile(filePath);
     const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
 
     const matrix: CellMatrix = new Map();
 
+    const isCancelled = () =>
+      cancelledRef.current || epochRef.current !== currentEpoch;
+
     try {
       for (let pageIndex = 0; pageIndex < numPages; pageIndex++) {
-        // キャンセルチェック
-        if (cancelledRef.current || epochRef.current !== currentEpoch) break;
+        if (isCancelled()) break;
 
-        const pageNumber = pageIndex + 1; // pdfjs は 1 始まり
-
-        let canvas: HTMLCanvasElement | null = null;
-        let pageWidth = 0;
+        const pageNumber = pageIndex + 1;
+        const offset = pageOffsets.get(pageNumber) ?? ZERO_OFFSET;
 
         try {
-          // ページをオフスクリーン canvas に描画
-          const rendered = await renderPageOffscreen(pdfDoc, pageNumber, REPORT_OCR_RENDER_SCALE);
-          canvas = rendered.canvas;
-          pageWidth = rendered.pageWidth;
+          const fieldMap = await runOcrSinglePage(
+            pdfDoc,
+            pageNumber,
+            template.fields,
+            offset,
+            isCancelled
+          );
 
-          const fields = useReportStore.getState().template.fields;
-          // 各欄のクロップ画像を OCR し、その欄へ直接セル値を割り当てる。
-          // クロップ画像は欄領域そのものを切り出すため、OCR が返す bbox は
-          // クロップローカル座標（0 始まり）になる。assignRegionByCoord の
-          // ような絶対 page 座標ベースの再割り当ては使えない（原点付近以外の
-          // 欄が未割当になり全セルが空になる）。クロップ＝欄が 1:1 なので、
-          // その欄のブロックは無条件にその欄へ属する（計画書 §7.2）。
-          const fieldMap = new Map<string, string>();
+          if (fieldMap === null) break; // キャンセル
 
-          for (const field of fields) {
-            if (cancelledRef.current || epochRef.current !== currentEpoch) break;
-
-            // 欄 rect をクロップ矩形に変換
-            const crop = computeCropRect(
-              field.rect,
-              REPORT_OCR_RENDER_SCALE,
-              canvas.width,
-              canvas.height
-            );
-
-            // クロップ領域が 0px なら OCR をスキップ（空セル扱い）
-            if (crop.width <= 0 || crop.height <= 0) {
-              fieldMap.set(field.id, "");
-              continue;
-            }
-
-            // クロップ PNG を生成
-            const pngBytes = await cropCanvasToPng(canvas, crop);
-
-            // raw body として invoke（本体の useOcrEngine と同じ書式）
-            const body =
-              pngBytes.byteOffset === 0 &&
-              pngBytes.byteLength === pngBytes.buffer.byteLength
-                ? pngBytes.buffer
-                : pngBytes.slice().buffer;
-
-            let raw: string;
-            try {
-              raw = await invoke<string>("run_report_ocr", body, {
-                headers: {
-                  "x-render-scale": String(REPORT_OCR_RENDER_SCALE),
-                  "x-language-tag": REPORT_OCR_LANGUAGE,
-                  "x-page-width": String(pageWidth),
-                },
-              });
-            } catch (e) {
-              console.error(
-                `[ReportOCR] invoke エラー (page=${pageNumber}, field=${field.id}):`,
-                e
-              );
-              fieldMap.set(field.id, "");
-              continue;
-            }
-
-            let blocks: ReturnType<typeof parseOcrResponse>;
-            try {
-              blocks = parseOcrResponse(raw);
-            } catch (e) {
-              console.error(
-                `[ReportOCR] OCR レスポンスパースエラー (page=${pageNumber}, field=${field.id}):`,
-                e
-              );
-              fieldMap.set(field.id, "");
-              continue;
-            }
-
-            // クロップ＝この欄の領域なので、認識ブロックは全てこの欄に属する。
-            // 座標再割り当てを挟まず decideCellValue で直接セル値を決める。
-            fieldMap.set(field.id, decideCellValue(blocks));
-          }
-
-          // 処理したページは 1 ページ = 1 行として必ず記録する（§7.7）。
-          // 全セルが空でも行は残し、後段の手入力補正に備える。
           if (fieldMap.size > 0) {
-            // CellMatrix のキーは 1 始まりのページ番号
             matrix.set(pageNumber, fieldMap);
           }
         } catch (e) {
           console.error(`[ReportOCR] ページ ${pageNumber} 処理エラー:`, e);
-        } finally {
-          // canvas を解放
-          if (canvas) {
-            canvas.width = 0;
-            canvas.height = 0;
-          }
         }
 
-        // キャンセルチェック
-        if (cancelledRef.current || epochRef.current !== currentEpoch) break;
+        if (isCancelled()) break;
 
         setProgress({ done: pageIndex + 1, total: numPages });
 
@@ -190,7 +213,6 @@ export function useReportOcr(): UseReportOcrReturn {
       pdfDoc.destroy().catch(() => {});
       setIsRunning(false);
 
-      // キャンセルされていなければ cells を格納
       if (!cancelledRef.current && epochRef.current === currentEpoch) {
         setCells(matrix);
         setProgress(null);
@@ -204,5 +226,54 @@ export function useReportOcr(): UseReportOcrReturn {
     cancelledRef.current = true;
   }, []);
 
-  return { isRunning, progress, runOcr, cancelOcr };
+  const runOcrForPage = useCallback(async (pageNum: number) => {
+    const { template, pageOffsets, setCellsForPage } = useReportStore.getState();
+    const { filePath } = usePdfStore.getState();
+
+    if (!filePath) return;
+    if (template.fields.length === 0) return;
+
+    // 全ページ OCR と同じ epoch を共有してキャンセルを相互に動作させる
+    const currentEpoch = ++epochRef.current;
+    cancelledRef.current = false;
+
+    setIsRunning(true);
+    setReocrTarget(pageNum);
+
+    const pdfjsLib = await import("pdfjs-dist");
+    const { readFile } = await import("@tauri-apps/plugin-fs");
+
+    const isCancelled = () =>
+      cancelledRef.current || epochRef.current !== currentEpoch;
+
+    try {
+      const bytes = await readFile(filePath);
+      const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+
+      try {
+        const offset = pageOffsets.get(pageNum) ?? ZERO_OFFSET;
+        const fieldMap = await runOcrSinglePage(
+          pdfDoc,
+          pageNum,
+          template.fields,
+          offset,
+          isCancelled
+        );
+
+        if (fieldMap !== null && !isCancelled()) {
+          // 全置換せず対象ページのみ部分更新する
+          setCellsForPage(pageNum, fieldMap);
+        }
+      } finally {
+        pdfDoc.destroy().catch(() => {});
+      }
+    } catch (e) {
+      console.error(`[ReportOCR] 単一ページ再 OCR エラー (page=${pageNum}):`, e);
+    } finally {
+      setIsRunning(false);
+      setReocrTarget(null);
+    }
+  }, []);
+
+  return { isRunning, progress, reocrTarget, runOcr, cancelOcr, runOcrForPage };
 }

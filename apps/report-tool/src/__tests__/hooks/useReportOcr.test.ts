@@ -287,4 +287,131 @@ describe("useReportOcr", () => {
     expect(result.current.progress).toBeNull();
     void progressHistory; // 変数を使用したとマーク
   });
+
+  it("初期状態は reocrTarget=null", () => {
+    const { result } = renderHook(() => useReportOcr());
+    expect(result.current.reocrTarget).toBeNull();
+  });
+});
+
+describe("useReportOcr: runOcrForPage", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+
+    invokeStub.mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [
+          { text: "再OCR値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.95 },
+        ],
+      })
+    );
+
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "field-1",
+            name: "欄1",
+            color: "#7cb9e8",
+            rect: { x: 10, y: 10, width: 100, height: 50 },
+          },
+        ],
+      },
+      cells: new Map([
+        [1, new Map([["field-1", "旧値"]])],
+        [2, new Map([["field-1", "ページ2の値"]])],
+      ]),
+      pageOffsets: new Map(),
+    });
+
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 2,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("runOcrForPage 完了後 指定ページの cells が更新される", async () => {
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    const page1 = useReportStore.getState().cells.get(1);
+    expect(page1?.get("field-1")).toBe("再OCR値");
+  });
+
+  it("runOcrForPage は他ページの cells を変更しない", async () => {
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    const page2 = useReportStore.getState().cells.get(2);
+    expect(page2?.get("field-1")).toBe("ページ2の値");
+  });
+
+  it("runOcrForPage 完了後 isRunning=false / reocrTarget=null に戻る", async () => {
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    expect(result.current.isRunning).toBe(false);
+    expect(result.current.reocrTarget).toBeNull();
+  });
+
+  it("filePath=null のとき runOcrForPage は即座に終了して cells を変えない", async () => {
+    usePdfStore.setState({ filePath: null });
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    expect(result.current.isRunning).toBe(false);
+    // cells は変化しない
+    expect(useReportStore.getState().cells.get(1)?.get("field-1")).toBe("旧値");
+  });
+
+  it("欄が 0 件のとき runOcrForPage は即座に終了して cells を変えない", async () => {
+    useReportStore.setState({ template: { fields: [] } });
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    expect(result.current.isRunning).toBe(false);
+  });
+
+  it("pageOffset が設定されているとき effectiveRectForPage が適用されて OCR が実行される", async () => {
+    useReportStore.setState({
+      pageOffsets: new Map([[1, { dx: 10, dy: 5 }]]),
+    });
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    // OCR は invoke を通して完了する（オフセット有でもエラーなく完了すること）
+    const page1 = useReportStore.getState().cells.get(1);
+    expect(page1?.has("field-1")).toBe(true);
+  });
 });
