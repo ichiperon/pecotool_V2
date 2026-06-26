@@ -7,6 +7,19 @@ interface FocusPos {
   fieldIndex: number;
 }
 
+/**
+ * ゼロ幅スペース (U+200B)。不可視かつスクリーンリーダーも無視するため表示に影響しない。
+ * aria-live の再アナウンスを保証するため、同一テキストでも DOM の textContent を変化させる
+ * トグル文字として使う。スクリーンリーダーは同一文字列を連続してセットすると再読み上げしない
+ * ため、末尾を微細に変化させることで確実に変更イベントを発火させる。
+ */
+// eslint-disable-next-line no-irregular-whitespace
+const ZWSP = "​";
+
+function makeAnnouncement(text: string, toggle: boolean): string {
+  return toggle ? `${text}${ZWSP}` : text;
+}
+
 const CsvPreviewTable: FC = () => {
   const fields = useReportStore((s) => s.template.fields);
   const cells = useReportStore((s) => s.cells);
@@ -27,10 +40,35 @@ const CsvPreviewTable: FC = () => {
   // ドラッグ状態
   const [dragSource, setDragSource] = useState<{ pageNum: number; fieldId: string } | null>(null);
   const [dragOverPos, setDragOverPos] = useState<{ pageNum: number; fieldId: string } | null>(null);
-  // aria-live 通知
+  // aria-live 通知（toggle で同一テキスト連続セット時も再アナウンスを保証）
   const [announcement, setAnnouncement] = useState("");
+  const announcementToggleRef = useRef(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const cellRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
+  const getCellKey = (pageNum: number, fieldIndex: number) => `${pageNum}:${fieldIndex}`;
+
+  /**
+   * focusPos のフィールドインデックスとページインデックスを有効範囲にクランプする。
+   * fields や pageNumbers が縮小した後に範囲外を指すことを防ぐ。
+   */
+  const clampFocusPos = useCallback(
+    (pos: FocusPos, currentFields: typeof fields, currentPageNumbers: typeof pageNumbers): FocusPos | null => {
+      if (currentFields.length === 0 || currentPageNumbers.length === 0) return null;
+      const clampedFieldIndex = Math.min(pos.fieldIndex, currentFields.length - 1);
+      const pageIdx = currentPageNumbers.indexOf(pos.pageNum);
+      const resolvedPageIdx = pageIdx >= 0 ? pageIdx : Math.min(0, currentPageNumbers.length - 1);
+      const clampedPageNum = currentPageNumbers[Math.min(resolvedPageIdx, currentPageNumbers.length - 1)];
+      return { pageNum: clampedPageNum, fieldIndex: clampedFieldIndex };
+    },
+    []
+  );
+
+  // 通知を発火するヘルパー（toggle を内部管理して同一文字列でも再アナウンス）
+  const announce = useCallback((text: string) => {
+    announcementToggleRef.current = !announcementToggleRef.current;
+    setAnnouncement(makeAnnouncement(text, announcementToggleRef.current));
+  }, []);
 
   // 編集開始
   const startEdit = useCallback(
@@ -49,10 +87,21 @@ const CsvPreviewTable: FC = () => {
     setEditPos(null);
   }, [editPos, editValue, setCellValue]);
 
-  // 編集取消
+  // 編集取消: フォーカスを親セル(td)へ確実に戻す
   const cancelEdit = useCallback(() => {
+    if (!editPos) {
+      setEditPos(null);
+      return;
+    }
+    const fieldIndex = fields.findIndex((f) => f.id === editPos.fieldId);
+    const safeFieldIndex = fieldIndex >= 0 ? fieldIndex : 0;
     setEditPos(null);
-  }, []);
+    // 次フレームで td にフォーカスを戻す（input のアンマウント完了後）
+    const targetKey = getCellKey(editPos.pageNum, safeFieldIndex);
+    requestAnimationFrame(() => {
+      cellRefs.current.get(targetKey)?.focus();
+    });
+  }, [editPos, fields]);
 
   // input がマウントされたらフォーカス
   useEffect(() => {
@@ -66,9 +115,9 @@ const CsvPreviewTable: FC = () => {
   const handleDelete = useCallback(
     (pageNum: number, fieldId: string, fieldName: string) => {
       clearCellValue(pageNum, fieldId);
-      setAnnouncement(`${pageNum}ページ目 ${fieldName} を削除しました`);
+      announce(`${pageNum}ページ目 ${fieldName} を削除しました`);
     },
-    [clearCellValue]
+    [clearCellValue, announce]
   );
 
   // 開発用: サンプルデータを注入
@@ -137,10 +186,20 @@ const CsvPreviewTable: FC = () => {
     [fields, pageNumbers, startEdit, handleDelete]
   );
 
-  // フォーカス位置が変わったとき対応セルにフォーカスを当てる
-  const cellRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
-  const getCellKey = (pageNum: number, fieldIndex: number) => `${pageNum}:${fieldIndex}`;
+  // focusPos が範囲外になったとき(欄/ページ削除後等)クランプする
+  useEffect(() => {
+    if (!focusPos) return;
+    const clamped = clampFocusPos(focusPos, fields, pageNumbers);
+    if (clamped === null) {
+      setFocusPos(null);
+      return;
+    }
+    if (clamped.fieldIndex !== focusPos.fieldIndex || clamped.pageNum !== focusPos.pageNum) {
+      setFocusPos(clamped);
+    }
+  }, [focusPos, fields, pageNumbers, clampFocusPos]);
 
+  // フォーカス位置が変わったとき対応セルにフォーカスを当てる
   useEffect(() => {
     if (focusPos && !editPos) {
       const key = getCellKey(focusPos.pageNum, focusPos.fieldIndex);
@@ -223,11 +282,9 @@ const CsvPreviewTable: FC = () => {
       moveCellValue(toPageNum, dragSource.fieldId, toFieldId);
       const fromField = fields.find((f) => f.id === dragSource.fieldId)?.name ?? "";
       const toField = fields.find((f) => f.id === toFieldId)?.name ?? "";
-      setAnnouncement(
-        `${toPageNum}ページ目: ${fromField} と ${toField} の値を移動しました`
-      );
+      announce(`${toPageNum}ページ目: ${fromField} と ${toField} の値を移動しました`);
     },
-    [dragSource, moveCellValue, fields]
+    [dragSource, moveCellValue, fields, announce]
   );
 
   const handleDragEnd = useCallback(() => {
@@ -315,6 +372,7 @@ const CsvPreviewTable: FC = () => {
                   key={pageNum}
                   role="row"
                   className={isDimmedPage ? "csv-preview__row--dimmed" : undefined}
+                  aria-description={isDimmedPage ? "このページへはドロップできません" : undefined}
                 >
                   <td
                     className="csv-preview__td csv-preview__td--page"
@@ -351,6 +409,7 @@ const CsvPreviewTable: FC = () => {
                           .join(" ")}
                         role="gridcell"
                         aria-label={`${pageNum}ページ目 ${field.name} ${isEmpty ? "空" : value}。Delete キーで削除`}
+                        aria-disabled={isDimmedPage || undefined}
                         tabIndex={
                           focusPos?.pageNum === pageNum && focusPos?.fieldIndex === fieldIndex
                             ? 0
