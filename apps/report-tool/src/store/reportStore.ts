@@ -1,5 +1,9 @@
 import { create } from "zustand";
 import type { CellMatrix, ReportField, ReportTemplate } from "../types/report";
+import { applyCellMove } from "../logic/cellEdit";
+import type { CellMoveMode } from "../logic/cellEdit";
+
+export type { CellMoveMode };
 
 /** 欄の表示色パレット（彩度抑えめ 8 色） */
 export const FIELD_COLOR_PALETTE: readonly string[] = [
@@ -30,6 +34,12 @@ interface ReportState {
   setCells: (matrix: CellMatrix) => void;
   setMode: (mode: EditorMode) => void;
   selectField: (id: string | null) => void;
+  /** インライン編集確定: 指定ページ・欄のセル値を更新する */
+  setCellValue: (pageNum: number, fieldId: string, value: string) => void;
+  /** Delete: 指定ページ・欄のセル値を空文字にする（キーは残す） */
+  clearCellValue: (pageNum: number, fieldId: string) => void;
+  /** ドラッグ値移動: 指定ページ内で from の値を to へ移動（既定 swap） */
+  moveCellValue: (pageNum: number, fromFieldId: string, toFieldId: string, mode?: CellMoveMode) => void;
 }
 
 /**
@@ -112,5 +122,42 @@ export const useReportStore = create<ReportState>((set) => ({
 
   selectField: (id) => {
     set({ selectedFieldId: id });
+  },
+
+  setCellValue: (pageNum, fieldId, value) => {
+    set((state) => {
+      const prevRow = state.cells.get(pageNum);
+      if (prevRow?.get(fieldId) === value) return {};
+      const nextCells = new Map(state.cells);
+      const nextRow = new Map(prevRow ?? []);
+      nextRow.set(fieldId, value);
+      nextCells.set(pageNum, nextRow);
+      return { cells: nextCells };
+    });
+  },
+
+  clearCellValue: (pageNum, fieldId) => {
+    set((state) => {
+      const prevRow = state.cells.get(pageNum);
+      if (!prevRow) return {};
+      if (prevRow.get(fieldId) === "") return {};
+      const nextCells = new Map(state.cells);
+      const nextRow = new Map(prevRow);
+      nextRow.set(fieldId, "");
+      nextCells.set(pageNum, nextRow);
+      return { cells: nextCells };
+    });
+  },
+
+  moveCellValue: (pageNum, fromFieldId, toFieldId, mode = "swap") => {
+    set((state) => {
+      const prevRow = state.cells.get(pageNum) ?? new Map<string, string>();
+      const nextRow = applyCellMove(prevRow, fromFieldId, toFieldId, mode);
+      // applyCellMove が same ref を返した場合は no-op（再描画させない）
+      if (nextRow === prevRow) return {};
+      const nextCells = new Map(state.cells);
+      nextCells.set(pageNum, nextRow);
+      return { cells: nextCells };
+    });
   },
 }));

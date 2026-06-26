@@ -51,7 +51,7 @@ describe("CsvPreviewTable", () => {
     const fields = useReportStore.getState().template.fields;
     setCells([[1, [[fields[0].id, "1000"]]]]);
     render(<CsvPreviewTable />);
-    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("grid")).toBeInTheDocument();
   });
 
   it("ヘッダ行に「ページ」と欄名が表示される", () => {

@@ -493,6 +493,101 @@ button {
   font-style: italic;
 }
 
+/* ===== CSV プレビュー: 編集モード ===== */
+
+/* テーブルセル: 相対配置（クリアボタンのアンカー） */
+.csv-preview__td {
+  position: relative;
+}
+
+/* 数値・ページ番号はタブラー数字で桁揃え */
+.csv-preview__td--page,
+.csv-preview__td {
+  font-variant-numeric: tabular-nums;
+}
+
+/* インライン編集 input */
+.csv-preview__cell-input {
+  display: block;
+  width: 100%;
+  /* 親 td の padding を打ち消してセル幅いっぱいに広げる */
+  margin: -0.35rem -0.6rem;
+  width: calc(100% + 1.2rem);
+  border: 1px solid #4299e1;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  font-family: inherit;
+  padding: 0.25rem 0.5rem;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25);
+  background-color: #fff;
+  color: #2d3748;
+  box-sizing: border-box;
+  /* レイアウトシフト防止: td の height を維持する最低限の高さ */
+  min-height: 1.6rem;
+}
+
+.csv-preview__cell-input:focus-visible {
+  outline: 2px solid #4299e1;
+  outline-offset: -2px;
+}
+
+/* セル右上の × クリアボタン（ホバー・フォーカス時のみ表示） */
+.csv-preview__cell-clear-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  /* opacity/visibility でトグル → compositor-only で再描画コスト低 */
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.1s ease-out;
+  background: none;
+  border: none;
+  color: #a0aec0;
+  font-size: 0.68rem;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.csv-preview__td:hover .csv-preview__cell-clear-btn,
+.csv-preview__td:focus-within .csv-preview__cell-clear-btn {
+  visibility: visible;
+  opacity: 1;
+}
+
+.csv-preview__cell-clear-btn:hover {
+  background-color: #fed7d7;
+  color: #c53030;
+}
+
+/* セル: フォーカス状態 */
+.csv-preview__td:focus {
+  outline: 2px solid #4299e1;
+  outline-offset: -2px;
+  background-color: #ebf8ff;
+}
+
+/* セル: ドラッグオーバー（同ページ・ドロップ可能） */
+.csv-preview__td--drag-over {
+  outline: 2px dashed #4299e1;
+  outline-offset: -2px;
+  background-color: #ebf8ff;
+}
+
+/* セル: ドラッグ中のソース（掴んでいるセル） */
+.csv-preview__td--drag-source {
+  opacity: 0.4;
+  transition: opacity 0.1s ease-out;
+}
+
+/* 行: 他ページのためドロップ不可（ドラッグ中にディム）
+   opacity は compositor-only のため transition OK */
+.csv-preview__row--dimmed {
+  opacity: 0.45;
+  transition: opacity 0.1s ease-out;
+}
+
 /* ===== CSV 出力 ===== */
 .csv-export {
   display: flex;
@@ -921,6 +1016,7 @@ button {
   height: 100%;
   background-color: #4299e1;
   border-radius: 3px;
+  width: var(--progress-pct, 0%);
   transition: width 0.2s ease-out;
 }
 
