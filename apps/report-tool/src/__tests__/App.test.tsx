@@ -16,6 +16,11 @@ vi.mock("../components/ThumbnailPanel", () => ({
   default: () => <div data-testid="thumbnail-panel-mock">Thumbnail Panel Mock</div>,
 }));
 
+// ConfirmLayout は内部で ConfirmPdfPane → pdfjs-dist を import し DOMMatrix エラーが出るため mock 化
+vi.mock("../components/ConfirmLayout", () => ({
+  default: () => <div data-testid="confirm-layout-mock">Confirm Layout Mock</div>,
+}));
+
 function resetStores() {
   useReportStore.setState({
     template: { fields: [] },

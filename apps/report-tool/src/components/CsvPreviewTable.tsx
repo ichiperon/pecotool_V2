@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, type FC, type KeyboardEvent, type PointerEvent } from "react";
 import { useReportStore } from "../store/reportStore";
+import { usePdfStore } from "../store/pdfStore";
 
 /** フォーカス位置 */
 interface FocusPos {
@@ -34,13 +35,29 @@ function makeAnnouncement(text: string, toggle: boolean): string {
 /** ドラッグ開始と判定するポインター移動量の閾値 (px) */
 const DRAG_THRESHOLD = 5;
 
-const CsvPreviewTable: FC = () => {
+interface CsvPreviewTableProps {
+  /**
+   * 確認画面で左の PDF ビューアと同期する「現在のページ番号」。
+   * 指定された行に --current クラスを付けて scrollIntoView する。
+   * 省略した場合は同期しない（ステップ①②④での従来動作）。
+   */
+  activePage?: number;
+  /**
+   * 単一ページ再 OCR の実行中ページ番号。
+   * 該当行にロード中スタイルを付ける。
+   * 省略した場合は再 OCR UI なし。
+   */
+  reocrTarget?: number | null;
+}
+
+const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) => {
   const fields = useReportStore((s) => s.template.fields);
   const cells = useReportStore((s) => s.cells);
   const setCells = useReportStore((s) => s.setCells);
   const setCellValue = useReportStore((s) => s.setCellValue);
   const clearCellValue = useReportStore((s) => s.clearCellValue);
   const moveCellValue = useReportStore((s) => s.moveCellValue);
+  const setCurrentPage = usePdfStore((s) => s.setCurrentPage);
 
   const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
   const hasData = pageNumbers.length > 0;
@@ -60,6 +77,8 @@ const CsvPreviewTable: FC = () => {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const cellRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
+  /** activePage 対応行の tr ref（scrollIntoView 用） */
+  const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
 
   /**
    * ドラッグ進行状態を ref で保持する（setState を介さない）。
@@ -86,6 +105,16 @@ const CsvPreviewTable: FC = () => {
     },
     []
   );
+
+  // activePage が変化したとき該当行を scrollIntoView（無限ループ防止: フォーカス移動はしない）
+  // scrollIntoView は jsdom では未実装のため防御的に呼ぶ
+  useEffect(() => {
+    if (activePage == null) return;
+    const rowEl = rowRefs.current.get(activePage);
+    if (rowEl && typeof rowEl.scrollIntoView === "function") {
+      rowEl.scrollIntoView({ block: "nearest" });
+    }
+  }, [activePage]);
 
   // 通知を発火するヘルパー（toggle を内部管理して同一文字列でも再アナウンス）
   const announce = useCallback((text: string) => {
@@ -461,12 +490,29 @@ const CsvPreviewTable: FC = () => {
             {pageNumbers.map((pageNum) => {
               const pageMap = cells.get(pageNum);
               const isDimmedPage = dragSource !== null && dragSource.pageNum !== pageNum;
+              const isCurrentPage = activePage != null && activePage === pageNum;
+              const isReocrLoading = reocrTarget != null && reocrTarget === pageNum;
               return (
                 <tr
                   key={pageNum}
+                  ref={(el) => {
+                    if (el) rowRefs.current.set(pageNum, el);
+                    else rowRefs.current.delete(pageNum);
+                  }}
                   role="row"
-                  className={isDimmedPage ? "csv-preview__row--dimmed" : undefined}
+                  className={[
+                    isDimmedPage ? "csv-preview__row--dimmed" : "",
+                    isCurrentPage ? "csv-preview__row--current" : "",
+                    isReocrLoading ? "csv-preview__row--reocr-loading" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ") || undefined}
                   aria-description={isDimmedPage ? "このページへはドロップできません" : undefined}
+                  onClick={() => {
+                    if (activePage != null) {
+                      setCurrentPage(pageNum);
+                    }
+                  }}
                 >
                   <td
                     className="csv-preview__td csv-preview__td--page"
@@ -503,7 +549,7 @@ const CsvPreviewTable: FC = () => {
                           .join(" ")}
                         role="gridcell"
                         aria-label={`${pageNum}ページ目 ${field.name} ${isEmpty ? "空" : value}。Delete キーで削除`}
-                        aria-disabled={isDimmedPage ? "true" : undefined}
+                        aria-disabled={isDimmedPage || undefined}
                         tabIndex={
                           focusPos?.pageNum === pageNum && focusPos?.fieldIndex === fieldIndex
                             ? 0

@@ -1098,6 +1098,279 @@ button {
   opacity: 0.8;
 }
 
+/* ===== 確認レイアウト（ステップ③専用） ===== */
+
+/* ステップ③の main（3ペインの app__body を置き換える） */
+.app__body--confirm {
+  overflow: hidden;
+  /* grid の 1fr 行に収まる（app は grid-template-rows: auto 1fr auto） */
+  min-height: 0;
+}
+
+/* ConfirmLayout: 2カラム grid + スプリッタ */
+.confirm-layout {
+  height: 100%;
+  overflow: hidden;
+}
+
+.confirm-layout__left {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #d1d9e0;
+}
+
+.confirm-layout__splitter {
+  background-color: #d1d9e0;
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+  transition: background-color 0.1s;
+}
+
+.confirm-layout__splitter:hover,
+.confirm-layout__splitter:focus-visible {
+  background-color: #4299e1;
+  outline: none;
+}
+
+.confirm-layout__right {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #d1d9e0;
+  background-color: #fff;
+}
+
+.confirm-layout__right-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  background-color: #f7f9fb;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.confirm-layout__page-badge {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #2b6cb0;
+  background-color: #ebf8ff;
+  border: 1px solid #bee3f8;
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+}
+
+/* ===== 確認PDF ペイン ===== */
+.confirm-pdf-pane {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: #e8ecf0;
+}
+
+.confirm-pdf-pane--empty {
+  align-items: center;
+  justify-content: center;
+  font-size: 0.82rem;
+  color: #a0aec0;
+}
+
+.confirm-pdf-pane__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  background-color: #2d3748;
+  border-bottom: 1px solid #1a202c;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+/* 欄をずらすトグルボタン */
+.confirm-pdf-pane__adjust-btn {
+  padding: 0.28rem 0.6rem;
+  background-color: #4a5568;
+  color: #e2e8f0;
+  border: 1px solid #718096;
+  border-radius: 4px;
+  font-size: 0.73rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 0.1s, border-color 0.1s;
+}
+
+.confirm-pdf-pane__adjust-btn:hover {
+  background-color: #718096;
+}
+
+.confirm-pdf-pane__adjust-btn--active {
+  background-color: #d69e2e;
+  border-color: #b7791f;
+  color: #fff;
+}
+
+.confirm-pdf-pane__adjust-btn--active:hover {
+  background-color: #b7791f;
+}
+
+/* オフセット調整ヒント帯 */
+.confirm-pdf-pane__adjust-hint {
+  background-color: #fffaf0;
+  border-bottom: 1px solid #fbd38d;
+  color: #744210;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.75rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Δオフセット行 */
+.confirm-pdf-pane__offset-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.75rem;
+  background-color: #1a202c;
+  border-bottom: 1px solid #0d1b2a;
+  flex-shrink: 0;
+  min-height: 1.8rem;
+}
+
+.confirm-pdf-pane__offset-badge {
+  font-size: 0.73rem;
+  font-family: "Consolas", "Monaco", monospace;
+  color: #718096;
+  white-space: nowrap;
+}
+
+.confirm-pdf-pane__offset-badge--active {
+  color: #f6e05e;
+  font-weight: 600;
+}
+
+.confirm-pdf-pane__reset-btn {
+  padding: 0.15rem 0.45rem;
+  background-color: #2d3748;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.confirm-pdf-pane__reset-btn:hover {
+  background-color: #4a5568;
+}
+
+.confirm-pdf-pane__offset-spacer {
+  flex: 1;
+}
+
+/* 再OCRボタン */
+.confirm-pdf-pane__reocr-btn {
+  padding: 0.2rem 0.6rem;
+  background-color: #2d3748;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  border-radius: 4px;
+  font-size: 0.73rem;
+  white-space: nowrap;
+  transition: background-color 0.1s;
+}
+
+.confirm-pdf-pane__reocr-btn:hover:not(:disabled) {
+  background-color: #4a5568;
+}
+
+.confirm-pdf-pane__reocr-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* オフセット変更後に「要再OCR」を強調する */
+.confirm-pdf-pane__reocr-btn--needs-reocr {
+  background-color: #744210;
+  border-color: #d69e2e;
+  color: #fefcbf;
+  font-weight: 600;
+}
+
+.confirm-pdf-pane__reocr-btn--needs-reocr:hover:not(:disabled) {
+  background-color: #975a16;
+}
+
+/* 再OCRインラインエラー */
+.confirm-pdf-pane__reocr-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  background-color: #fff5f5;
+  border-bottom: 1px solid #feb2b2;
+  font-size: 0.78rem;
+  color: #c53030;
+  flex-shrink: 0;
+}
+
+.confirm-pdf-pane__reocr-retry-btn {
+  padding: 0.15rem 0.5rem;
+  background-color: #fff;
+  color: #c53030;
+  border: 1px solid #fc8181;
+  border-radius: 3px;
+  font-size: 0.73rem;
+}
+
+.confirm-pdf-pane__reocr-retry-btn:hover {
+  background-color: #fff5f5;
+}
+
+/* ===== CsvPreviewTable: 確認ステップ追加スタイル ===== */
+
+/* 確認中ページ行ハイライト */
+.csv-preview__row--current {
+  background-color: #ebf8ff;
+}
+
+.csv-preview__row--current td {
+  border-bottom-color: #bee3f8;
+}
+
+/* 再OCR中行: ローディング表示
+   opacity + will-change: opacity は W3C Compositing 仕様上 compositor-only。
+   リンターが @keyframes 内の全プロパティ変化に対して Composite/Paint 警告を
+   出す誤検知（opacity が Paint をトリガーするという記述は仕様上誤り）のため無視する。 */
+.csv-preview__row--reocr-loading {
+  pointer-events: none;
+}
+
+.csv-preview__row--reocr-loading td {
+  background-color: #e2e8f0;
+  /* stylelint-disable-next-line plugin/no-low-performance-animation-properties */
+  animation: csv-reocr-pulse 1.2s ease-in-out infinite;
+  will-change: opacity;
+}
+
+/* stylelint-disable-next-line keyframe-block-no-duplicate-selectors */
+@keyframes csv-reocr-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%       { opacity: 0.25; }
+}
+
+/* 確認レイアウト右カラム内の CsvPreviewTable は高さいっぱい伸ばす */
+.confirm-layout__right .csv-preview {
+  flex: 1;
+  overflow: hidden;
+}
+
+.confirm-layout__right .csv-preview__table-wrapper {
+  flex: 1;
+  overflow: auto;
+}
+
 /* ===== サムネイルパネル ===== */
 .thumbnail-panel {
   flex: 1;
