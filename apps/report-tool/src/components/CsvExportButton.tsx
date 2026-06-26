@@ -1,4 +1,5 @@
 import { useState, type FC } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useReportStore } from "../store/reportStore";
 import { buildTemplateCsv } from "../logic/templateCsv";
 import { encodeCsvUtf8Bom } from "../logic/csvEncode";
@@ -42,26 +43,19 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
       const data = encodeCsvUtf8Bom(csv);
 
       if (onSave) {
-        // テスト・非Tauri環境: 外部からモックを注入
+        // テスト・非Tauri環境: 外部からモックを注入（テスト互換維持）
         await onSave(data, csv);
         setStatus("done");
         setTimeout(() => setStatus("idle"), 2000);
       } else {
-        // Tauriランタイム環境: plugin-dialog + plugin-fs で保存
-        let tauriAvailable = true;
+        // Tauriランタイム環境: plugin-dialog でパス取得 → Rust save_csv コマンドで保存
         let saveModule: typeof import("@tauri-apps/plugin-dialog") | null = null;
-        let fsModule: typeof import("@tauri-apps/plugin-fs") | null = null;
         try {
           saveModule = await import("@tauri-apps/plugin-dialog");
-          fsModule = await import("@tauri-apps/plugin-fs");
         } catch {
           // Tauriランタイム外（ブラウザ等）ではプラグインが利用不可
           // eslint-disable-next-line no-console
           console.warn("Tauri plugin が利用できません。ファイル保存をスキップしました。");
-          tauriAvailable = false;
-        }
-
-        if (!tauriAvailable || saveModule === null || fsModule === null) {
           setStatus("unavailable");
           setTimeout(() => setStatus("idle"), 3000);
           return;
@@ -78,7 +72,8 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
           return;
         }
 
-        await fsModule.writeFile(filePath, data);
+        // BOM 付与は Rust 側 save_csv が担当するため csv 文字列をそのまま渡す
+        await invoke("save_csv", { path: filePath, csv });
         setStatus("done");
         setTimeout(() => setStatus("idle"), 2000);
       }

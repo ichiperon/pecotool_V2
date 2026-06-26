@@ -1,62 +1,82 @@
-import { useState, useRef, type FC, type KeyboardEvent } from "react";
+import { useState, useEffect, useRef, type FC } from "react";
 import "./App.css";
-import StepBar from "./components/StepBar";
+import StepBar, { type StepNumber } from "./components/StepBar";
 import FieldListPanel from "./components/FieldListPanel";
 import CsvPreviewTable from "./components/CsvPreviewTable";
 import CsvExportButton from "./components/CsvExportButton";
 import PdfViewer from "./components/PdfViewer";
 import OcrRunPanel from "./components/OcrRunPanel";
+import ThumbnailPanel from "./components/ThumbnailPanel";
 import { useReportStore } from "./store/reportStore";
 
-type RightTab = "template" | "preview";
-
-const TAB_ORDER: readonly RightTab[] = ["template", "preview"] as const;
+const STEP_LABELS: Record<StepNumber, string> = {
+  1: "欄を定義",
+  2: "OCR 適用",
+  3: "確認",
+  4: "CSV 出力",
+};
 
 const App: FC = () => {
-  const [rightTab, setRightTab] = useState<RightTab>("template");
-  const tabRefs = useRef<Record<RightTab, HTMLButtonElement | null>>({
-    template: null,
-    preview: null,
-  });
+  const [currentStep, setCurrentStep] = useState<StepNumber>(1);
   const fields = useReportStore((s) => s.template.fields);
   const cells = useReportStore((s) => s.cells);
 
-  const handleTabKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    const currentIndex = TAB_ORDER.indexOf(rightTab);
-    if (e.key === "ArrowRight") {
-      e.preventDefault();
-      const nextIndex = (currentIndex + 1) % TAB_ORDER.length;
-      const nextTab = TAB_ORDER[nextIndex];
-      setRightTab(nextTab);
-      tabRefs.current[nextTab]?.focus();
-    } else if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      const prevIndex = (currentIndex - 1 + TAB_ORDER.length) % TAB_ORDER.length;
-      const prevTab = TAB_ORDER[prevIndex];
-      setRightTab(prevTab);
-      tabRefs.current[prevTab]?.focus();
+  // OCR 完了（cells が空→非空に変わった）を検知して自動ステップ③へ
+  const prevCellsSizeRef = useRef(cells.size);
+  useEffect(() => {
+    const prevSize = prevCellsSizeRef.current;
+    prevCellsSizeRef.current = cells.size;
+    if (prevSize === 0 && cells.size > 0) {
+      setCurrentStep(3);
     }
-  };
+  }, [cells.size]);
 
   const fieldCount = fields.length;
   const pageCount = cells.size;
+
+  const hasFields = fieldCount > 0;
+  const hasCells = cells.size > 0;
+
+  // 各ステップの有効状態（ソフトゲート）
+  const stepEnabled: Record<StepNumber, boolean> = {
+    1: true,
+    2: hasFields,
+    3: true,
+    4: hasFields,
+  };
+
+  // 各ステップの完了状態
+  const stepCompleted: Partial<Record<StepNumber, boolean>> = {
+    1: hasFields,
+    2: hasCells,
+    3: false,
+    4: false,
+  };
+
+  const handleStepSelect = (step: StepNumber) => {
+    if (stepEnabled[step]) {
+      setCurrentStep(step);
+    }
+  };
 
   return (
     <div className="app">
       {/* ヘッダ */}
       <header className="app__header">
         <h1 className="app__title">Peco 帳票ツール</h1>
-        <StepBar activeStep={1} />
+        <StepBar
+          activeStep={currentStep}
+          stepEnabled={stepEnabled}
+          onStepSelect={handleStepSelect}
+          stepCompleted={stepCompleted}
+        />
       </header>
 
       {/* 3ペインメイン */}
       <main className="app__body">
-        {/* 左: サムネイル領域 */}
+        {/* 左: サムネイル */}
         <aside className="app__pane app__pane--left" aria-label="サムネイル">
-          <div className="placeholder-pane">
-            <p className="placeholder-pane__label">PDF 未読込</p>
-            <p className="placeholder-pane__sub">PDF を開くと<br />サムネイルが表示されます</p>
-          </div>
+          <ThumbnailPanel />
         </aside>
 
         {/* 中央: PDFビューア */}
@@ -64,65 +84,42 @@ const App: FC = () => {
           <PdfViewer />
         </section>
 
-        {/* 右: タブパネル */}
-        <aside className="app__pane app__pane--right" aria-label="設定パネル">
-          {/* タブ切り替え */}
-          <div
-            className="right-panel__tabs"
-            role="tablist"
-            aria-label="右パネルのタブ"
-            onKeyDown={handleTabKeyDown}
-          >
-            <button
-              ref={(el) => { tabRefs.current.template = el; }}
-              type="button"
-              role="tab"
-              className={`right-panel__tab ${rightTab === "template" ? "right-panel__tab--active" : ""}`}
-              aria-selected={rightTab === "template"}
-              aria-controls="panel-template"
-              id="tab-template"
-              tabIndex={rightTab === "template" ? 0 : -1}
-              onClick={() => setRightTab("template")}
-            >
-              欄テンプレート
-            </button>
-            <button
-              ref={(el) => { tabRefs.current.preview = el; }}
-              type="button"
-              role="tab"
-              className={`right-panel__tab ${rightTab === "preview" ? "right-panel__tab--active" : ""}`}
-              aria-selected={rightTab === "preview"}
-              aria-controls="panel-preview"
-              id="tab-preview"
-              tabIndex={rightTab === "preview" ? 0 : -1}
-              onClick={() => setRightTab("preview")}
-            >
-              CSV プレビュー
-            </button>
-          </div>
-
-          {/* 欄テンプレートタブ */}
-          <div
-            id="panel-template"
-            role="tabpanel"
-            aria-labelledby="tab-template"
-            hidden={rightTab !== "template"}
-            className="right-panel__content"
-          >
-            <FieldListPanel />
-            <OcrRunPanel />
-            <CsvExportButton />
-          </div>
-
-          {/* CSVプレビュータブ */}
-          <div
-            id="panel-preview"
-            role="tabpanel"
-            aria-labelledby="tab-preview"
-            hidden={rightTab !== "preview"}
-            className="right-panel__content"
-          >
-            <CsvPreviewTable />
+        {/* 右: ステップパネル */}
+        <aside className="app__pane app__pane--right" aria-label="操作パネル">
+          <div className="right-panel__content">
+            {currentStep === 1 && (
+              <div className="step-panel">
+                <p className="step-panel__hint">
+                  PDF を開き、欄をドラッグして定義してください
+                </p>
+                <FieldListPanel />
+              </div>
+            )}
+            {currentStep === 2 && (
+              <div className="step-panel">
+                {!hasFields && (
+                  <p className="step-panel__warning" role="note">
+                    先に欄を定義してください（ステップ 1）
+                  </p>
+                )}
+                <OcrRunPanel />
+              </div>
+            )}
+            {currentStep === 3 && (
+              <div className="step-panel">
+                <CsvPreviewTable />
+              </div>
+            )}
+            {currentStep === 4 && (
+              <div className="step-panel">
+                {!hasFields && (
+                  <p className="step-panel__warning" role="note">
+                    先に欄を定義してください（ステップ 1）
+                  </p>
+                )}
+                <CsvExportButton />
+              </div>
+            )}
           </div>
         </aside>
       </main>
@@ -134,7 +131,7 @@ const App: FC = () => {
         <span className="app__status-item">ページ数: {pageCount}</span>
         <span className="app__status-divider" aria-hidden="true">|</span>
         <span className="app__status-item app__status-item--phase">
-          フェーズ 1 — 段階 1（欄テンプレート定義）
+          ステップ {currentStep}/4: {STEP_LABELS[currentStep]}
         </span>
       </footer>
     </div>

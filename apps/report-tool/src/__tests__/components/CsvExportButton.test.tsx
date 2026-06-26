@@ -5,12 +5,18 @@ import { useReportStore } from "../../store/reportStore";
 import { buildTemplateCsv } from "../../logic/templateCsv";
 import { encodeCsvUtf8Bom } from "../../logic/csvEncode";
 
-// Tauriプラグインのモック（#378用）
+// Tauriプラグインのモック
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: vi.fn(),
 }));
+// plugin-fs は修正C により Tauri 経路では使わなくなったが、
+// モジュール解決エラー回避のためスタブとして残す
 vi.mock("@tauri-apps/plugin-fs", () => ({
   writeFile: vi.fn(),
+}));
+// Tauri invoke モック（修正C: save_csv コマンド経由保存）
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
 }));
 
 const SAMPLE_RECT = { x: 0, y: 0, width: 100, height: 30 };
@@ -189,7 +195,7 @@ describe("CsvExportButton", () => {
   });
 });
 
-// #378: Tauri経路のキャンセル・成功・import失敗の検証
+// 修正C: Tauri 経路は invoke("save_csv", ...) を使う
 describe("CsvExportButton (Tauri 経路)", () => {
   beforeEach(async () => {
     useReportStore.setState({
@@ -200,9 +206,9 @@ describe("CsvExportButton (Tauri 経路)", () => {
     });
     // モックをリセット
     const dialogMod = await import("@tauri-apps/plugin-dialog");
-    const fsMod = await import("@tauri-apps/plugin-fs");
+    const invokeMod = await import("@tauri-apps/api/core");
     vi.mocked(dialogMod.save).mockReset();
-    vi.mocked(fsMod.writeFile).mockReset();
+    vi.mocked(invokeMod.invoke).mockReset();
   });
 
   it("save() が null を返す（キャンセル）とき「保存しました」が表示されない", async () => {
@@ -215,7 +221,6 @@ describe("CsvExportButton (Tauri 経路)", () => {
     fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
 
     // キャンセル後はボタンが「CSV を出力」のまま（done にならない）
-    // save呼び出しを待ってから確認
     await waitFor(() => {
       expect(dialogMod.save).toHaveBeenCalled();
     });
@@ -225,11 +230,11 @@ describe("CsvExportButton (Tauri 経路)", () => {
     expect(screen.getByRole("button", { name: "CSV を出力" })).toBeInTheDocument();
   });
 
-  it("save() がパスを返し writeFile が成功するとき「保存しました」が表示される", async () => {
+  it("save() がパスを返し invoke(save_csv) が成功するとき「保存しました」が表示される", async () => {
     const dialogMod = await import("@tauri-apps/plugin-dialog");
-    const fsMod = await import("@tauri-apps/plugin-fs");
+    const invokeMod = await import("@tauri-apps/api/core");
     vi.mocked(dialogMod.save).mockResolvedValue("/tmp/report.csv");
-    vi.mocked(fsMod.writeFile).mockResolvedValue(undefined);
+    vi.mocked(invokeMod.invoke).mockResolvedValue(undefined);
 
     useReportStore.getState().addField({ x: 0, y: 0, width: 100, height: 30 }, "金額");
     render(<CsvExportButton />);
@@ -240,10 +245,11 @@ describe("CsvExportButton (Tauri 経路)", () => {
       expect(screen.getByText("保存しました")).toBeInTheDocument();
     });
 
-    // writeFile が Uint8Array を渡して呼ばれていること
-    expect(fsMod.writeFile).toHaveBeenCalledTimes(1);
-    const [calledPath, calledData] = vi.mocked(fsMod.writeFile).mock.calls[0];
-    expect(calledPath).toBe("/tmp/report.csv");
-    expect(calledData).toBeInstanceOf(Uint8Array);
+    // invoke が save_csv コマンドで呼ばれ、path と csv 文字列が渡っていること
+    expect(invokeMod.invoke).toHaveBeenCalledTimes(1);
+    const [cmd, args] = vi.mocked(invokeMod.invoke).mock.calls[0];
+    expect(cmd).toBe("save_csv");
+    expect((args as { path: string; csv: string }).path).toBe("/tmp/report.csv");
+    expect(typeof (args as { path: string; csv: string }).csv).toBe("string");
   });
 });

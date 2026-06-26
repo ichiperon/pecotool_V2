@@ -386,6 +386,34 @@ async fn list_ocr_languages() -> Result<Vec<OcrLanguageInfo>, String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// csv_bytes_with_bom / save_csv
+//
+// Excel の文字コード自動判定を UTF-8 に確定させるため、
+// BOM (0xEF 0xBB 0xBF) を先頭に付与してから std::fs::write で直書きする。
+//
+// plugin-fs を経由しないため fs-scope 検証（\\?\ 正規化の罠を含む）に掛からない。
+// 本体の write_pdf_chunk / OCR temp と同じ考え方。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// BOM 付き UTF-8 バイト列を生成する純関数。
+/// save_csv が内部で利用し、単体テストもここに当てる。
+fn csv_bytes_with_bom(csv: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(3 + csv.len());
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(csv.as_bytes());
+    bytes
+}
+
+/// ユーザーが保存ダイアログで選んだパスへ CSV を BOM 付き UTF-8 で直書きする。
+/// plugin-fs を経由せず std::fs::write を使うため fs-scope 検証に掛からない。
+#[tauri::command]
+async fn save_csv(path: String, csv: String) -> Result<(), String> {
+    let bytes = csv_bytes_with_bom(&csv);
+    std::fs::write(&path, bytes).map_err(|e| format!("CSV保存に失敗しました: {e}"))?;
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // greet (スケルトンから引き継ぎ)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -404,7 +432,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![greet, run_report_ocr, list_ocr_languages])
+        .invoke_handler(tauri::generate_handler![greet, run_report_ocr, list_ocr_languages, save_csv])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -595,5 +623,29 @@ mod tests {
         let result = parse_report_ocr_headers(&headers).unwrap();
         // 空文字は filter で None になる
         assert!(result.language_tag.is_none());
+    }
+
+    // ── csv_bytes_with_bom ────────────────────────────────────────────────────
+
+    /// 先頭 3 バイトが UTF-8 BOM (0xEF 0xBB 0xBF) であること。
+    #[test]
+    fn csv_bytes_with_bom_starts_with_bom() {
+        let bytes = csv_bytes_with_bom("a,b\n1,2");
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "先頭3バイトがBOMでなければならない");
+    }
+
+    /// BOM の後に本文 UTF-8 が続くこと。
+    #[test]
+    fn csv_bytes_with_bom_body_follows_bom() {
+        let csv = "a,b\n1,2";
+        let bytes = csv_bytes_with_bom(csv);
+        assert_eq!(&bytes[3..], csv.as_bytes(), "BOM後の本文がCSV文字列と一致しなければならない");
+    }
+
+    /// 空文字入力では BOM のみ 3 バイトになること。
+    #[test]
+    fn csv_bytes_with_bom_empty_csv_is_bom_only() {
+        let bytes = csv_bytes_with_bom("");
+        assert_eq!(bytes, vec![0xEF, 0xBB, 0xBF], "空CSVはBOM3バイトのみ");
     }
 }
