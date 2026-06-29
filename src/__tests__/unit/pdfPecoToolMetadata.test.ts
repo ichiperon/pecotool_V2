@@ -3,7 +3,7 @@
  * test gap fill wave 2
  */
 import { describe, it, expect } from 'vitest';
-import { PDFDocument, PDFName } from '@cantoo/pdf-lib';
+import { PDFDocument, PDFName, PDFRawStream } from '@cantoo/pdf-lib';
 import { deflate } from 'pako';
 import {
   readPecoToolBBoxMetaFromPdfDoc,
@@ -81,6 +81,20 @@ async function makePdfDocWithArrayFilterFlateStream(
   catalog.set(PDFName.of('PecoTool'), pecoToolDict as never);
 
   return pdfDoc;
+}
+
+/** 現在 Catalog/PecoTool/BBoxes が指す PDFRawStream の生バイトを取り出す。
+ * 破壊検知用: 書込前後で同一バイトなら既存 stream が温存されたことを意味する。 */
+function getPrivateBBoxRawBytes(pdfDoc: PDFDocument): Uint8Array | null {
+  const catalog = pdfDoc.catalog as unknown as { get: (k: PDFName) => unknown };
+  const pecoToolValue = catalog.get(PDFName.of('PecoTool'));
+  if (!pecoToolValue) return null;
+  const ctx = pdfDoc.context as unknown as { lookup: (v: unknown) => unknown };
+  const dict = ctx.lookup(pecoToolValue) as { get?: (k: PDFName) => unknown } | undefined;
+  const bboxesValue = dict?.get?.(PDFName.of('BBoxes'));
+  if (!bboxesValue) return null;
+  const stream = ctx.lookup(bboxesValue);
+  return stream instanceof PDFRawStream ? stream.getContents() : null;
 }
 
 // ── テスト ────────────────────────────────────────────────────────────────
@@ -284,5 +298,50 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
 
     // removeLegacyPecoToolBBoxInfo が呼ばれて legacy key が削除されている
     expect(legacyDeleted).toBe(true);
+  });
+
+  // ── U-PM-11 (#392 / PCT-161): 空メタ書込で decode不能な既存 BBox stream を破壊しない ──
+  //
+  // 根拠: 既存 PecoTool BBox stream が decode 不能（多重フィルタ・破損 flate 等。#388 が
+  // 塞いだのは配列形式 [/FlateDecode] の1ケースのみ）だと readPecoToolBBoxMetaFromPdfDoc が
+  // {} を返し（U-PM-02 が実証）、保存時に空 {} で既存 stream を上書きして OCR BBox を
+  // 恒久喪失する。安全側ガード: 新メタが空 かつ 既存 stream が present-but-undecodable の
+  // ときは上書きしない（読めないだけで実データを含む可能性があり、空で潰さない）。
+  it('U-PM-11: 空メタ書込は decode不能な既存 BBox stream を上書きしない（データ損失防止）', async () => {
+    const pdfDoc = await makePdfDocWithInvalidFlateStream();
+    // 既存 stream は decode 不能 → アプリ上は空に見える（= 救出できなかった状態）
+    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual({});
+    const before = getPrivateBBoxRawBytes(pdfDoc);
+    expect(before).not.toBeNull();
+
+    // 「読めなかった結果として」空メタで保存される状況を再現
+    writePecoToolBBoxMetaToPdfDoc(pdfDoc, {});
+
+    // ガード: decode不能な既存 stream は温存され、空 {} で潰されない
+    const after = getPrivateBBoxRawBytes(pdfDoc);
+    expect(after).not.toBeNull();
+    expect(Array.from(after!)).toEqual(Array.from(before!));
+  });
+
+  // ── U-PM-12 (#392): 既存が decode可能なら空メタで正常上書き（全削除を尊重） ──
+  it('U-PM-12: 既存が decode可能なら空メタ書込で上書きする（ユーザーの全削除は尊重）', async () => {
+    const pdfDoc = await makePdfDocWithArrayFilterFlateStream({
+      version: 2,
+      pages: { '0': [{ x: 1, y: 2, w: 3, h: 4, text: 'real' }] },
+    });
+    // 既存は読める（アプリもブロックを表示できていた）
+    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).not.toEqual({});
+
+    // ユーザーが全ブロックを削除 → 空メタ保存 → 上書きされるべき（読めていたので意図的操作）
+    writePecoToolBBoxMetaToPdfDoc(pdfDoc, {});
+    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual({});
+  });
+
+  // ── U-PM-13 (#392): 非空メタは decode不能既存があっても新メタで上書き（現状真実を優先） ──
+  it('U-PM-13: 非空メタ書込は decode不能な既存があっても新メタで上書きする', async () => {
+    const pdfDoc = await makePdfDocWithInvalidFlateStream();
+    const newMeta = { version: 2, pages: { '0': [{ x: 5, y: 6, w: 7, h: 8, text: 'new' }] } };
+    writePecoToolBBoxMetaToPdfDoc(pdfDoc, newMeta);
+    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual(newMeta);
   });
 });

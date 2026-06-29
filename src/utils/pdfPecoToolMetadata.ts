@@ -103,7 +103,8 @@ function decodeRawStream(stream: PDFRawStream): Uint8Array | null {
   return null;
 }
 
-function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | null {
+/** Catalog/PecoTool/BBoxes が指す PDFRawStream を取得する（無ければ null）。 */
+function locatePrivateBBoxStream(pdfDoc: PDFDocument): PDFRawStream | null {
   const catalog = pdfDoc.catalog as unknown as {
     get?: (key: PDFName) => unknown;
   } | undefined;
@@ -117,11 +118,27 @@ function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | nul
   if (!bboxesValue) return null;
 
   const stream = pdfDoc.context.lookup(bboxesValue as never);
-  if (!(stream instanceof PDFRawStream)) return null;
+  return stream instanceof PDFRawStream ? stream : null;
+}
+
+function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | null {
+  const stream = locatePrivateBBoxStream(pdfDoc);
+  if (!stream) return null;
 
   const decoded = decodeRawStream(stream);
   if (!decoded) return null;
   return parseBBoxMetaJson(new TextDecoder().decode(decoded));
+}
+
+/** 既存の private BBox stream が「存在するが decode/parse 不能」かを判定する。
+ * true の場合、その stream は読めないだけで実データ（OCR BBox）を含む可能性があり、
+ * 空メタで上書きすると恒久喪失する（#392 / PCT-161）。 */
+function hasUnreadablePrivateBBoxStream(pdfDoc: PDFDocument): boolean {
+  const stream = locatePrivateBBoxStream(pdfDoc);
+  if (!stream) return false;
+  const decoded = decodeRawStream(stream);
+  if (!decoded) return true;
+  return parseBBoxMetaJson(new TextDecoder().decode(decoded)) === null;
 }
 
 function getInfoDictSafe(pdfDoc: PDFDocument): PDFDict | undefined {
@@ -187,6 +204,14 @@ export function writePecoToolBBoxMetaToPdfDoc(
     typeof context.obj !== 'function' ||
     typeof catalog?.set !== 'function'
   ) {
+    return;
+  }
+  // #392 / PCT-161: 新メタが空で、かつ既存に decode 不能な PecoTool BBox stream がある場合は
+  // 上書きしない。読めないだけで実データ（OCR BBox）を含む可能性があり、空 {} で潰すと恒久喪失する
+  // （#388 が塞いだのは配列 Filter の1ケースのみ。多重フィルタ・破損 flate 等は依然
+  // readPecoToolBBoxMetaFromPdfDoc が {} を返し、保存時にこの write へ空メタが渡りうる）。
+  // 既存が decode 可能（= アプリも読めていた）状態での空保存は、ユーザーの全削除操作として尊重する。
+  if (Object.keys(bboxMeta).length === 0 && hasUnreadablePrivateBBoxStream(pdfDoc)) {
     return;
   }
   const json = JSON.stringify(bboxMeta);
