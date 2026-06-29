@@ -2,6 +2,12 @@ import { create } from 'zustand';
 import type * as pdfjsLib from 'pdfjs-dist';
 import type { PageData } from '../types';
 
+/** ストレージ容量逼迫の警告レベルと使用率。null は警告なし。 */
+export interface StorageWarning {
+  ratio: number;
+  level: 'warn' | 'critical';
+}
+
 interface InfraState {
   /**
    * #102: ドキュメント差し替え (setDocument) のたびに +1 される単調増加カウンタ。
@@ -16,6 +22,11 @@ interface InfraState {
   pendingRestoration: Record<string, Partial<PageData>> | null;
   /** 直近の IDB 保存失敗エラー。UI から subscribe してユーザーに通知できる。 */
   lastIdbError: Error | null;
+  /**
+   * ストレージ容量逼迫の警告。navigator.storage.estimate() で取得した使用率に基づき設定される。
+   * null は警告なし（使用率が閾値未満、または navigator.storage 非対応環境）。
+   */
+  storageWarning: StorageWarning | null;
   /**
    * 現在表示中 (もしくは表示開始中) ページの PDFPageProxy。
    * usePageNavigation が viewport 取得時に set し、usePdfRendering が subscribe して
@@ -35,6 +46,8 @@ interface InfraState {
   setLastIdbError: (err: Error) => void;
   clearLastIdbError: () => void;
   clearLastIdbErrorIfSet: () => void;
+  setStorageWarning: (warning: StorageWarning | null) => void;
+  clearStorageWarning: () => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
 }
@@ -44,6 +57,7 @@ export const useInfraStore = create<InfraState>((set, get) => ({
   pageAccessOrder: [],
   pendingRestoration: null,
   lastIdbError: null,
+  storageWarning: null,
   currentPageProxy: null,
   currentPageProxyKey: null,
 
@@ -79,6 +93,10 @@ export const useInfraStore = create<InfraState>((set, get) => ({
     if (get().lastIdbError) set({ lastIdbError: null });
   },
 
+  setStorageWarning: (warning) => set({ storageWarning: warning }),
+
+  clearStorageWarning: () => set({ storageWarning: null }),
+
   setCurrentPageProxy: (filePath, pageIndex, proxy) => {
     const key = `${filePath}:${pageIndex}`;
     set({ currentPageProxy: proxy, currentPageProxyKey: proxy ? key : null });
@@ -92,5 +110,6 @@ export const selectDocumentEpoch = (s: InfraState) => s.documentEpoch;
 export const selectPageAccessOrder = (s: InfraState) => s.pageAccessOrder;
 export const selectPendingRestoration = (s: InfraState) => s.pendingRestoration;
 export const selectLastIdbError = (s: InfraState) => s.lastIdbError;
+export const selectStorageWarning = (s: InfraState) => s.storageWarning;
 export const selectCurrentPageProxy = (s: InfraState) => s.currentPageProxy;
 export const selectCurrentPageProxyKey = (s: InfraState) => s.currentPageProxyKey;

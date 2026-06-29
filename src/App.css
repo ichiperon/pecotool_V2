@@ -2540,3 +2540,67 @@ body, #root {
   color: #f9fafb;
   box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
 }
+
+/* ─── Storage Health Banner ─── */
+.storage-health-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  flex-shrink: 0;
+  border-bottom: 1px solid transparent;
+}
+
+.storage-health-banner--warn {
+  background-color: #78350f;
+  color: #fef3c7;
+  border-bottom-color: #92400e;
+}
+
+.storage-health-banner--critical {
+  background-color: #7f1d1d;
+  color: #fee2e2;
+  border-bottom-color: #991b1b;
+}
+
+.storage-health-banner--error {
+  background-color: #7f1d1d;
+  color: #fee2e2;
+  border-bottom-color: #991b1b;
+}
+
+.storage-health-banner__icon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.storage-health-banner__message {
+  flex: 1;
+}
+
+.storage-health-banner__close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  opacity: 0.75;
+  line-height: 1;
+}
+
+.storage-health-banner__close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.storage-health-banner__close:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  opacity: 1;
+}

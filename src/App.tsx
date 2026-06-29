@@ -50,7 +50,9 @@ import { useAppUpdater, UPDATER_ENABLED } from "./hooks/useAppUpdater";
 import { usePageExtraction } from "./hooks/usePageExtraction";
 import { useBatchJob } from "./hooks/useBatchJob";
 import { usePageManagement } from "./hooks/usePageManagement";
+import { useStorageQuotaMonitor } from "./hooks/useStorageQuotaMonitor";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
+import { StorageHealthBanner } from "./components/StorageHealthBanner";
 
 // Components
 import { Ribbon } from "./components/Ribbon/Ribbon";
@@ -619,6 +621,9 @@ function App() {
   const isSavingRef = useRef(isSaving);
   isSavingRef.current = isSaving;
 
+  // ストレージ容量逼迫の定期監視（IDB 一時保存の事前警告）
+  useStorageQuotaMonitor();
+
   // --- Effects ---
   // CloseGuard: 保存中 / バックアップ中の close を suppress する (PCT-055: rename race・バックアップ破損回避)。
   useTauriCloseGuard({ isSavingRef, isBackingUpRef });
@@ -879,6 +884,8 @@ function App() {
         onOpenLogFolder={handleOpenLogFolder}
         onCheckUpdate={handleManualCheckUpdate}
       />
+
+      <StorageHealthBanner />
 
       <main className="main-content">
         <ThumbnailPanel
