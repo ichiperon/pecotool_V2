@@ -7,6 +7,7 @@ import { PDFDocument, PDFName, PDFRawStream } from '@cantoo/pdf-lib';
 import { deflate } from 'pako';
 import {
   readPecoToolBBoxMetaFromPdfDoc,
+  readPecoToolBBoxMetaWithStatus,
   writePecoToolBBoxMetaToPdfDoc,
   hasLegacyPecoToolBBoxInfo,
   removeLegacyPecoToolBBoxInfo,
@@ -343,5 +344,33 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
     const newMeta = { version: 2, pages: { '0': [{ x: 5, y: 6, w: 7, h: 8, text: 'new' }] } };
     writePecoToolBBoxMetaToPdfDoc(pdfDoc, newMeta);
     expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual(newMeta);
+  });
+
+  // ── U-PM-14 (#392): decode可能な空 {} stream は status='ok'（undecodable と誤判定しない） ──
+  // false-positive ガード: decode 成功した空メタは preserve 対象でなく、通常どおり上書きできる。
+  it("U-PM-14: decode可能な空 '{}' stream は status='ok'（preserve 誤発火しない）", async () => {
+    const pdfDoc = await makePdfDocWithArrayFilterFlateStream({});
+    const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
+    expect(read.status).toBe('ok');
+    expect(read.meta).toEqual({});
+  });
+
+  // ── U-PM-15 (#392): undecodable private + 読める legacy は status='ok' で legacy を返す ──
+  // 旧 readPecoToolBBoxMetaFromPdfDoc の `private ?? legacy ?? {}` フォールバックを温存する回帰。
+  it("U-PM-15: undecodable private + 読める legacy → status='ok' で legacy を返す", async () => {
+    const pdfDoc = await makePdfDocWithInvalidFlateStream(); // private は decode 不能
+    const legacyMeta = { legacy: true, pages: { '0': [] } };
+    (pdfDoc as unknown as Record<string, unknown>).getInfoDict = () => ({
+      get(key: PDFName): unknown {
+        return key.asString() === '/PecoToolBBoxes'
+          ? { decodeText: () => JSON.stringify(legacyMeta) }
+          : undefined;
+      },
+      delete: (_k: PDFName) => {},
+    });
+    const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
+    expect(read.status).toBe('ok');
+    expect(read.meta).toEqual(legacyMeta);
+    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual(legacyMeta);
   });
 });

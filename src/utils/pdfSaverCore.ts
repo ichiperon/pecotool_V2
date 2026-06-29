@@ -55,7 +55,7 @@ import { ensureDenseClassicXref } from './pdfClassicXref';
 import { compactIndirectObjectNumbers, sweepUnreachableObjects } from './pdfReachabilityGc';
 import {
   hasLegacyPecoToolBBoxInfo,
-  readPecoToolBBoxMetaFromPdfDoc,
+  readPecoToolBBoxMetaWithStatus,
   writePecoToolBBoxMetaToPdfDoc,
 } from './pdfPecoToolMetadata';
 import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
@@ -1070,7 +1070,17 @@ export async function buildPdfDocumentCore(
   const skippedChars = createSkippedTextCollector();
 
   const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
-  const rawExistingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  const existingBBoxRead = readPecoToolBBoxMetaWithStatus(pdfDoc);
+  const rawExistingBBoxMeta = existingBBoxRead.meta;
+  // #392 / PCT-161: 既存 private BBox stream が本バージョンで decode 不能なら、その実データを
+  // 読めない＝安全にマージできない。ここで編集を保存すると (a) 空/partial/準空メタで既存 BBox
+  // stream を潰す、(b) dirty ページの content 再描画で旧 OCR レンダ層を strip し meta と乖離する、
+  // のいずれかで未読データを恒久喪失する。よって undecodable のときは meta も content も一切触らず
+  // 原本バイトをそのまま返す（完全 byte-preserve・meta/content 矛盾ゼロ）。新規編集は保存に反映
+  // されないが、load 時に検出して UI 警告で透明化する（ユーザー合意済みのトレードオフ）。
+  if (existingBBoxRead.status === 'undecodable') {
+    return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars) };
+  }
   const existingBBoxMeta = remapBBoxMetaForPageOrderCore(rawExistingBBoxMeta, pageOrder, isDefaultOrder);
   const hadExistingBBoxMeta = Object.keys(rawExistingBBoxMeta).length > 0;
 

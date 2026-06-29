@@ -159,8 +159,35 @@ function readLegacyInfoBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | 
   return decoded ? parseBBoxMetaJson(decoded) : null;
 }
 
+/** BBox メタの読み取り結果の分類。
+ * - 'ok': private/legacy のいずれかから読めた（空オブジェクトを含む正常読取）。
+ * - 'undecodable': private BBox stream は存在するが、本バージョンで decode/parse できない。
+ *   → 読めないだけで実データ（OCR BBox）を含む可能性があり、上書きで恒久喪失しうる（#392）。
+ * - 'empty': private/legacy のどちらも存在しない（メタ自体が無い）。 */
+export type PecoToolBBoxMetaStatus = 'ok' | 'undecodable' | 'empty';
+
+export interface PecoToolBBoxMetaRead {
+  status: PecoToolBBoxMetaStatus;
+  meta: Record<string, unknown>;
+}
+
+/** BBox メタを読取ステータス付きで返す（#392 / PCT-161）。
+ * 'undecodable'（既存 stream はあるが読めない）を 'empty'（メタ無し）と区別することで、
+ * 呼び出し側（保存パス）が「読めないだけで実在するデータ」を空・partial メタで破壊的に
+ * 上書きしないよう判断できる。 */
+export function readPecoToolBBoxMetaWithStatus(pdfDoc: PDFDocument): PecoToolBBoxMetaRead {
+  const privateMeta = readPrivateBBoxMeta(pdfDoc);
+  if (privateMeta) return { status: 'ok', meta: privateMeta };
+  // legacy が読めるなら従来どおりそれを返す（旧 `private ?? legacy ?? {}` フォールバックを温存）。
+  // undecodable は private が読めず legacy でも救えない場合に限る（= 真に読めない時だけ preserve）。
+  const legacy = readLegacyInfoBBoxMeta(pdfDoc);
+  if (legacy) return { status: 'ok', meta: legacy };
+  if (hasUnreadablePrivateBBoxStream(pdfDoc)) return { status: 'undecodable', meta: {} };
+  return { status: 'empty', meta: {} };
+}
+
 export function readPecoToolBBoxMetaFromPdfDoc(pdfDoc: PDFDocument): Record<string, unknown> {
-  return readPrivateBBoxMeta(pdfDoc) ?? readLegacyInfoBBoxMeta(pdfDoc) ?? {};
+  return readPecoToolBBoxMetaWithStatus(pdfDoc).meta;
 }
 
 export async function readPecoToolBBoxMetaFromBytes(bytes: Uint8Array): Promise<Record<string, unknown>> {
@@ -207,10 +234,13 @@ export function writePecoToolBBoxMetaToPdfDoc(
     return;
   }
   // #392 / PCT-161: 新メタが空で、かつ既存に decode 不能な PecoTool BBox stream がある場合は
-  // 上書きしない。読めないだけで実データ（OCR BBox）を含む可能性があり、空 {} で潰すと恒久喪失する
-  // （#388 が塞いだのは配列 Filter の1ケースのみ。多重フィルタ・破損 flate 等は依然
-  // readPecoToolBBoxMetaFromPdfDoc が {} を返し、保存時にこの write へ空メタが渡りうる）。
+  // 上書きしない。読めないだけで実データ（OCR BBox）を含む可能性があり、空 {} で潰すと恒久喪失する。
   // 既存が decode 可能（= アプリも読めていた）状態での空保存は、ユーザーの全削除操作として尊重する。
+  //
+  // 層の役割（消さないこと）: 本体の保存パス（pdfSaverCore）は undecodable を read 境界で検出し
+  // 原本バイトを完全 byte-preserve で返すため、通常はこの write 自体が呼ばれない。このガードは
+  // pdfSaverCore を経由しない直接/別呼び出し元に対する last-line defense であり、partial メタは
+  // 防げない（空のみ対象）。partial を含む完全防御は pdfSaverCore 側の byte-preserve が担う。
   if (Object.keys(bboxMeta).length === 0 && hasUnreadablePrivateBBoxStream(pdfDoc)) {
     return;
   }
