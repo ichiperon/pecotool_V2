@@ -125,13 +125,12 @@ gh pr create --draft --base feature/report-tool-sidecar \
 ### #388 follow-up（#392 / PCT-161）— **Stage1 完了・Stage2 は要再対応（Round3 指摘）**
 ユーザー合意（HITL-2）で「read 境界 first-class ＋可視警告」を採用。**Stage1（データ保護）は堅牢に完了。Stage2（透明化バナー）は Round3 で配線欠陥が判明し再対応が必要**。
 - ✅ **Stage1（保存パス・完全 byte-preserve）** commit `7a9d26c`: `readPecoToolBBoxMetaWithStatus` が `'ok'|'undecodable'|'empty'` を返す（legacy が読めれば 'ok'(legacy) 優先で旧 `private ?? legacy ?? {}` を温存）。pdfSaverCore は status==='undecodable' のとき **meta も content も触らず原本バイトをそのまま返す**。空・partial・準空の全経路で喪失ゼロ・乖離ゼロ。saveUndecodableMetaPreservation が保存バイト全体の原本一致を assert。reviewer_security/architecture APPROVE・critic の「meta だけ温存は content と乖離」反証を byte-preserve で解消済み。**＝ファイルの破損/喪失は起きない（出荷ゲート①は守られる）**。
-- ⚠️ **Stage2（透明化バナー）commit `45c6942` は実フローで発火しない欠陥あり（Round3 confirmed）**:
-  - `onUndecodable` の配線は `loadAllPagesWithTextBlocks`（=applyOffsetAllPages 保存パス限定）のみで、**通常オープン／通常 Ctrl+S では発火しない**。
-  - `_bboxMetaCache`（filePath+mtime）がページナビ/OCR 経路で先に充填され、保存パスでも**キャッシュヒットで onUndecodable をバイパス**。
-  - `bboxMetaUnreadable` がファイル切替/クローズで reset されず stale、dismiss でフラグ永久消滅、warn バナー後付けマウントで SR 読み上げ漏れ。
-  - 帰結: **byte-preserve は効くが警告が出ない＝編集が無警告でドロップ**（データは保護されるが透明性が未達）。
-- 🔜 **Stage2 再対応方針（次タスク・要再レビュー）**: 検出を**ファイルオープン時に直接 `readPecoToolBBoxMetaWithStatusFromBytes` で行い（キャッシュ非依存）**、reset を open/close（setDocument/handleClose）に紐付ける。可能なら**保存時にも警告**（byte-preserve が編集をドロップした瞬間に通知）。この領域は今回まさに欠陥クラスタを出したため、修正後は再度 finder/verifier レビューを通すこと。
-- ✅ **テスト false-green 修正**: lruIdbRollback（退避保護される page0 でなく実退避 page1 を検証）commit `39aa2f8`。**未対応**: U-SQM-05（dedup 未発火 vacuous）/ saveVerticalRotationRegression R=270（items 1件で空ループ）/ goldenMasterLargeScale（集約経路 _executeSave 未実行）。
+- ⚠️→✅ **Stage2（透明化）は Round3 で欠陥クラスタが判明し、再設計＋ブロッカー是正で機能化**:
+  - Round3 が「バナーが実フローで発火しない（onUndecodable が applyOffsetAllPages 限定＋cache バイパス＋reset 欠落＋dismiss 永久消滅）」を confirmed。
+  - **再設計 `7dbc884`**: 検出を usePageNavigation の初回 meta ロード（通常オープンの唯一の meta 経路）へ移管＋cache に undecodable 保持で cache-hit でも再通知。reset を open(handleOpen)/close(handleClose) に集約。バナー恒久化（dismiss 廃止）。
+  - **再レビューで出荷ブロッカー発覚→是正 `dab6297`**: byte-preserve はターゲットパス非依存で**別名保存も編集を落とす**のに、旧バナーは「別名で書き出して」と虚偽案内し別名保存は成功トーストを出していた（silent loss の新経路・①違反）。文言を「閲覧のみ・保存できません」に正し、全保存経路（handleSave/executeSaveAs/saveAllPagesWithOffset）で undecodable×未保存編集なら成功トーストを出さず警告。usePageNavigation の onUndecodable を epoch ガード（A→B 切替の stale 誤バナー解消）。reader 整合テスト U-PM-16。
+- 🔜 **残（architect/PM 判断・次タスク）**: ①警告を UI フラグ依存でなく **`_executeSave`/SaveResult に `undecodablePreserved` フラグ**を返して全 caller が save の真実から一貫警告（reader 二重化の脆さを構造的に解消）。②**別名保存を真の escape hatch にするか**（undecodable のとき読めない stream を捨てて編集つき新規 PDF を再構築する saver モード）＝product 決定。
+- ✅ **テスト false-green 修正**: lruIdbRollback（実退避 page1 を検証）`39aa2f8` / U-SQM-05（fake timers で dedup 実検証）`517e907`。**未対応(低優先)**: saveVerticalRotationRegression R=270（items 1件で空ループ・R=90 b2 と始点 assert で部分カバー）/ goldenMasterLargeScale（集約経路 _executeSave 未実行・useFileOperations.test.ts で別途カバー）。
 - 防御の残置: write 内の空メタガード（`03a8e4b`）は last-line defense として保持。
 - **既知の narrow ギャップ（許容）**: 破損 legacy Info(plain string) は status='empty' で preserve されない（旧形式・破損は稀）。
 - クローズ判断: Stage1 完了。issue クローズは Stage2 再対応＋PR マージ＋HITL-3 後。
