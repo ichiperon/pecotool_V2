@@ -231,6 +231,11 @@ function ensurePrefetchOriginalBytes(filePath: string): Promise<Uint8Array | nul
  *
  * PCT-109: 進捗を onProgress で通知し、長時間処理のフリーズ誤認を防ぐ。
  */
+/** #392: undecodable な PDF は byte-preserve で編集を保存できない（別名保存も同じく原本を
+ * 返すため反映されない）。全保存経路で一貫表示する案内文。別名保存を救済策として案内しない。 */
+const UNDECODABLE_SAVE_BLOCKED_MESSAGE =
+  'このPDFには本バージョンで読み込めないOCRデータがあるため、編集内容は保存できませんでした（このファイルは閲覧のみ可能で、別名保存でも編集は反映されません）。';
+
 async function loadAllPagesWithTextBlocks(
   filePath: string,
   pageOrder: number[],
@@ -986,10 +991,8 @@ export function useFileOperations(
         }
         if (useInfraStore.getState().bboxMetaUnreadable && hadUnsavedEdits) {
           // #392: byte-preserve で原本を返したため編集は反映されていない。明示警告する。
-          showToast(
-            'このファイルには本バージョンで読み込めないOCRデータがあるため、編集内容は保存されませんでした。必要な変更は「名前を付けて保存」で別ファイルに書き出してください。',
-            true,
-          );
+          // 別名保存も同じ byte-preserve で編集を落とすため、別名保存を救済策として案内しない。
+          showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
         } else {
           showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         }
@@ -1084,6 +1087,9 @@ export function useFileOperations(
         isSavingRef.current = true;
         setIsSaving?.(true);
         try {
+          // #392: 別名保存も undecodable 源では byte-preserve で編集を落とす。捕捉して警告する。
+          const hadUnsavedEdits = usePecoStore.getState().isDirty
+            || Array.from(usePecoStore.getState().document?.pages.values() || []).some((p) => p.isDirty);
           const result = await _executeSave(path, options);
           if (result !== null) {
             const currentDoc = usePecoStore.getState().document;
@@ -1100,7 +1106,12 @@ export function useFileOperations(
             if (result.hasPostSnapshotChanges) {
               usePecoStore.setState({ isDirty: true });
             }
-            showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
+            if (useInfraStore.getState().bboxMetaUnreadable && hadUnsavedEdits) {
+              // #392: byte-preserve でターゲットにも編集が反映されていない。成功扱いにしない。
+              showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
+            } else {
+              showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
+            }
             // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
             void _writeAuditLog(path).catch((e) => {
               console.warn('[save-as] audit log write failed (ignored):', e);
@@ -1269,6 +1280,9 @@ export function useFileOperations(
     isSavingRef.current = true;
     setIsSaving?.(true);
     showToast('全ページに位置補正を適用して保存中…（ページ数が多いと時間がかかります）');
+    // #392: applyOffsetAllPages 保存も undecodable 源では byte-preserve で編集を落とす。
+    const hadUnsavedEdits = usePecoStore.getState().isDirty
+      || Array.from(usePecoStore.getState().document?.pages.values() || []).some((p) => p.isDirty);
     try {
       const result = await _executeSave(undefined, undefined, { applyOffsetAllPages: true });
       if (result === null) return false;
@@ -1277,7 +1291,12 @@ export function useFileOperations(
       if (result.hasPostSnapshotChanges) {
         usePecoStore.setState({ isDirty: true });
       }
-      showToast(formatSaveToast('全ページに位置補正を適用して保存しました', result.size, result.skippedChars));
+      if (useInfraStore.getState().bboxMetaUnreadable && hadUnsavedEdits) {
+        // #392: byte-preserve で編集が反映されていない。成功扱いにしない。
+        showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
+      } else {
+        showToast(formatSaveToast('全ページに位置補正を適用して保存しました', result.size, result.skippedChars));
+      }
       invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
       return true;
     } catch (err) {

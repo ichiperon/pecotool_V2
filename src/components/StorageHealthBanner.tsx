@@ -65,7 +65,7 @@ export function StorageHealthBanner() {
       >
         <span className="storage-health-banner__icon" aria-hidden="true">ℹ</span>
         <span className="storage-health-banner__message">
-          このPDFには、本バージョンで読み込めないOCRデータが含まれています。編集内容はこのファイルには保存されません（必要な変更は別名で書き出してください）。
+          このPDFには、本バージョンで読み込めないOCRデータが含まれています。このファイルは閲覧のみ可能で、編集内容は保存できません（別名保存でも編集は反映されません）。
         </span>
       </div>
     );

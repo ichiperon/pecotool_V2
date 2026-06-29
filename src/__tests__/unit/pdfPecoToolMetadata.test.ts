@@ -8,6 +8,7 @@ import { deflate } from 'pako';
 import {
   readPecoToolBBoxMetaFromPdfDoc,
   readPecoToolBBoxMetaWithStatus,
+  readPecoToolBBoxMetaWithStatusFromBytes,
   writePecoToolBBoxMetaToPdfDoc,
   hasLegacyPecoToolBBoxInfo,
   removeLegacyPecoToolBBoxInfo,
@@ -372,5 +373,19 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
     expect(read.status).toBe('ok');
     expect(read.meta).toEqual(legacyMeta);
     expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual(legacyMeta);
+  });
+
+  // ── U-PM-16 (#392): bytes 経路と pdfDoc 経路の undecodable 判定が一致する ──
+  // load 検出は readPecoToolBBoxMetaWithStatusFromBytes(bytes)、save の byte-preserve は
+  // readPecoToolBBoxMetaWithStatus(pdfDoc) を使う。両者が食い違うと「save は preserve するが
+  // 警告フラグは立たない＝無警告 silent drop」になるため、同一内容で判定一致を固定する（御局指摘）。
+  it('U-PM-16: bytes 経路（load）と pdfDoc 経路（save）の undecodable 判定が一致する', async () => {
+    const pdfDoc = await makePdfDocWithInvalidFlateStream();
+    // save パス相当（loaded pdfDoc から直接）
+    expect(readPecoToolBBoxMetaWithStatus(pdfDoc).status).toBe('undecodable');
+    // load パス相当（同一内容の bytes から）
+    const bytes = await pdfDoc.save({ useObjectStreams: false });
+    const fromBytes = await readPecoToolBBoxMetaWithStatusFromBytes(bytes);
+    expect(fromBytes.status).toBe('undecodable');
   });
 });

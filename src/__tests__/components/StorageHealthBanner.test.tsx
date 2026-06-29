@@ -166,7 +166,8 @@ describe('C-SHB-06: bboxMetaUnreadable → 編集が保存に反映されない�
     useInfraStore.setState({ bboxMetaUnreadable: true });
     render(<StorageHealthBanner />);
     expect(screen.getByText(/読み込めないOCRデータ/)).toBeTruthy();
-    expect(screen.getByText(/保存されません/)).toBeTruthy();
+    // 虚偽の救済策（別名で書き出して）でなく、保存できない旨を正直に表示する
+    expect(screen.getByText(/保存できません/)).toBeTruthy();
   });
 
   it('role="status" / aria-live="polite"', () => {
