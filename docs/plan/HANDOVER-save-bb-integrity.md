@@ -122,8 +122,10 @@ gh pr create --draft --base feature/report-tool-sidecar \
 | #389 | PCT-159 | normalizeNumeric "△-50000"→"--50000" 値破壊 | 3 | medium | 修正済(未コミット) |
 | #390 | PCT-160 | adjustOffset 矢印キー二重発火 | 7 | high | 修正済(未コミット) |
 
-### #388 follow-up（起票済 ✅ → #392 / PCT-161）
-- **#392（MEDIUM・データ損失の根本）**: `decodeRawStream` が null（decode失敗）と「本当に空」を上位で `{}` に集約して区別せず、`writePecoToolBBoxMetaToPdfDoc`（L168-204）が空メタで既存BBoxを上書きしうる。#388は配列ケースを塞いだだけで**構造は残存**。提案＝write側ガード「既存PecoTool streamがあり decode不能かつ新メタが空なら上書きしない」（安全側）を本ファイル内で先に入れ、必要なら read番兵を重ねる。read 実L106-146 / write 実L168-204。failing-test素案つきで起票済み。
+### #388 follow-up（#392 / PCT-161）— **部分対応済み・未クローズ**
+- **状態（2026-06-29 セッション3）**: write 境界の防御ガードを実装（commit `03a8e4b`）。「新メタが空 `{}` かつ 既存 stream が present-but-undecodable なら上書きしない」＝`hasUnreadablePrivateBBoxStream` で空メタ上書き喪失を阻止。`locatePrivateBBoxStream` を read 経路と共有（挙動保存）。failing-test U-PM-11（バイト破壊検知）＋過剰発火防止 U-PM-12/13。reviewer_security/architecture APPROVE。
+- ⚠️ **#392 はクローズしない（御局らでん指摘・妥当）**: 実損失の**主経路は partial 上書き**＝decode不能 stream あり＋1ページ編集 → 非空 partial メタで上書き → 未読ページ **silent 喪失**。`Object.keys===0` ガードはこれを捕まえない（pdfSaverCore:1268 で metaChanged=true・bboxMeta 非空）。さらに ①空メタ経路は上流（pdfSaverCore:1090 短絡・1075 hadExistingBBoxMeta=false）でほぼ死に番 ②`{version,pages:{}}` 等の準空メタ取りこぼし ③一度不能化した stream は空 write で永久に置換不能。本ガードは防御的 no-op-safe で害はないが「直った」ではない。
+- 🔜 **本対応（HITL-2 設計判断待ち）**: read 境界で「decode 不能」を第一級状態化し `preserveExistingPrivateStream` フラグを pdfSaverCore へ通す（空・partial・準空のいずれでも破壊的上書きを拒否）＋ユーザー可視警告。代替案＝(A) 旧 raw stream を `PecoToolBBoxesOrphan` 等へ退避してから上書き（いろは案・silent 救済余地）／(B) decoder を #388 式に広げ false-undecodable を減らす（根本側）。挙動・UX を変えるため要ユーザー合意。read 実 L124-131 / write 実 L189-229。
 
 ### 既存issueと重複/関連（Discovery で確認・補強候補）
 - **#360**（pecoStore非同期ガード）: `replaceText(scope='all')` が `waitForPendingIdbSaves` 前に `getAllTemporaryPageData` を読み、LRU退避ページが一括置換から無音スキップ→保存欠落（`pecoStore.ts:1213-1239`）。**実P1相当**。ただし `pecoStore.ts` は未コミットWIP中 → **WIP確定後**に着手。
