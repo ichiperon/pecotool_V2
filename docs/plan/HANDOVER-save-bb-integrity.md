@@ -122,10 +122,14 @@ gh pr create --draft --base feature/report-tool-sidecar \
 | #389 | PCT-159 | normalizeNumeric "△-50000"→"--50000" 値破壊 | 3 | medium | 修正済(未コミット) |
 | #390 | PCT-160 | adjustOffset 矢印キー二重発火 | 7 | high | 修正済(未コミット) |
 
-### #388 follow-up（#392 / PCT-161）— **部分対応済み・未クローズ**
-- **状態（2026-06-29 セッション3）**: write 境界の防御ガードを実装（commit `03a8e4b`）。「新メタが空 `{}` かつ 既存 stream が present-but-undecodable なら上書きしない」＝`hasUnreadablePrivateBBoxStream` で空メタ上書き喪失を阻止。`locatePrivateBBoxStream` を read 経路と共有（挙動保存）。failing-test U-PM-11（バイト破壊検知）＋過剰発火防止 U-PM-12/13。reviewer_security/architecture APPROVE。
-- ⚠️ **#392 はクローズしない（御局らでん指摘・妥当）**: 実損失の**主経路は partial 上書き**＝decode不能 stream あり＋1ページ編集 → 非空 partial メタで上書き → 未読ページ **silent 喪失**。`Object.keys===0` ガードはこれを捕まえない（pdfSaverCore:1268 で metaChanged=true・bboxMeta 非空）。さらに ①空メタ経路は上流（pdfSaverCore:1090 短絡・1075 hadExistingBBoxMeta=false）でほぼ死に番 ②`{version,pages:{}}` 等の準空メタ取りこぼし ③一度不能化した stream は空 write で永久に置換不能。本ガードは防御的 no-op-safe で害はないが「直った」ではない。
-- 🔜 **本対応（HITL-2 設計判断待ち）**: read 境界で「decode 不能」を第一級状態化し `preserveExistingPrivateStream` フラグを pdfSaverCore へ通す（空・partial・準空のいずれでも破壊的上書きを拒否）＋ユーザー可視警告。代替案＝(A) 旧 raw stream を `PecoToolBBoxesOrphan` 等へ退避してから上書き（いろは案・silent 救済余地）／(B) decoder を #388 式に広げ false-undecodable を減らす（根本側）。挙動・UX を変えるため要ユーザー合意。read 実 L124-131 / write 実 L189-229。
+### #388 follow-up（#392 / PCT-161）— **本対応済み（Stage1+Stage2）**
+ユーザー合意（HITL-2）で「read 境界 first-class ＋可視警告」を採用し、2段で実装完了。
+- **Stage1（保存パス・完全 byte-preserve）** commit `7a9d26c`: `readPecoToolBBoxMetaWithStatus` が `'ok'|'undecodable'|'empty'` を返す（legacy が読めれば 'ok'(legacy) を優先し旧 `private ?? legacy ?? {}` を温存）。pdfSaverCore は status==='undecodable' のとき **meta も content も一切触らず原本バイトをそのまま返す**。空・partial・準空の全経路で喪失ゼロ・meta/content 乖離ゼロ。failing-test は保存バイト全体の原本一致を assert（saveUndecodableMetaPreservation）＋過剰温存なし＋U-PM-14/15。
+  - 経緯: 当初の「meta write のみスキップ」案は御局らでんが「dirty ページ content は再描画され meta/content が乖離＝silent loss を引っ越すだけ」と反証 → 完全 byte-preserve に倒して解消。reviewer_security/architecture APPROVE・critic 反証を反映。
+- **Stage2（透明化・UI 警告）** commit `45c6942`: load 時に `onUndecodable` で検出し infraStore `bboxMetaUnreadable` を立て、StorageHealthBanner が「このPDFには読み込めないOCRデータがある／編集は保存されない／別名で書き出して」を表示。
+- 防御の残置: write 内の空メタガード（`03a8e4b`）は pdfSaverCore を経由しない別呼出への last-line defense として保持（層をコメント明記）。
+- **既知の narrow ギャップ（許容）**: legacy Info（plain string）が破損 JSON で読めない場合は status='empty' に落ち preserve されない（legacy は旧形式・破損は稀）。#392 の root cause（private stream）は完全に塞いだ。
+- クローズ判断: コード・テストは完了。issue クローズは PR マージ＋HITL-3 実機サニティ後（運用方針どおり）。
 
 ### 既存issueと重複/関連（Discovery で確認・補強候補）
 - **#360**（pecoStore非同期ガード）: `replaceText(scope='all')` が `waitForPendingIdbSaves` 前に `getAllTemporaryPageData` を読み、LRU退避ページが一括置換から無音スキップ→保存欠落（`pecoStore.ts:1213-1239`）。**実P1相当**。ただし `pecoStore.ts` は未コミットWIP中 → **WIP確定後**に着手。
