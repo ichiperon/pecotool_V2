@@ -190,13 +190,17 @@ export function readPecoToolBBoxMetaFromPdfDoc(pdfDoc: PDFDocument): Record<stri
   return readPecoToolBBoxMetaWithStatus(pdfDoc).meta;
 }
 
-export async function readPecoToolBBoxMetaFromBytes(bytes: Uint8Array): Promise<Record<string, unknown>> {
+export async function readPecoToolBBoxMetaWithStatusFromBytes(bytes: Uint8Array): Promise<PecoToolBBoxMetaRead> {
   const pdfDoc = await PDFDocument.load(new Uint8Array(bytes), {
     ignoreEncryption: true,
     throwOnInvalidObject: false,
     updateMetadata: false,
   });
-  return readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  return readPecoToolBBoxMetaWithStatus(pdfDoc);
+}
+
+export async function readPecoToolBBoxMetaFromBytes(bytes: Uint8Array): Promise<Record<string, unknown>> {
+  return (await readPecoToolBBoxMetaWithStatusFromBytes(bytes)).meta;
 }
 
 export function removeLegacyPecoToolBBoxInfo(pdfDoc: PDFDocument): void {

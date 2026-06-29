@@ -7,6 +7,7 @@ import { writeFileAtomically, isWriteAccessError } from '../utils/tauriFileIO';
 export { isWriteAccessError };
 
 import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../store/pecoStore';
+import { useInfraStore } from '../store/infraStore';
 import { useOcrSettingsStore } from '../store/ocrSettingsStore';
 import { resolveDisplayIndex, resolvePageId, displayToSourcePageIndex } from '../utils/pageOrder';
 import {
@@ -238,11 +239,15 @@ async function loadAllPagesWithTextBlocks(
 ): Promise<{ pages: Map<number, PageData>; failedPages: number[] }> {
   const pdf = await getSharedPdfProxy(filePath);
   let bboxMeta: Awaited<ReturnType<typeof loadPecoToolBBoxMeta>> | null = null;
+  // #392: 読込開始時に warning をリセットし、private BBox stream が decode 不能なら立てる。
+  // undecodable のとき保存パスは byte-preserve で編集を反映しないため、UI 警告で透明化する。
+  useInfraStore.getState().setBboxMetaUnreadable(false);
   try {
     bboxMeta = await loadPecoToolBBoxMeta(pdf, {
       loadBytes: async () => readFile(filePath),
       filePath,
       mtime: document.mtime,
+      onUndecodable: () => useInfraStore.getState().setBboxMetaUnreadable(true),
     });
   } catch {
     bboxMeta = null;

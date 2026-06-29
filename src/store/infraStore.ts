@@ -28,6 +28,12 @@ interface InfraState {
    */
   storageWarning: StorageWarning | null;
   /**
+   * #392 / PCT-161: 現在開いているファイルの private BBox stream が本バージョンで decode 不能
+   * （undecodable）であることを示す。true のとき、このファイルへの編集は保存パスが byte-preserve で
+   * 据え置くため反映されない。load 時に set し、UI 警告バナーで透明化する。
+   */
+  bboxMetaUnreadable: boolean;
+  /**
    * 現在表示中 (もしくは表示開始中) ページの PDFPageProxy。
    * usePageNavigation が viewport 取得時に set し、usePdfRendering が subscribe して
    * 二重 getCachedPageProxy を避けるための共有チャネル。
@@ -48,6 +54,7 @@ interface InfraState {
   clearLastIdbErrorIfSet: () => void;
   setStorageWarning: (warning: StorageWarning | null) => void;
   clearStorageWarning: () => void;
+  setBboxMetaUnreadable: (value: boolean) => void;
   setCurrentPageProxy: (filePath: string, pageIndex: number, proxy: pdfjsLib.PDFPageProxy | null) => void;
   clearCurrentPageProxy: () => void;
 }
@@ -58,6 +65,7 @@ export const useInfraStore = create<InfraState>((set, get) => ({
   pendingRestoration: null,
   lastIdbError: null,
   storageWarning: null,
+  bboxMetaUnreadable: false,
   currentPageProxy: null,
   currentPageProxyKey: null,
 
@@ -97,6 +105,11 @@ export const useInfraStore = create<InfraState>((set, get) => ({
 
   clearStorageWarning: () => set({ storageWarning: null }),
 
+  // 同値の再 set による不要な通知を避ける（load で false→（必要なら）true と呼ぶため）
+  setBboxMetaUnreadable: (value) => {
+    if (get().bboxMetaUnreadable !== value) set({ bboxMetaUnreadable: value });
+  },
+
   setCurrentPageProxy: (filePath, pageIndex, proxy) => {
     const key = `${filePath}:${pageIndex}`;
     set({ currentPageProxy: proxy, currentPageProxyKey: proxy ? key : null });
@@ -111,5 +124,6 @@ export const selectPageAccessOrder = (s: InfraState) => s.pageAccessOrder;
 export const selectPendingRestoration = (s: InfraState) => s.pendingRestoration;
 export const selectLastIdbError = (s: InfraState) => s.lastIdbError;
 export const selectStorageWarning = (s: InfraState) => s.storageWarning;
+export const selectBboxMetaUnreadable = (s: InfraState) => s.bboxMetaUnreadable;
 export const selectCurrentPageProxy = (s: InfraState) => s.currentPageProxy;
 export const selectCurrentPageProxyKey = (s: InfraState) => s.currentPageProxyKey;

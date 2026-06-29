@@ -3,22 +3,26 @@ import {
   useInfraStore,
   selectLastIdbError,
   selectStorageWarning,
+  selectBboxMetaUnreadable,
 } from '../store/infraStore';
 
 /**
- * ストレージ健全性に関する警告バナー。
+ * ストレージ健全性・ファイル健全性に関する警告バナー。
  *
  * 優先順位:
  *   1. IDB 書込失敗（lastIdbError が非 null）→ 失敗通知
- *   2. 容量逼迫 critical → 強い警告
- *   3. 容量逼迫 warn → 軽い警告
+ *   2. OCR メタ decode 不能（bboxMetaUnreadable）→ 編集が保存に反映されない旨（#392）
+ *   3. 容量逼迫 critical → 強い警告
+ *   4. 容量逼迫 warn → 軽い警告
  *
- * どちらもなければ何も表示しない。
+ * いずれも無ければ何も表示しない。
  */
 export function StorageHealthBanner() {
   const lastIdbError = useInfraStore(selectLastIdbError);
+  const bboxMetaUnreadable = useInfraStore(selectBboxMetaUnreadable);
   const storageWarning = useInfraStore(selectStorageWarning);
   const clearLastIdbError = useInfraStore(s => s.clearLastIdbError);
+  const setBboxMetaUnreadable = useInfraStore(s => s.setBboxMetaUnreadable);
 
   const handleDismiss = useCallback(() => {
     clearLastIdbError();
@@ -41,6 +45,31 @@ export function StorageHealthBanner() {
           type="button"
           className="storage-health-banner__close"
           onClick={handleDismiss}
+          aria-label="閉じる"
+        >
+          ✕
+        </button>
+      </div>
+    );
+  }
+
+  // #392: 開いているファイルの OCR メタが decode 不能 → 編集が保存に反映されない旨を警告
+  if (bboxMetaUnreadable) {
+    return (
+      <div
+        className="storage-health-banner storage-health-banner--warn"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <span className="storage-health-banner__icon" aria-hidden="true">ℹ</span>
+        <span className="storage-health-banner__message">
+          このPDFには、本バージョンで読み込めないOCRデータが含まれています。編集内容はこのファイルには保存されません（必要な変更は別名で書き出してください）。
+        </span>
+        <button
+          type="button"
+          className="storage-health-banner__close"
+          onClick={() => setBboxMetaUnreadable(false)}
           aria-label="閉じる"
         >
           ✕

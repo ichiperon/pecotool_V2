@@ -1,6 +1,6 @@
 import type * as pdfjsLib from 'pdfjs-dist';
 import { BoundingBox } from '../types';
-import { readPecoToolBBoxMetaFromBytes } from './pdfPecoToolMetadata';
+import { readPecoToolBBoxMetaWithStatusFromBytes } from './pdfPecoToolMetadata';
 
 export interface PecoToolBBoxMetaEntry {
   bbox: BoundingBox;
@@ -104,6 +104,12 @@ export interface PecoToolBBoxMetaSource {
    */
   filePath?: string;
   mtime?: number;
+  /**
+   * #392 / PCT-161: private BBox stream は存在するが本バージョンで decode/parse できない
+   * （undecodable）と判定されたときに呼ばれる。呼び出し側は「このファイルの編集は保存に
+   * 反映されない」旨を UI 警告で透明化するために使う。
+   */
+  onUndecodable?: () => void;
 }
 
 // PCT-103: 直近1ファイル分のメモ化エントリ。ファイル切替で自然に追い出される。
@@ -177,7 +183,11 @@ export async function loadPecoToolBBoxMeta(
   try {
     const bytes = await loadSourceBytes(source);
     if (bytes) {
-      const parsed = await readPecoToolBBoxMetaFromBytes(bytes);
+      const read = await readPecoToolBBoxMetaWithStatusFromBytes(bytes);
+      // #392: private stream はあるが decode 不能なら、保存パスは byte-preserve で編集を
+      // 反映しない。ここで検出して呼び出し側に通知し UI 警告で透明化する。
+      if (read.status === 'undecodable') source?.onUndecodable?.();
+      const parsed = read.meta;
       if (Object.keys(parsed).length > 0) {
         result = validateParsedBBoxMeta(parsed);
         // PCT-103: キャッシュ更新

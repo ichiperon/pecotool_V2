@@ -19,6 +19,7 @@ afterEach(() => {
     pendingRestoration: null,
     lastIdbError: null,
     storageWarning: null,
+    bboxMetaUnreadable: false,
     currentPageProxy: null,
     currentPageProxyKey: null,
   });
@@ -157,5 +158,48 @@ describe('C-SHB-05: lastIdbError と storageWarning が同時に非 null → IDB
     expect(
       screen.queryByText(/ストレージの空き容量が少なくなっています/),
     ).toBeNull();
+  });
+});
+
+describe('C-SHB-06: bboxMetaUnreadable → 編集が保存に反映されない旨が表示される (#392)', () => {
+  it('警告文言が表示される', () => {
+    useInfraStore.setState({ bboxMetaUnreadable: true });
+    render(<StorageHealthBanner />);
+    expect(screen.getByText(/読み込めないOCRデータ/)).toBeTruthy();
+    expect(screen.getByText(/保存されません/)).toBeTruthy();
+  });
+
+  it('role="status" / aria-live="polite"', () => {
+    useInfraStore.setState({ bboxMetaUnreadable: true });
+    render(<StorageHealthBanner />);
+    const banner = screen.getByRole('status');
+    expect(banner.getAttribute('aria-live')).toBe('polite');
+  });
+
+  it('閉じるボタンで setBboxMetaUnreadable(false) が呼ばれる', () => {
+    const setBboxMetaUnreadable = vi.fn();
+    useInfraStore.setState({ bboxMetaUnreadable: true, setBboxMetaUnreadable });
+    render(<StorageHealthBanner />);
+    fireEvent.click(screen.getByRole('button', { name: '閉じる' }));
+    expect(setBboxMetaUnreadable).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('C-SHB-07: 優先順位 lastIdbError > bboxMetaUnreadable > storageWarning', () => {
+  it('lastIdbError があれば bboxMetaUnreadable より IDB 失敗が優先', () => {
+    useInfraStore.setState({ lastIdbError: new Error('x'), bboxMetaUnreadable: true });
+    render(<StorageHealthBanner />);
+    expect(screen.getByText(/一時データの保存に失敗しました/)).toBeTruthy();
+    expect(screen.queryByText(/読み込めないOCRデータ/)).toBeNull();
+  });
+
+  it('bboxMetaUnreadable があれば storageWarning より優先', () => {
+    useInfraStore.setState({
+      bboxMetaUnreadable: true,
+      storageWarning: { ratio: 0.82, level: 'warn' },
+    });
+    render(<StorageHealthBanner />);
+    expect(screen.getByText(/読み込めないOCRデータ/)).toBeTruthy();
+    expect(screen.queryByText(/ストレージの空き容量が少なくなっています/)).toBeNull();
   });
 });
