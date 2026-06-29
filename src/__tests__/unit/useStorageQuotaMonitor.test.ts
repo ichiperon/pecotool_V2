@@ -129,29 +129,40 @@ describe('U-SQM-04: navigator.storage が存在しない環境では no-op（例
   });
 });
 
-describe('U-SQM-05: 同一レベルが続く場合は store を再 set しない', () => {
-  it('同じ warn が続いても setStorageWarning は 1 回しか呼ばれない', async () => {
-    mockStorageEstimate(85, 100);
+describe('U-SQM-05: 同一レベルが続く場合は store を再 set しない（dedup）', () => {
+  it('60s 後に同じ warn を再チェックしても setStorageWarning は再呼び出しされない', async () => {
+    vi.useFakeTimers();
+    try {
+      mockStorageEstimate(85, 100);
 
-    const setStorageWarningSpy = vi.spyOn(
-      useInfraStore.getState(),
-      'setStorageWarning',
-    );
+      const setStorageWarningSpy = vi.spyOn(
+        useInfraStore.getState(),
+        'setStorageWarning',
+      );
 
-    const { unmount } = renderHook(() => useStorageQuotaMonitor());
+      const { unmount } = renderHook(() => useStorageQuotaMonitor());
 
-    // 2回 act を流す（初回チェック）
-    await act(async () => {
-      await Promise.resolve();
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
+      // 初回 check（mount 時の void check()）を流す → warn が 1 回 set される
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(setStorageWarningSpy.mock.calls.length).toBe(1);
 
-    // 値が同じなので setStorageWarning は 1 回（初回のみ）
-    expect(setStorageWarningSpy.mock.calls.length).toBeLessThanOrEqual(1);
+      // 60s（hook の CHECK_INTERVAL_MS）進めて interval の2回目 check を起こす
+      // （同一 warn レベル・visibility=visible）。dedup が無いと2回目も set されて
+      // count=2 になる＝この advance が検出力の核。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
 
-    unmount();
+      // dedup により同一レベルでは再 set されない（dedup を削ると 2 になり赤）
+      expect(setStorageWarningSpy.mock.calls.length).toBe(1);
+
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
