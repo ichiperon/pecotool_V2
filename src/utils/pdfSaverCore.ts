@@ -1390,8 +1390,13 @@ export async function buildPdfDocumentCore(
               translate(baselineX_run + textOffsetDx, baselineY_run - textOffsetDy),
               scale(sx_outer, sy_outer),
             );
-            page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
-            page.pushOperators(popGraphicsState());
+            try {
+              page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
+            } finally {
+              // #397 / PCT-166: 描画例外時も必ず Q を発行し graphics-state スタックを均衡させる
+              // （q コミット後に drawText が throw すると per-block catch が握り潰し Q 欠落 → q/Q 不均衡）。
+              page.pushOperators(popGraphicsState());
+            }
             // #75: per-run advance は runTextWidth * sy_outer (共通スケール)。
             // Σ advance = textWidth * sy_outer = bbox.height で完全に bbox を埋める。
             offsetInPage += runTextWidth * sy_outer;
@@ -1449,30 +1454,35 @@ export async function buildPdfDocumentCore(
           );
           let offset = 0;
           let lastRunFont: PDFFont | null = null;
-          for (const run of runs) {
-            setPageFontWithStableKey(page, run.font, pageFontKeys);
-            page.drawText(run.text, { x: offset, y: 0, size: fontSize, renderMode: 3 });
-            offset += run.font.widthOfTextAtSize(run.text, fontSize);
-            lastRunFont = run.font;
-          }
-          // issue #100 / 案A: Acrobat の text extraction は座標と文字幅の heuristic で
-          // 隣接 BB を連結する (BT...ET 境界を無視)。各 BB の末尾に invisible スペース
-          // (U+0020) を 1 文字描画して word-break heuristic を成立させ、隣接 BB の連結を
-          // 回避する。renderMode 3 (invisible) なので画面・印刷への影響なし。
-          // 案A: setWordSpacing (Tw) で末尾スペースの advance を拡大し「語境界」と Acrobat
-          // に認識させる。buildBlockSeparatorOperators は BT...ET を自己完結した単位で組む
-          // ため Tw が外部に漏れない (ET 直前に 0 リセット済み)。
-          if (lastRunFont) {
-            const fontKey = pageFontKeys.get(lastRunFont);
-            if (fontKey) {
-              page.pushOperators(
-                ...buildBlockSeparatorOperators(lastRunFont, fontKey, fontSize, offset, 0),
-              );
-            } else {
-              console.warn('[pdfSaver] separator skipped: fontKey unresolved', { pageIndex, font: lastRunFont });
+          try {
+            for (const run of runs) {
+              setPageFontWithStableKey(page, run.font, pageFontKeys);
+              page.drawText(run.text, { x: offset, y: 0, size: fontSize, renderMode: 3 });
+              offset += run.font.widthOfTextAtSize(run.text, fontSize);
+              lastRunFont = run.font;
             }
+            // issue #100 / 案A: Acrobat の text extraction は座標と文字幅の heuristic で
+            // 隣接 BB を連結する (BT...ET 境界を無視)。各 BB の末尾に invisible スペース
+            // (U+0020) を 1 文字描画して word-break heuristic を成立させ、隣接 BB の連結を
+            // 回避する。renderMode 3 (invisible) なので画面・印刷への影響なし。
+            // 案A: setWordSpacing (Tw) で末尾スペースの advance を拡大し「語境界」と Acrobat
+            // に認識させる。buildBlockSeparatorOperators は BT...ET を自己完結した単位で組む
+            // ため Tw が外部に漏れない (ET 直前に 0 リセット済み)。
+            if (lastRunFont) {
+              const fontKey = pageFontKeys.get(lastRunFont);
+              if (fontKey) {
+                page.pushOperators(
+                  ...buildBlockSeparatorOperators(lastRunFont, fontKey, fontSize, offset, 0),
+                );
+              } else {
+                console.warn('[pdfSaver] separator skipped: fontKey unresolved', { pageIndex, font: lastRunFont });
+              }
+            }
+          } finally {
+            // #397 / PCT-166: 描画例外時も必ず Q を発行し graphics-state スタックを均衡させる
+            // （q コミット後に drawText 等が throw すると per-block catch が握り潰し Q 欠落 → q/Q 不均衡）。
+            page.pushOperators(popGraphicsState());
           }
-          page.pushOperators(popGraphicsState());
         }
       } catch(e) {
         console.warn(`[buildPdfDocumentCore] Page ${pageIndex} block error:`, e);
