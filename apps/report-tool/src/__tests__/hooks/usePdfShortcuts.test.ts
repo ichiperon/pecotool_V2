@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { usePdfShortcuts } from "../../hooks/usePdfShortcuts";
 import { usePdfStore } from "../../store/pdfStore";
+import { useReportStore } from "../../store/reportStore";
 
 beforeEach(() => {
   usePdfStore.getState().reset();
@@ -166,6 +167,39 @@ describe("usePdfShortcuts: 編集ガード", () => {
   });
 
   it("document.body では ArrowDown でページ移動する（ガードされない）", () => {
+    renderHook(() => usePdfShortcuts());
+    pressKey("ArrowDown");
+    expect(usePdfStore.getState().currentPage).toBe(4);
+  });
+});
+
+describe("usePdfShortcuts: オフセット調整モードの矢印競合 (#390 / PCT-160)", () => {
+  // 根拠: 確認画面の adjustOffset モードでは、OffsetAdjustOverlay が
+  // window keydown で矢印キーを ±1px nudgePageOffset に使う（同コンポーネント L246-268）。
+  // usePdfShortcuts も同じ window keydown で矢印をページ移動に使うため、両者が
+  // stopPropagation せず同時発火し、欄を微調整するたびにページが進む（PCT-160 / #390）。
+  // 期待動作: adjustOffset 中は矢印をオーバーレイの nudge に専有させ、usePdfShortcuts 側は
+  // ページ移動しない。Page系/Home/End は競合しないので従来どおり動く。
+  afterEach(() => {
+    useReportStore.getState().setMode("idle");
+  });
+
+  it("adjustOffset モードでは ArrowDown でページ移動しない（矢印は欄微調整に譲る）", () => {
+    useReportStore.getState().setMode("adjustOffset");
+    renderHook(() => usePdfShortcuts());
+    pressKey("ArrowDown");
+    expect(usePdfStore.getState().currentPage).toBe(3); // 不変（初期=3）
+  });
+
+  it("adjustOffset モードでも PageDown はページ移動する（Page系は競合しない）", () => {
+    useReportStore.getState().setMode("adjustOffset");
+    renderHook(() => usePdfShortcuts());
+    pressKey("PageDown");
+    expect(usePdfStore.getState().currentPage).toBe(4);
+  });
+
+  it("idle モードでは従来どおり ArrowDown でページ移動する（回帰防止）", () => {
+    useReportStore.getState().setMode("idle");
     renderHook(() => usePdfShortcuts());
     pressKey("ArrowDown");
     expect(usePdfStore.getState().currentPage).toBe(4);

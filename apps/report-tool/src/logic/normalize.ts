@@ -86,7 +86,10 @@ export function normalizeNumeric(s: string): string {
   }
 
   // 11. マイナス符号の前置
-  if (negative) {
+  //     △/▲ 由来の負号。本体 v が既に明示マイナスを持つ冗長表記（"△-50000" 等）では
+  //     二重マイナス "--50000"（無効値）を作らない。△▲ と明示マイナスはどちらも
+  //     「負数」を表すため符号は1つに畳む（#389 / PCT-159: CSV 値破壊の防止）。
+  if (negative && !v.startsWith("-")) {
     v = "-" + v;
   }
 
