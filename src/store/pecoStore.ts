@@ -327,7 +327,7 @@ interface PecoState {
   ) => Promise<{ totalHits: number; perRuleHits: number[] }>;
 }
 
-const MAX_CACHED_PAGES = 50;
+export const MAX_CACHED_PAGES = 50;
 
 export const usePecoStore = create<PecoState>((set, get) => ({
   document: null,

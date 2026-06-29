@@ -422,6 +422,78 @@ export async function buildC07(): Promise<CorpusEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// 大規模スケール: N ページ可変コーパス（LRU 境界超えテスト用・高密度対応）
+//
+// 各ページに blocksPerPage 個のブロックを配置する。
+// 各ブロックの text には "L-<pageIndex>-<blockIndex>" の一意マーカーを埋める。
+// これにより保存後の bboxMeta からブロック欠落をマーカー単位で特定できる。
+//
+// 高密度ケース向け座標配置:
+//   ページ内に収まるよう格子状（グリッド）に配置する。
+//   列数 = ceil(sqrt(blocksPerPage)) で折り返し、行列のセルが重ならないよう
+//   ブロック幅/高さをページ寸法から逆算する。
+//   はみ出しによって保存側がブロックを弾く事故を防ぐ。
+// ---------------------------------------------------------------------------
+
+/** デフォルトの 1 ページあたりの合成ブロック数（後方互換） */
+const LARGE_SCALE_DEFAULT_BLOCKS_PER_PAGE = 3;
+
+/**
+ * 大規模合成コーパス（N ページ可変・密度可変）を生成する。
+ *
+ * @param pageCount    生成するページ数（退避境界を跨ぐ 51 以上を推奨）
+ * @param blocksPerPage 1 ページあたりのブロック数（省略時=3・後方互換）
+ * @returns            CorpusEntry（inputBytes / doc / expectedPageDims / expectedRotations / id）
+ *
+ * 各ブロックの text: "L-<pageIndex>-<blockIndex>"（一意マーカー）
+ * resetDeterministicCounter() を呼んでから使うこと（goldenCorpus 既存 API に準拠）。
+ */
+export async function buildLargeScale(
+  pageCount: number,
+  blocksPerPage: number = LARGE_SCALE_DEFAULT_BLOCKS_PER_PAGE,
+): Promise<CorpusEntry> {
+  const W = 595, H = 842;
+
+  // 格子配置の計算
+  // 列数を sqrt(blocksPerPage) の切り上げで決め、行列セルが均等に敷き詰まるようにする。
+  // マージン 20px を確保し、残りをセルサイズとして等分する。
+  const MARGIN = 20;
+  const cols = Math.ceil(Math.sqrt(blocksPerPage));
+  const rows = Math.ceil(blocksPerPage / cols);
+  const availW = W - MARGIN * 2;
+  const availH = H - MARGIN * 2;
+  const cellW = Math.floor(availW / cols);
+  const cellH = Math.floor(availH / rows);
+  // ブロック自体のサイズはセルより少し小さく（隣接ブロックとの隙間を 2px 確保）
+  const bW = Math.max(1, cellW - 2);
+  const bH = Math.max(1, cellH - 2);
+
+  const pageDefs = Array.from({ length: pageCount }, () => ({ width: W, height: H }));
+  const inputBytes = await makeBlankPdf(pageDefs);
+
+  const pages = new Map<number, PageData>();
+  for (let pi = 0; pi < pageCount; pi++) {
+    const blocks: TextBlock[] = [];
+    for (let bi = 0; bi < blocksPerPage; bi++) {
+      const col = bi % cols;
+      const row = Math.floor(bi / cols);
+      const x = MARGIN + col * cellW;
+      const y = MARGIN + row * cellH;
+      blocks.push(makeBlock(pi, bi, `L-${pi}-${bi}`, x, y, bW, bH));
+    }
+    pages.set(pi, makePageData(pi, W, H, blocks));
+  }
+
+  return {
+    id: `LARGE_SCALE_${pageCount}_${blocksPerPage}`,
+    inputBytes,
+    doc: makeDoc(pages, `large_scale_${pageCount}_${blocksPerPage}.pdf`),
+    expectedPageDims: pageDefs.map(() => ({ width: W, height: H })),
+    expectedRotations: pageDefs.map(() => 0),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 全コーパス一括生成
 // ---------------------------------------------------------------------------
 

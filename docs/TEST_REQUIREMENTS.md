@@ -1,26 +1,30 @@
 # PecoTool v2 自動テスト要件書
 
-> **改定日**: 2026-04-16
-> **改定理由**: 実装の進化（LRU キャッシュ、IDB 永続化、bitmapCache、bulkReorder、ocrSort 等）に対してテスト要件が追従していなかったため、全面的に再策定。
+> **改定日**: 2026-06-25（v2.0.24 時点）
+> **改定理由**: 初版（2026-04-16・目標250件）に対し実装が大幅に拡大（実測 ≒2255 ケース）。実規模・テストゲート構成・最優先要件「保存無欠落」を反映して再策定。テストID別の詳細カタログ（Phase 1〜4）は初版の設計カタログとして代表ケース参照用に残す。
+>
+> **最優先要件**: 保存したPDFのデータが正しいこと＝**OCRブロックが1件も欠落しないこと**。リリース最低保証ライン①保存の正しさ（絶対）②表示の正しさ。本書のすべての要件はこの①を最上位ゲートとする。
 
 ---
 
 ## テスト戦略
 
-| レイヤー       | フレームワーク     | 対象                           | テスト数 |
-| -------------- | ------------------ | ------------------------------ | -------- |
-| ユニット       | Vitest             | `utils/`, `store/`             | 144      |
-| コンポーネント | Vitest + RTL       | `src/components/`              | 60       |
-| 統合テスト     | Vitest             | クロスモジュール・ワークフロー | 26       |
-| E2E            | Playwright + Tauri | エンドツーエンドシナリオ       | 20       |
+| レイヤー       | フレームワーク     | 対象                           | 実測ケース数 | ファイル数 |
+| -------------- | ------------------ | ------------------------------ | ------------ | ---------- |
+| ユニット       | Vitest             | `utils/`, `store/`, `hooks/`   | 1608         | 89         |
+| コンポーネント | Vitest + RTL       | `src/components/`              | 254          | 13         |
+| 統合テスト     | Vitest             | クロスモジュール・ワークフロー | 308          | 45         |
+| E2E            | Playwright + Tauri | エンドツーエンドシナリオ       | 85           | 16         |
+
+> 実測値は v2.0.24 時点（`it`/`test` 概算）。広域 `npm test` で 2147 passed（ローカル）、`cargo test` 56 passed。対象ソースモジュール約81。初版の目標250件は達成済みで、現在は回帰防止のため網羅を継続中。
 
 ### テストピラミッド方針
 
-```
-        /  E2E (20)  \          ← Tauri 起動必須。スモークテスト中心
-       / 統合 (26)     \        ← Store + Utils 横断ワークフロー
-      / Component (60)   \      ← RTL でレンダリング + ユーザー操作
-     / Unit (144)          \    ← 純粋ロジック。モック最小限
+```text
+        /  E2E (~85)   \          ← Tauri 起動必須。スモーク＋主要フロー
+       / 統合 (~308)      \        ← Store + Utils 横断・保存ラウンドトリップ
+      / Component (~254)    \      ← RTL でレンダリング + ユーザー操作
+     / Unit (~1608)           \    ← 純粋ロジック。モック最小限
 ```
 
 ### モック戦略
@@ -37,7 +41,60 @@
 
 ---
 
-## Phase 1 — ユニットテスト (144 件)
+## テストゲート構成（npm scripts / CI）
+
+要件は「どのゲートで常時強制されるか」で意味が決まる。実行は段階化されている。
+
+| スクリプト | 中身 | 役割 | CI(`quality-gate.yml`)で常時実行 |
+| ---------- | ---- | ---- | -------------------------------- |
+| `test` | unit + components + integration（重い実PDF系を除外） | 開発時の高速チェック | ❌（CIは叩かない） |
+| `test:critical` | `test:pdf:acceptance` + `test:state:acceptance` | **保存・状態の受入＝最低保証ライン①直結** | ✅ |
+| `test:quality`（=`test:ci`） | build → critical → e2e:ci → tauri | **総合ゲート（CIが叩く本体）** | ✅ |
+| `test:pdf:soak` | realPdf系・500ページ負荷・各種 roundtrip | 重量級ソーク | ❌（`workflow_dispatch` かつ実PDFフィクスチャ必須） |
+| `test:tauri` | `cargo test`（Rust側） | バックエンド | ✅（`test:quality` 経由） |
+
+> CI は `npm run test:quality` のみを強制する。広域 `npm test`（≒2147件）は CI では走らず、ローカル/手動の網羅確認用。**要件として保証したいものは `test:critical` に置くこと**が原則。
+
+---
+
+## 最優先要件: 保存無欠落の不変則
+
+OCR欠落が最も起きやすい経路は **LRU退避**（`MAX_CACHED_PAGES`=50 超で `pages` から退避 → IDB永続化 → 保存時に再集約）。この境界を跨ぐ大量ページで「1ページ分のOCRが丸ごと落ちる」事故を常時検知することが最上位要件。
+
+### 現状の番人（実装済み）
+
+| テスト | 保証内容 | 常時ゲート | 退避境界(50)を跨ぐか |
+| ------ | -------- | ---------- | -------------------- |
+| `goldenMaster.test.ts` | ページ毎に `保存後ブロック数===入力数` ＋ text/bbox/order/writingMode 完全一致 ＋ 2サイクル耐久 | ✅ `test:critical` | ❌（数ページ合成コーパス） |
+| `savePdfAcceptanceStrict.test.ts` | 横/縦/空文字を実保存→完全一致で読み戻し、再保存で他ページのメタ維持 | ✅ | ❌ |
+| `saveDuringEditRace.test.ts` | 保存中の別ページ編集が巻き込まれて消えない | ✅ | ❌ |
+| `pdfSaverNonDirtyMetaPreservation.test.ts` | 非dirtyページの既存OCRメタが消えない | ✅ | ❌ |
+| `lruIdbRollback.test.ts` ＋ `pdfTemporaryStorageBoundary.test.ts` | **退避IDB書込が失敗した時の安全網**: `saveTemporaryPageDataBatch` の reject 固定＋退避ページがメモリに復元され `isDirty` 維持（保存対象に残る）＝サイレント欠落しない（2026-06-25 追加） | ✅ `test:critical`系 | ✅（退避失敗経路） |
+| `goldenMasterLargeScale.test.ts`（ページ数軸） | **51/120ページ合成**で退避を必ず跨ぎ、`Σ保存ブロック数===Σ編集数`＋一意マーカー全件存在を2サイクル耐久で検査（実PDF不要） | ✅ `test:critical`（2026-06-25 追加） | ✅ |
+| `goldenMasterLargeScale.test.ts`（密度軸） | **1ページ×1000BB / 3ページ×400BB** の高密度合成で `Σ保存=Σ編集`＋全マーカー存在＋保存時間ガード（catastrophic上限10s・実測270〜486ms）を2サイクル検査 | ✅ `test:critical`（2026-06-25 追加） | N/A（退避は起きない密度水準） |
+| `loadTest500Pages.test.ts` | 500ページ全件編集→保存で `missingEdit===[]`／メタ500件（大規模欠落の番人） | ❌ `test:pdf:soak` 限定 | ✅ |
+
+### 改訂履歴・既知ギャップ（v2.0.24 時点）
+
+1. **大規模・無欠落の番人を常時ゲートへ昇格（2026-06-25 実施済み）**: 退避境界を跨ぐ 500ページテストは `test:pdf:soak` 限定＋実PDFフィクスチャ必須でPR/push CIではほぼ起動しなかった。代替として実PDF不要の合成 `goldenMasterLargeScale.test.ts`（51＝境界直上／120＝大幅超の2水準）を新設し `test:critical` に常時化。退避発火（メモリ≤50・IDB退避≥totalPages-50）を assert で保証した上で、`savePDF`→pdfjs再ロードで一意マーカー全件存在を2サイクル検証。`MAX_CACHED_PAGES` は `pecoStore.ts` から export してテストと共有（ハードコードのドリフト防止）。孤児だった `loadTest1000Pages.test.ts` は本テストが代替するため削除。
+2. **保存/OCRコアのカバレッジ計測を warn 運用で配線（2026-06-25 実施済み）**: `vite.config.ts` の `test.coverage`（provider=v8）で計測対象をコア5ファイルに限定し、`npm run test:coverage` を新設。CI（`quality-gate.yml`）に `continue-on-error: true` の warn ステップ＋ `coverage/` アーティファクト出力を追加（**現時点ではゲートしない＝CIを赤にしない**）。
+   - **floor 実測値（2026-06-25・次の gate 化の基準）**:
+
+     | ファイル | Stmts | Branch | Funcs | Lines |
+     | -------- | ----- | ------ | ----- | ----- |
+     | `pdfSaverCore.ts` | 91.7% | 84.3% | 96.2% | 95.2% |
+     | `pecoStore.ts` | 91.0% | 76.1% | 91.0% | 96.5% |
+     | `pdfSaver.ts` | 82.4% | 67.9% | 76.2% | 89.3% |
+     | `useFileOperations.ts` | 78.5% | 74.3% | 76.9% | 79.7% |
+     | `pdfLoader.ts` | 59.9% | **38.7%** | 52.6% | 61.9% |
+
+   - **次フェーズ②-gate化**: floor を `coverage.thresholds`（perFile）に設定し `continue-on-error` を外す。最優先改善対象は `pdfLoader.ts`（IDB退避・loaderエラー経路の Branch が薄い＝OCR欠落リスク直結）。閾値は floor 比 -5〜10% の安全マージンから始める。
+
+---
+
+## Phase 1 — ユニットテスト (144 件) — *初版設計カタログ（2026-04-16・代表ケース参照用）*
+
+> 以下 Phase 1〜4 のID別カタログは初版の設計時点のもの。現行実装は上記「テスト戦略」の実測規模まで拡大しており、本カタログは網羅の完全な一覧ではなく**代表ケースの参照用**として残す。
 
 ---
 
@@ -596,4 +653,5 @@ Playwright + Tauri DevServer (`http://localhost:1420`)。実際のアプリ UI �
 
 ---
 
-*テスト合計: **250 件** (ユニット 144 + コンポーネント 60 + 統合 26 + E2E 20)*
+*初版カタログ合計: **250 件** (ユニット 144 + コンポーネント 60 + 統合 26 + E2E 20)*
+*現行実装の実測規模: **≒2255 ケース** (ユニット ~1608 + コンポーネント ~254 + 統合 ~308 + E2E ~85 / v2.0.24 時点)*
