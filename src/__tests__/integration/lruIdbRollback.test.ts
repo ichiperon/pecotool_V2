@@ -300,11 +300,16 @@ describe('LRU 退避書込失敗 → ロールバック（pecoStore レベル）
     // 退避発動後にロールバックが起きていれば全ページが復元される
     const pagesInMemory = afterState.document!.pages;
 
-    // 退避→ロールバックで復元されたページが存在する（少なくとも1ページは復元されているはず）
-    // 復元前に退避されたページ（最も古くアクセスされたページ）が存在するか確認する
-    // updatePageData の順序的に pageIndex=0 が最初に退避対象になる
-    expect(pagesInMemory.has(0)).toBe(true);
-    const restoredPage = pagesInMemory.get(0)!;
+    // 退避→IDB失敗→ロールバックの本質的不変則は「退避されたページが復元され、1ページも
+    // 失われない」こと。currentPageIndex=0 のページ0は「Never purge the current page」
+    // (pecoStore.ts) で退避保護され常駐するため、has(0) では検出力がゼロ（ロールバックを
+    // 丸ごと削っても通る）。実際に退避→復元されるのは非current の最古ページ(page1)。
+    // 喪失ゼロ = size===TOTAL でロールバック復元を固定する（復元を削ると size=TOTAL-1 で赤）。
+    expect(pagesInMemory.size).toBe(TOTAL);
+
+    // 退避された非currentページ(page1)が復元され、保存対象として dirty を維持している
+    expect(pagesInMemory.has(1)).toBe(true);
+    const restoredPage = pagesInMemory.get(1)!;
 
     // ── アサート B-2: 復元されたページは isDirty=true（保存対象に残る）──
     expect(restoredPage.isDirty).toBe(true);
