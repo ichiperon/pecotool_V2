@@ -638,4 +638,26 @@ describe('S-392: undecodable private BBox stream → onUndecodable 通知 (#392/
     });
     expect(called).toBe(0);
   });
+
+  // Round3 修正: cache-hit でも undecodable は再通知される。
+  // 先行ロード（ページナビ等・onUndecodable 無し）が filePath+mtime キャッシュを充填しても、
+  // 後続の onUndecodable 付き呼び出しで警告が確実に発火することを固定する。
+  it('cache-hit でも undecodable は再通知される（先行 no-callback ロードを後続が拾う）', async () => {
+    const bytes = await makeUndecodableBytes();
+    // 1回目: onUndecodable 無しで同一キーを読み、キャッシュを undecodable=true で充填
+    await loadPecoToolBBoxMeta(makeFakePdf(null), {
+      loadBytes: async () => bytes,
+      filePath: 'undecodable.pdf',
+      mtime: 1,
+    });
+    // 2回目: 同一 filePath+mtime で onUndecodable 付き → cache-hit だが onUndecodable は発火すべき
+    let called = 0;
+    await loadPecoToolBBoxMeta(makeFakePdf(null), {
+      loadBytes: async () => bytes,
+      filePath: 'undecodable.pdf',
+      mtime: 1,
+      onUndecodable: () => { called += 1; },
+    });
+    expect(called).toBe(1);
+  });
 });

@@ -19,6 +19,7 @@ import {
   selectIsRangeOcrMode,
 } from "./store/viewerStore";
 import { useOcrSettingsStore } from "./store/ocrSettingsStore";
+import { useInfraStore } from "./store/infraStore";
 import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
 import { ask, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
@@ -357,6 +358,8 @@ function App() {
     }
     destroySharedPdfProxy();
     usePecoStore.getState().setDocument(null);
+    // #392: ファイルを閉じたら undecodable 警告もリセット（無ドキュメント状態で残さない）。
+    useInfraStore.getState().setBboxMetaUnreadable(false);
   }, [isDirty, isSaving, showToast]);
 
   const searchInputRef = useRef<HTMLInputElement>(null);

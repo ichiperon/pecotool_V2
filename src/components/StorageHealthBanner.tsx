@@ -22,7 +22,6 @@ export function StorageHealthBanner() {
   const bboxMetaUnreadable = useInfraStore(selectBboxMetaUnreadable);
   const storageWarning = useInfraStore(selectStorageWarning);
   const clearLastIdbError = useInfraStore(s => s.clearLastIdbError);
-  const setBboxMetaUnreadable = useInfraStore(s => s.setBboxMetaUnreadable);
 
   const handleDismiss = useCallback(() => {
     clearLastIdbError();
@@ -53,7 +52,9 @@ export function StorageHealthBanner() {
     );
   }
 
-  // #392: 開いているファイルの OCR メタが decode 不能 → 編集が保存に反映されない旨を警告
+  // #392: 開いているファイルの OCR メタが decode 不能 → 編集が保存に反映されない旨を警告。
+  // ファイル状態を反映する恒久バナー（dismiss 不可。open/close で自動 reset される）。
+  // 手動 dismiss を許すと「閉じた後に編集→保存で silent 喪失」の導線が残るため閉じる不可にする。
   if (bboxMetaUnreadable) {
     return (
       <div
@@ -66,14 +67,6 @@ export function StorageHealthBanner() {
         <span className="storage-health-banner__message">
           このPDFには、本バージョンで読み込めないOCRデータが含まれています。編集内容はこのファイルには保存されません（必要な変更は別名で書き出してください）。
         </span>
-        <button
-          type="button"
-          className="storage-health-banner__close"
-          onClick={() => setBboxMetaUnreadable(false)}
-          aria-label="閉じる"
-        >
-          ✕
-        </button>
       </div>
     );
   }

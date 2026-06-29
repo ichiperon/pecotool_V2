@@ -176,12 +176,11 @@ describe('C-SHB-06: bboxMetaUnreadable → 編集が保存に反映されない�
     expect(banner.getAttribute('aria-live')).toBe('polite');
   });
 
-  it('閉じるボタンで setBboxMetaUnreadable(false) が呼ばれる', () => {
-    const setBboxMetaUnreadable = vi.fn();
-    useInfraStore.setState({ bboxMetaUnreadable: true, setBboxMetaUnreadable });
+  it('恒久バナー: 閉じるボタンが無い（dismiss 不可・open/close で自動 reset）', () => {
+    useInfraStore.setState({ bboxMetaUnreadable: true });
     render(<StorageHealthBanner />);
-    fireEvent.click(screen.getByRole('button', { name: '閉じる' }));
-    expect(setBboxMetaUnreadable).toHaveBeenCalledWith(false);
+    // dismiss を許すと「閉じた後に編集→保存で silent 喪失」の導線が残るため閉じる不可。
+    expect(screen.queryByRole('button', { name: '閉じる' })).toBeNull();
   });
 });
 

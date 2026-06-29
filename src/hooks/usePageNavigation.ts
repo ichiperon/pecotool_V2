@@ -115,6 +115,9 @@ export function usePageNavigation({
             },
             filePath: doc.filePath,
             mtime: doc.mtime,
+            // #392: ファイルを開いて最初に meta を読むのはこの経路（ページ表示）。ここで
+            // undecodable を検出して警告フラグを立てる（cache-hit でも再通知される）。
+            onUndecodable: () => useInfraStore.getState().setBboxMetaUnreadable(true),
           });
         } catch {
           nextBBoxMeta = null;

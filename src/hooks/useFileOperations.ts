@@ -239,14 +239,12 @@ async function loadAllPagesWithTextBlocks(
 ): Promise<{ pages: Map<number, PageData>; failedPages: number[] }> {
   const pdf = await getSharedPdfProxy(filePath);
   let bboxMeta: Awaited<ReturnType<typeof loadPecoToolBBoxMeta>> | null = null;
-  // #392: 読込開始時に warning をリセットし、private BBox stream が decode 不能なら立てる。
-  // undecodable のとき保存パスは byte-preserve で編集を反映しないため、UI 警告で透明化する。
-  useInfraStore.getState().setBboxMetaUnreadable(false);
   try {
     bboxMeta = await loadPecoToolBBoxMeta(pdf, {
       loadBytes: async () => readFile(filePath),
       filePath,
       mtime: document.mtime,
+      // #392: undecodable の再検出（reset は open/close 側に集約。ここは保存補助経路）。
       onUndecodable: () => useInfraStore.getState().setBboxMetaUnreadable(true),
     });
   } catch {
@@ -549,6 +547,9 @@ export function useFileOperations(
             }
           }
           await clearCachedPages(selected);
+          // #392: 新しいファイルを開くので undecodable 警告をリセット。直後の
+          // usePageNavigation の meta ロードで undecodable なら onUndecodable が立て直す。
+          useInfraStore.getState().setBboxMetaUnreadable(false);
           setDocument(doc);
           perf.mark('open.setDoc');
           addToRecent(selected);
@@ -964,6 +965,10 @@ export function useFileOperations(
       }
     }
 
+    // #392: undecodable なファイルは保存パスが byte-preserve するため編集が反映されない。
+    // 保存前の未保存編集の有無を記録し、ドロップ時に明示警告する（silent drop の透明化）。
+    const hadUnsavedEdits = usePecoStore.getState().isDirty
+      || Array.from(usePecoStore.getState().document?.pages.values() || []).some((p) => p.isDirty);
     isSavingRef.current = true;
     setIsSaving?.(true);
     showToast("保存処理を開始しました...");
@@ -979,7 +984,15 @@ export function useFileOperations(
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
         }
-        showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
+        if (useInfraStore.getState().bboxMetaUnreadable && hadUnsavedEdits) {
+          // #392: byte-preserve で原本を返したため編集は反映されていない。明示警告する。
+          showToast(
+            'このファイルには本バージョンで読み込めないOCRデータがあるため、編集内容は保存されませんでした。必要な変更は「名前を付けて保存」で別ファイルに書き出してください。',
+            true,
+          );
+        } else {
+          showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
+        }
         // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
         void _writeAuditLog(document.filePath).catch((e) => {
           console.warn('[save] audit log write failed (ignored):', e);
