@@ -35,6 +35,19 @@ jobs:
 
       - run: npm run test:quality
 
+      # カバレッジ計測 (warn 運用: continue-on-error=true でジョブをブロックしない)
+      # 閾値ゲートは設けない。計測・可視化のみ。フェーズ②で per-file gate 化予定。
+      - name: Measure core coverage (warn only)
+        run: npm run test:coverage
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
