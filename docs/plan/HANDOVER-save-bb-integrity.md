@@ -21,9 +21,10 @@ Discovery ラウンド1完了 → NEW3件を起票（#388/#389/#390）→ **3件
 >
 > **更新（2026-06-29 セッション3・現在地リセット）**: 状況が §1〜§4 の記述を追い越した。`fix/save-bb-integrity-round1` / HEAD `5e30b7d` / origin と 0 ahead 0 behind。
 > - **保存/BB修正は #388/#389/#390/#395 に加え #397（q/Q不均衡・`5e30b7d`）も commit 済み・全て push 済み**。§1 の「6ファイル未コミット」「#397 別対応 pending」は **完了済みで obsolete**（§1 の再開コマンドは実行不要）。
-> - 本セッションは「別作業WIP（本体ストレージ監視＋MMPテスト拡張）」を3コミットに整理（**未 push**）: `97a1e2d` feat(storage) 逼迫警告バナー / `9e4c627` test(save) LRU×大規模の番人を test:critical 昇格（goldenMasterLargeScale＋lruIdbRollback 合流） / `ab079ad` chore(ci) コアカバレッジ warn。再検証: **test:critical 16ファイル 258緑+1skip・回帰なし / 広域 npm test 2194緑0fail**。
+> - 本セッションは「別作業WIP（本体ストレージ監視＋MMPテスト拡張）」と新規保存テストを5コミットに整理（**未 push**）: `97a1e2d` feat(storage) 逼迫警告バナー / `9e4c627` test(save) LRU×大規模の番人を test:critical 昇格（goldenMasterLargeScale＋lruIdbRollback 合流） / `ab079ad` chore(ci) コアカバレッジ warn / `826b6d0` docs(plan) 本書含む計画/発見の整備 / `ad4ae6a` test(save) N-2/N-4/N-5＋縦書き×回転を test:critical 昇格。再検証: **test:critical 20ファイル 275緑+1skip・回帰なし / 広域 npm test 緑0fail**。
 > - ⚠️ **stash@{0} 衝突（保存パス）**: `stripStrayTextOperatorsOutsideTextObjects` の実装は **feat/save-force-cleanup-toggle（stash@{0}・別PC稼働）が所有**（pdfContentStream +146行＋sweepNonDirtyPage 配線＋pdfSaverCore）。本ブランチの `stripStrayTextOperators.test.ts` は **describe.skip で保留**。**ここで再実装しないこと**（保存パス関数を2ブランチに二重実装＝分岐回避）。当該ブランチのマージで impl が入った時に skip を外す。
-> - 🔜 **残タスク（MMP §4 item3 の未達分）**: 新規3本 **N-4 座標再抽出 / N-2 移動後反映 / N-5 編集後コピペ** と **縦書き×回転の回帰テスト** は未着手。#360/#393/#394 は pecoStore の大型WIP待ち（今回の pecoStore 差分は `MAX_CACHED_PAGES` の export 1行のみで無関係）。
+> - ✅ **MMP §4 item3 進捗**: 新規3本 **N-4 座標再抽出 / N-2 移動後反映 / N-5 編集後コピペ** と **縦書き×回転回帰** を作成・全green・test:critical 合流済み（commit `ad4ae6a`・4ファイル17ケース・グラウンドトゥルース導出→作成→敵対的検証で誤仕様固定を回避）。残るは **reachabilityGc/infraStore eviction の合流** と、pecoStore大型WIP待ちの **#360/#393/#394**（今回の pecoStore 差分は `MAX_CACHED_PAGES` export 1行のみで無関係）。
+> - 📐 **座標モデル確定（計画 §4 の "PDF_y reduce" は誤りと判明）**: 保存→pdfjs `transform[4]/[5]` 再抽出の実測で、**横書き R=90 の advance は +PDF_y（transform[5]増加）・transform[4]一定**、**縦書き R=90 は +PDF_x・transform[5]一定**。計画 §4 item3 の「R=90 で PDF_y reduce」は誤り（実際は増加・横/縦で送り軸が直交）。根拠 `getRotationCm`（pdfSaverCore.ts:566-583）。新4テストはこの真値で固定（`saveCoordReextract`/`saveVerticalRotationRegression`）。**注意**: `reloadBBoxMetaViaPdfjs` は永続JSONを返すだけで cm/baseline の座標バグを素通しする＝座標モデルは必ず transform 由来経路（`buildPecoDocumentFromRealPdf` / content-stream cm）で縛ること。
 > - 📌 **push 判断保留**: 上記3コミットは PR #391（base `feature/report-tool-sidecar`・「保存BB整合ラウンド1+2」）の scope を広げる（storage監視は別機能）。push 前に「別ブランチ/別PRに分けるか」をユーザー判断。
 
 ---
