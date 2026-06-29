@@ -63,15 +63,34 @@ function decodePdfStringValue(value: unknown): string | null {
   }
 }
 
+/** PDF の /Filter を単一フィルタ名へ正規化する。
+ * 単一名 (/FlateDecode) と、外部ツールが正規化しがちな配列形式 ([/FlateDecode]) の
+ * 両方を扱う。複数フィルタチェーン ([... /FlateDecode] 等) は inflate 単体で復号
+ * できないため null を返す（呼び出し側で未対応として扱う）。
+ */
+function resolveFilterName(filter: unknown): string | null {
+  if (!filter) return null;
+
+  const asName = (f: unknown): string | null => {
+    const like = f as { asString?: () => string } | undefined;
+    if (typeof like?.asString === 'function') return like.asString();
+    return typeof f === 'string' ? f : null;
+  };
+
+  // 配列形式 [/FlateDecode]（Acrobat 等の最適化で単一 /Filter が配列化される）
+  const arrLike = filter as { asArray?: () => unknown[] } | undefined;
+  if (typeof arrLike?.asArray === 'function') {
+    const elems = arrLike.asArray();
+    return elems.length === 1 ? asName(elems[0]) : null;
+  }
+
+  return asName(filter);
+}
+
 function decodeRawStream(stream: PDFRawStream): Uint8Array | null {
   const filter = stream.dict.lookup(PDFName.of('Filter'));
   const raw = stream.getContents();
-  const filterLike = filter as unknown as { asString?: () => string } | undefined;
-  const filterName = typeof filterLike?.asString === 'function'
-    ? filterLike.asString()
-    : typeof filter === 'string'
-      ? filter
-      : null;
+  const filterName = resolveFilterName(filter);
 
   if (filterName === '/FlateDecode' || filterName === 'FlateDecode') {
     try {

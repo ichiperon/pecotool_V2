@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { PDFDocument, PDFName } from '@cantoo/pdf-lib';
+import { deflate } from 'pako';
 import {
   readPecoToolBBoxMetaFromPdfDoc,
   writePecoToolBBoxMetaToPdfDoc,
@@ -47,6 +48,41 @@ async function makePdfDocWithInvalidFlateStream(): Promise<PDFDocument> {
   return pdfDoc;
 }
 
+/** Filter を配列形式 [/FlateDecode] で持つ FlateDecode stream を作る helper。
+ * Acrobat 等の最適化ツールが再保存時に単一 /Filter を配列へ正規化した形を再現する。
+ * 本体は実際に deflate 圧縮されている（read 側が inflate できるべき）。
+ */
+async function makePdfDocWithArrayFilterFlateStream(
+  meta: Record<string, unknown>
+): Promise<PDFDocument> {
+  const pdfDoc = await PDFDocument.create();
+
+  const context = pdfDoc.context as unknown as {
+    register: (obj: unknown) => unknown;
+    stream: (bytes: Uint8Array, dict: Record<string, unknown>) => unknown;
+    obj: (d: unknown) => unknown;
+  };
+  const catalog = pdfDoc.catalog as unknown as {
+    set: (key: PDFName, value: unknown) => void;
+  };
+
+  const compressed = deflate(new TextEncoder().encode(JSON.stringify(meta)));
+  const rawStream = context.stream(compressed, { Subtype: 'BBoxes' }) as {
+    dict: { set: (k: PDFName, v: unknown) => void };
+  };
+  // 単一名ではなく配列形式の Filter にする（[/FlateDecode]）
+  rawStream.dict.set(
+    PDFName.of('Filter'),
+    context.obj([PDFName.of('FlateDecode')]) as never
+  );
+  const streamRef = context.register(rawStream);
+
+  const pecoToolDict = context.obj({ Version: 1, BBoxes: streamRef });
+  catalog.set(PDFName.of('PecoTool'), pecoToolDict as never);
+
+  return pdfDoc;
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────
 
 describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
@@ -78,6 +114,24 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
     // legacy fallback も無いので {} を返す
     const result = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
     expect(result).toEqual({});
+  });
+
+  // ── U-PM-02b (#388 / PCT-158): 配列形式 /Filter [/FlateDecode] でも読める ──
+
+  // 根拠: 外部ツール（Acrobat の最適化等）が再保存時に単一 /Filter を配列形式
+  // [/FlateDecode] へ正規化すると、decodeRawStream が inflate せず null を返し、
+  // BBox メタが空 {} に落ちて次回保存で全 OCR BBox を上書き消失する（データ損失）。
+  it('U-PM-02b: array-form /Filter [/FlateDecode] でも inflate して meta を読める', async () => {
+    const meta = {
+      version: 2,
+      pages: {
+        '0': [{ x: 10, y: 20, w: 100, h: 30, text: 'array-filter' }],
+      },
+    };
+    const pdfDoc = await makePdfDocWithArrayFilterFlateStream(meta);
+
+    const readBack = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+    expect(readBack).toEqual(meta);
   });
 
   // ── U-PM-03: legacy /PecoToolBBoxes (Info dict) → 読み取り成功 ────────
