@@ -122,14 +122,19 @@ gh pr create --draft --base feature/report-tool-sidecar \
 | #389 | PCT-159 | normalizeNumeric "△-50000"→"--50000" 値破壊 | 3 | medium | 修正済(未コミット) |
 | #390 | PCT-160 | adjustOffset 矢印キー二重発火 | 7 | high | 修正済(未コミット) |
 
-### #388 follow-up（#392 / PCT-161）— **本対応済み（Stage1+Stage2）**
-ユーザー合意（HITL-2）で「read 境界 first-class ＋可視警告」を採用し、2段で実装完了。
-- **Stage1（保存パス・完全 byte-preserve）** commit `7a9d26c`: `readPecoToolBBoxMetaWithStatus` が `'ok'|'undecodable'|'empty'` を返す（legacy が読めれば 'ok'(legacy) を優先し旧 `private ?? legacy ?? {}` を温存）。pdfSaverCore は status==='undecodable' のとき **meta も content も一切触らず原本バイトをそのまま返す**。空・partial・準空の全経路で喪失ゼロ・meta/content 乖離ゼロ。failing-test は保存バイト全体の原本一致を assert（saveUndecodableMetaPreservation）＋過剰温存なし＋U-PM-14/15。
-  - 経緯: 当初の「meta write のみスキップ」案は御局らでんが「dirty ページ content は再描画され meta/content が乖離＝silent loss を引っ越すだけ」と反証 → 完全 byte-preserve に倒して解消。reviewer_security/architecture APPROVE・critic 反証を反映。
-- **Stage2（透明化・UI 警告）** commit `45c6942`: load 時に `onUndecodable` で検出し infraStore `bboxMetaUnreadable` を立て、StorageHealthBanner が「このPDFには読み込めないOCRデータがある／編集は保存されない／別名で書き出して」を表示。
-- 防御の残置: write 内の空メタガード（`03a8e4b`）は pdfSaverCore を経由しない別呼出への last-line defense として保持（層をコメント明記）。
-- **既知の narrow ギャップ（許容）**: legacy Info（plain string）が破損 JSON で読めない場合は status='empty' に落ち preserve されない（legacy は旧形式・破損は稀）。#392 の root cause（private stream）は完全に塞いだ。
-- クローズ判断: コード・テストは完了。issue クローズは PR マージ＋HITL-3 実機サニティ後（運用方針どおり）。
+### #388 follow-up（#392 / PCT-161）— **Stage1 完了・Stage2 は要再対応（Round3 指摘）**
+ユーザー合意（HITL-2）で「read 境界 first-class ＋可視警告」を採用。**Stage1（データ保護）は堅牢に完了。Stage2（透明化バナー）は Round3 で配線欠陥が判明し再対応が必要**。
+- ✅ **Stage1（保存パス・完全 byte-preserve）** commit `7a9d26c`: `readPecoToolBBoxMetaWithStatus` が `'ok'|'undecodable'|'empty'` を返す（legacy が読めれば 'ok'(legacy) 優先で旧 `private ?? legacy ?? {}` を温存）。pdfSaverCore は status==='undecodable' のとき **meta も content も触らず原本バイトをそのまま返す**。空・partial・準空の全経路で喪失ゼロ・乖離ゼロ。saveUndecodableMetaPreservation が保存バイト全体の原本一致を assert。reviewer_security/architecture APPROVE・critic の「meta だけ温存は content と乖離」反証を byte-preserve で解消済み。**＝ファイルの破損/喪失は起きない（出荷ゲート①は守られる）**。
+- ⚠️ **Stage2（透明化バナー）commit `45c6942` は実フローで発火しない欠陥あり（Round3 confirmed）**:
+  - `onUndecodable` の配線は `loadAllPagesWithTextBlocks`（=applyOffsetAllPages 保存パス限定）のみで、**通常オープン／通常 Ctrl+S では発火しない**。
+  - `_bboxMetaCache`（filePath+mtime）がページナビ/OCR 経路で先に充填され、保存パスでも**キャッシュヒットで onUndecodable をバイパス**。
+  - `bboxMetaUnreadable` がファイル切替/クローズで reset されず stale、dismiss でフラグ永久消滅、warn バナー後付けマウントで SR 読み上げ漏れ。
+  - 帰結: **byte-preserve は効くが警告が出ない＝編集が無警告でドロップ**（データは保護されるが透明性が未達）。
+- 🔜 **Stage2 再対応方針（次タスク・要再レビュー）**: 検出を**ファイルオープン時に直接 `readPecoToolBBoxMetaWithStatusFromBytes` で行い（キャッシュ非依存）**、reset を open/close（setDocument/handleClose）に紐付ける。可能なら**保存時にも警告**（byte-preserve が編集をドロップした瞬間に通知）。この領域は今回まさに欠陥クラスタを出したため、修正後は再度 finder/verifier レビューを通すこと。
+- ✅ **テスト false-green 修正**: lruIdbRollback（退避保護される page0 でなく実退避 page1 を検証）commit `39aa2f8`。**未対応**: U-SQM-05（dedup 未発火 vacuous）/ saveVerticalRotationRegression R=270（items 1件で空ループ）/ goldenMasterLargeScale（集約経路 _executeSave 未実行）。
+- 防御の残置: write 内の空メタガード（`03a8e4b`）は last-line defense として保持。
+- **既知の narrow ギャップ（許容）**: 破損 legacy Info(plain string) は status='empty' で preserve されない（旧形式・破損は稀）。
+- クローズ判断: Stage1 完了。issue クローズは Stage2 再対応＋PR マージ＋HITL-3 後。
 
 ### 既存issueと重複/関連（Discovery で確認・補強候補）
 - **#360**（pecoStore非同期ガード）: `replaceText(scope='all')` が `waitForPendingIdbSaves` 前に `getAllTemporaryPageData` を読み、LRU退避ページが一括置換から無音スキップ→保存欠落（`pecoStore.ts:1213-1239`）。**実P1相当**。ただし `pecoStore.ts` は未コミットWIP中 → **WIP確定後**に着手。
