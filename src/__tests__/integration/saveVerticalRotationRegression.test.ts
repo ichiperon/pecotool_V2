@@ -255,15 +255,45 @@ describe('N-4 縦書き×回転回帰: /Rotate=270', () => {
     const start = items[0].transform;
     expect(start[4]).toBeCloseTo(expectedT4Start, 0);
     expect(start[5]).toBeCloseTo(expectedT5, 0);
+    // 注: 単一ブロックは pdfjs で 1 item に束ねられ advance を観測できない（旧 for ループは
+    // items.length=1 で空回りする vacuous assert だった）。R=270 の advance 方向は (e) で
+    // 同一列2ブロックを実測して固定する。
+  }, 30_000);
 
-    // R=270 縦書きの advance は -PDF_x（PDF_x 減少）・PDF_y 一定
-    const t4s = items.map((i) => i.transform[4]);
-    const t5s = items.map((i) => i.transform[5]);
-    for (let k = 1; k < items.length; k++) {
-      expect(t4s[k]).toBeLessThan(t4s[k - 1] + 0.01); // 非増加
-    }
-    for (const t5 of t5s) {
-      expect(Math.abs(t5 - expectedT5)).toBeLessThan(2);
-    }
+  it('(e) advance=-PDF_x / PDF_y 一定: 縦方向(viewport-y増)で PDF_x が減少し PDF_y は不変（R=270）', async () => {
+    // (b2) と同型。R=270 縦書きの advance（viewport-y 増＝列が下へ伸びる）は PDF_x 減少・
+    // PDF_y 一定。単一ブロックでは観測不能なため、同一列(x 同一)の 2 ブロックで実測固定する。
+    const input = await makeRotatedBlankPdf(270);
+    const upper = { x: 100, y: 120, width: 24, height: 120 }; // viewport-y 小
+    const lower = { x: 100, y: 300, width: 24, height: 120 }; // viewport-y 大（advance 進行側）
+    const doc = makeVerticalDoc(270, upper, 'アイ');
+    const page = doc.pages.get(0)!;
+    page.textBlocks.push({
+      id: 'vblock-1',
+      text: 'カキ',
+      originalText: 'カキ',
+      bbox: lower,
+      writingMode: 'vertical',
+      order: 1,
+      isNew: false,
+      isDirty: true,
+    });
+    const saved = await buildPdfDocument(input, doc, fontBytes);
+    const items = await extractTextItems(saved);
+
+    const a = items.find((i) => i.str.includes('アイ'));
+    const b = items.find((i) => i.str.includes('カキ'));
+    expect(a, 'upper item found').toBeTruthy();
+    expect(b, 'lower item found').toBeTruthy();
+
+    const expectedT5 = PAGE_H - 100 - DR * 24; // 列位置（両ブロック同一 x）
+    // PDF_x: viewport-y 増（120→300）で減少（advance=-PDF_x）。getRotationCm:579 由来。
+    expect(a!.transform[4]).toBeCloseTo(PAGE_W - 120, 0); // 595-120=475
+    expect(b!.transform[4]).toBeCloseTo(PAGE_W - 300, 0); // 595-300=295
+    expect(b!.transform[4]).toBeLessThan(a!.transform[4]);
+    // PDF_y: advance に依らず一定
+    expect(a!.transform[5]).toBeCloseTo(expectedT5, 0);
+    expect(b!.transform[5]).toBeCloseTo(expectedT5, 0);
+    expect(Math.abs(b!.transform[5] - a!.transform[5])).toBeLessThan(0.5);
   }, 30_000);
 });
