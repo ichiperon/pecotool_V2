@@ -181,8 +181,16 @@ export function drawStaticBlockCurve(
   const glyphs = layoutTextOnCurveViewport(block.text, block.curve!, fontSize);
 
   // #240: save/restore をループ外で 1 回に削減。
-  // ループ内では setTransform で translate+rotate を直接設定し、
+  // ループ内では base 行列への復帰 (setTransform) + glyph 変換の乗算合成 (transform) で
   // glyph ごとの save/restore オーバーヘッドを排除する。
+  //
+  // PCT-169 (#400): 以前は setTransform(cos, sin, -sin, cos, gx, gy) の絶対指定で
+  // 呼び出し元 (renderStaticLayer / PdfCanvas 動的層) が applyRotationTransform で
+  // 事前適用した UI rotation を上書き消去し、回転中に curve overlay だけが
+  // 非回転位置に描画されていた。現在の変換行列を base として取得し、
+  // glyph ごとに base へ戻してから translate+rotate を乗算合成することで
+  // 事前変換 (回転含む) を保持する。
+  const base = context.getTransform();
   context.save();
   // ループ外で変わらない描画状態を先に設定
   context.lineWidth = 3;
@@ -196,8 +204,10 @@ export function drawStaticBlockCurve(
 
     const cos = Math.cos(g.rotation);
     const sin = Math.sin(g.rotation);
-    // setTransform(a, b, c, d, e, f) = 2D affine: translate(gx,gy) * rotate(rotation)
-    context.setTransform(cos, sin, -sin, cos, gx, gy);
+    // base (UI rotation 等の事前変換) に復帰してから glyph 変換を乗算合成する。
+    // transform(a, b, c, d, e, f) = 現在行列 × [translate(gx,gy) * rotate(rotation)]
+    context.setTransform(base);
+    context.transform(cos, sin, -sin, cos, gx, gy);
 
     context.fillStyle = fillColor;
     context.fillRect(-gw / 2 + inset, -inset, gw - inset * 2, gh - inset * 2);
@@ -210,8 +220,8 @@ export function drawStaticBlockCurve(
     }
   }
 
-  // transform を恒等行列に戻してから restore (後続の描画を保護)
-  context.setTransform(1, 0, 0, 1, 0, 0);
+  // transform を base (呼び出し元の事前変換) に戻してから restore (後続の描画を保護)
+  context.setTransform(base);
   context.restore();
 
   // issue #196: curve block の検索ヒット黄色ハイライトは bbox 全体に重ねる
