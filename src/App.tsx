@@ -363,7 +363,16 @@ function App() {
     if (selectedIds.size === 0 || !currentPage) return;
     perf.mark('ui.blockDelete', { count: selectedIds.size });
     const newBlocks = currentPage.textBlocks.filter(b => !selectedIds.has(b.id));
-    updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
+    // PCT-168 (issue #399): 全ブロック削除でページが空になる場合は ocrCleared を立てる。
+    // usePageNavigation の merge ガードは「isDirty && (textBlocks.length>0 || ocrCleared===true)」
+    // でユーザー編集を判定するため、空配列 + isDirty だけでは loadPage の抽出原文に
+    // 上書きされて削除が復活する。clearOcrCurrentPage と同じフラグ構成に揃える。
+    updatePageData(
+      currentPageIndex,
+      newBlocks.length === 0
+        ? { textBlocks: newBlocks, isDirty: true, isTextExtracted: true, ocrCleared: true }
+        : { textBlocks: newBlocks, isDirty: true }
+    );
     usePecoStore.getState().clearSelection();
   };
 

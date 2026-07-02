@@ -36,7 +36,7 @@ vi.mock('../../utils/pdfLoader', () => ({
 import { usePageNavigation } from '../../hooks/usePageNavigation'
 import { usePecoStore } from '../../store/pecoStore'
 import { useInfraStore } from '../../store/infraStore'
-import type { PecoDocument, PageData } from '../../types'
+import type { PecoDocument, PageData, TextBlock } from '../../types'
 
 function makePage(pageIndex: number, isDirty = false, width = 100): PageData {
   return {
@@ -893,5 +893,215 @@ describe('page input validation', () => {
 
     expect(usePecoStore.getState().currentPageIndex).toBe(2)
     expect(result.current.pageInputValue).toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// PCT-168 (issue #399): 全ブロック削除 (Ctrl+A → Delete) したページが
+// loadPage 再実行 (ページ移動→戻る / 再読込等) で抽出原文に復活しない。
+//
+// loadCurrentPage 内の merge ガード:
+//   hasUserEdits = existing.isDirty && (textBlocks.length > 0 || ocrCleared === true)
+// は「空配列 + isDirty」だけのページを編集なしと判定し、loadPage の抽出原文
+// (isDirty=false) で上書きする。そのため App.tsx の handleDelete は全削除時に
+// ocrCleared: true を立てる (clearOcrCurrentPage と同じフラグ構成)。
+// ─────────────────────────────────────────────────────────────
+
+function makeBlock(id: string, text = 'x'): TextBlock {
+  return {
+    id,
+    text,
+    originalText: text,
+    bbox: { x: 10, y: 10, width: 50, height: 12 },
+    writingMode: 'horizontal',
+    order: 0,
+    isNew: false,
+    isDirty: false,
+  }
+}
+
+describe('PCT-168 (issue #399): 全ブロック削除ページの loadPage 上書き防止 (merge ガード)', () => {
+  /**
+   * page 0 を width=0 ダミーにして loadCurrentPage を発火させ、
+   * loadPage の resolve を手動制御できるようにする共通セットアップ。
+   */
+  function setupWithControlledLoadPage() {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, makeDummyPage(0)]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({ document: doc, currentPageIndex: 0 } as any)
+
+    getSharedPdfProxyMock.mockResolvedValue({ numPages: 1 })
+    getCachedPageProxyMock.mockResolvedValue({
+      getViewport: () => ({ width: 100, height: 100 }),
+    })
+    loadPecoToolBBoxMetaMock.mockResolvedValue({ '0': [] })
+
+    let resolveLoadPage!: (p: PageData) => void
+    loadPageMock.mockReturnValue(
+      new Promise<PageData>((res) => { resolveLoadPage = res })
+    )
+
+    const stableShowToast = vi.fn()
+    const stableTriggerThumbnail = vi.fn()
+    renderHook(() =>
+      usePageNavigation({
+        currentPageIndex: 0,
+        showToast: stableShowToast,
+        triggerThumbnailLoad: stableTriggerThumbnail,
+      })
+    )
+    return { resolveLoadPage: (p: PageData) => resolveLoadPage(p) }
+  }
+
+  /** loadPage が返す「抽出原文」: 非空 textBlocks + isDirty=false。
+   *  thumbnail をマーカーにして .then 内の updatePageData 完了を検知する。 */
+  function extractedOriginal(): PageData {
+    return {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [makeBlock('orig-1'), makeBlock('orig-2')],
+      isDirty: false,
+      thumbnail: 'extracted-marker',
+    }
+  }
+
+  it('空 textBlocks + isDirty=true + ocrCleared=true の既存編集は loadPage 抽出原文で上書きされない (温存)', async () => {
+    const { resolveLoadPage } = setupWithControlledLoadPage()
+
+    await waitFor(() => expect(loadPageMock).toHaveBeenCalled())
+
+    // ユーザーの全ブロック削除を再現 (修正後の handleDelete が書く形)
+    act(() => {
+      usePecoStore.getState().updatePageData(0, {
+        textBlocks: [],
+        isDirty: true,
+        isTextExtracted: true,
+        ocrCleared: true,
+      }, false)
+    })
+
+    resolveLoadPage(extractedOriginal())
+
+    // merge 後の updatePageData 完了を thumbnail マーカーで待つ
+    // (温存/上書きどちらの分岐でも pageData の thumbnail は書き込まれる)
+    await waitFor(() => {
+      expect(usePecoStore.getState().document!.pages.get(0)!.thumbnail).toBe('extracted-marker')
+    })
+
+    const page = usePecoStore.getState().document!.pages.get(0)!
+    expect(page.textBlocks).toHaveLength(0) // 削除が温存される (復活しない)
+    expect(page.isDirty).toBe(true)         // dirty も温存 (保存 PDF に削除が反映される)
+    expect(page.ocrCleared).toBe(true)      // 次の loadPage サイクルでもガードが効く
+  })
+
+  it('ocrCleared を立てない空 dirty ページは抽出原文で上書きされる (ガードの既存契約 = handleDelete が ocrCleared を立てる理由)', async () => {
+    const { resolveLoadPage } = setupWithControlledLoadPage()
+
+    await waitFor(() => expect(loadPageMock).toHaveBeenCalled())
+
+    // 修正前の handleDelete が書いていた形 (ocrCleared なし)。
+    // width=0 stub や clearOcrAllPages ダミーを実データで置換するための
+    // ガード仕様上、この形は「編集なし」と判定される。
+    act(() => {
+      usePecoStore.getState().updatePageData(0, {
+        textBlocks: [],
+        isDirty: true,
+        isTextExtracted: true,
+      }, false)
+    })
+
+    resolveLoadPage(extractedOriginal())
+
+    await waitFor(() => {
+      expect(usePecoStore.getState().document!.pages.get(0)!.thumbnail).toBe('extracted-marker')
+    })
+
+    const page = usePecoStore.getState().document!.pages.get(0)!
+    expect(page.textBlocks).toHaveLength(2) // 抽出原文が復活する (PCT-168 のバグ経路そのもの)
+    expect(page.isDirty).toBe(false)
+  })
+})
+
+describe('PCT-168 (issue #399): handleDelete の全削除で ocrCleared が立つ (契約検証)', () => {
+  /**
+   * 検証対象: App.tsx の handleDelete と同一仕様の関数。
+   * App.tsx 内に inline 定義されているため、契約 (全削除時に ocrCleared: true を
+   * updatePageData へ渡す) のみをここで担保する。
+   * 仕様逸脱した場合、本関数と App.tsx を同時に修正する。
+   */
+  function handleDeleteSpec() {
+    const { document, currentPageIndex, selectedIds, updatePageData } = usePecoStore.getState()
+    const currentPage = document?.pages.get(currentPageIndex)
+    if (selectedIds.size === 0 || !currentPage) return
+    const newBlocks = currentPage.textBlocks.filter(b => !selectedIds.has(b.id))
+    updatePageData(
+      currentPageIndex,
+      newBlocks.length === 0
+        ? { textBlocks: newBlocks, isDirty: true, isTextExtracted: true, ocrCleared: true }
+        : { textBlocks: newBlocks, isDirty: true }
+    )
+    usePecoStore.getState().clearSelection()
+  }
+
+  function setupPageWithBlocks(blocks: TextBlock[], selected: string[]) {
+    const doc: PecoDocument = {
+      filePath: 'test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map<number, PageData>([[0, {
+        pageIndex: 0,
+        width: 100,
+        height: 100,
+        textBlocks: blocks,
+        isDirty: false,
+        thumbnail: null,
+        isTextExtracted: true,
+      }]]),
+      mtime: 1234,
+    }
+    usePecoStore.setState({
+      document: doc,
+      currentPageIndex: 0,
+      selectedIds: new Set(selected),
+    } as any)
+  }
+
+  it('3手再現: 全ブロック選択 → Delete で textBlocks=[] + isDirty=true + ocrCleared=true が立つ', () => {
+    const blocks = [makeBlock('a'), makeBlock('b')]
+    setupPageWithBlocks(blocks, ['a', 'b']) // 手1: Ctrl+A 相当 (全選択)
+
+    handleDeleteSpec() // 手2: Delete
+
+    // 手3: この状態でページ移動→戻る (loadPage 再実行) が起きても、
+    // 上の merge ガードテストが示す通り ocrCleared=true で温存される。
+    const page = usePecoStore.getState().document!.pages.get(0)!
+    expect(page.textBlocks).toHaveLength(0)
+    expect(page.isDirty).toBe(true)
+    expect(page.ocrCleared).toBe(true)
+    expect(page.isTextExtracted).toBe(true)
+    expect(usePecoStore.getState().selectedIds.size).toBe(0)
+  })
+
+  it('部分削除 (ページに残ブロックあり) では ocrCleared を立てない', () => {
+    const blocks = [makeBlock('a'), makeBlock('b')]
+    setupPageWithBlocks(blocks, ['a'])
+
+    handleDeleteSpec()
+
+    const page = usePecoStore.getState().document!.pages.get(0)!
+    expect(page.textBlocks).toHaveLength(1)
+    expect(page.textBlocks[0].id).toBe('b')
+    expect(page.isDirty).toBe(true)
+    // 非空ページは merge ガードが textBlocks.length > 0 で守るため、
+    // ocrCleared は導入しない (OCR 再実行時の false リセット経路とも整合)
+    expect(page.ocrCleared).toBeUndefined()
   })
 })
