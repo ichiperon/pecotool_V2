@@ -26,6 +26,7 @@ vi.mock('pdfjs-dist', () => ({ default: {} }))
 vi.mock('../../utils/pdfLoader', () => ({ getCachedPageProxy: vi.fn() }))
 
 import { drawStaticBlock, drawStaticBlockCurve, renderStaticLayer } from '../../utils/pdfCanvasRender'
+import { layoutTextOnCurveViewport } from '../../utils/curveGlyphLayout'
 import type { TextBlock, CurveDefinition } from '../../types'
 
 function makeMockContext() {
@@ -42,6 +43,10 @@ function makeMockContext() {
     translate: vi.fn(),
     scale: vi.fn(),
     rotate: vi.fn(),
+    // PCT-169: drawStaticBlockCurve は現在の変換行列を getTransform で取得し
+    // base として復帰に使う。既定は恒等行列 (rotation なし相当)。
+    getTransform: vi.fn(() => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 })),
+    transform: vi.fn(),
     setTransform: vi.fn(),
     setLineDash: vi.fn(),
     fillStyle: '',
@@ -248,8 +253,9 @@ describe('PdfCanvas static layer – curve block (Phase 4 #188)', () => {
     // #240: save/restore はループ外で 1 回だけ (per-glyph save/restore は廃止)
     expect(ctx.save).toHaveBeenCalledTimes(1)
     expect(ctx.restore).toHaveBeenCalledTimes(1)
-    // ループ内では setTransform で translate+rotate を直接設定する (字数分)
-    expect(ctx.setTransform).toHaveBeenCalledTimes(text.length + 1) // +1 は恒等行列リセット
+    // PCT-169: ループ内では setTransform(base) で復帰 → transform で glyph 変換を乗算合成
+    expect(ctx.setTransform).toHaveBeenCalledTimes(text.length + 1) // +1 はループ後の base 復帰
+    expect(ctx.transform).toHaveBeenCalledTimes(text.length)
   })
 
   it('axis-aligned (curve なし) block は依然として fillRect が 1 回', () => {
@@ -758,5 +764,142 @@ describe('PdfCanvas overlay – curve block in dynamic layer (#290)', () => {
 
     // 静的層では selectedIds に含まれるブロックはスキップ
     expect(ctx.fillRect).not.toHaveBeenCalled()
+  })
+})
+
+// ── PCT-169 (#400): UI 回転中の curve overlay が回転を保持すること ──────────
+// バグ: drawStaticBlockCurve の glyph ループが setTransform(cos, sin, -sin, cos, gx, gy)
+// の絶対指定で、呼び出し元が applyRotationTransform で事前適用した UI rotation を
+// 上書き消去 → 回転中 curve overlay だけ非回転位置に描画されていた。
+// 修正: getTransform() で base を取得し、glyph ごとに setTransform(base) で復帰 →
+// transform(...) で乗算合成する。本 describe は「絶対 setTransform の復活」を CI で縛る。
+describe('PdfCanvas static layer – curve block keeps pre-applied rotation (PCT-169 / #400)', () => {
+  const arcCurve: CurveDefinition = {
+    type: 'arc',
+    center: { x: 150, y: 150 },
+    radius: 80,
+    startAngle: Math.PI,
+    endAngle: 2 * Math.PI,
+  }
+
+  function makeCurveBlock(text: string): TextBlock {
+    return {
+      id: 'c0',
+      text,
+      originalText: '',
+      bbox: { x: 50, y: 50, width: 200, height: 40 },
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: false,
+      curve: arcCurve,
+    }
+  }
+
+  // drawStaticBlockCurve 内の fontSize 計算と同一 (scale=1, bbox.height=40)
+  const SCALE = 1
+  const FONT_SIZE = Math.max(10, 40 * SCALE * 0.8) // = 32
+
+  /** 実装と同じ layout から期待される glyph 変換行列 (a,b,c,d,e,f) を計算する */
+  function expectedGlyphMatrices(text: string) {
+    return layoutTextOnCurveViewport(text, arcCurve, FONT_SIZE).map((g) => {
+      const cos = Math.cos(g.rotation)
+      const sin = Math.sin(g.rotation)
+      return [cos, sin, -sin, cos, g.x * SCALE, g.y * SCALE]
+    })
+  }
+
+  it('R=90: 事前適用済み回転行列を base として保持する (setTransform は base 復帰のみ・glyph は transform で乗算合成)', () => {
+    // applyRotationTransform(ctx, {rotation: 90, vw: 500}) 適用後の行列に相当
+    const rotationBase = { a: 0, b: 1, c: -1, d: 0, e: 500, f: 0 }
+    const ctx = {
+      ...makeMockContext(),
+      getTransform: vi.fn(() => rotationBase),
+    }
+    const text = 'AB'
+
+    drawStaticBlockCurve(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock(text),
+      SCALE,
+      0.5,
+    )
+
+    // setTransform は「base への復帰」のみに使われる (字数分 + ループ後 1 回)。
+    // 旧バグの絶対指定 setTransform(cos, sin, -sin, cos, gx, gy) が復活すると
+    // 6 引数呼び出しが混ざってここで fail する。
+    expect(ctx.setTransform).toHaveBeenCalledTimes(text.length + 1)
+    for (const call of ctx.setTransform.mock.calls) {
+      expect(call).toEqual([rotationBase])
+    }
+
+    // glyph の translate+rotate は transform (乗算合成) で適用される
+    expect(ctx.transform.mock.calls).toEqual(expectedGlyphMatrices(text))
+  })
+
+  it('R=0 (非退行): base=恒等行列でも glyph 変換行列は従来の絶対指定と同値になる', () => {
+    const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }
+    const ctx = {
+      ...makeMockContext(),
+      getTransform: vi.fn(() => identity),
+    }
+    const text = 'XYZ'
+
+    drawStaticBlockCurve(
+      ctx as unknown as CanvasRenderingContext2D,
+      makeCurveBlock(text),
+      SCALE,
+      0.5,
+    )
+
+    // base=恒等のとき setTransform(identity) + transform(M) の合成結果は
+    // 旧実装の setTransform(M) と同一 (identity × M = M) — 従来動作の非退行を縛る。
+    expect(ctx.setTransform).toHaveBeenCalledTimes(text.length + 1)
+    for (const call of ctx.setTransform.mock.calls) {
+      expect(call).toEqual([identity])
+    }
+    expect(ctx.transform.mock.calls).toEqual(expectedGlyphMatrices(text))
+    // 描画自体も従来どおり字数分走る
+    expect(ctx.fillRect).toHaveBeenCalledTimes(text.length)
+  })
+
+  it('renderStaticLayer 経由 (rotationParams R=90): applyRotationTransform 適用後に glyph が乗算合成される', () => {
+    // renderOverlays / renderStaticLayer 相当の配線を検証する。
+    // mock は変換状態を持たないため、getTransform は「回転適用後」の行列を返す設定にする。
+    const rotationBase = { a: 0, b: 1, c: -1, d: 0, e: 500, f: 0 }
+    const ctx = {
+      ...makeMockContext(),
+      getTransform: vi.fn(() => rotationBase),
+    }
+    const canvas = makeMockCanvas(500, 500)
+    const text = 'AB'
+
+    renderStaticLayer(
+      ctx as unknown as CanvasRenderingContext2D,
+      canvas,
+      [makeCurveBlock(text)],
+      new Set(),
+      true,
+      100, // zoom=100 → scale=1
+      0.5,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { rotation: 90, vw: 500, vh: 500 },
+    )
+
+    // 1回目の transform は applyRotationTransform(R=90) の行列
+    expect(ctx.transform.mock.calls[0]).toEqual([0, 1, -1, 0, 500, 0])
+    // 以降の transform は glyph の乗算合成 (字数分)
+    expect(ctx.transform.mock.calls.slice(1)).toEqual(expectedGlyphMatrices(text))
+
+    // setTransform のうち 6 引数呼び出しは clearRect 用の恒等リセットのみ。
+    // 絶対指定の glyph setTransform (回転消去) が復活したらここで fail する。
+    const sixArgCalls = ctx.setTransform.mock.calls.filter((c) => c.length === 6)
+    expect(sixArgCalls).toEqual([[1, 0, 0, 1, 0, 0]])
+    // 残りの setTransform はすべて base 復帰 (字数分 + ループ後 1 回)
+    const matrixCalls = ctx.setTransform.mock.calls.filter((c) => c.length === 1)
+    expect(matrixCalls).toEqual(Array.from({ length: text.length + 1 }, () => [rotationBase]))
   })
 })

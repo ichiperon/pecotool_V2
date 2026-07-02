@@ -126,9 +126,14 @@ describe('buildPdfDocument / no-op short-circuit', () => {
     // のため short-circuit はせず、何らかの正常書き出しが走る。
     const out = await buildPdfDocument(withMeta, makeEmptyDocState());
     // 規定: 短絡条件は existingBBoxMeta 空 かつ legacy 無し かつ dirty 0。
-    // 既存メタありなのでこの assert は「短絡しなかった」ことだけを検証する。
-    // (byte 等価かどうかは pdf-lib の冪等性に依存するため厳密一致は要求しない)
+    // 短絡が誤発動すると入力 bytes (withMeta) が verbatim で返るため、
+    // 「入力と byte 等価でない」ことが「短絡しなかった」ことの判別になる。
+    // 正常経路では writePecoToolBBoxMetaToPdfDoc が新 flate stream を register
+    // → 旧 stream を sweep → compact 再採番 → pdf-lib save が走るので、
+    // 入力との byte 差分が発生する (PCT-171: 旧アサートは instanceof /
+    // byteLength のみで short-circuit 誤発動を検出できなかった)。
     expect(out).toBeInstanceOf(Uint8Array);
     expect(out.byteLength).toBeGreaterThan(0);
+    expect(bytesEqual(out, withMeta)).toBe(false);
   }, 30_000);
 });

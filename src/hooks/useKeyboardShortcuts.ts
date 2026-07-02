@@ -50,10 +50,12 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       const isFormEditing = tag === 'INPUT' || tag === 'TEXTAREA';
       const isContentEditing = !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
       const isEditing = isFormEditing || isContentEditing;
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !isEditing) {
+      // PCT-170: e.key は CapsLock ON や Shift 併用で大文字になる ('Z' 等)。
+      // 生比較だとショートカットが全滅するため toLowerCase() で比較する。
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !isEditing) {
         if (e.shiftKey) ac.redo();
         else ac.undo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y' && !isEditing) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y' && !e.shiftKey && !isEditing) {
         ac.redo();
       } else if ((e.ctrlKey || e.metaKey) && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0') && !isEditing) {
         // PCT-095: 編集中（contentEditable / INPUT / TEXTAREA フォーカス）は他ショートカットと一貫させてスルー
@@ -97,44 +99,50 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       const isContentEditing = !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
       const isOcrCardContent = !!target?.closest('.ocr-card-content');
       const isEditing = isFormEditing || isContentEditing;
-      if ((e.ctrlKey || e.metaKey) && e.key === 'o' && !isEditing) {
+      // PCT-170: 文字キーの比較は e.key.toLowerCase() に統一 (CapsLock / Shift 対策)。
+      // Shift 併用を意図しない分岐には !e.shiftKey を付け、Ctrl+Shift+C 等が意図せぬ
+      // alias として発火しない（WebView2 の DevTools 系アクセラレータとの二重発火防止）。
+      // CapsLock は shiftKey を立てないため CapsLock 経路（大文字 e.key + shiftKey=false）
+      // は影響を受けない。Shift 分岐を持つ z (redo) / s (別名保存) と、従来から
+      // Shift 込みで動作していた q は対象外。
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o' && !e.shiftKey && !isEditing) {
         e.preventDefault();
         // #102: OCR 実行中の Ctrl+O は no-op (handleOpen 内のガード trustが Toast を出す経路は
         // useFileOperations 側だが、ここで preventDefault しておくことで編集領域への伝播を防ぐ)
         if (ac.isOcrRunning) return;
         ac.handleOpen();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         if (e.shiftKey) ac.handleSaveAs();
         else ac.handleSave();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'q') {
         e.preventDefault();
         ac.toggleShowOcr();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !isEditing) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && !e.shiftKey && !isEditing) {
         ac.copySelected();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !isEditing) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && !e.shiftKey && !isEditing) {
         ac.pasteClipboard();
       } else if (e.key === 'Delete' && !isEditing) {
         ac.handleDelete();
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'Space' && !isEditing) {
         e.preventDefault();
         ac.handleRemoveSpaces();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.shiftKey) {
         e.preventDefault();
         window.document.querySelector<HTMLInputElement>('.search-box')?.focus();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'h' && !isEditing) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h' && !e.shiftKey && !isEditing) {
         // issue #93: Ctrl+H で Find & Replace ダイアログ。編集中は素通り (ブラウザ既定の履歴等は出ないが contentEditable では IME 等の衝突を避ける)。
         // #103: OCR 実行中はそもそも Replace を開かない (置換結果が OCR で後追い上書きされる)。
         e.preventDefault();
         if (ac.isOcrRunning) return;
         ac.openReplace?.();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'b' && !isEditing) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b' && !e.shiftKey && !isEditing) {
         e.preventDefault();
         ac.toggleDrawingMode();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'x' && !isEditing) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x' && !e.shiftKey && !isEditing) {
         e.preventDefault();
         ac.toggleSplitMode();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'g' && !isFormEditing && (!isContentEditing || isOcrCardContent)) {
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g' && !e.shiftKey && !isFormEditing && (!isContentEditing || isOcrCardContent)) {
         e.preventDefault();
         ac.handleGroup();
       } else if (e.key === 'Escape' && ac.isCurveMode && !isEditing) {

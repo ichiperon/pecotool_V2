@@ -320,6 +320,118 @@ describe('useKeyboardShortcuts: OCR 実行中ガード (issue #102 / #103)', () 
   });
 });
 
+describe('useKeyboardShortcuts: 大文字 key 正規化 (PCT-170)', () => {
+  // CapsLock ON や Shift 併用時、e.key は 'Z' 等の大文字になる。
+  // 生比較 (e.key === 'z') だとショートカット全滅するため toLowerCase() 統一の回帰を縛る。
+
+  it("CapsLock 相当: key='Z' + Ctrl で undo が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Z');
+
+    expect(actions.undo).toHaveBeenCalledTimes(1);
+    expect(actions.redo).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Shift+Z (key='Z', shiftKey=true) で redo が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Z', { shiftKey: true });
+
+    expect(actions.redo).toHaveBeenCalledTimes(1);
+    expect(actions.undo).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Shift+S (key='S', shiftKey=true) で handleSaveAs が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, 'S', { shiftKey: true });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.handleSaveAs).toHaveBeenCalledTimes(1);
+    expect(actions.handleSave).not.toHaveBeenCalled();
+  });
+
+  it("CapsLock 相当: 大文字 key で他のショートカット (Y/O/B/X/G) も発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Y');
+    press(window, 'O');
+    press(window, 'B');
+    press(window, 'X');
+    press(window, 'G');
+
+    expect(actions.redo).toHaveBeenCalledTimes(1);
+    expect(actions.handleOpen).toHaveBeenCalledTimes(1);
+    expect(actions.toggleDrawingMode).toHaveBeenCalledTimes(1);
+    expect(actions.toggleSplitMode).toHaveBeenCalledTimes(1);
+    expect(actions.handleGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it("非退行: 小文字 key='z' + Ctrl で undo が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'z');
+
+    expect(actions.undo).toHaveBeenCalledTimes(1);
+  });
+
+  it("非退行: INPUT フォーカス中は大文字 key='Z' でも undo が呼ばれない (isEditing ガード維持)", () => {
+    const actions = makeActions();
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(input, 'Z');
+
+    expect(actions.undo).not.toHaveBeenCalled();
+  });
+
+  // レビュー対応 (PCT-170): Shift 併用を意図しない分岐は !e.shiftKey でガードし、
+  // Ctrl+Shift+C (WebView2 DevTools 要素選択) 等との二重発火・意図せぬ alias 化を防ぐ。
+  it('Shift ガード: Ctrl+Shift+C / Ctrl+Shift+V は copy/paste を発火しない', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'C', { shiftKey: true });
+    press(window, 'V', { shiftKey: true });
+
+    expect(actions.copySelected).not.toHaveBeenCalled();
+    expect(actions.pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('Shift ガード: Ctrl+Shift+{Y,O,B,X,G} も発火しない (意図せぬ alias 防止)', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Y', { shiftKey: true });
+    press(window, 'O', { shiftKey: true });
+    press(window, 'B', { shiftKey: true });
+    press(window, 'X', { shiftKey: true });
+    press(window, 'G', { shiftKey: true });
+
+    expect(actions.redo).not.toHaveBeenCalled();
+    expect(actions.handleOpen).not.toHaveBeenCalled();
+    expect(actions.toggleDrawingMode).not.toHaveBeenCalled();
+    expect(actions.toggleSplitMode).not.toHaveBeenCalled();
+    expect(actions.handleGroup).not.toHaveBeenCalled();
+  });
+
+  it('非退行: Shift なしの Ctrl+C は copySelected を発火する', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'c');
+
+    expect(actions.copySelected).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('useKeyboardShortcuts: Esc split mode 解除 (issue #292)', () => {
   function pressEsc(target: EventTarget = window) {
     const event = new KeyboardEvent('keydown', {
