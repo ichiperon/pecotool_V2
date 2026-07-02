@@ -11,6 +11,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 // ダブルクリック直後のシングルクリックイベントを抑制するガード時間 (ms) (#260)
 const DOUBLE_CLICK_GUARD_MS = 300;
+// #424 (PCT-193): polyline セグメントがこの長さ (viewport 座標, zoom 非依存)
+// 未満の場合はゼロ長相当とみなす。curveGlyphLayout.ts の layoutOnPolyline が
+// `len === 0` のセグメントを無視するのと同じ意図で、丸め誤差程度の非ゼロ値
+// (ほぼ同一点のクリック) も含めて退化 curve を弾くための閾値。
+const MIN_POLYLINE_SEGMENT_LENGTH = 0.01;
 import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
 import { isCurveDefinition } from "../utils/curveDefinition";
 import type { CurveDefinition, PageData, TextBlock } from "../types";
@@ -62,6 +67,10 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
   const [curveClickPoints, setCurveClickPoints] = useState<Array<{ x: number; y: number }>>([]);
   // handle drag: どの handle を掴んでいるか (0=始点 1=中点 2=終点)、null=非ドラッグ
   const curveHandleDragRef = useRef<{ handleIndex: number; blockId: string } | null>(null);
+  // #431 FB-5: handle drag 中の mousemove を RAF に coalesce するための ref 群。
+  // useBlockDragResize (#91/#172) の dragRafRef/pendingDragPosRef と同じパターン。
+  const curveDragRafRef = useRef<number | null>(null);
+  const pendingCurveDragPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // ── #205: Polyline 作成 draft state ───────────────────────────
   const [polylineDraftPoints, setPolylineDraftPoints] = useState<Array<{ x: number; y: number }>>([]);
@@ -118,6 +127,18 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     if (!polylineDraftActive || polylineDraftPoints.length < 2) return;
     const selectedId = selectedIds.size === 1 ? Array.from(selectedIds)[0] : null;
     if (!selectedId) return;
+
+    // #424 (PCT-193): 全点が実質同一点（隣接セグメントが全てゼロ長相当）の
+    // polyline は curveGlyphLayout.ts の layoutOnPolyline が空配列を返し、
+    // 保存コアでブロックの文字が丸ごと落ちる（文字消失）。退化した curve は
+    // ここで拒否し、draft はクリアせず残す（ユーザーが別の点をクリックし直せる）。
+    const hasNonDegenerateSegment = polylineDraftPoints.some((p, i) => {
+      if (i === 0) return false;
+      const prev = polylineDraftPoints[i - 1];
+      return Math.hypot(p.x - prev.x, p.y - prev.y) >= MIN_POLYLINE_SEGMENT_LENGTH;
+    });
+    if (!hasNonDegenerateSegment) return;
+
     const page = getPageData();
     if (page) {
       const newCurve: CurveDefinition = { type: "polyline", points: polylineDraftPoints };
@@ -148,6 +169,43 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [polylineDraftActive, confirmPolylineDraft]);
+
+  // #417 (PCT-186) / PCT-139 #1: curve モード解除・ページ移動・選択変更の
+  // いずれでも、入力途中の arc 3点クリック収集 (curveClickPoints) と
+  // polyline draft を破棄する。selectedIds はページ移動 (setCurrentPage) の
+  // たびに空集合へリセットされるため、依存に含めることでページ移動も検知できる。
+  // (#288 の split hover クリアと同パターン)
+  useEffect(() => {
+    if (!isCurveMode) {
+      setCurveClickPoints([]);
+      setPolylineDraftPoints([]);
+      setPolylineDraftActive(false);
+      polylineMousePosRef.current = null;
+    }
+  }, [isCurveMode]);
+
+  useEffect(() => {
+    setCurveClickPoints([]);
+    setPolylineDraftPoints([]);
+    setPolylineDraftActive(false);
+    polylineMousePosRef.current = null;
+    // selectedIds の参照は毎回変わるが、値としての変化（ページ移動 / 選択変更）
+    // のたびにクリアしたいので依存に含める。中身の内容比較ではなく参照変化で十分
+    // （selectedIds は toggleSelection / setCurrentPage 等が呼ばれるたび新しい
+    // Set インスタンスを作る前提。既存 hitTestCurveHandle 等も同様の前提）。
+  }, [selectedIds]);
+
+  // #431 FB-5: unmount 時に保留中の curve handle drag RAF をクリーンアップ
+  // (useBlockDragResize の unmount effect と同じ安全装置)。
+  useEffect(() => {
+    return () => {
+      if (curveDragRafRef.current !== null) {
+        cancelAnimationFrame(curveDragRafRef.current);
+        curveDragRafRef.current = null;
+      }
+      pendingCurveDragPosRef.current = null;
+    };
+  }, []);
 
   /**
    * curve mode の mouseDown 処理。
@@ -203,6 +261,40 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     return true;
   }, [isCurveMode, selectedIds, polylineDraftActive, hitTestCurveHandle, canvasToViewport, curveClickPoints, getPageData, updatePageData, pageIndex]);
 
+  // #431 FB-5: curve handle drag の実処理本体。RAF コールバックおよび
+  // handleMouseUpCurve の flush (未処理 pending が残っている場合) の両方から
+  // 呼ばれる。useBlockDragResize の applyDragResize と同じ役割。
+  const applyCurveHandleDrag = useCallback((pos: { x: number; y: number }): void => {
+    if (!curveHandleDragRef.current) return;
+    const { blockId, handleIndex } = curveHandleDragRef.current;
+    const block = currentTextBlocksById.get(blockId);
+    if (!block?.curve || !isCurveDefinition(block.curve)) return;
+    const pdfPos = canvasToViewport(pos);
+    const curve = block.curve;
+
+    let newCurve: CurveDefinition | null = null;
+    if (curve.type === "arc") {
+      // 3 ハンドル位置を取得して移動先を反映
+      const handles = arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle);
+      handles[handleIndex] = pdfPos;
+      newCurve = arcFromThreePoints(handles[0], handles[1], handles[2]);
+    } else if (curve.type === "polyline") {
+      const newPoints = curve.points.map((p, i) => (i === handleIndex ? pdfPos : p));
+      newCurve = { type: "polyline", points: newPoints };
+    }
+
+    if (newCurve) {
+      const page = getPageData();
+      if (page) {
+        const newBlocks = page.textBlocks.map((b) =>
+          b.id === blockId ? { ...b, curve: newCurve as CurveDefinition, isDirty: true } : b,
+        );
+        // drag 中は undoable=false で頻度を抑える。mouseUp で確定
+        updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
+      }
+    }
+  }, [currentTextBlocksById, canvasToViewport, getPageData, updatePageData, pageIndex]);
+
   /**
    * curve mode の mouseMove 処理。
    * 処理した場合は true を返す。
@@ -222,35 +314,18 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
       return true;
     }
 
-    // curve handle drag 中: handle 位置を更新して curve を再算出
+    // #431 FB-5: curve handle drag 中: 同一フレーム内の複数 mousemove を
+    // coalesce し、RAF コールバックで 1 度だけ updatePageData を呼ぶ
+    // (useBlockDragResize の updateDragResize と同じパターン)。
     if (curveHandleDragRef.current) {
-      const { blockId, handleIndex } = curveHandleDragRef.current;
-      const block = currentTextBlocksById.get(blockId);
-      if (block?.curve && isCurveDefinition(block.curve)) {
-        const pdfPos = canvasToViewport(pos);
-        const curve = block.curve;
-
-        let newCurve: CurveDefinition | null = null;
-        if (curve.type === "arc") {
-          // 3 ハンドル位置を取得して移動先を反映
-          const handles = arcHandlePositions(curve.center, curve.radius, curve.startAngle, curve.endAngle);
-          handles[handleIndex] = pdfPos;
-          newCurve = arcFromThreePoints(handles[0], handles[1], handles[2]);
-        } else if (curve.type === "polyline") {
-          const newPoints = curve.points.map((p, i) => (i === handleIndex ? pdfPos : p));
-          newCurve = { type: "polyline", points: newPoints };
-        }
-
-        if (newCurve) {
-          const page = getPageData();
-          if (page) {
-            const newBlocks = page.textBlocks.map((b) =>
-              b.id === blockId ? { ...b, curve: newCurve as CurveDefinition, isDirty: true } : b,
-            );
-            // drag 中は undoable=false で頻度を抑える。mouseUp で確定
-            updatePageData(pageIndex, { textBlocks: newBlocks, isDirty: true }, false);
-          }
-        }
+      pendingCurveDragPosRef.current = pos;
+      if (curveDragRafRef.current === null) {
+        curveDragRafRef.current = requestAnimationFrame(() => {
+          curveDragRafRef.current = null;
+          const next = pendingCurveDragPosRef.current;
+          pendingCurveDragPosRef.current = null;
+          if (next) applyCurveHandleDrag(next);
+        });
       }
       return true;
     }
@@ -270,7 +345,7 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
     }
 
     return false;
-  }, [polylineDraftActive, renderOverlaysRef, overlayRafRef, currentTextBlocksById, canvasToViewport, getPageData, updatePageData, pageIndex, isCurveMode, hitTestCurveHandle, overlayCanvasRef]);
+  }, [polylineDraftActive, renderOverlaysRef, overlayRafRef, applyCurveHandleDrag, isCurveMode, hitTestCurveHandle, overlayCanvasRef]);
 
   /**
    * curve mode の mouseUp 処理。
@@ -279,6 +354,17 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
   const handleMouseUpCurve = useCallback((): boolean => {
     // curve handle drag 確定: 最終位置を undoable で書き込む
     if (curveHandleDragRef.current) {
+      // #431 FB-5: ドロップ位置を確実に反映するため、保留中の RAF を
+      // キャンセルして pending pos を同期的に flush する
+      // (useBlockDragResize の finishDragResize と同じ流儀)。
+      if (curveDragRafRef.current !== null) {
+        cancelAnimationFrame(curveDragRafRef.current);
+        curveDragRafRef.current = null;
+      }
+      const pendingPos = pendingCurveDragPosRef.current;
+      pendingCurveDragPosRef.current = null;
+      if (pendingPos) applyCurveHandleDrag(pendingPos);
+
       const { blockId } = curveHandleDragRef.current;
       curveHandleDragRef.current = null;
       // mouseMove 中は undoable=false で書き込んでいるため、mouseUp 時点の
@@ -297,7 +383,7 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
       return true;
     }
     return false;
-  }, [currentTextBlocksById, getPageData, updatePageData, pageIndex]);
+  }, [currentTextBlocksById, getPageData, updatePageData, pageIndex, applyCurveHandleDrag]);
 
   /**
    * curve mode の doubleClick 処理 (#205: polyline 作成開始)。
