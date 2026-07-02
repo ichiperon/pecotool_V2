@@ -979,6 +979,10 @@ export function useFileOperations(
         // 下ろす。保存中に編集されたページは参照が変わり一致しないため isDirty が
         // 保持され、次回保存の dirty フィルタに正しく載る。
         resetDirty(result.savedPageSnapshots);
+        // issue #413 (PCT-182): 監査ログの diff は「更新前の lastSavedActionIndex」
+        // を基準に計算する必要がある。setLastSavedActionIndex を先に実行すると
+        // 直後の _writeAuditLog が読む値が既に更新後になり、diff が常に空になる。
+        const preSaveActionIndex = usePecoStore.getState().lastSavedActionIndex;
         // issue #201: 保存成功時に lastSavedActionIndex を更新する
         setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
         if (result.hasPostSnapshotChanges) {
@@ -986,7 +990,7 @@ export function useFileOperations(
         }
         showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
-        void _writeAuditLog(document.filePath).catch((e) => {
+        void _writeAuditLog(document.filePath, preSaveActionIndex).catch((e) => {
           console.warn('[save] audit log write failed (ignored):', e);
         });
         // 正常保存後はバックアップファイルを削除する（fire-and-forget）
@@ -1087,6 +1091,9 @@ export function useFileOperations(
             // issue #115 / #119: 別名保存でも保存スナップショットと同一参照の
             // ページだけ dirty を下ろす。
             resetDirty(result.savedPageSnapshots);
+            // issue #413 (PCT-182): setLastSavedActionIndex 更新前の値を diff 計算に使う
+            // (通常保存と同じ非対称バグが別名保存にもあった)。
+            const preSaveActionIndex = usePecoStore.getState().lastSavedActionIndex;
             // issue #201: 保存成功時に lastSavedActionIndex を更新する
             setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
             if (result.hasPostSnapshotChanges) {
@@ -1094,7 +1101,7 @@ export function useFileOperations(
             }
             showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
             // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
-            void _writeAuditLog(path).catch((e) => {
+            void _writeAuditLog(path, preSaveActionIndex).catch((e) => {
               console.warn('[save-as] audit log write failed (ignored):', e);
             });
             addToRecent(path);
@@ -1118,9 +1125,9 @@ export function useFileOperations(
    * issue #201: 保存成功後に NDJSON 監査ログを appData/pecotool/audit/<YYYY-MM-DD>.ndjson に追記する。
    * undoStack の直近変更エントリを集約して 1 行の JSON として書き出す。
    */
-  const _writeAuditLog = async (filePath: string): Promise<void> => {
-    const { undoStack, lastSavedActionIndex } = usePecoStore.getState();
-    const diff = computeSaveDiff(undoStack, lastSavedActionIndex);
+  const _writeAuditLog = async (filePath: string, preSaveActionIndex: number): Promise<void> => {
+    const { undoStack } = usePecoStore.getState();
+    const diff = computeSaveDiff(undoStack, preSaveActionIndex);
     if (diff.entries.length === 0) return;
     const record = {
       timestamp: new Date().toISOString(),
