@@ -1182,6 +1182,111 @@ describe('pecoStore', () => {
       expect(pdfLoader.saveTemporaryPageDataBatch).not.toHaveBeenCalled()
     })
 
+    it('回帰(B-1): rotatePages は getAllTemporaryPageData 待機中のファイル切替を検出し stale set() を中止する', async () => {
+      // LRU 退避ページの回転で await 中にファイル切替が割り込むと、captured スナップショットを
+      // set() して旧ドキュメントを新ファイルへ復活させ、保存が壊れる (レビュー B-1)。
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      let resolveIdbRead!: (m: Map<string, Partial<PageData>>) => void
+      const idbRead = new Promise<Map<string, Partial<PageData>>>((r) => { resolveIdbRead = r })
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockReturnValueOnce(idbRead)
+
+      // a.pdf: 表示 index 0 を in-memory から欠落させ (LRU 退避相当) rotatePages で await を発生させる
+      usePecoStore.getState().setDocument({
+        filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[1, makePage({ pageIndex: 1 })]]),
+      })
+      await waitForPendingIdbSaves()
+
+      const rotatePromise = usePecoStore.getState().rotatePages([0], 90)
+      for (let i = 0; i < 10 && vi.mocked(pdfLoader.getAllTemporaryPageData).mock.calls.length === 0; i++) {
+        await Promise.resolve()
+      }
+      expect(pdfLoader.getAllTemporaryPageData).toHaveBeenCalledTimes(1)
+
+      // await 中に別ファイルへ切替 (documentEpoch +1)
+      usePecoStore.getState().setDocument({
+        filePath: 'b.pdf', fileName: 'b.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0 })]]),
+      })
+
+      resolveIdbRead(new Map())
+      const result = await rotatePromise
+      await waitForPendingIdbSaves()
+
+      expect(result.skippedPageIndices).toContain(0)
+      const doc = usePecoStore.getState().document
+      expect(doc?.filePath).toBe('b.pdf')        // 旧 a.pdf に復活していない
+      expect(doc?.pages.get(0)?.rotation ?? 0).toBe(0) // b.pdf のページに回転が漏れていない
+    })
+
+    it('回帰(B-1): rotatePages は await 中にコミットされた別ページ編集を丸ごと差し替えで消さない', async () => {
+      // 同一ファイル (epoch 不変) でも、captured スナップショットを wholesale set() すると
+      // await 中の OCR 等の別ページ編集が失われる。functional set の live 差分適用で保持する。
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      let resolveIdbRead!: (m: Map<string, Partial<PageData>>) => void
+      const idbRead = new Promise<Map<string, Partial<PageData>>>((r) => { resolveIdbRead = r })
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockReturnValueOnce(idbRead)
+
+      usePecoStore.getState().setDocument({
+        filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[1, makePage({ pageIndex: 1, textBlocks: [makeBlock({ text: 'old' })] })]]),
+      })
+      await waitForPendingIdbSaves()
+
+      const rotatePromise = usePecoStore.getState().rotatePages([0], 90)
+      for (let i = 0; i < 10 && vi.mocked(pdfLoader.getAllTemporaryPageData).mock.calls.length === 0; i++) {
+        await Promise.resolve()
+      }
+
+      // await 中に別ページ(1)へ編集をコミット (ファイル切替ではないので epoch 不変)
+      usePecoStore.getState().updatePageData(1, { textBlocks: [makeBlock({ text: 'committed-during-await' })] })
+
+      // IDB には退避ページ0 (src:0) が textBlocks 付きで存在する
+      resolveIdbRead(new Map([['src:0', { textBlocks: [makeBlock({ text: 'p0' })], rotation: 0 } as Partial<PageData>]]))
+      const result = await rotatePromise
+      await waitForPendingIdbSaves()
+
+      expect(result.skippedPageIndices).toEqual([])
+      const doc = usePecoStore.getState().document
+      expect(doc?.filePath).toBe('a.pdf')
+      expect(doc?.pages.get(0)?.rotation).toBe(90)                       // 退避ページの回転が適用された
+      expect(doc?.pages.get(1)?.textBlocks[0]?.text).toBe('committed-during-await') // 並行編集が保持された
+    })
+
+    it('回帰(B-1): deletePages は getAllTemporaryPageData 待機中のファイル切替を検出し中止する', async () => {
+      vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined)
+      let resolveIdbRead!: (m: Map<string, Partial<PageData>>) => void
+      const idbRead = new Promise<Map<string, Partial<PageData>>>((r) => { resolveIdbRead = r })
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockReturnValueOnce(idbRead)
+
+      // a.pdf: 削除対象 index 0 を in-memory から欠落させ deletePages で await を発生させる
+      usePecoStore.getState().setDocument({
+        filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[1, makePage({ pageIndex: 1 })]]),
+      })
+      await waitForPendingIdbSaves()
+
+      const deletePromise = usePecoStore.getState().deletePages([0])
+      for (let i = 0; i < 10 && vi.mocked(pdfLoader.getAllTemporaryPageData).mock.calls.length === 0; i++) {
+        await Promise.resolve()
+      }
+      expect(pdfLoader.getAllTemporaryPageData).toHaveBeenCalledTimes(1)
+
+      usePecoStore.getState().setDocument({
+        filePath: 'b.pdf', fileName: 'b.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0 })]]),
+      })
+
+      resolveIdbRead(new Map())
+      await deletePromise
+      await waitForPendingIdbSaves()
+
+      const doc = usePecoStore.getState().document
+      expect(doc?.filePath).toBe('b.pdf')     // 旧 a.pdf に復活していない
+      expect(doc?.totalPages).toBe(1)          // b.pdf が削除で改変されていない
+      expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled() // a.pdf への削除同期が発火しない
+    })
+
     it('S-02-03: IDB 保存失敗時、ロールバック対象 page が新しい同 idx の更新で上書きされていればロールバックしない', async () => {
       // updatePageData の LRU 退避経路でロールバックロジックが走るかを検証する。
       // setState() 内で newPages.has(idx) チェックがあるため、保存失敗後も新しい同 idx が

@@ -38,7 +38,7 @@ export function useThumbnailWindow() {
   const prevPageOrderRef = useRef<string>('');
   // 直近で通知した表示 (pageOrder) 順 rotations 文字列 (emit 内容の重複排除用)
   const prevRotationsRef = useRef<string>('');
-  // rotationsSerialized (source page index 順) の直近値。effect の再実行判定用。
+  // rotationsSerialized (pages Map の displayIndex キー順) の直近値。effect の再実行判定用。
   const prevRotationsSourceRef = useRef<string>('');
 
   const getDirtyPages = useCallback((): number[] => {
@@ -49,13 +49,16 @@ export function useThumbnailWindow() {
     return result;
   }, []);
 
-  // issue #431 (FB-6): pageOrder (display index → source page index) の順で
-  // rotation 値を並べた配列を返す。ThumbnailWindow 側は表示順で受け取るだけで
-  // よく、source page index への変換を意識しなくて済む。
+  // issue #431 (FB-6): 表示順 (display index) に沿って rotation 値を並べた配列を返す。
+  // document.pages Map は displayIndex キー (movePage / deletePages / reorder undo が
+  // すべて display index で再構築、内蔵の ThumbnailPanel も pages.get(displayIndex) 参照)。
+  // pageOrder の中身 (source page index) で引くと、並べ替え・削除後に別ページの
+  // rotation を返してしまう (pageOrder が identity のうちだけ偶然一致していた)。
+  // 表示スロット数 (= pageOrder.length) 分、displayIndex 0..n-1 で引く。
   const getRotations = useCallback((pageOrder: number[]): number[] => {
     const doc = usePecoStore.getState().document;
     if (!doc) return [];
-    return pageOrder.map((sourceIdx) => doc.pages.get(sourceIdx)?.rotation ?? 0);
+    return pageOrder.map((_, displayIdx) => doc.pages.get(displayIdx)?.rotation ?? 0);
   }, []);
 
   // --- ウィンドウ初期化（遅延生成）---

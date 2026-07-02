@@ -433,15 +433,18 @@ describe('useThumbnailWindow', () => {
   })
 
   describe('issue #431 (PCT-200 / FB-6): 別ウィンドウサムネイルに UI 回転を反映する', () => {
-    it('thumbnail:file-opened payload の rotations は pageOrder (表示順) に沿って source page の rotation を並べる', async () => {
+    it('thumbnail:file-opened payload の rotations は表示順 (displayIndex) の rotation を並べる', async () => {
+      // 本番の pages Map は displayIndex キー (movePage/deletePages/reorder undo が
+      // display で再構築、pageIndex フィールドも displayIndex に揃う)。並べ替え後
+      // pageOrder=[2,0,1] のとき、表示スロット0=元page2(270°)/1=元page0(90°)/2=元page1(0°)。
+      // makeDoc は pageIndex をキーにするため、rotation は displayIndex スロットで与える。
       usePecoStore.setState({
         document: makeDoc([
-          makePage(0, [], false, 90),
-          makePage(1, [], false, 0),
-          makePage(2, [], false, 270),
+          makePage(0, [], false, 270), // 表示スロット0 (元 page2)
+          makePage(1, [], false, 90),  // 表示スロット1 (元 page0)
+          makePage(2, [], false, 0),   // 表示スロット2 (元 page1)
         ]),
         currentPageIndex: 0,
-        // 表示順: [page2, page0, page1] → rotations は [270, 90, 0] になるはず
         pageOrder: [2, 0, 1],
       } as any)
 
@@ -451,6 +454,30 @@ describe('useThumbnailWindow', () => {
       expect(fileOpenedEmits().at(-1)?.[1]).toMatchObject({
         pageOrder: [2, 0, 1],
         rotations: [270, 90, 0],
+      })
+    })
+
+    it('回帰(B-2): 並べ替え後に source-index で引くと別ページの rotation を返す誤りを検出する', async () => {
+      // pageOrder が identity でない状態で、displayIndex 引きと source 引きが分岐する fixture。
+      // displayIndex キーの pages: slot0=0°, slot1=90°, slot2=0°。pageOrder=[2,0,1]。
+      // 正しい表示順 rotations は [slot0, slot1, slot2] = [0, 90, 0]。
+      // 旧実装 pageOrder.map(src => get(src)) だと get(2),get(0),get(1)=[0,0,90] になり不一致。
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false, 0),
+          makePage(1, [], false, 90),
+          makePage(2, [], false, 0),
+        ]),
+        currentPageIndex: 0,
+        pageOrder: [2, 0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      expect(fileOpenedEmits().at(-1)?.[1]).toMatchObject({
+        pageOrder: [2, 0, 1],
+        rotations: [0, 90, 0],
       })
     })
 
