@@ -978,6 +978,66 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
 
     unmount()
   })
+
+  // #429 (PCT-198) 是正: セクション1「queue management」は hook 内部ロジックを
+  // テストファイル内に複製した同等ロジックで検証しており、実 hook (useThumbnailPanel.ts
+  // requestThumbnail L621-631) の dedup 実装が退行しても検出できなかった。
+  // S-07 の実 hook インフラ (MockThumbnailWorker) を使い、requestThumbnail の
+  // dedup を実 hook 経由で直接検証する。
+  it('S-07-05: requestThumbnail dedup — requesting the same page twice enqueues only one worker request (real hook)', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    await setDoc('/path/A.pdf', 5)
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    // 同一ページを 2 回リクエスト → dedup により Worker への GENERATE は 1 件のみ
+    act(() => {
+      result.current.requestThumbnail(0)
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    const totalPendingGenerates = createdWorkers.reduce(
+      (sum, w) => sum + w.pendingGenerates.length,
+      0,
+    )
+    expect(totalPendingGenerates).toBe(1)
+
+    unmount()
+  })
+
+  it('S-07-06: epoch mismatch during queue processing discards in-flight results (real hook)', async () => {
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    await setDoc('/path/A.pdf', 5)
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    // A でページ 0 をリクエスト（Worker が GENERATE を保留）
+    act(() => {
+      result.current.requestThumbnail(0)
+    })
+    await flush()
+
+    const pendingWorker = createdWorkers.find((w) => w.pendingGenerates.length > 0)
+    expect(pendingWorker).toBeDefined()
+
+    // 応答が届く前にファイル切替（epoch が進み、旧 epoch の処理は中断される想定）
+    await setDoc('/path/B.pdf', 5)
+    await flush()
+
+    // 旧 epoch 宛の保留中リクエストに今さら応答しても、新 epoch の thumbnailsRef には反映されない
+    act(() => {
+      pendingWorker!.flushAllThumbnails()
+    })
+    await flush()
+
+    // B に切替後、ページ 0 の thumbnail は A 用の古い応答に汚染されず未定義のまま
+    expect(result.current.getThumbnail(0)).toBeUndefined()
+
+    unmount()
+  })
 })
 
 // ---------------------------------------------------------------------------
