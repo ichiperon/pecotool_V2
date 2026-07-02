@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import PdfViewer from "../../components/PdfViewer";
 import { usePdfStore } from "../../store/pdfStore";
+import { useReportStore } from "../../store/reportStore";
 
 // --- pdfjs-dist のモック ---
 // canvas 描画はjsdom で動作しないためモックで getDocument / getPage をスタブする。
@@ -375,5 +376,74 @@ describe("PdfViewer: ズーム操作", () => {
     usePdfStore.getState().setZoom(400);
     render(<PdfViewer />);
     expect(screen.getByRole("button", { name: "拡大" })).toBeDisabled();
+  });
+});
+
+// MA-1: PDF差し替え時に PDF固有 state（cells/confidences/pageOffsets）をリセットする。
+// 同一パス再オープンでは編集内容を消さないこと・template は保持されることも検証する。
+describe("PdfViewer: MA-1 — PDF差し替え時の抽出データリセット", () => {
+  beforeEach(() => {
+    useReportStore.setState({
+      template: { fields: [{ id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 0, y: 0, width: 10, height: 10 } }] },
+      cells: new Map([[1, [new Map([["field-1", "値A"]])]]]),
+      confidences: new Map([[1, [new Map([["field-1", 0.9]])]]]),
+      pageOffsets: new Map([[1, { dx: 5, dy: -3 }]]),
+    });
+  });
+
+  it("別の PDF を開くと cells / confidences / pageOffsets が空になる", async () => {
+    const { open } = await getDialogMock();
+    const { readFile } = await getFsMock();
+    const pdfjs = await getPdfjsMock();
+
+    usePdfStore.getState().setPdf("/pdf-A.pdf", 2);
+
+    const proxyB = makeMockProxy(3);
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(proxyB),
+    } as unknown as ReturnType<typeof pdfjs.getDocument>);
+    vi.mocked(open).mockResolvedValue("/pdf-B.pdf" as Awaited<ReturnType<typeof open>>);
+    vi.mocked(readFile).mockResolvedValue(new Uint8Array([9, 9, 9]));
+
+    render(<PdfViewer />);
+    fireEvent.click(screen.getByRole("button", { name: "PDF を開く" }));
+
+    await waitFor(() => {
+      expect(usePdfStore.getState().filePath).toBe("/pdf-B.pdf");
+    });
+
+    const state = useReportStore.getState();
+    expect(state.cells.size).toBe(0);
+    expect(state.confidences.size).toBe(0);
+    expect(state.pageOffsets.size).toBe(0);
+    // template（欄定義）は保持される
+    expect(state.template.fields).toHaveLength(1);
+  });
+
+  it("同一パスを再オープンしても cells / confidences / pageOffsets は消えない", async () => {
+    const { open } = await getDialogMock();
+    const { readFile } = await getFsMock();
+    const pdfjs = await getPdfjsMock();
+
+    usePdfStore.getState().setPdf("/pdf-A.pdf", 2);
+
+    const proxyA2 = makeMockProxy(2);
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(proxyA2),
+    } as unknown as ReturnType<typeof pdfjs.getDocument>);
+    vi.mocked(open).mockResolvedValue("/pdf-A.pdf" as Awaited<ReturnType<typeof open>>);
+    vi.mocked(readFile).mockResolvedValue(new Uint8Array([1, 1, 1]));
+
+    render(<PdfViewer />);
+    fireEvent.click(screen.getByRole("button", { name: "PDF を開く" }));
+
+    await waitFor(() => {
+      expect(pdfjs.getDocument).toHaveBeenCalled();
+    });
+
+    const state = useReportStore.getState();
+    expect(state.cells.size).toBe(1);
+    expect(state.confidences.size).toBe(1);
+    expect(state.pageOffsets.size).toBe(1);
   });
 });

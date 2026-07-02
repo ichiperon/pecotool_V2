@@ -189,6 +189,37 @@ describe("clearTemplate", () => {
   });
 });
 
+// MA-1: PDF差し替え時に cells/confidences/pageOffsets のみ初期化し、
+// template（欄定義）は保持することを検証する。
+describe("resetExtractedData", () => {
+  it("cells / confidences / pageOffsets を空にする", () => {
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([["field-1", "値"]])]]]),
+      confidences: new Map([[1, [new Map([["field-1", 0.9]])]]]),
+      pageOffsets: new Map([[1, { dx: 5, dy: -3 }]]),
+    });
+
+    useReportStore.getState().resetExtractedData();
+
+    const state = useReportStore.getState();
+    expect(state.cells.size).toBe(0);
+    expect(state.confidences.size).toBe(0);
+    expect(state.pageOffsets.size).toBe(0);
+  });
+
+  it("template（欄定義）は保持される", () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "A");
+    useReportStore.getState().addField(SAMPLE_RECT, "B");
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([["field-1", "値"]])]]]),
+    });
+
+    useReportStore.getState().resetExtractedData();
+
+    expect(useReportStore.getState().template.fields).toHaveLength(2);
+  });
+});
+
 describe("setMode / selectField", () => {
   it("モードを切り替えられる", () => {
     useReportStore.getState().setMode("defineField");

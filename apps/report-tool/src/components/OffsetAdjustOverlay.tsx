@@ -247,6 +247,19 @@ const OffsetAdjustOverlay: FC<Props> = ({ geom }) => {
     if (!isAdjusting) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // MA-4: 入力要素にフォーカス中は矢印キーをテキスト編集用として扱い、
+      // nudgePageOffset には流さない（フォーム操作中の意図しないオフセット変更を防止）。
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
       const step = e.shiftKey ? 10 : 1;
       if (e.key === "ArrowLeft") {
         e.preventDefault();

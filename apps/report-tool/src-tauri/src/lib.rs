@@ -48,7 +48,10 @@ fn estimate_confidence(text: &str, width: f64, height: f64) -> f64 {
         .filter(|c| {
             c.is_ascii_punctuation()
                 || matches!(*c, '\u{3000}'..='\u{303F}') // CJK 句読点
-                || matches!(*c, '\u{FF00}'..='\u{FF1F}') // 全角 ASCII 記号
+                // 全角 ASCII 記号（U+FF00-FF1F）から全角数字（U+FF10-FF19 ０-９）を除外。
+                // 除外しないと全角数字が常に記号扱いになり、金額セルが常時低信頼(0.5)判定される。
+                || matches!(*c, '\u{FF00}'..='\u{FF0F}') // ！＂＃＄％＆＇（）＊＋，－．／ 等
+                || matches!(*c, '\u{FF1A}'..='\u{FF1F}') // ：；＜＝＞？
         })
         .count() as f64;
     let symbol_ratio = symbol_count / char_count;
@@ -546,6 +549,39 @@ mod tests {
         assert!(
             (score - 0.9).abs() < f64::EPSILON,
             "normal text should be 0.9, got: {score}"
+        );
+    }
+
+    // PCT-200 MA-8: 全角数字（U+FF10-FF19）は記号ではないため、記号率判定に含めてはいけない。
+    // 金額セルの多くは全角数字のみで構成されるため、ここが誤って symbol 扱いだと
+    // 常時 0.5 (低信頼) になりハイライトが氾濫する。
+    #[test]
+    fn estimate_confidence_fullwidth_digits_returns_high() {
+        // "１２３４５６" は全角数字6文字のみ。記号は0文字なので symbol_ratio=0 → 高信頼のはず。
+        let score = estimate_confidence("１２３４５６", 100.0, 20.0);
+        assert!(
+            (score - 0.9).abs() < f64::EPSILON,
+            "fullwidth digits should not be treated as symbols, expected 0.9, got: {score}"
+        );
+    }
+
+    #[test]
+    fn estimate_confidence_fullwidth_digits_with_yen_mark_returns_high() {
+        // "￥１２，０００" 相当のケース: 全角数字4 + 全角カンマ1 = symbol_ratio = 1/5 = 20% <= 50%
+        let score = estimate_confidence("１２，０００", 100.0, 20.0);
+        assert!(
+            (score - 0.9).abs() < f64::EPSILON,
+            "mostly fullwidth digits with one fullwidth comma should stay high, got: {score}"
+        );
+    }
+
+    #[test]
+    fn estimate_confidence_fullwidth_symbol_range_boundaries_still_low() {
+        // U+FF0C(，) と U+FF1A(：) は全角数字レンジの外側の記号。分割後も記号率判定は機能すること。
+        let score = estimate_confidence("，，，：：：", 100.0, 20.0);
+        assert!(
+            (score - 0.5).abs() < f64::EPSILON,
+            "fullwidth symbols outside the digit range should still count as symbols, got: {score}"
         );
     }
 

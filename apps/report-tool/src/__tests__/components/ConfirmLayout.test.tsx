@@ -40,6 +40,7 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     isRunning: false,
     progress: null,
     reocrTarget: null,
+    failedPages: [],
     runOcr: vi.fn(),
     cancelOcr: vi.fn(),
     runOcrForPage: vi.fn().mockResolvedValue(undefined),

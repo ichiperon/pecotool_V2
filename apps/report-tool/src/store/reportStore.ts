@@ -66,6 +66,12 @@ interface ReportState {
    */
   setFieldLineItem: (id: string, value: boolean) => void;
   clearTemplate: () => void;
+  /**
+   * PDF差し替え時に PDF固有の抽出データのみ初期化する。
+   * cells / confidences / pageOffsets を空にする。
+   * template（欄定義）は差し替え後の新PDFでも再利用するため保持する。
+   */
+  resetExtractedData: () => void;
   setCells: (matrix: CellMatrix) => void;
   setMode: (mode: EditorMode) => void;
   selectField: (id: string | null) => void;
@@ -234,6 +240,10 @@ export const useReportStore = create<ReportState>((set) => ({
 
   clearTemplate: () => {
     set({ template: { fields: [] }, pageOffsets: new Map(), confidences: new Map() });
+  },
+
+  resetExtractedData: () => {
+    set({ cells: new Map(), confidences: new Map(), pageOffsets: new Map() });
   },
 
   setCells: (matrix) => {
