@@ -45,39 +45,36 @@ describe("getSplitRatioSnapped", () => {
     });
   }
 
-  it("horizontal 5-grapheme block / ratio=0.5 snaps to 2/5 = 0.4", () => {
-    // 5 graphemes: "abcde". targetIdx = round(0.5 * 5) = round(2.5) = 3 (JS rounds to even? no, round(2.5)=3)
-    // Actually Math.round(2.5) = 3 in JS. safeIdx = clamp(1..4, 3) = 3. result = 3/5 = 0.6.
-    // Wait — spec says ratio=0.5 → 0.4 (2/5). Let's think: Math.round(0.5 * 5) = Math.round(2.5) = 3.
-    // Hmm, spec says "2/5". Let me re-read: targetIdx = round(0.5 * 5) = round(2.5).
-    // In JS, Math.round(2.5) === 3 (rounds up). So result = 3/5 = 0.6, not 0.4.
-    // The spec comment says "→ 0.4 (2/5)" but that would be Math.floor, not Math.round.
-    // We follow the implementation (Math.round). Expected = 3/5 = 0.6.
-    // NOTE: spec text says 0.4 but that's inconsistent with Math.round. Test matches implementation.
+  it("horizontal 5-grapheme block (all weight=1) / ratio=0.5 snaps to 2/5 = 0.4 (matches actual split via getSplitIndex)", () => {
+    // 5 graphemes "abcde", weights all 1, totalW=5. targetW = 0.5*5 = 2.5.
+    // j=0: cur=1, j=1: cur=2, j=2: cur=3 >= 2.5 → cur-targetW=0.5, weight/2=0.5 → 0.5<0.5 is false
+    // → return j=2 → 2/5 = 0.4. This matches splitBlockAtRatio's actual split boundary (#423).
     const block = makeHorizontalBlock("abcde");
     const result = getSplitRatioSnapped(block, 0.5);
-    // Math.round(0.5 * 5) = Math.round(2.5) = 3 → 3/5
-    expect(result).toBeCloseTo(3 / 5, 10);
+    expect(result).toBeCloseTo(2 / 5, 10);
   });
 
   it("horizontal 4-grapheme block / ratio=0.5 snaps to 2/4 = 0.5 (exact boundary)", () => {
+    // weights all 1, totalW=4, targetW=2. j=0:cur=1, j=1:cur=2>=2 → cur-targetW=0 < weight/2=0.5
+    // → return j+1=2 → 2/4 = 0.5
     const block = makeHorizontalBlock("abcd");
     const result = getSplitRatioSnapped(block, 0.5);
-    // Math.round(0.5 * 4) = Math.round(2) = 2 → 2/4 = 0.5
     expect(result).toBeCloseTo(0.5, 10);
   });
 
   it("ratio very close to 0 clamps to 1/n (no empty first part)", () => {
+    // targetW = 0.01*5 = 0.05. j=0: cur=1 >= 0.05 → cur-targetW=0.95, weight/2=0.5 → not < → return j=0
+    // → clamped to max(1, 0) = 1 → 1/5
     const block = makeHorizontalBlock("abcde");
     const result = getSplitRatioSnapped(block, 0.01);
-    // targetIdx = round(0.01 * 5) = round(0.05) = 0 → clamped to 1 → 1/5
     expect(result).toBeCloseTo(1 / 5, 10);
   });
 
   it("ratio very close to 1 clamps to (n-1)/n (no empty second part)", () => {
+    // targetW = 0.99*5 = 4.95. j=4: cur=5>=4.95 → cur-targetW=0.05 < weight/2=0.5 → return j+1=5
+    // → clamped to min(4, 5) = 4 → 4/5
     const block = makeHorizontalBlock("abcde");
     const result = getSplitRatioSnapped(block, 0.99);
-    // targetIdx = round(0.99 * 5) = round(4.95) = 5 → clamped to 4 → 4/5
     expect(result).toBeCloseTo(4 / 5, 10);
   });
 
@@ -92,28 +89,54 @@ describe("getSplitRatioSnapped", () => {
     expect(getSplitRatioSnapped(block, 0.7)).toBe(0.7);
   });
 
-  it("vertical block snaps the same way (grapheme count only, writing mode agnostic)", () => {
+  it("vertical block snaps the same way (weighted boundary, writing mode agnostic)", () => {
+    // "あいうえお" → 5 full-width graphemes, weight=2 each, totalW=10. ratio=0.5 → targetW=5.
+    // j=0:cur=2, j=1:cur=4, j=2:cur=6>=5 → cur-targetW=1, weight/2=1 → 1<1 is false → return j=2 → 2/5
     const block = makeVerticalBlock("あいうえお");
     const result = getSplitRatioSnapped(block, 0.5);
-    // 5 graphemes: same logic as horizontal → 3/5
-    expect(result).toBeCloseTo(3 / 5, 10);
+    expect(result).toBeCloseTo(2 / 5, 10);
   });
 
   it("surrogate-pair grapheme is treated as a single unit", () => {
-    // "A😀B" → 3 graphemes. ratio=0.5 → targetIdx=round(1.5)=2 → 2/3
+    // "A😀B" → 3 graphemes, weights [1,2,1], totalW=4. ratio=0.5 → targetW=2.
+    // j=0:cur=1<2, j=1:cur=3>=2 → cur-targetW=1, weight/2=1 → 1<1 is false → return j=1 → 1/3
     const block = makeHorizontalBlock("A😀B");
     const result = getSplitRatioSnapped(block, 0.5);
-    expect(result).toBeCloseTo(2 / 3, 10);
+    expect(result).toBeCloseTo(1 / 3, 10);
   });
 
   it("ratio outside [0,1] is clamped before snapping", () => {
     const block = makeHorizontalBlock("abcde");
     const over = getSplitRatioSnapped(block, 5);
     const under = getSplitRatioSnapped(block, -2);
-    // over: clamped to 1, targetIdx=round(5)=5→clamped to 4 → 4/5
+    // over: clamped to 1, targetW=5 (totalW). j=4:cur=5>=5 → cur-targetW=0<0.5 → return j+1=5→clamped to 4 → 4/5
     expect(over).toBeCloseTo(4 / 5, 10);
-    // under: clamped to 0, targetIdx=round(0)=0→clamped to 1 → 1/5
+    // under: clamped to 0, targetW=0. j=0:cur=1>=0 → cur-targetW=1, weight/2=0.5 → not < → return j=0→clamped to 1 → 1/5
     expect(under).toBeCloseTo(1 / 5, 10);
+  });
+
+  it("#423 regression: preview snap ratio always lands on the same grapheme boundary as the actual split", () => {
+    // 全角半角混在テキストで、あらゆる raw ratio について、プレビュー用の
+    // getSplitRatioSnapped(block, rawRatio) が指す境界と、その rawRatio をそのまま
+    // splitBlockAtRatio に渡した実分割の境界が完全一致することを確認する
+    // （#423: プレビュー線=文字数等分 / 実分割=weight加重 の食い違い防止の直接回帰）。
+    const mixedTexts = ["漢AAAA", "あいうA", "A漢A漢A", "漢字混在テキストABC123"];
+    for (const text of mixedTexts) {
+      const block = makeHorizontalBlock(text);
+      for (const rawRatio of [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]) {
+        // プレビューが「ここで割れる」と示す境界（グラフェム数換算）
+        const snapped = getSplitRatioSnapped(block, rawRatio);
+        const graphemes = Array.from(text);
+        const previewSplitIdx = Math.round(snapped * graphemes.length);
+
+        // 実分割は同じ rawRatio を直接 weight 加重ロジックに渡す
+        const result = splitBlockAtRatio(block, rawRatio);
+        expect(result).not.toBeNull();
+        const actualSplitIdx = Array.from(result!.b1.text).length;
+
+        expect(previewSplitIdx).toBe(actualSplitIdx);
+      }
+    }
   });
 });
 

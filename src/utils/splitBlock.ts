@@ -50,6 +50,9 @@ function getSplitIndex(graphemes: string[], ratio: number): number {
  * Converts a geometric ratio (0-1) to the nearest character boundary ratio.
  * Snaps to the closest grapheme boundary within 1..length-1 so the caller
  * can preview and perform splits that land exactly on a character edge.
+ * Uses the same full-width(2)/half-width(1) weighted boundary calculation as
+ * splitBlockAtRatio (via getSplitIndex) so the preview line always lands on
+ * the exact position where the actual split will occur (#423 / PCT-192).
  * Returns the original ratio unchanged when the block has 0 or 1 graphemes
  * (splitting is not meaningful; splitBlockAtRatio will return null for those).
  */
@@ -57,9 +60,7 @@ export function getSplitRatioSnapped(block: TextBlock, ratio: number): number {
   const graphemes = splitGraphemes(block.text);
   if (graphemes.length <= 1) return ratio;
   const clamped = Math.max(0, Math.min(1, ratio));
-  const targetIdx = Math.round(clamped * graphemes.length);
-  // Clamp to 1..length-1 so neither split part is empty.
-  const safeIdx = Math.max(1, Math.min(graphemes.length - 1, targetIdx));
+  const safeIdx = getSplitIndex(graphemes, clamped);
   return safeIdx / graphemes.length;
 }
 
