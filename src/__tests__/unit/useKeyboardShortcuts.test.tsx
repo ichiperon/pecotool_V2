@@ -320,6 +320,79 @@ describe('useKeyboardShortcuts: OCR 実行中ガード (issue #102 / #103)', () 
   });
 });
 
+describe('useKeyboardShortcuts: 大文字 key 正規化 (PCT-170)', () => {
+  // CapsLock ON や Shift 併用時、e.key は 'Z' 等の大文字になる。
+  // 生比較 (e.key === 'z') だとショートカット全滅するため toLowerCase() 統一の回帰を縛る。
+
+  it("CapsLock 相当: key='Z' + Ctrl で undo が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Z');
+
+    expect(actions.undo).toHaveBeenCalledTimes(1);
+    expect(actions.redo).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Shift+Z (key='Z', shiftKey=true) で redo が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Z', { shiftKey: true });
+
+    expect(actions.redo).toHaveBeenCalledTimes(1);
+    expect(actions.undo).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Shift+S (key='S', shiftKey=true) で handleSaveAs が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    const event = press(window, 'S', { shiftKey: true });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.handleSaveAs).toHaveBeenCalledTimes(1);
+    expect(actions.handleSave).not.toHaveBeenCalled();
+  });
+
+  it("CapsLock 相当: 大文字 key で他のショートカット (Y/O/B/X/G) も発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Y');
+    press(window, 'O');
+    press(window, 'B');
+    press(window, 'X');
+    press(window, 'G');
+
+    expect(actions.redo).toHaveBeenCalledTimes(1);
+    expect(actions.handleOpen).toHaveBeenCalledTimes(1);
+    expect(actions.toggleDrawingMode).toHaveBeenCalledTimes(1);
+    expect(actions.toggleSplitMode).toHaveBeenCalledTimes(1);
+    expect(actions.handleGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it("非退行: 小文字 key='z' + Ctrl で undo が発火する", () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'z');
+
+    expect(actions.undo).toHaveBeenCalledTimes(1);
+  });
+
+  it("非退行: INPUT フォーカス中は大文字 key='Z' でも undo が呼ばれない (isEditing ガード維持)", () => {
+    const actions = makeActions();
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(input, 'Z');
+
+    expect(actions.undo).not.toHaveBeenCalled();
+  });
+});
+
 describe('useKeyboardShortcuts: Esc split mode 解除 (issue #292)', () => {
   function pressEsc(target: EventTarget = window) {
     const event = new KeyboardEvent('keydown', {
