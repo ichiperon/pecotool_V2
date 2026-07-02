@@ -168,6 +168,69 @@ describe('bulkReorder - reorderBlocks (additional)', () => {
   });
 });
 
+describe('bulkReorder - reorderBlocks 推移律回帰（#426）', () => {
+  // 傾きスキャン原稿を模したケース: A.cy=100, B.cy=106, C.cy=112 で avgH=20% threshold → tvY=... を
+  // 「A≈B(差6<=tv)」「B≈C(差6<=tv)」だが「A と C(差12>tv)」が閾値超になるよう tv を選ぶ。
+  // 旧実装（隣接ペアだけを比較する fuzzy comparator）は推移律を破り、入力順によって
+  // ソート結果が揺れ得た（Array.sort の実装依存）。新実装は主軸を厳密ソートしてから
+  // 許容差でグループ化するため、入力順によらず決定的な結果になる。
+  function makeSkewedBlocks(order: string[]): TextBlock[] {
+    const specs: Record<string, { x: number; y: number }> = {
+      A: { x: 100, y: 100 },
+      B: { x: 100, y: 106 },
+      C: { x: 100, y: 112 },
+    };
+    return order.map((id, i) => ({
+      id,
+      bbox: { x: specs[id].x, y: specs[id].y, width: 50, height: 20 },
+      text: id,
+      originalText: id,
+      writingMode: 'horizontal' as const,
+      order: i,
+      isNew: false,
+      isDirty: false,
+    }));
+  }
+
+  it('U-BR-24: 非推移的な閾値境界（A≈B, B≈C だが A と C は閾値超）でも入力順によらず結果が決定的', () => {
+    // avgH=20, threshold=30% → tvY=6。|A-B|=6(<=6 同一グループ), |B-C|=6(<=6 同一グループ),
+    // |A-C|=12(>6 別グループ)。
+    const threshold = 30;
+
+    const permutations = [
+      ['A', 'B', 'C'],
+      ['C', 'B', 'A'],
+      ['B', 'A', 'C'],
+      ['B', 'C', 'A'],
+      ['A', 'C', 'B'],
+      ['C', 'A', 'B'],
+    ];
+
+    const results = permutations.map((perm) =>
+      reorderBlocks(makeSkewedBlocks(perm), 'up-down', threshold).map((b) => b.text)
+    );
+
+    // 全ての入力順で同じ出力順になること（非決定性の解消）
+    const first = results[0];
+    for (const r of results) {
+      expect(r).toEqual(first);
+    }
+  });
+
+  it('U-BR-25: 閾値内グループはX昇順、グループ間はY昇順で決定的に並ぶ', () => {
+    // A.y=100, B.y=106 は groupByTolerance でグループ先頭(A)基準の差 <=6 なので同一グループ、
+    // C.y=112 は A 基準の差=12>6 で別グループ。同一グループ内は副軸(X)でソートされる。
+    const blocks: TextBlock[] = [
+      { id: 'A', bbox: { x: 200, y: 100, width: 50, height: 20 }, text: 'A', originalText: 'A', writingMode: 'horizontal', order: 0, isNew: false, isDirty: false },
+      { id: 'B', bbox: { x: 100, y: 106, width: 50, height: 20 }, text: 'B', originalText: 'B', writingMode: 'horizontal', order: 1, isNew: false, isDirty: false },
+      { id: 'C', bbox: { x: 100, y: 112, width: 50, height: 20 }, text: 'C', originalText: 'C', writingMode: 'horizontal', order: 2, isNew: false, isDirty: false },
+    ];
+    const result = reorderBlocks(blocks, 'up-down', 30);
+    // グループ{A,B}はX昇順→B(100),A(200)。グループ{C}は単独。
+    expect(result.map((b) => b.text)).toEqual(['B', 'A', 'C']);
+  });
+});
+
 describe('bulkReorder - getDirectionLabel', () => {
   it('U-BR-22: All 8 directions return non-empty string with arrow character', () => {
     const directions = [

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { exportTextFromDocument, type TextExportFormat } from '../../utils/textExport';
+import { describe, it, expect, vi } from 'vitest';
+import { exportTextFromDocument, buildLruAwarePageDataGetter, type TextExportFormat } from '../../utils/textExport';
 import type { PecoDocument, PageData, TextBlock } from '../../types';
 
 // ─── テスト用データ構築ヘルパ ────────────────────────────────────────────────
@@ -405,5 +405,122 @@ describe('exportTextFromDocument - abnormal / boundary', () => {
     const elapsed = Date.now() - start;
     expect(result).toBe(longText);
     expect(elapsed).toBeLessThan(1000); // 1秒以内
+  });
+});
+
+// ─── buildLruAwarePageDataGetter（#427: LRU 退避ページの無警告脱落対策） ─────────
+
+describe('buildLruAwarePageDataGetter', () => {
+  it('U-TE-LRU-01: IDB 退避ページ（textBlocks あり）が displayIndex に正しく復元される', async () => {
+    const fetchAll = vi.fn().mockResolvedValue(
+      new Map([
+        ['src:1', { textBlocks: [makeBlock('r1', 'Restored', 0)], width: 595, height: 842, isDirty: true }],
+      ]),
+    );
+    const { getPageData, restoredCount, droppedPageIds } = await buildLruAwarePageDataGetter(
+      '/tmp/test.pdf',
+      [0, 1, 2], // identity pageOrder
+      fetchAll,
+    );
+    expect(fetchAll).toHaveBeenCalledWith('/tmp/test.pdf');
+    expect(restoredCount).toBe(1);
+    expect(droppedPageIds).toEqual([]);
+    const restored = getPageData(1);
+    expect(restored?.textBlocks.map(b => b.text)).toEqual(['Restored']);
+    expect(restored?.pageIndex).toBe(1);
+  });
+
+  it('U-TE-LRU-02: 全ページエクスポートに retored ページが実際に反映される（脱落しない）', async () => {
+    // page 0 のみ in-memory、page 1 は IDB 退避済み（無警告脱落していたケース）
+    const map = new Map<number, PageData>();
+    map.set(0, page0);
+    const partialDoc: PecoDocument = {
+      filePath: '/tmp/lru.pdf',
+      fileName: 'lru.pdf',
+      totalPages: 2,
+      metadata: {},
+      pages: map,
+    };
+    const fetchAll = vi.fn().mockResolvedValue(
+      new Map([
+        ['src:1', { textBlocks: page1.textBlocks, width: 595, height: 842, isDirty: false }],
+      ]),
+    );
+    const { getPageData } = await buildLruAwarePageDataGetter('/tmp/lru.pdf', [0, 1], fetchAll);
+    const result = exportTextFromDocument(partialDoc, 'txt', { getPageData });
+    // #427 修正前は page1 (Delta/Epsilon/Zeta) が無警告で欠落していた
+    expect(result).toBe('Alpha\nBeta\nGamma\n---\nDelta\nEpsilon\nZeta');
+  });
+
+  it('U-TE-LRU-03: pageOrder による並び替え後も pageId から正しい displayIndex に解決される', async () => {
+    // pageOrder=[1,0] means displayIndex 0 -> sourceIndex 1, displayIndex 1 -> sourceIndex 0
+    const fetchAll = vi.fn().mockResolvedValue(
+      new Map([
+        ['src:0', { textBlocks: [makeBlock('s0', 'SourceZero', 0)] }],
+        ['src:1', { textBlocks: [makeBlock('s1', 'SourceOne', 0)] }],
+      ]),
+    );
+    const { getPageData } = await buildLruAwarePageDataGetter('/tmp/reordered.pdf', [1, 0], fetchAll);
+    // displayIndex 0 は sourceIndex 1 (src:1 → SourceOne)
+    expect(getPageData(0)?.textBlocks[0].text).toBe('SourceOne');
+    // displayIndex 1 は sourceIndex 0 (src:0 → SourceZero)
+    expect(getPageData(1)?.textBlocks[0].text).toBe('SourceZero');
+  });
+
+  it('U-TE-LRU-04: textBlocks が欠落しているエントリは droppedPageIds に記録され無警告にならない', async () => {
+    const fetchAll = vi.fn().mockResolvedValue(
+      new Map([
+        // textBlocks を持たないエントリ（サムネイルのみ書かれた不完全エントリ等を模す）
+        ['src:2', { width: 595, height: 842 }],
+      ]),
+    );
+    const { getPageData, restoredCount, droppedPageIds } = await buildLruAwarePageDataGetter(
+      '/tmp/dropped.pdf',
+      [0, 1, 2],
+      fetchAll,
+    );
+    expect(restoredCount).toBe(0);
+    expect(droppedPageIds).toEqual(['src:2']);
+    expect(getPageData(2)).toBeUndefined();
+  });
+
+  it('U-TE-LRU-05: pageId が pageOrder に解決できない場合は無視される（displayIndex=-1 除外）', async () => {
+    const fetchAll = vi.fn().mockResolvedValue(
+      new Map([
+        // sourceIndex=99 は pageOrder に存在しない
+        ['src:99', { textBlocks: [makeBlock('x', 'Ghost', 0)] }],
+      ]),
+    );
+    const { getPageData, restoredCount } = await buildLruAwarePageDataGetter(
+      '/tmp/ghost.pdf',
+      [0, 1],
+      fetchAll,
+    );
+    expect(restoredCount).toBe(0);
+    expect(getPageData(0)).toBeUndefined();
+  });
+
+  it('U-TE-LRU-06: IDB 読み出し失敗時は例外を投げず空 Map 扱いにフォールバックする', async () => {
+    const fetchAll = vi.fn().mockRejectedValue(new Error('IDB unavailable'));
+    const { getPageData, restoredCount, droppedPageIds } = await buildLruAwarePageDataGetter(
+      '/tmp/fail.pdf',
+      [0, 1],
+      fetchAll,
+    );
+    expect(restoredCount).toBe(0);
+    expect(droppedPageIds).toEqual([]);
+    expect(getPageData(0)).toBeUndefined();
+  });
+
+  it('U-TE-LRU-07: 退避エントリが0件（空 Map）でも正常終了する', async () => {
+    const fetchAll = vi.fn().mockResolvedValue(new Map());
+    const { getPageData, restoredCount, droppedPageIds } = await buildLruAwarePageDataGetter(
+      '/tmp/empty.pdf',
+      [0, 1],
+      fetchAll,
+    );
+    expect(restoredCount).toBe(0);
+    expect(droppedPageIds).toEqual([]);
+    expect(getPageData(0)).toBeUndefined();
   });
 });

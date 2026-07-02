@@ -22,12 +22,12 @@ import { useOcrSettingsStore } from "./store/ocrSettingsStore";
 import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
 import { ask, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
-import { exportTextFromDocument, type TextExportFormat } from './utils/textExport';
-import { destroySharedPdfProxy } from "./utils/pdfLoader";
+import { exportTextFromDocument, buildLruAwarePageDataGetter, type TextExportFormat } from './utils/textExport';
+import { destroySharedPdfProxy, getAllTemporaryPageData } from "./utils/pdfLoader";
 import { readReorderThreshold, writeReorderThreshold } from "./utils/reorderThreshold";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
-import { TextBlock } from "./types";
+import { TextBlock, type PageData } from "./types";
 import { perf } from "./utils/perfLogger";
 
 // Hooks
@@ -225,6 +225,8 @@ function App() {
     savePdfAs: (targetPath) => handleSaveTo(targetPath, { bypassOcrGuard: true }),
     // issue #252: provide document snapshot without store direct access in hook
     getDocumentSnapshot: () => usePecoStore.getState().document,
+    // #427: LRU 退避ページの pageId->displayIndex 解決に pageOrder が必要
+    getPageOrder: () => usePecoStore.getState().pageOrder,
     showToast,
   });
 
@@ -262,9 +264,17 @@ function App() {
   } = usePageManagement();
 
   // issue #207: ページ回転ハンドラ
+  // PCT-183 (#414): 未ロード (IDB にも編集データが無い) ページは rotatePages が
+  // 回転を適用できずスキップする。その場合はユーザーに無音 no-op と誤解されないよう通知する。
   const handleRotatePages = useCallback((pageIndices: number[], delta: 90 | 180 | 270) => {
-    usePecoStore.getState().rotatePages(pageIndices, delta);
-  }, []);
+    void usePecoStore.getState().rotatePages(pageIndices, delta).then(({ skippedPageIndices }) => {
+      if (skippedPageIndices.length === 0) return;
+      const label = skippedPageIndices.length === 1
+        ? `ページ ${skippedPageIndices[0] + 1}`
+        : `${skippedPageIndices.length} 件のページ`;
+      showToast(`${label} は未読み込みのため回転できませんでした。一度表示してから再度お試しください。`, true);
+    });
+  }, [showToast]);
 
   // issue #208: ページ抽出ハンドラ
   const { extractPagesToFile } = usePageExtraction(showToast);
@@ -312,11 +322,20 @@ function App() {
   ) => {
     const doc = usePecoStore.getState().document;
     if (!doc) return;
+    // #427: 全ページエクスポート時は LRU 退避済みページ（document.pages から追い出された
+    // もの）も IDB から読み戻して対象に含める。replaceText 系（#104 対応）と同じ方式。
+    let getPageData: ((pageIndex: number) => PageData | undefined) | undefined;
+    let droppedPageIds: string[] = [];
+    if (scope === 'all' && doc.filePath) {
+      const pageOrder = usePecoStore.getState().pageOrder;
+      const restored = await buildLruAwarePageDataGetter(doc.filePath, pageOrder, getAllTemporaryPageData);
+      getPageData = restored.getPageData;
+      droppedPageIds = restored.droppedPageIds;
+    }
     const text = exportTextFromDocument(doc, format, {
       pageRange: scope === 'current' ? 'current' : undefined,
       currentPageIndex,
-      // TODO: LRU退避ページの取得 (getAllTemporaryPageData経由) は未実装。
-      // 現状は document.pages に乗っているページのみエクスポート対象。
+      getPageData,
     });
     const defaultName = doc.fileName.replace(/\.pdf$/i, '') + '_export.' + format;
     const filterName = format === 'txt' ? 'Text' : format === 'md' ? 'Markdown' : format.toUpperCase();
@@ -326,7 +345,11 @@ function App() {
     });
     if (!savePath) return;
     await writeTextFile(savePath, text);
-    showToast(`${savePath} にエクスポートしました`);
+    if (droppedPageIds.length > 0) {
+      showToast(`${savePath} にエクスポートしました（一部ページ ${droppedPageIds.length} 件の復元に失敗したため含まれていません）`, true);
+    } else {
+      showToast(`${savePath} にエクスポートしました`);
+    }
   }, [currentPageIndex, showToast]);
 
   const handleOpenLogFolder = useCallback(async () => {

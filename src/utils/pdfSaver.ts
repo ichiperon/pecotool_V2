@@ -97,6 +97,11 @@ export async function buildPdfDocument(
 
 let activeSaveWorker: Worker | null = null;
 let currentSaveTask: Promise<Uint8Array> | null = null;
+// 先行保存タスクを外部（次の savePDF 呼び出し）から reject するためのハンドル。
+// PREVIOUS_SAVE_TIMEOUT_MS 経過で stale worker を terminate する際、terminate は
+// 先行タスクの Promise を settle させない（onmessage/onerror が発火しないため）。
+// これを保持しておき、terminate と同時に明示 reject して宙吊りを防ぐ（#425）。
+let currentSaveReject: ((err: unknown) => void) | null = null;
 
 const PREVIOUS_SAVE_TIMEOUT_MS = 5000;
 // 保存全体のハードタイムアウト。Worker 内で fetch や pdf-lib が想定外に無応答に
@@ -127,6 +132,7 @@ export function __resetSaveStateForTest(): void {
   }
   activeSaveWorker = null;
   currentSaveTask = null;
+  currentSaveReject = null;
 }
 
 export async function savePDF(
@@ -157,6 +163,13 @@ export async function savePDF(
           try { activeSaveWorker.terminate(); } catch { /* noop: terminate の二重呼び出しは無害扱い */ }
           activeSaveWorker = null;
         }
+        // terminate は先行タスクの Promise を settle させない（onmessage/onerror が
+        // 発火しないため）。放置すると SAVE_HARD_TIMEOUT_MS(120秒) まで宙吊りになる
+        // （#425）。ここで明示的に reject し、呼び出し側へ速やかに失敗を伝える。
+        if (currentSaveReject) {
+          currentSaveReject(new Error('後続の保存操作により、前回の保存が中断されました。もう一度保存してください。'));
+          currentSaveReject = null;
+        }
         currentSaveTask = null;
       }
     } catch {
@@ -167,17 +180,25 @@ export async function savePDF(
   const task = new Promise<Uint8Array>((resolve, reject) => {
     let settled = false;
     let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
-    const settleResolve = (value: Uint8Array) => {
-      if (settled) return;
-      settled = true;
-      if (hardTimeoutId !== null) clearTimeout(hardTimeoutId);
-      resolve(value);
-    };
-    const settleReject = (err: unknown) => {
+    // このタスク専用の reject ハンドル。currentSaveReject には常にこの参照を
+    // 登録する（下の代入部を参照）。settle 時は自分が current の場合のみクリアし、
+    // 既に次のタスクに上書きされていれば触らない（多重タスクの取り違え防止）。
+    const myReject = (err: unknown) => {
       if (settled) return;
       settled = true;
       if (hardTimeoutId !== null) clearTimeout(hardTimeoutId);
       reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const settleResolve = (value: Uint8Array) => {
+      if (settled) return;
+      settled = true;
+      if (hardTimeoutId !== null) clearTimeout(hardTimeoutId);
+      if (currentSaveReject === myReject) currentSaveReject = null;
+      resolve(value);
+    };
+    const settleReject = (err: unknown) => {
+      if (currentSaveReject === myReject) currentSaveReject = null;
+      myReject(err);
     };
 
     let worker: Worker | null = null;
@@ -192,6 +213,8 @@ export async function savePDF(
       }
       const activeWorker = worker;
       activeSaveWorker = activeWorker;
+      // stale worker として terminate された際に先行 Promise を reject できるよう登録。
+      currentSaveReject = myReject;
 
       const cleanup = () => {
         if (activeSaveWorker === activeWorker) activeSaveWorker = null;

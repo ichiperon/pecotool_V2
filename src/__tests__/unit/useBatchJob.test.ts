@@ -28,10 +28,13 @@ vi.mock('@tauri-apps/api/path', () => ({
 }));
 
 // pdfLoader mock (for sidecar save helper)
+// #427: getAllTemporaryPageData も buildLruAwarePageDataGetter 経由で呼ばれるため、
+// 空 Map を返すデフォルトモックを用意する（IDB 退避ページなしのケースを模す）。
 vi.mock('../../utils/pdfLoader', () => ({
   getSharedPdfProxy: vi.fn().mockResolvedValue({
     getData: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
   }),
+  getAllTemporaryPageData: vi.fn().mockResolvedValue(new Map()),
 }));
 
 // pecoStore mock
@@ -67,6 +70,8 @@ function makeCallbacks(overrides: Partial<UseBatchJobCallbacks> = {}): UseBatchJ
     // issue #252: getDocumentSnapshot delegates to the mocked store
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     getDocumentSnapshot: vi.fn(() => (usePecoStore.getState() as any).document ?? null),
+    // #427: LRU 退避ページ解決に使う pageOrder。テストでは identity（並び替えなし）を既定にする。
+    getPageOrder: vi.fn(() => []),
     showToast: vi.fn(),
     ...overrides,
   };
@@ -283,6 +288,70 @@ describe('useBatchJob', () => {
     });
     expect(result2.current.currentJob).toBeNull();
     expect(localStorage.getItem('peco-batch-job-v1')).toBeNull();
+  });
+
+  // #430 (AQ-6): shape 検証強化 — 'id' in parsed だけでは files 欠落を検出できず、
+  // mount 時の persisted.files.some(...) が TypeError を throw して起動不能ループになっていた。
+  describe('#430 AQ-6: 破損 localStorage からの起動', () => {
+    it('files プロパティが欠落した破損データでも throw せず初期状態(currentJob=null)で起動する', () => {
+      // 'id' in parsed は満たすが files が無い、旧実装ならここで throw していたケース
+      localStorage.setItem('peco-batch-job-v1', JSON.stringify({ id: 'broken' }));
+
+      const callbacks = makeCallbacks();
+      expect(() => {
+        const { result } = renderHook(() => useBatchJob(callbacks));
+        expect(result.current.currentJob).toBeNull();
+      }).not.toThrow();
+    });
+
+    it('files が配列でない破損データでも初期状態で起動する', () => {
+      localStorage.setItem('peco-batch-job-v1', JSON.stringify({
+        id: 'broken2', folderPath: '/f', outputDir: '/out',
+        exportFormat: 'none', saveMode: 'overwrite',
+        files: 'not-an-array',
+      }));
+
+      const callbacks = makeCallbacks();
+      expect(() => {
+        const { result } = renderHook(() => useBatchJob(callbacks));
+        expect(result.current.currentJob).toBeNull();
+      }).not.toThrow();
+    });
+
+    it('files 要素が shape 不正（path/status 欠落）でも初期状態で起動する', () => {
+      localStorage.setItem('peco-batch-job-v1', JSON.stringify({
+        id: 'broken3', folderPath: '/f', outputDir: '/out',
+        exportFormat: 'none', saveMode: 'overwrite',
+        files: [{ notAPath: true }],
+      }));
+
+      const callbacks = makeCallbacks();
+      const { result } = renderHook(() => useBatchJob(callbacks));
+      expect(result.current.currentJob).toBeNull();
+    });
+
+    it('破損データは検出時に localStorage から破棄される（次回起動でも再破損しない）', () => {
+      localStorage.setItem('peco-batch-job-v1', JSON.stringify({ id: 'broken4' }));
+
+      const callbacks = makeCallbacks();
+      renderHook(() => useBatchJob(callbacks));
+
+      // 破損データは読み込み時に破棄される
+      expect(localStorage.getItem('peco-batch-job-v1')).toBeNull();
+    });
+
+    it('壊れていない正常な pending job は引き続き正しく復元される（回帰なし確認）', () => {
+      const validJob = {
+        id: 'valid-1', folderPath: '/f',
+        files: [{ path: '/f/a.pdf', status: 'pending' }],
+        outputDir: '/out', exportFormat: 'none', saveMode: 'overwrite',
+      };
+      localStorage.setItem('peco-batch-job-v1', JSON.stringify(validJob));
+
+      const callbacks = makeCallbacks();
+      const { result } = renderHook(() => useBatchJob(callbacks));
+      expect(result.current.currentJob?.id).toBe('valid-1');
+    });
   });
 
   // ── wave 5 additions ──────────────────────────────────────────────────────

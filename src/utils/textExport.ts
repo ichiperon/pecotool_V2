@@ -1,4 +1,5 @@
 import { PecoDocument, PageData } from '../types';
+import { resolveDisplayIndex } from './pageOrder';
 
 export type TextExportFormat = 'txt' | 'md' | 'csv' | 'json';
 
@@ -64,6 +65,70 @@ export function exportTextFromDocument(
     case 'json':
       return serializeJson(pages);
   }
+}
+
+/**
+ * #427: 全ページテキストエクスポート時、LRU 退避済み（document.pages から追い出された）
+ * ページの内容が無警告で脱落する問題への対処。
+ *
+ * replaceText 系（#104 対応・pecoStore.ts の scope='all' 実装）と同じ方式で、
+ * IDB (temporary_changes ストア) から退避ページの Partial<PageData> を読み出し、
+ * displayIndex をキーにした Map を組み立てる。これを `exportTextFromDocument` の
+ * `getPageData` コールバックとして渡すことで、in-memory に無いページも
+ * エクスポート対象に含められる。
+ *
+ * @param filePath 対象ファイルパス
+ * @param pageOrder 現在の pageOrder（displayIndex -> sourceIndex）
+ * @param fetchAllTemporaryPageData getAllTemporaryPageData の DI（テスト容易化のため注入可能にする）
+ * @returns
+ *   - getPageData: exportTextFromDocument にそのまま渡せるコールバック
+ *   - restoredCount: IDB から復元できたページ数
+ *   - droppedPageIds: textBlocks が欠落していて復元できなかった pageId（無警告脱落を防ぐため呼び出し元で警告表示に使う）
+ */
+export async function buildLruAwarePageDataGetter(
+  filePath: string,
+  pageOrder: number[],
+  fetchAllTemporaryPageData: (filePath: string) => Promise<Map<string, Partial<PageData>>>,
+): Promise<{
+  getPageData: (pageIndex: number) => PageData | undefined;
+  restoredCount: number;
+  droppedPageIds: string[];
+}> {
+  const restored = new Map<number, PageData>();
+  const droppedPageIds: string[] = [];
+
+  let idbAll: Map<string, Partial<PageData>>;
+  try {
+    idbAll = await fetchAllTemporaryPageData(filePath);
+  } catch {
+    // IDB 読み出し失敗時は in-memory のみにフォールバック（エクスポート自体は継続する）
+    idbAll = new Map();
+  }
+
+  for (const [pageId, partial] of idbAll.entries()) {
+    const displayIndex = resolveDisplayIndex(pageOrder, pageId);
+    if (displayIndex < 0) continue;
+    if (!partial.textBlocks) {
+      // textBlocks が無いエントリ（サムネイルのみ等）は復元不可。無警告脱落を防ぐため記録する。
+      droppedPageIds.push(pageId);
+      continue;
+    }
+    restored.set(displayIndex, {
+      pageIndex: displayIndex,
+      width: partial.width ?? 0,
+      height: partial.height ?? 0,
+      textBlocks: partial.textBlocks,
+      isDirty: partial.isDirty ?? false,
+      thumbnail: partial.thumbnail ?? null,
+      isTextExtracted: partial.isTextExtracted,
+    });
+  }
+
+  return {
+    getPageData: (pageIndex: number) => restored.get(pageIndex),
+    restoredCount: restored.size,
+    droppedPageIds,
+  };
 }
 
 // ─── ページインデックス解決 ───────────────────────────────────────────────────

@@ -40,12 +40,55 @@ export function getDirectionLabel(dir: DragDirection | null): string {
   }
 }
 
+type BlockCenter = {
+  block: TextBlock;
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+};
+
+/**
+ * 許容差（tolerance）でグループ化する。ocrSort.ts の groupByTolerance と同じ方式:
+ * 事前に主軸で厳密ソート済みの配列を、隣接要素との差が tolerance 以下なら同一グループに
+ * まとめる。閾値付き comparator（隣接ペアの差だけで直接ソートする方式）と異なり、
+ * 「a≈b かつ b≈c だが a と c は閾値超」という非推移的な関係が生じても、ソートでなく
+ * グループ化として扱うため揺れが発生しない（#426: bulkReorder の旧実装は推移律を破る
+ * 閾値付き comparator を Array.sort に渡していたため、傾きスキャン原稿で読み順が
+ * 非決定的になっていた）。
+ */
+function groupByTolerance(
+  sorted: BlockCenter[],
+  keyFn: (c: BlockCenter) => number,
+  tolerance: number
+): BlockCenter[][] {
+  const groups: BlockCenter[][] = [];
+  let current: BlockCenter[] = [];
+
+  for (const c of sorted) {
+    if (current.length === 0) {
+      current.push(c);
+    } else {
+      const groupBase = keyFn(current[0]);
+      const currVal = keyFn(c);
+      if (Math.abs(currVal - groupBase) <= tolerance) {
+        current.push(c);
+      } else {
+        groups.push(current);
+        current = [c];
+      }
+    }
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
 export function reorderBlocks(
   blocks: TextBlock[],
   direction: DragDirection,
   thresholdPercent: number
 ): TextBlock[] {
-  const centers = blocks.map(b => ({
+  const centers: BlockCenter[] = blocks.map(b => ({
     block: b,
     cx: b.bbox.x + b.bbox.width / 2,
     cy: b.bbox.y + b.bbox.height / 2,
@@ -55,55 +98,61 @@ export function reorderBlocks(
 
   const avgH = centers.length ? centers.reduce((sum, c) => sum + c.h, 0) / centers.length : 0;
   const avgW = centers.length ? centers.reduce((sum, c) => sum + c.w, 0) / centers.length : 0;
-
-  const comparePrimarySecondary = (
-    a: typeof centers[0],
-    b: typeof centers[0],
-    axisPrimary: 'x' | 'y',
-    axisSecondary: 'x' | 'y',
-    dirPrimary: 1 | -1,
-    dirSecondary: 1 | -1,
-    thresholdValue: number
-  ) => {
-    const valA = axisPrimary === 'x' ? a.cx : a.cy;
-    const valB = axisPrimary === 'x' ? b.cx : b.cy;
-
-    if (Math.abs(valA - valB) > thresholdValue) {
-      return (valA - valB) * dirPrimary;
-    }
-    
-    const secA = axisSecondary === 'x' ? a.cx : a.cy;
-    const secB = axisSecondary === 'x' ? b.cx : b.cy;
-    return (secA - secB) * dirSecondary;
-  };
-
   const tvY = avgH * (thresholdPercent / 100);
   const tvX = avgW * (thresholdPercent / 100);
 
-  centers.sort((a, b) => {
-    switch (direction) {
-      case 'up-down':
-        return comparePrimarySecondary(a, b, 'y', 'x', 1, 1, tvY);
-      case 'down-up':
-        return comparePrimarySecondary(a, b, 'y', 'x', -1, -1, tvY);
-      case 'left-right':
-        return comparePrimarySecondary(a, b, 'x', 'y', 1, 1, tvX);
-      case 'right-left':
-        return comparePrimarySecondary(a, b, 'x', 'y', -1, -1, tvX);
-      case 'topleft-bottomright':
-        return comparePrimarySecondary(a, b, 'y', 'x', 1, 1, tvY);
-      case 'bottomright-topleft':
-        return comparePrimarySecondary(a, b, 'y', 'x', -1, -1, tvY);
-      case 'topright-bottomleft':
-        return comparePrimarySecondary(a, b, 'y', 'x', 1, -1, tvY);
-      case 'bottomleft-topright':
-        return comparePrimarySecondary(a, b, 'y', 'x', -1, 1, tvY);
-      default:
-        return 0;
-    }
-  });
+  // direction ごとの主軸/副軸・昇降順・閾値を決定する。
+  // 主軸: 厳密ソート → 許容差でグループ化。副軸: 各グループ内で厳密ソート。
+  let primaryKey: (c: BlockCenter) => number;
+  let secondaryKey: (c: BlockCenter) => number;
+  let primaryAsc: boolean;
+  let secondaryAsc: boolean;
+  let tolerance: number;
 
-  return centers.map((c, i) => ({
+  switch (direction) {
+    case 'up-down':
+    case 'topleft-bottomright':
+      primaryKey = (c) => c.cy; secondaryKey = (c) => c.cx;
+      primaryAsc = true; secondaryAsc = true; tolerance = tvY;
+      break;
+    case 'down-up':
+    case 'bottomright-topleft':
+      primaryKey = (c) => c.cy; secondaryKey = (c) => c.cx;
+      primaryAsc = false; secondaryAsc = false; tolerance = tvY;
+      break;
+    case 'left-right':
+      primaryKey = (c) => c.cx; secondaryKey = (c) => c.cy;
+      primaryAsc = true; secondaryAsc = true; tolerance = tvX;
+      break;
+    case 'right-left':
+      primaryKey = (c) => c.cx; secondaryKey = (c) => c.cy;
+      primaryAsc = false; secondaryAsc = false; tolerance = tvX;
+      break;
+    case 'topright-bottomleft':
+      primaryKey = (c) => c.cy; secondaryKey = (c) => c.cx;
+      primaryAsc = true; secondaryAsc = false; tolerance = tvY;
+      break;
+    case 'bottomleft-topright':
+      primaryKey = (c) => c.cy; secondaryKey = (c) => c.cx;
+      primaryAsc = false; secondaryAsc = true; tolerance = tvY;
+      break;
+    default:
+      primaryKey = (c) => c.cy; secondaryKey = (c) => c.cx;
+      primaryAsc = true; secondaryAsc = true; tolerance = tvY;
+  }
+
+  const sorted = [...centers].sort((a, b) =>
+    primaryAsc ? primaryKey(a) - primaryKey(b) : primaryKey(b) - primaryKey(a)
+  );
+  const groups = groupByTolerance(sorted, primaryKey, tolerance);
+  for (const group of groups) {
+    group.sort((a, b) =>
+      secondaryAsc ? secondaryKey(a) - secondaryKey(b) : secondaryKey(b) - secondaryKey(a)
+    );
+  }
+  const ordered = groups.flat();
+
+  return ordered.map((c, i) => ({
     ...c.block,
     order: i,
     isDirty: true
