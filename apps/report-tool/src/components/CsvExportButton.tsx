@@ -1,9 +1,19 @@
 import { useState, type FC } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useReportStore } from "../store/reportStore";
+import { usePdfStore } from "../store/pdfStore";
 import { buildTemplateCsv } from "../logic/templateCsv";
 import { encodeCsvUtf8Bom } from "../logic/csvEncode";
 import type { CsvOptions } from "../types/report";
+
+/**
+ * フルパスからファイル名（拡張子込み）を取り出す。
+ * Tauri の filePath は Windows(\) / POSIX(/) どちらの区切りでも来うるため両対応する。
+ */
+function basenameOf(filePath: string): string {
+  const segments = filePath.split(/[\\/]/);
+  return segments[segments.length - 1] ?? filePath;
+}
 
 const DEFAULT_OPTIONS: CsvOptions = {
   includeFileName: true,
@@ -20,6 +30,7 @@ interface CsvExportButtonProps {
 const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
   const template = useReportStore((s) => s.template);
   const cells = useReportStore((s) => s.cells);
+  const pdfFilePath = usePdfStore((s) => s.filePath);
   const [opts, setOpts] = useState<CsvOptions>(DEFAULT_OPTIONS);
   const [status, setStatus] = useState<"idle" | "saving" | "done" | "error" | "unavailable">("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
@@ -38,6 +49,7 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
 
     try {
       const csv = buildTemplateCsv(template, cells, opts, {
+        fileName: pdfFilePath ? basenameOf(pdfFilePath) : "",
         pageNumbers: pageNumbers.length > 0 ? pageNumbers : [1],
       });
       const data = encodeCsvUtf8Bom(csv);
