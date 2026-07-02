@@ -89,7 +89,9 @@ describe('stripTextBlocks numeric operand drop (#41)', () => {
 });
 
 describe('hasTextOperatorsOutsideTextObjects', () => {
-  it('BT 外の TL/T*/Tf を検出する', () => {
+  it('BT 外の T*（BT 内限定演算子）を含む列は検出する', () => {
+    // PCT-167 補足: この入力は T* (BT内限定) を含むため引き続き損傷。
+    // TL/Tf 単独なら合法（下の PCT-167 ケース参照）。
     expect(hasTextOperatorsOutsideTextObjects(enc('q\n14 TL\nT*\n/F1 12 Tf\nQ\n'))).toBe(true);
   });
 
@@ -99,5 +101,48 @@ describe('hasTextOperatorsOutsideTextObjects', () => {
 
   it('文字列リテラル内の ET/T* は誤検出しない', () => {
     expect(hasTextOperatorsOutsideTextObjects(enc('q\nBT\n(Hello ET T*) Tj\nET\nQ\n'))).toBe(false);
+  });
+
+  // PCT-167 (#398): text state 演算子 (Tc/Tw/Tz/TL/Tf/Tr/Ts) は BT 外でも合法
+  // (PDF 32000-1:2008 §9.3.1)。損傷判定してしまうと sweepNonDirtyPage が
+  // 未編集ページの原本テキスト層を strip し、恒久データ損失になる。
+  describe('PCT-167: BT 外の text state 演算子は損傷としない', () => {
+    it('BT 外の Tf 単独は合法（issue #398 の再現ケース）', () => {
+      expect(hasTextOperatorsOutsideTextObjects(enc('/F1 12 Tf\nBT\n(Hello) Tj\nET\n'))).toBe(false);
+    });
+
+    it('BT 外の Tc/Tw/Tz/TL/Tr/Ts も合法', () => {
+      expect(
+        hasTextOperatorsOutsideTextObjects(
+          enc('0.5 Tc\n0.5 Tw\n100 Tz\n14 TL\n0 Tr\n1 Ts\nBT\n(Hi) Tj\nET\n'),
+        ),
+      ).toBe(false);
+    });
+
+    it('BT 外の positioning 演算子 (Td/TD/Tm/T*) は引き続き損傷とする', () => {
+      expect(hasTextOperatorsOutsideTextObjects(enc('1 0 Td\n'))).toBe(true);
+      expect(hasTextOperatorsOutsideTextObjects(enc('1 0 TD\n'))).toBe(true);
+      expect(hasTextOperatorsOutsideTextObjects(enc('1 0 0 1 0 0 Tm\n'))).toBe(true);
+      expect(hasTextOperatorsOutsideTextObjects(enc('T*\n'))).toBe(true);
+    });
+
+    it('BT 外の showing 演算子 (Tj/TJ/\'/"") は引き続き損傷とする', () => {
+      expect(hasTextOperatorsOutsideTextObjects(enc('(x) Tj\n'))).toBe(true);
+      expect(hasTextOperatorsOutsideTextObjects(enc('[(x)] TJ\n'))).toBe(true);
+      expect(hasTextOperatorsOutsideTextObjects(enc("(x) '\n"))).toBe(true);
+      expect(hasTextOperatorsOutsideTextObjects(enc('1 1 (x) "\n'))).toBe(true);
+    });
+
+    it('孤児 ET は引き続き損傷とする', () => {
+      expect(hasTextOperatorsOutsideTextObjects(enc('q\nET\nQ\n'))).toBe(true);
+    });
+
+    it('未クローズ BT は引き続き損傷とする（stream 跨ぎの誤判定解消は PCT-177 で別対応）', () => {
+      expect(hasTextOperatorsOutsideTextObjects(enc('BT\n(Hello) Tj\n'))).toBe(true);
+    });
+
+    it('文字列リテラル内の " Tf " は誤検出しない（状態機械の非退行）', () => {
+      expect(hasTextOperatorsOutsideTextObjects(enc('BT\n(set Tf here) Tj\nET\n'))).toBe(false);
+    });
   });
 });

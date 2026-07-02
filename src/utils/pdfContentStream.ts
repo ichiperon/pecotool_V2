@@ -388,6 +388,27 @@ function textOperatorOperandCount(data: Uint8Array, i: number): { length: number
 }
 
 /**
+ * BT...ET の内側でのみ合法な演算子の判定（PDF 32000-1:2008 §9.4.2 text positioning /
+ * §9.4.3 text showing）。
+ *
+ * PCT-167: text state 演算子（Tc/Tw/Tz/TL/Tf/Tr/Ts、§9.3.1 Table 103）は text object の
+ * **外にも現れてよい**（設定値は text object を跨いで保持される）ため、BT 外に単独で
+ * 現れても content stream の損傷ではない。従来は textOperatorOperandCount（strip 用の
+ * 全 text 演算子表）を損傷判定に流用していたため、BT 外の合法な Tf 等を「損傷」と
+ * 誤判定し、sweepNonDirtyPage 経由で未編集ページの原本テキスト層が strip されていた。
+ * 損傷判定に使ってよいのは BT 内限定の positioning / showing 演算子のみ。
+ * （Tj / TJ は呼び出し側で matchesToken により個別判定している）
+ */
+const TEXT_OBJECT_ONLY_OPERATORS = ['T*', 'Td', 'TD', 'Tm', "'", '"'] as const;
+
+function matchesTextObjectOnlyOperator(data: Uint8Array, i: number): boolean {
+  for (const op of TEXT_OBJECT_ONLY_OPERATORS) {
+    if (matchesOperator(data, i, op)) return true;
+  }
+  return false;
+}
+
+/**
  * 描画オペレータ（PDF 1.7 §8.5 path painting, §8.6 color, §8.8 XObject 等）の判定。
  *
  * これらが q...Q ブロック内に**含まれない**場合、その q...Q は「グラフィックスステートを
@@ -477,7 +498,9 @@ export function hasTextOperatorsOutsideTextObjects(decoded: Uint8Array): boolean
         (
           matchesToken(decoded, i, 0x54, 0x6a /* Tj */) ||
           matchesToken(decoded, i, 0x54, 0x4a /* TJ */) ||
-          textOperatorOperandCount(decoded, i) !== null
+          // PCT-167: BT 内限定演算子のみ損傷とする。text state 演算子
+          // (Tc/Tw/Tz/TL/Tf/Tr/Ts) は BT 外でも合法 (§9.3.1) のため含めない。
+          matchesTextObjectOnlyOperator(decoded, i)
         )
       ) {
         return true;
