@@ -731,6 +731,320 @@ describe('useAutoBackup isSavingRef 排他ロック (Wave-3 issue #137)', () => 
   });
 });
 
+// ── PCT-173 (#404): dirtyPages キーの sourceIndex 正規化 ──────────────────────
+
+/**
+ * PCT-173 (#404) 回帰:
+ * ページ並べ替え/削除で pageOrder≠identity になった状態で dirty ページを
+ * バックアップすると、書く側 (performBackup) は dirtyPages のキーを
+ * displayIndex ではなく sourceIndex (= pageOrder[displayIndex]) に正規化する。
+ *
+ * 復元側 (pecoStore.setDocument) は fresh open = identity 前提で
+ * pageId = "src:" + key として解釈するため、書く側が displayIndex キーのまま
+ * 保存すると復元時に編集が別ページへ注入される (保証ライン①抵触)。
+ *
+ * 検証: save_backup の pagesJson を parse し、キーが sourceIndex になっていることを確認する。
+ */
+describe('useAutoBackup performBackup sourceIndex 正規化 (PCT-173 #404)', () => {
+  beforeEach(() => {
+    resetStore();
+    vi.mocked(getAllTemporaryPageData).mockReset().mockResolvedValue(new Map());
+    vi.mocked(saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(clearTemporaryChanges).mockReset().mockResolvedValue(undefined);
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_pending_backups') return [];
+      if (cmd === 'save_backup') return undefined;
+      return undefined;
+    });
+  });
+
+  /** save_backup 呼び出しの pagesJson を parse して返す (未呼び出しなら null) */
+  function getSavedDirtyPages(): Record<string, unknown> | null {
+    const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'save_backup');
+    if (!call) return null;
+    const args = call[1] as { pagesJson: string };
+    return JSON.parse(args.pagesJson) as Record<string, unknown>;
+  }
+
+  /**
+   * pageOrder≠identity かつ dirty ページを持つ状態を組み、
+   * quietPeriod を越えて performBackup が走れる状態にする。
+   * @param pageOrder displayIndex→sourceIndex の対応 (例 [2,0,1])
+   * @param dirtyDisplayIndices dirty にする displayIndex の集合
+   */
+  function setupReorderedDirtyState(
+    nowSpy: ReturnType<typeof vi.spyOn>,
+    quietMs: number,
+    pageOrder: number[],
+    dirtyDisplayIndices: number[],
+  ): void {
+    // t=1: PDF オープン (setDocument, filePath null→test.pdf) → lastEditTime は更新されない
+    nowSpy.mockReturnValue(1);
+    const initialPages = new Map<number, PageData>();
+    for (let i = 0; i < pageOrder.length; i++) {
+      initialPages.set(i, makePage({ pageIndex: i }));
+    }
+    usePecoStore.setState({
+      document: makeDoc(initialPages),
+      pageOrder,
+      isDirty: false,
+    });
+
+    // t=1000: 編集発生 (filePath 同一, pages 参照変化) → lastEditTime=1000
+    nowSpy.mockReturnValue(1000);
+    const dirtyPages = new Map<number, PageData>();
+    for (let i = 0; i < pageOrder.length; i++) {
+      dirtyPages.set(
+        i,
+        makePage({ pageIndex: i, isDirty: dirtyDisplayIndices.includes(i) }),
+      );
+    }
+    usePecoStore.setState({
+      document: makeDoc(dirtyPages),
+      pageOrder,
+      isDirty: true,
+    });
+
+    // t=1000 + quietMs + 1: 静止期間経過後
+    nowSpy.mockReturnValue(1000 + quietMs + 1);
+  }
+
+  // S-404-01: pageOrder=[2,0,1] のとき displayIndex=0 の dirty ページは
+  // sourceIndex=2 のキーで保存される (displayIndex キーではない)
+  it('S-404-01: pageOrder≠identity のとき dirtyPages のキーは sourceIndex に正規化される', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    // pageOrder=[2,0,1]: displayIndex 0→src2, 1→src0, 2→src1
+    // displayIndex=0 のみ dirty
+    setupReorderedDirtyState(nowSpy, quietMs, [2, 0, 1], [0]);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saved = getSavedDirtyPages();
+    expect(saved).not.toBeNull();
+    // 修正前は displayIndex キー "0" で保存されバグ。修正後は sourceIndex キー "2"。
+    expect(Object.keys(saved!)).toEqual(['2']);
+    expect(saved!['0']).toBeUndefined();
+
+    nowSpy.mockRestore();
+  });
+
+  // S-404-02: 複数 dirty ページがそれぞれ正しい sourceIndex キーへ写像される
+  it('S-404-02: 複数 dirty ページが各 displayIndex → sourceIndex へ正規化される', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    // pageOrder=[2,0,1]: displayIndex 0→src2, 2→src1 を dirty に
+    setupReorderedDirtyState(nowSpy, quietMs, [2, 0, 1], [0, 2]);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saved = getSavedDirtyPages();
+    expect(saved).not.toBeNull();
+    // displayIndex 0→src2, 2→src1
+    expect(Object.keys(saved!).sort()).toEqual(['1', '2']);
+    // 元の displayIndex キー ("0") で保存されていないこと
+    expect(saved!['0']).toBeUndefined();
+
+    nowSpy.mockRestore();
+  });
+
+  // S-404-03: identity pageOrder のときは従来どおり displayIndex==sourceIndex
+  // (回帰でない: 正規化しても identity なら値が変わらないことを保証)
+  it('S-404-03: pageOrder=identity のときキーは displayIndex と一致 (退行なし)', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    // pageOrder=[0,1,2] (identity): displayIndex=1 を dirty に
+    setupReorderedDirtyState(nowSpy, quietMs, [0, 1, 2], [1]);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saved = getSavedDirtyPages();
+    expect(saved).not.toBeNull();
+    expect(Object.keys(saved!)).toEqual(['1']);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-404-04: pageOrder が undefined/空でも identity フォールバックで displayIndex キー
+  // (displayToSourcePageIndex の ?? フォールバック経路)
+  it('S-404-04: pageOrder が空配列でも identity フォールバックで displayIndex キーになる', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+
+    // pageOrder を空にしたまま dirty ページを用意する (setupReorderedDirtyState を使わず手組み)
+    nowSpy.mockReturnValue(1);
+    usePecoStore.setState({
+      document: makeDoc(new Map([[3, makePage({ pageIndex: 3 })]])),
+      pageOrder: [],
+      isDirty: false,
+    });
+    nowSpy.mockReturnValue(1000);
+    usePecoStore.setState({
+      document: makeDoc(new Map([[3, makePage({ pageIndex: 3, isDirty: true })]])),
+      pageOrder: [],
+      isDirty: true,
+    });
+    nowSpy.mockReturnValue(1000 + quietMs + 1);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saved = getSavedDirtyPages();
+    expect(saved).not.toBeNull();
+    // pageOrder 空 → displayToSourcePageIndex は displayIndex をそのまま返す → キー "3"
+    expect(Object.keys(saved!)).toEqual(['3']);
+
+    nowSpy.mockRestore();
+  });
+});
+
+// ── PCT-185 (#416): performBackup の TOCTOU 再評価 ─────────────────────────────
+
+/**
+ * PCT-185 (#416) 回帰:
+ * performBackup は冒頭ガード通過後、await (waitForPendingIdbSaves /
+ * getAllTemporaryPageData) の間に手動保存が完走すると、clear_backup 実行済みなのに
+ * 古い dirty 状態を書き戻し「偽の未保存バックアップ」を生成する (write-after-clear)。
+ *
+ * 修正: invoke('save_backup') 直前に最新 state を読み直し、
+ *   - externalIsSavingRef.current=true (手動保存が進行/完走)
+ *   - isDirty=false (保存完走で dirty 解消)
+ *   - filePath 変化 (対象ドキュメント差し替え)
+ * のいずれかなら書き戻しを中止する。
+ *
+ * 検証: getAllTemporaryPageData の await 解決フックで state を「保存完走後」へ
+ * 変化させ、save_backup が呼ばれないことを確認する。
+ */
+describe('useAutoBackup performBackup TOCTOU 再評価 (PCT-185 #416)', () => {
+  beforeEach(() => {
+    resetStore();
+    vi.mocked(saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(clearTemporaryChanges).mockReset().mockResolvedValue(undefined);
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_pending_backups') return [];
+      if (cmd === 'save_backup') return undefined;
+      return undefined;
+    });
+  });
+
+  // S-416-01: ガード通過後 (await 中) に isDirty=false へ変化したら save_backup は呼ばれない
+  it('S-416-01: await 中に保存完走で isDirty=false になると save_backup は呼ばれない', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    // getAllTemporaryPageData の解決タイミングで「手動保存完走」をシミュレート:
+    // dirty を解消 (isDirty=false) してから空 Map を返す。
+    vi.mocked(getAllTemporaryPageData).mockReset().mockImplementation(async () => {
+      usePecoStore.setState({ isDirty: false });
+      return new Map();
+    });
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    setupBackupReadyState(nowSpy, quietMs);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    // TOCTOU 再評価で latest.isDirty=false のため中止 → save_backup 未呼び出し
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(0);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-416-02: await 中に filePath が変化 (別ドキュメントへ差し替え) したら save_backup は呼ばれない
+  it('S-416-02: await 中に filePath が変化すると save_backup は呼ばれない', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    vi.mocked(getAllTemporaryPageData).mockReset().mockImplementation(async () => {
+      // 対象ドキュメントを別ファイルへ差し替え (isDirty は true のまま)
+      const other = { ...makeDoc(new Map([[0, makePage({ isDirty: true })]])), filePath: 'other.pdf', fileName: 'other.pdf' };
+      usePecoStore.setState({ document: other, isDirty: true });
+      return new Map();
+    });
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    setupBackupReadyState(nowSpy, quietMs);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    // latest.document.filePath !== 開始時 filePath のため中止
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(0);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-416-03: await 中に externalIsSavingRef=true になったら save_backup は呼ばれない
+  it('S-416-03: await 中に externalIsSavingRef=true になると save_backup は呼ばれない', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    // externalIsSavingRef は開始時 false (冒頭ガードは通過), await 中に true へ
+    const externalRef = { current: false } as React.RefObject<boolean>;
+    vi.mocked(getAllTemporaryPageData).mockReset().mockImplementation(async () => {
+      externalRef.current = true; // 手動保存が開始
+      return new Map();
+    });
+
+    const { result } = renderHook(() =>
+      useAutoBackup(() => {}, 5 * 60 * 1000, quietMs, externalRef),
+    );
+    setupBackupReadyState(nowSpy, quietMs);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    // invoke 直前の externalIsSavingRef 再チェックで中止
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(0);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-416-04: await 中も状態が不変 (dirty のまま/同一 filePath) なら通常どおり save_backup が走る
+  // (再評価ガードが健全な書き込みまで殺していないことの保証 = vacuous 防止)
+  it('S-416-04: await 中に状態変化がなければ save_backup は通常どおり呼ばれる', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    // 状態を変えずに空 Map を返す (通常経路)
+    vi.mocked(getAllTemporaryPageData).mockReset().mockResolvedValue(new Map());
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+    setupBackupReadyState(nowSpy, quietMs);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(1);
+
+    nowSpy.mockRestore();
+  });
+});
+
 // ── PCT-055 退行修正: onBackupComplete の ref 安定性 ────────────────────────────
 
 /**
