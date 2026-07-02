@@ -391,6 +391,45 @@ describe('useKeyboardShortcuts: 大文字 key 正規化 (PCT-170)', () => {
 
     expect(actions.undo).not.toHaveBeenCalled();
   });
+
+  // レビュー対応 (PCT-170): Shift 併用を意図しない分岐は !e.shiftKey でガードし、
+  // Ctrl+Shift+C (WebView2 DevTools 要素選択) 等との二重発火・意図せぬ alias 化を防ぐ。
+  it('Shift ガード: Ctrl+Shift+C / Ctrl+Shift+V は copy/paste を発火しない', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'C', { shiftKey: true });
+    press(window, 'V', { shiftKey: true });
+
+    expect(actions.copySelected).not.toHaveBeenCalled();
+    expect(actions.pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('Shift ガード: Ctrl+Shift+{Y,O,B,X,G} も発火しない (意図せぬ alias 防止)', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'Y', { shiftKey: true });
+    press(window, 'O', { shiftKey: true });
+    press(window, 'B', { shiftKey: true });
+    press(window, 'X', { shiftKey: true });
+    press(window, 'G', { shiftKey: true });
+
+    expect(actions.redo).not.toHaveBeenCalled();
+    expect(actions.handleOpen).not.toHaveBeenCalled();
+    expect(actions.toggleDrawingMode).not.toHaveBeenCalled();
+    expect(actions.toggleSplitMode).not.toHaveBeenCalled();
+    expect(actions.handleGroup).not.toHaveBeenCalled();
+  });
+
+  it('非退行: Shift なしの Ctrl+C は copySelected を発火する', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+
+    press(window, 'c');
+
+    expect(actions.copySelected).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('useKeyboardShortcuts: Esc split mode 解除 (issue #292)', () => {
