@@ -20,6 +20,36 @@ import { useCurveEditor } from '../../hooks/useCurveEditor';
 import type { UseCurveEditorParams } from '../../hooks/useCurveEditor';
 import type { PageData, TextBlock, CurveDefinition } from '../../types';
 
+// #431 FB-5: curve handle drag の mousemove は RAF に coalesce されるため、
+// テストでは手動制御可能な requestAnimationFrame mock を入れて 1 フレーム進める
+// ユーティリティを用意する (useBlockDragResize.test.ts と同じパターン)。
+type RafCallback = (t: number) => void;
+let rafQueue: Array<{ id: number; cb: RafCallback }> = [];
+let rafCounter = 0;
+
+function installRafMock() {
+  rafQueue = [];
+  rafCounter = 0;
+  vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
+    const id = ++rafCounter;
+    rafQueue.push({ id, cb: cb as RafCallback });
+    return id;
+  });
+  vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id: number) => {
+    rafQueue = rafQueue.filter((e) => e.id !== id);
+  });
+}
+
+function flushRaf() {
+  const queued = rafQueue;
+  rafQueue = [];
+  for (const { cb } of queued) cb(performance.now());
+}
+
+beforeEach(() => {
+  installRafMock();
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function makeTextBlock(id: string, curve?: CurveDefinition): TextBlock {
@@ -90,6 +120,33 @@ describe('useCurveEditor — canvasToViewport', () => {
     const params = makeParams({ zoom: 100 });
     const { result } = renderHook(() => useCurveEditor(params));
     expect(result.current.canvasToViewport({ x: 50, y: 30 })).toEqual({ x: 50, y: 30 });
+  });
+
+  it('multiplies by inverse scale when zoom=50 (coordinates doubled)', () => {
+    const params = makeParams({ zoom: 50 });
+    const { result } = renderHook(() => useCurveEditor(params));
+    expect(result.current.canvasToViewport({ x: 50, y: 75 })).toEqual({ x: 100, y: 150 });
+  });
+
+  it('divides by scale when zoom=150 (non-integer scale factor)', () => {
+    const params = makeParams({ zoom: 150 });
+    const { result } = renderHook(() => useCurveEditor(params));
+    const vp = result.current.canvasToViewport({ x: 150, y: 300 });
+    expect(vp.x).toBeCloseTo(100);
+    expect(vp.y).toBeCloseTo(200);
+  });
+
+  it('round-trips through pdfToCanvas-equivalent scale for zoom!=100', () => {
+    // canvasToViewport(pos, zoom) is the inverse of `pos * (zoom/100)`.
+    // Applying the forward scale then canvasToViewport must return the original point.
+    const params = makeParams({ zoom: 220 });
+    const { result } = renderHook(() => useCurveEditor(params));
+    const original = { x: 123.456, y: 789.012 };
+    const scale = 220 / 100;
+    const canvasPos = { x: original.x * scale, y: original.y * scale };
+    const back = result.current.canvasToViewport(canvasPos);
+    expect(back.x).toBeCloseTo(original.x, 5);
+    expect(back.y).toBeCloseTo(original.y, 5);
   });
 });
 
@@ -203,6 +260,54 @@ describe('useCurveEditor — polyline creation flow', () => {
     });
 
     expect(result.current.polylineDraftPoints).toHaveLength(2);
+  });
+
+  it('double-click at zoom=200 records viewport-scale point, not raw canvas coords (#409 regression guard)', () => {
+    // Regression guard for issue #409 (PCT-178): polyline draft points must be
+    // stored in viewport (zoom-independent) space via canvasToViewport, so that
+    // a curve created while zoomed reproduces the same PDF-space geometry as
+    // one created at zoom=100. If the scale division regresses (e.g. dropped
+    // or inverted), this assertion catches it directly on the production hook.
+    const params = makeParams({ zoom: 200 });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => {
+      result.current.handleDoubleClickCurve({ x: 200, y: 400 });
+    });
+
+    expect(result.current.polylineDraftPoints).toHaveLength(1);
+    expect(result.current.polylineDraftPoints[0]).toEqual({ x: 100, y: 200 });
+  });
+
+  it('polyline confirmed at zoom=50 stores viewport-scale points in the curve definition (#409 regression guard)', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ zoom: 50, getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => {
+      result.current.handleDoubleClickCurve({ x: 50, y: 75 });
+    });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 100, y: 150 });
+    });
+    act(() => {
+      result.current.handleDoubleClickCurve({ x: 150, y: 225 });
+    });
+
+    expect(updatePageData).toHaveBeenCalledTimes(1);
+    const [, partial] = updatePageData.mock.calls[0];
+    const newBlock = partial.textBlocks?.find((b: TextBlock) => b.id === 'block1');
+    expect(newBlock?.curve).toEqual({
+      type: 'polyline',
+      points: [
+        { x: 100, y: 150 },
+        { x: 200, y: 300 },
+      ],
+    });
   });
 
   it('second double-click confirms polyline draft', () => {
@@ -397,9 +502,13 @@ describe('useCurveEditor — handle drag lifecycle', () => {
     act(() => {
       result.current.handleMouseDownCurve({ x: 80, y: 50 });
     });
-    // Move to new position
+    // Move to new position — #431 FB-5: the actual updatePageData call is
+    // coalesced into a RAF callback, so it only fires once the frame flushes.
     act(() => {
       result.current.handleMouseMoveCurve({ x: 90, y: 55 });
+    });
+    act(() => {
+      flushRaf();
     });
 
     expect(updatePageData).toHaveBeenCalled();
@@ -441,6 +550,96 @@ describe('useCurveEditor — handle drag lifecycle', () => {
     // Last updatePageData call must be undoable=true
     const lastCall = updatePageData.mock.calls[updatePageData.mock.calls.length - 1];
     expect(lastCall[2]).toBe(true);
+  });
+
+  // #431 FB-5: curve handle drag の mousemove が RAF に coalesce され、
+  // useBlockDragResize (#91/#172) と対称に「1フレームにつき1回」の
+  // updatePageData 呼び出しになることを実測で縛る。
+  describe('#431 FB-5: RAF coalescing during handle drag', () => {
+    const arc: CurveDefinition = {
+      type: 'arc',
+      center: { x: 50, y: 50 },
+      radius: 30,
+      startAngle: 0,
+      endAngle: Math.PI,
+    };
+
+    it('multiple mousemove calls within the same frame produce only 1 updatePageData call after flush', () => {
+      const block = makeTextBlock('block1', arc);
+      const page = makePageData([block]);
+      const getPageData = vi.fn(() => page);
+      const updatePageData = vi.fn();
+      const params = makeParams({
+        currentTextBlocksById: new Map([['block1', block]]),
+        getPageData,
+        updatePageData,
+        zoom: 100,
+      });
+      const { result } = renderHook(() => useCurveEditor(params));
+
+      act(() => {
+        result.current.handleMouseDownCurve({ x: 80, y: 50 });
+      });
+
+      // Simulate several mousemove events firing before the browser paints
+      // a frame (the RAF callback has not run yet — coalesced).
+      act(() => {
+        result.current.handleMouseMoveCurve({ x: 82, y: 51 });
+        result.current.handleMouseMoveCurve({ x: 85, y: 53 });
+        result.current.handleMouseMoveCurve({ x: 90, y: 55 });
+      });
+
+      // Not yet flushed: no updatePageData call from drag should have fired.
+      expect(updatePageData).not.toHaveBeenCalled();
+
+      act(() => {
+        flushRaf();
+      });
+
+      // Exactly 1 call for the whole burst of mousemove events (coalesced),
+      // and it reflects the *latest* position (x:90,y:55), not an
+      // intermediate one.
+      expect(updatePageData).toHaveBeenCalledTimes(1);
+      const [, partial, undoable] = updatePageData.mock.calls[0];
+      expect(undoable).toBe(false);
+      const newBlock = partial.textBlocks?.find((b: TextBlock) => b.id === 'block1');
+      expect(newBlock?.curve?.type).toBe('arc');
+    });
+
+    it('mouseUp before the RAF flushes still applies the latest pending position (no dropped final move)', () => {
+      const block = makeTextBlock('block1', arc);
+      const page = makePageData([block]);
+      const getPageData = vi.fn(() => page);
+      const updatePageData = vi.fn();
+      const params = makeParams({
+        currentTextBlocksById: new Map([['block1', block]]),
+        getPageData,
+        updatePageData,
+        zoom: 100,
+      });
+      const { result } = renderHook(() => useCurveEditor(params));
+
+      act(() => {
+        result.current.handleMouseDownCurve({ x: 80, y: 50 });
+      });
+      act(() => {
+        result.current.handleMouseMoveCurve({ x: 90, y: 55 });
+      });
+      // mouseUp fires before the queued RAF callback runs (fast drag release).
+      // The drag-position update must still be applied synchronously, then
+      // the undoable=true commit follows — not dropped by the pending RAF.
+      act(() => {
+        result.current.handleMouseUpCurve();
+      });
+
+      expect(updatePageData.mock.calls.length).toBeGreaterThanOrEqual(2);
+      const undoableFalseCall = updatePageData.mock.calls.find((c) => c[2] === false);
+      const undoableTrueCall = updatePageData.mock.calls[updatePageData.mock.calls.length - 1];
+      expect(undoableFalseCall).toBeDefined();
+      expect(undoableTrueCall[2]).toBe(true);
+      // No RAF should remain queued after mouseUp flushes it.
+      expect(rafQueue.length).toBe(0);
+    });
   });
 
   it('mouseUp when not dragging returns false', () => {
@@ -515,5 +714,219 @@ describe('useCurveEditor — selectedIds.size !== 1 guard', () => {
       handled = result.current.handleMouseDownCurve({ x: 10, y: 10 });
     });
     expect(handled).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #417 (PCT-186): curveClickPoints / polyline draft must not survive page
+// navigation, curve-mode exit, or selection change — otherwise a later click
+// on a different page/block mixes with stale points into a silently
+// committed hybrid arc/polyline (regression guard).
+describe('useCurveEditor — #417 stale draft clearing on mode/selection/page change', () => {
+  it('clears curveClickPoints when isCurveMode toggles off (mode exit)', () => {
+    const params = makeParams();
+    const { result, rerender } = renderHook((p: UseCurveEditorParams) => useCurveEditor(p), {
+      initialProps: params,
+    });
+
+    // Collect 2 of 3 points needed for an arc — leaves a stale in-progress point.
+    act(() => { result.current.handleMouseDownCurve({ x: 10, y: 20 }); });
+    act(() => { result.current.handleMouseDownCurve({ x: 50, y: 10 }); });
+    expect(result.current.curveClickPoints).toHaveLength(2);
+
+    // Simulate leaving curve mode (e.g. toolbar toggle / Escape from mode).
+    rerender({ ...params, isCurveMode: false });
+
+    expect(result.current.curveClickPoints).toHaveLength(0);
+  });
+
+  it('clears curveClickPoints when selectedIds changes (selection change / page navigation)', () => {
+    const params = makeParams({ selectedIds: new Set(['block1']) });
+    const { result, rerender } = renderHook((p: UseCurveEditorParams) => useCurveEditor(p), {
+      initialProps: params,
+    });
+
+    act(() => { result.current.handleMouseDownCurve({ x: 10, y: 20 }); });
+    expect(result.current.curveClickPoints).toHaveLength(1);
+
+    // setCurrentPage / toggleSelection both replace selectedIds with a new
+    // Set instance (see pecoStore.ts setCurrentPage / toggleSelection) —
+    // simulate that here to reproduce a page move or selection change.
+    rerender({ ...params, selectedIds: new Set(['block2']) });
+
+    expect(result.current.curveClickPoints).toHaveLength(0);
+  });
+
+  it('a fresh click after mode exit + re-entry does not mix with the stale point (no hybrid arc)', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result, rerender } = renderHook((p: UseCurveEditorParams) => useCurveEditor(p), {
+      initialProps: params,
+    });
+
+    // 1st click on original page/mode.
+    act(() => { result.current.handleMouseDownCurve({ x: 0, y: 0 }); });
+    expect(result.current.curveClickPoints).toHaveLength(1);
+
+    // Leave curve mode without confirming (stale point would previously survive).
+    rerender({ ...params, isCurveMode: false });
+    // Re-enter curve mode (e.g. after navigating to a different page).
+    rerender({ ...params, isCurveMode: true });
+
+    expect(result.current.curveClickPoints).toHaveLength(0);
+
+    // A single new click on the "new page" must start a fresh collection of 1,
+    // not silently combine with the discarded stale point.
+    act(() => { result.current.handleMouseDownCurve({ x: 100, y: 100 }); });
+    expect(result.current.curveClickPoints).toHaveLength(1);
+    expect(result.current.curveClickPoints[0]).toEqual({ x: 100, y: 100 });
+    expect(updatePageData).not.toHaveBeenCalled();
+  });
+
+  it('clears an active polyline draft when isCurveMode toggles off, without committing it', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result, rerender } = renderHook((p: UseCurveEditorParams) => useCurveEditor(p), {
+      initialProps: params,
+    });
+
+    act(() => { result.current.handleDoubleClickCurve({ x: 30, y: 40 }); });
+    expect(result.current.polylineDraftActive).toBe(true);
+    expect(result.current.polylineDraftPoints).toHaveLength(1);
+
+    rerender({ ...params, isCurveMode: false });
+
+    expect(result.current.polylineDraftActive).toBe(false);
+    expect(result.current.polylineDraftPoints).toHaveLength(0);
+    // Must be discarded, not silently committed as a curve.
+    expect(updatePageData).not.toHaveBeenCalled();
+  });
+
+  it('clears an active polyline draft when selectedIds changes (page navigation mid-draft)', () => {
+    const params = makeParams({ selectedIds: new Set(['block1']) });
+    const { result, rerender } = renderHook((p: UseCurveEditorParams) => useCurveEditor(p), {
+      initialProps: params,
+    });
+
+    act(() => { result.current.handleDoubleClickCurve({ x: 30, y: 40 }); });
+    expect(result.current.polylineDraftActive).toBe(true);
+
+    rerender({ ...params, selectedIds: new Set() }); // e.g. setCurrentPage clears selection
+
+    expect(result.current.polylineDraftActive).toBe(false);
+    expect(result.current.polylineDraftPoints).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #424 (PCT-193): a polyline whose points are all identical (or within
+// floating-point noise) must not confirm — curveGlyphLayout.layoutOnPolyline
+// treats zero-length segments as unusable and returns [], which causes the
+// save core to drop the block's text entirely (character loss).
+describe('useCurveEditor — #424 degenerate (same-point) polyline is rejected on confirm', () => {
+  it('double-click then click on the exact same point, then Enter: draft is not confirmed (no updatePageData call)', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => { result.current.handleDoubleClickCurve({ x: 30, y: 40 }); });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 30, y: 40 }); // identical point
+    });
+    expect(result.current.polylineDraftPoints).toHaveLength(2);
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    });
+
+    // Rejected: no curve committed, and the draft is left active so the user
+    // can click a distinct point instead of silently losing their input.
+    expect(updatePageData).not.toHaveBeenCalled();
+    expect(result.current.polylineDraftActive).toBe(true);
+    expect(result.current.polylineDraftPoints).toHaveLength(2);
+  });
+
+  it('all points within floating-point noise (< epsilon) are also rejected', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => { result.current.handleDoubleClickCurve({ x: 30, y: 40 }); });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      // 0.001 away — well under the MIN_POLYLINE_SEGMENT_LENGTH threshold.
+      result.current.handleMouseDownCurve({ x: 30.001, y: 40 });
+    });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    });
+
+    expect(updatePageData).not.toHaveBeenCalled();
+    expect(result.current.polylineDraftActive).toBe(true);
+  });
+
+  it('a polyline with at least one non-degenerate segment still confirms normally (no false rejection)', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => { result.current.handleDoubleClickCurve({ x: 30, y: 40 }); });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 80, y: 90 }); // clearly distinct point
+    });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    });
+
+    expect(updatePageData).toHaveBeenCalledTimes(1);
+    expect(result.current.polylineDraftActive).toBe(false);
+    const [, partial] = updatePageData.mock.calls[0];
+    const newBlock = partial.textBlocks?.find((b: TextBlock) => b.id === 'block1');
+    expect(newBlock?.curve?.type).toBe('polyline');
+  });
+
+  it('3 points where only the first segment is degenerate but the second is not: still confirms (some usable segment exists)', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => { result.current.handleDoubleClickCurve({ x: 30, y: 40 }); });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 30, y: 40 }); // identical to first (degenerate seg)
+    });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 100, y: 40 }); // distinct (non-degenerate seg)
+    });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    });
+
+    expect(updatePageData).toHaveBeenCalledTimes(1);
+    expect(result.current.polylineDraftActive).toBe(false);
   });
 });

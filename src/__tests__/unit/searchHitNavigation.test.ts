@@ -211,3 +211,45 @@ describe('searchHitNavigation – searchStore actions', () => {
     expect(useSearchStore.getState().searchHitIndex).toBe(0)
   })
 })
+
+// ── SH-7 (#431 / PCT-200): clampSearchHitIndex ──────────────────────
+
+describe('searchHitNavigation – SH-7: clampSearchHitIndex', () => {
+  beforeEach(() => {
+    useSearchStore.setState({ searchTerm: 'x', searchHitIndex: 0 })
+  })
+
+  it('searchHitIndex が totalHits 未満なら変更しない', () => {
+    useSearchStore.setState({ searchHitIndex: 1 })
+    useSearchStore.getState().clampSearchHitIndex(3)
+    expect(useSearchStore.getState().searchHitIndex).toBe(1)
+  })
+
+  it('ページ切替でヒット数が減ると searchHitIndex を範囲内 (totalHits-1) に丸める（「8/3」バグの再現条件）', () => {
+    // 旧ページで 8 件目 (index=7) を見ていた状態を再現
+    useSearchStore.setState({ searchHitIndex: 7 })
+    // 新ページのヒット数は 3 件のみ
+    useSearchStore.getState().clampSearchHitIndex(3)
+    expect(useSearchStore.getState().searchHitIndex).toBe(2) // 0-based: 3件中最後は index=2
+  })
+
+  it('totalHits=0 になったら searchHitIndex を 0 に戻す', () => {
+    useSearchStore.setState({ searchHitIndex: 5 })
+    useSearchStore.getState().clampSearchHitIndex(0)
+    expect(useSearchStore.getState().searchHitIndex).toBe(0)
+  })
+
+  it('searchHitIndex が既に 0 で totalHits=0 のときは無駄な set をしない (同一 state 参照)', () => {
+    useSearchStore.setState({ searchHitIndex: 0 })
+    const before = useSearchStore.getState()
+    useSearchStore.getState().clampSearchHitIndex(0)
+    const after = useSearchStore.getState()
+    expect(after).toBe(before) // set() が state を差し替えていないことを参照同一性で確認
+  })
+
+  it('searchHitIndex が負値のときは 0 に補正する (防御的)', () => {
+    useSearchStore.setState({ searchHitIndex: -1 })
+    useSearchStore.getState().clampSearchHitIndex(3)
+    expect(useSearchStore.getState().searchHitIndex).toBe(0)
+  })
+})

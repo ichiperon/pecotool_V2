@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import CsvExportButton from "../../components/CsvExportButton";
 import { useReportStore } from "../../store/reportStore";
+import { usePdfStore } from "../../store/pdfStore";
 import { buildTemplateCsv } from "../../logic/templateCsv";
 import { encodeCsvUtf8Bom } from "../../logic/csvEncode";
 
@@ -28,6 +29,7 @@ beforeEach(() => {
     mode: "idle",
     selectedFieldId: null,
   });
+  usePdfStore.getState().reset();
 });
 
 function addField(name: string) {
@@ -77,6 +79,7 @@ describe("CsvExportButton", () => {
     // 新形: Map<number, ReportRow[]>
     const matrix = new Map([[1, [new Map([[fields[0].id, "1000"]])]]]);
     useReportStore.getState().setCells(matrix);
+    usePdfStore.getState().setPdf("C:\\docs\\invoice.pdf", 1);
 
     const mockSave = vi.fn().mockResolvedValue(undefined);
     render(<CsvExportButton onSave={mockSave} />);
@@ -93,11 +96,53 @@ describe("CsvExportButton", () => {
       useReportStore.getState().template,
       useReportStore.getState().cells,
       { includeFileName: true, includePageNumber: true, emptyValue: "", normalizeNumbers: false },
-      { pageNumbers: [1] }
+      { fileName: "invoice.pdf", pageNumbers: [1] }
     );
     const expectedData = encodeCsvUtf8Bom(expectedCsv);
     expect(savedCsv).toBe(expectedCsv);
     expect(savedData).toEqual(expectedData);
+  });
+
+  it("PCT-189: usePdfStore.filePath の basename がファイル名列の値として出力される", async () => {
+    addField("金額");
+    const fields = useReportStore.getState().template.fields;
+    useReportStore.getState().setCells(new Map([[1, [new Map([[fields[0].id, "1000"]])]]]));
+    // POSIX区切りのフルパスでも basename が正しく抽出されること
+    usePdfStore.getState().setPdf("/home/user/docs/請求書.pdf", 1);
+
+    let capturedCsv = "";
+    const mockSave = vi.fn().mockImplementation(async (_data: Uint8Array, csv: string) => {
+      capturedCsv = csv;
+    });
+
+    render(<CsvExportButton onSave={mockSave} />);
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    await waitFor(() => expect(mockSave).toHaveBeenCalled());
+
+    const rows = capturedCsv.split("\r\n");
+    const dataRow = rows[1];
+    // ファイル名列（先頭列）の値がフルパスでなく basename であること
+    expect(dataRow.startsWith("請求書.pdf,")).toBe(true);
+  });
+
+  it("PCT-189: PDF 未ロード（filePath=null）のときファイル名列は空文字のまま", async () => {
+    addField("金額");
+    const fields = useReportStore.getState().template.fields;
+    useReportStore.getState().setCells(new Map([[1, [new Map([[fields[0].id, "1000"]])]]]));
+    // usePdfStore.reset() 済み（beforeEach）→ filePath は null のまま
+
+    let capturedCsv = "";
+    const mockSave = vi.fn().mockImplementation(async (_data: Uint8Array, csv: string) => {
+      capturedCsv = csv;
+    });
+
+    render(<CsvExportButton onSave={mockSave} />);
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    await waitFor(() => expect(mockSave).toHaveBeenCalled());
+
+    const rows = capturedCsv.split("\r\n");
+    const dataRow = rows[1];
+    expect(dataRow.startsWith(",")).toBe(true); // ファイル名列が空
   });
 
   it("欄がゼロのまま（ボタン disabled 状態）では onSave が呼ばれない", async () => {

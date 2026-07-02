@@ -1377,6 +1377,9 @@ describe('pdfSaver / Worker 経路', () => {
 
         // 1 回目: 応答を発火せず hung 状態のまま置く
         const p1 = savePDF(new Uint8Array(), doc)
+        // #425: p1 は timeout 経路で明示 reject されるようになったため、
+        // unhandled rejection にならないよう reject 前に catch を仕込んでおく。
+        const p1Rejection = expect(p1).rejects.toThrow('後続の保存操作により、前回の保存が中断されました。')
         expect(ControllableMockWorker.instances.length).toBe(1)
         const w1 = ControllableMockWorker.instances[0]
         expect(w1.terminateCount).toBe(0)
@@ -1400,9 +1403,48 @@ describe('pdfSaver / Worker 経路', () => {
         w2.emitSuccess(new Uint8Array([9, 9]))
         await p2
 
-        // hung 状態の p1 を回収（terminate 済み）
-        w1.emitSuccess(new Uint8Array([0]))
-        await p1.catch(() => {}) // 既に settled なので no-op
+        // #425: terminate と同時に p1 が明示 reject され、SAVE_HARD_TIMEOUT_MS(120秒)
+        // まで宙吊りにならないことを確認する（vacuous 回避のため実際に reject を検証）。
+        await p1Rejection
+
+        // terminate 済み worker に遅延応答が届いても、既に settled のため無視される
+        // （二重 settle が起きない = 例外を投げない）ことを確認。
+        expect(() => w1.emitSuccess(new Uint8Array([0]))).not.toThrow()
+
+        warnSpy.mockRestore()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('#425: p1 の reject が PREVIOUS_SAVE_TIMEOUT_MS(5秒) 時点で検出できる（SAVE_HARD_TIMEOUT_MS=120秒を待たない）', async () => {
+      vi.useFakeTimers()
+      try {
+        const doc = makeSimpleDoc()
+
+        const p1 = savePDF(new Uint8Array(), doc)
+        // catch を reject 前に仕込んでおく（unhandled rejection 回避）
+        const p1Settled = p1.then(
+          () => ({ status: 'resolved' as const }),
+          (err: unknown) => ({ status: 'rejected' as const, err }),
+        )
+        const w1 = ControllableMockWorker.instances[0]
+
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const p2 = savePDF(new Uint8Array(), doc)
+
+        // PREVIOUS_SAVE_TIMEOUT_MS(5秒) ちょうどでは、SAVE_HARD_TIMEOUT_MS(120秒)
+        // 側のタイマーはまだ発火していないはず。この時点で reject されていることが
+        // 「進捗ベースでなく PREVIOUS_SAVE_TIMEOUT_MS の即時 reject である」ことの証明になる。
+        await vi.advanceTimersByTimeAsync(5001)
+        expect(w1.terminateCount).toBe(1)
+
+        const result = await p1Settled
+        expect(result.status).toBe('rejected')
+
+        const w2 = ControllableMockWorker.instances[1]
+        w2.emitSuccess(new Uint8Array([1]))
+        await p2
 
         warnSpy.mockRestore()
       } finally {
@@ -1458,6 +1500,9 @@ describe('pdfSaver / Worker 経路', () => {
         const doc = makeSimpleDoc()
         // 1 回目を hung 状態にする
         const p1 = savePDF(new Uint8Array(), doc)
+        // #425: p1 は timeout 経路で明示 reject されるようになったため、
+        // unhandled rejection にならないよう reject 前に catch を仕込んでおく。
+        const p1Settled = p1.catch((err: unknown) => err)
         const w1 = ControllableMockWorker.instances[0]
 
         // 2 回目で timeout 経路を発火させ w1 を terminate
@@ -1471,7 +1516,9 @@ describe('pdfSaver / Worker 経路', () => {
         // 重要なのはカウントが増えること ≠ 例外発生、という点。
         expect(w1.terminateCount).toBeGreaterThanOrEqual(1)
 
-        await p1.catch(() => {})
+        // #425: terminate と同時に明示 reject されている（宙吊りにならない）ことを確認
+        const p1Result = await p1Settled
+        expect(p1Result).toBeInstanceOf(Error)
 
         const w2 = ControllableMockWorker.instances[1]
         w2.emitSuccess(new Uint8Array([8]))

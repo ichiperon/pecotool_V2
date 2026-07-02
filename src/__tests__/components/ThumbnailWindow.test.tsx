@@ -573,4 +573,76 @@ describe('ThumbnailWindow', () => {
     )
     expect(newGenerates.some((msg) => msg.pageIndex === 2)).toBe(false)
   })
+
+  describe('issue #431 (PCT-200 / FB-6): UI 回転の反映', () => {
+    it('thumbnail:file-opened の rotations が --thumbnail-rotation / --thumb-box-w の CSS variable に反映される', async () => {
+      render(<ThumbnailWindow />)
+
+      await waitFor(() => expect(m.listeners.get('thumbnail:file-opened')?.[0]).toBeDefined())
+
+      act(() => {
+        m.listeners.get('thumbnail:file-opened')![0]({
+          payload: {
+            filePath: 'test.pdf',
+            currentPageIndex: 0,
+            totalPages: 3,
+            dirtyPages: [],
+            pageOrder: [0, 1, 2],
+            // page0: 回転なし, page1: 90度 (landscape), page2: 180度 (portrait のまま)
+            rotations: [0, 90, 180],
+          },
+        })
+      })
+      await flushEffects()
+
+      const boxes = document.querySelectorAll('.thumbnail-box')
+      expect(boxes).toHaveLength(3)
+
+      // page0 (rotation=0): variable は未設定
+      expect((boxes[0] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('')
+
+      // page1 (rotation=90, landscape): 幅高さがスワップされる
+      expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('160px')
+      expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-h')).toBe('120px')
+
+      // page2 (rotation=180): landscape ではないので box variable は未設定
+      expect((boxes[2] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('')
+    })
+
+    it('thumbnail:rotation-update を受信すると既存表示の回転が更新される', async () => {
+      render(<ThumbnailWindow />)
+
+      await waitFor(() => expect(m.listeners.get('thumbnail:file-opened')?.[0]).toBeDefined())
+
+      act(() => {
+        m.listeners.get('thumbnail:file-opened')![0]({
+          payload: {
+            filePath: 'test.pdf',
+            currentPageIndex: 0,
+            totalPages: 2,
+            dirtyPages: [],
+            pageOrder: [0, 1],
+            rotations: [0, 0],
+          },
+        })
+      })
+      await flushEffects()
+
+      await waitFor(() => expect(m.listeners.get('thumbnail:rotation-update')?.[0]).toBeDefined())
+
+      act(() => {
+        m.listeners.get('thumbnail:rotation-update')![0]({
+          payload: { rotations: [270, 0] },
+        })
+      })
+      await flushEffects()
+
+      const boxes = document.querySelectorAll('.thumbnail-box')
+      // page0 が 270度 (landscape) に変わったので box variable がスワップされる
+      expect((boxes[0] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('160px')
+      expect((boxes[0] as HTMLElement).style.getPropertyValue('--thumb-box-h')).toBe('120px')
+      // page1 は回転なしのまま
+      expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('')
+    })
+  })
 })

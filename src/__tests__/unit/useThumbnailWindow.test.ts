@@ -68,7 +68,7 @@ function makeBlock(id: string, text: string, order: number): TextBlock {
   }
 }
 
-function makePage(pageIndex: number, blocks: TextBlock[], isDirty = false): PageData {
+function makePage(pageIndex: number, blocks: TextBlock[], isDirty = false, rotation?: 0 | 90 | 180 | 270): PageData {
   return {
     pageIndex,
     width: 100,
@@ -76,6 +76,7 @@ function makePage(pageIndex: number, blocks: TextBlock[], isDirty = false): Page
     textBlocks: blocks,
     isDirty,
     thumbnail: null,
+    ...(rotation !== undefined ? { rotation } : {}),
   }
 }
 
@@ -276,6 +277,7 @@ describe('useThumbnailWindow', () => {
           totalPages: 3,
           dirtyPages: [],
           pageOrder: [1, 2, 0],
+          rotations: [0, 0, 0],
         },
       ])
     })
@@ -308,6 +310,7 @@ describe('useThumbnailWindow', () => {
         totalPages: 3,
         dirtyPages: [],
         pageOrder: [2, 0, 1],
+        rotations: [0, 0, 0],
       })
       expect(fileOpenedEmits()).toHaveLength(0)
     })
@@ -351,6 +354,7 @@ describe('useThumbnailWindow', () => {
         totalPages: 2,
         dirtyPages: [1],
         pageOrder: [0, 2],
+        rotations: [0, 0],
       })
     })
   })
@@ -384,6 +388,7 @@ describe('useThumbnailWindow', () => {
         totalPages: 2,
         dirtyPages: [],
         pageOrder: [0, 1],
+        rotations: [0, 0],
       })
       expect(
         m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:page-order-changed')
@@ -422,7 +427,118 @@ describe('useThumbnailWindow', () => {
         totalPages: 2,
         dirtyPages: [1],
         pageOrder: [1, 0],
+        rotations: [0, 0],
       })
+    })
+  })
+
+  describe('issue #431 (PCT-200 / FB-6): 別ウィンドウサムネイルに UI 回転を反映する', () => {
+    it('thumbnail:file-opened payload の rotations は表示順 (displayIndex) の rotation を並べる', async () => {
+      // 本番の pages Map は displayIndex キー (movePage/deletePages/reorder undo が
+      // display で再構築、pageIndex フィールドも displayIndex に揃う)。並べ替え後
+      // pageOrder=[2,0,1] のとき、表示スロット0=元page2(270°)/1=元page0(90°)/2=元page1(0°)。
+      // makeDoc は pageIndex をキーにするため、rotation は displayIndex スロットで与える。
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false, 270), // 表示スロット0 (元 page2)
+          makePage(1, [], false, 90),  // 表示スロット1 (元 page0)
+          makePage(2, [], false, 0),   // 表示スロット2 (元 page1)
+        ]),
+        currentPageIndex: 0,
+        pageOrder: [2, 0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      expect(fileOpenedEmits().at(-1)?.[1]).toMatchObject({
+        pageOrder: [2, 0, 1],
+        rotations: [270, 90, 0],
+      })
+    })
+
+    it('回帰(B-2): 並べ替え後に source-index で引くと別ページの rotation を返す誤りを検出する', async () => {
+      // pageOrder が identity でない状態で、displayIndex 引きと source 引きが分岐する fixture。
+      // displayIndex キーの pages: slot0=0°, slot1=90°, slot2=0°。pageOrder=[2,0,1]。
+      // 正しい表示順 rotations は [slot0, slot1, slot2] = [0, 90, 0]。
+      // 旧実装 pageOrder.map(src => get(src)) だと get(2),get(0),get(1)=[0,0,90] になり不一致。
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false, 0),
+          makePage(1, [], false, 90),
+          makePage(2, [], false, 0),
+        ]),
+        currentPageIndex: 0,
+        pageOrder: [2, 0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      expect(fileOpenedEmits().at(-1)?.[1]).toMatchObject({
+        pageOrder: [2, 0, 1],
+        rotations: [0, 90, 0],
+      })
+    })
+
+    it('rotation のみ変化 (pageOrder/dirty 不変) すると thumbnail:rotation-update が表示順 payload で emit される', async () => {
+      usePecoStore.setState({
+        document: makeDoc([
+          makePage(0, [], false, 0),
+          makePage(1, [], false, 0),
+        ]),
+        currentPageIndex: 0,
+        pageOrder: [0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      // page 1 だけ回転させる (pageOrder は不変)
+      act(() => {
+        usePecoStore.setState({
+          document: makeDoc([
+            makePage(0, [], false, 0),
+            makePage(1, [], false, 90),
+          ]),
+        } as any)
+      })
+      await flushEffects()
+
+      const rotationEmits = m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:rotation-update')
+      expect(rotationEmits.length).toBeGreaterThanOrEqual(1)
+      expect(rotationEmits.at(-1)?.[1]).toEqual({ rotations: [0, 90] })
+      // pageOrder/totalPages 再構成の file-opened / page-order-changed は飛ばない (軽量パス)
+      expect(fileOpenedEmits()).toHaveLength(0)
+      expect(
+        m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:page-order-changed')
+      ).toHaveLength(0)
+    })
+
+    it('rotation が変化しない store 更新では thumbnail:rotation-update が増えない', async () => {
+      usePecoStore.setState({
+        document: makeDoc([makePage(0, [makeBlock('b1', 'hello', 0)], false, 0)]),
+        currentPageIndex: 0,
+        pageOrder: [0],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      const baseline = m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:rotation-update').length
+
+      // textBlocks だけ変化 (rotation は不変)
+      act(() => {
+        usePecoStore.setState({
+          document: makeDoc([makePage(0, [makeBlock('b1', 'HELLO', 0)], false, 0)]),
+        } as any)
+      })
+      await flushEffects()
+
+      expect(
+        m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:rotation-update').length
+      ).toBe(baseline)
     })
   })
 })

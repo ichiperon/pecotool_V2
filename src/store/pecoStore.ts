@@ -157,24 +157,38 @@ function scheduleStructuralUndoRedoIdbSync(
 }
 
 
-function scheduleClearOcrAllPagesIdbWrite(filePath: string, totalPages: number): void {
+/**
+ * PCT-181 (#412): 遅延実行時に live getState() を読まない。
+ * スケジュール時点 (clearOcrAllPages 実行時、同期) の livePages / pageOrder /
+ * documentEpoch を呼び出し元がキャプチャして渡す。
+ * 実行時に documentEpoch が変化していたら (ファイル切替/開き直しが割り込んだ)
+ * no-op にし、切替後の live state への誤書込を防ぐ。
+ * schedulePendingIdbWrite (PCT-108) と同じ「遅延 getState 禁止」規律に合わせる。
+ */
+function scheduleClearOcrAllPagesIdbWrite(
+  filePath: string,
+  totalPages: number,
+  livePages: Map<number, PageData>,
+  pageOrder: number[],
+  capturedEpoch: number,
+): void {
   const pendingBeforeWrite = waitForPendingIdbSaves();
   const work = pendingBeforeWrite
     .then(async () => {
+      // documentEpoch ガード: 待機中にファイル切替/開き直しが起きていたら中止する。
+      if (useInfraStore.getState().documentEpoch !== capturedEpoch) return;
       // PCT-104 (A-lite 段階2): getAllTemporaryPageData は Map<pageId, data> を返す。
       // OCR クリア前に pageOrder が初期連番 [0..n-1] であるため、
       // idx と src:idx は 1:1 対応する（move/delete 前の全ページ一括操作のため）。
       const idbPages = await getAllTemporaryPageData(filePath);
-      const currentDocument = usePecoStore.getState().document;
-      const livePages = currentDocument?.filePath === filePath ? currentDocument.pages : undefined;
-      // pageOrder は呼び出し時点の最新値を使う
-      const pageOrder = usePecoStore.getState().pageOrder;
+      // epoch ガード再確認: getAllTemporaryPageData の await 中にも切替が起きうる。
+      if (useInfraStore.getState().documentEpoch !== capturedEpoch) return;
       const entries = Array.from({ length: totalPages }, (_, idx) => {
         const pageId = resolvePageId(pageOrder, idx);
         return {
           filePath,
           pageId,
-          data: livePages?.has(idx)
+          data: livePages.has(idx)
             ? clearedOcrPage(idx, livePages.get(idx)!)
             : clearedOcrData(idx, idbPages.get(pageId) ?? {}),
         };
@@ -243,8 +257,14 @@ interface PecoState {
    * issue #207: 指定した pageIndex のページを時計回りに delta 度回転する。
    * delta は 90 | 180 | 270 のいずれか。
    * undoable=true で RotatePagesAction を undo スタックに積む。
+   *
+   * PCT-183 (#414): in-memory pages Map に無いページ (未ロード or LRU 退避済み) は
+   * IDB (temporary_changes) から読み戻して回転を適用する (#403/#412 と同じ復元パターン)。
+   * IDB にも無い (本当に未ロード) ページは回転を適用できないためスキップし、
+   * その pageIndex 一覧を戻り値の skippedPageIndices で呼び出し元へ返す
+   * (呼び出し元がトースト等でユーザーに通知する)。
    */
-  rotatePages: (pageIndices: number[], delta: 90 | 180 | 270) => void;
+  rotatePages: (pageIndices: number[], delta: 90 | 180 | 270) => Promise<{ skippedPageIndices: number[] }>;
   setDocument: (doc: PecoDocument | null, skipViewerReset?: boolean) => void;
   /**
    * issue #118: documentEpoch だけを +1 する。document / pages / currentPageIndex /
@@ -349,13 +369,66 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // キー競合レース条件を防ぐ。onIdbWork を使う場合は呼び出し元（hook）が await を担う。
     if (!onIdbWork) await waitForPendingIdbSaves();
 
+    const pre = get();
+    if (!pre.document || displayIndices.length === 0) return;
+
+    const capturedFilePath = pre.document.filePath;
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
+
+    // PCT-172 (#403): 削除対象のうち LRU 退避済み (in-memory pages Map に無い) ページは
+    // beforePages snapshot に含まれず、undo 時に IDB 唯一コピーが既に消えているため
+    // 編集内容が永久喪失する。削除実行前に IDB から該当ページを読み戻して snapshot に含める。
+    // replaceText (scope='all') の IDB 復元ロジックと同じ組み立て方。
+    // 【重要】idbAll の await 中はスナップショットを取らない。await 後に epoch/filePath を
+    // 再検証し、改めて live state を snapshot する。これにより (a) 待機中のファイル切替で
+    // 旧ドキュメントを新ファイルへ set() してしまう事故、(b) 待機中にコミットされた別ページの
+    // 編集 (OCR 等) を stale スナップショットの丸ごと差し替えで消す事故、の両方を防ぐ。
+    const preMissing = displayIndices.filter((di) => !pre.document!.pages.has(di));
+    let idbAll: Map<string, Partial<PageData>> | null = null;
+    if (preMissing.length > 0) {
+      idbAll = await getAllTemporaryPageData(capturedFilePath);
+      const live = get();
+      if (
+        useInfraStore.getState().documentEpoch !== capturedEpoch ||
+        !live.document ||
+        live.document.filePath !== capturedFilePath
+      ) {
+        return;
+      }
+    }
+
+    // await 後の最新 state を基準にスナップショットする (以降 set() まで await は無い)。
     const state = get();
-    if (!state.document || displayIndices.length === 0) return;
+    if (!state.document) return;
 
     const beforeOrder = [...state.pageOrder];
     const beforePages = new Map(state.document.pages);
     const beforeTotalPages = state.document.totalPages;
     const beforeCurrentPageIndex = state.currentPageIndex;
+
+    // 最新 state 基準でまだ in-memory に無い削除対象だけ IDB から snapshot へ読み戻す。
+    if (idbAll) {
+      const stillMissing = displayIndices.filter((di) => !beforePages.has(di));
+      for (const di of stillMissing) {
+        const pageId = resolvePageId(beforeOrder, di);
+        const partial = idbAll.get(pageId);
+        if (!partial || !partial.textBlocks) continue;
+        const restored: PageData = {
+          pageIndex: di,
+          width: partial.width ?? 0,
+          height: partial.height ?? 0,
+          textBlocks: partial.textBlocks,
+          isDirty: partial.isDirty ?? false,
+          thumbnail: partial.thumbnail ?? null,
+          isTextExtracted: partial.isTextExtracted,
+          ocrCleared: partial.ocrCleared,
+          rotation: partial.rotation,
+          // m3 と同じ流儀: IDB 復元時に pageId を設定する
+          pageId: partial.pageId ?? pageId,
+        };
+        beforePages.set(di, restored);
+      }
+    }
 
     // displayIndices を Set に変換 (重複排除)
     const deleteDisplaySet = new Set(displayIndices);
@@ -537,35 +610,111 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   },
 
   // issue #207: ページ回転
-  rotatePages: (pageIndices, delta) => {
+  // PCT-183 (#414): in-memory に無いページ (未ロード or LRU 退避済み) を無音スキップしていた。
+  // LRU 退避済み (IDB に textBlocks あり) は IDB から読み戻して回転を適用する。
+  // 本当に未ロード (IDB にも無い) はスキップし、pageIndex を戻り値で呼び出し元へ返す。
+  rotatePages: async (pageIndices, delta) => {
     const state = get();
-    if (!state.document || pageIndices.length === 0) return;
+    if (!state.document || pageIndices.length === 0) return { skippedPageIndices: [] };
+
+    const capturedFilePath = state.document.filePath;
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
+    const basePages = new Map(state.document.pages);
+    const missingPageIndices = pageIndices.filter((pi) => !basePages.has(pi));
+
+    // 未ロード/LRU退避ページを IDB から読み戻す (#403/#412 と同じ復元パターン)
+    let idbAll: Map<string, Partial<PageData>> | null = null;
+    if (missingPageIndices.length > 0) {
+      idbAll = await getAllTemporaryPageData(capturedFilePath);
+      // epoch/filePath 再検証: getAllTemporaryPageData の await 中にファイル切替が
+      // 割り込むと、captured スナップショットを set() して旧ドキュメントで新ファイルを
+      // 上書きしてしまう。clearOcrAllPages (PCT-181) と同じ「遅延実行は再検証」規律。
+      const live = get();
+      if (
+        useInfraStore.getState().documentEpoch !== capturedEpoch ||
+        !live.document ||
+        live.document.filePath !== capturedFilePath
+      ) {
+        return { skippedPageIndices: pageIndices };
+      }
+    }
 
     const changes: RotatePagesAction['changes'] = [];
-    const newPages = new Map(state.document.pages);
+    const skippedPageIndices: number[] = [];
+    // pageIndex → 回転適用後データ。set() 時に live pages へ差分適用する
+    // (await 中に別ページへ入った編集 (OCR 等) を丸ごと差し替えで消さないため)。
+    const rotatedByIndex = new Map<number, PageData>();
+    // LRU 退避から復元したページ (IDB 書き戻し対象)。includes の O(m^2) を避け Set で判定。
+    const restoredEvictedIndices = new Set<number>();
 
     for (const pageIndex of pageIndices) {
-      const page = newPages.get(pageIndex);
-      if (!page) continue;
+      let page = basePages.get(pageIndex);
+      let fromEvicted = false;
+      if (!page && idbAll) {
+        const pageId = resolvePageId(state.pageOrder, pageIndex);
+        const partial = idbAll.get(pageId);
+        if (partial && partial.textBlocks) {
+          page = {
+            pageIndex,
+            width: partial.width ?? 0,
+            height: partial.height ?? 0,
+            textBlocks: partial.textBlocks,
+            isDirty: partial.isDirty ?? false,
+            thumbnail: partial.thumbnail ?? null,
+            isTextExtracted: partial.isTextExtracted,
+            ocrCleared: partial.ocrCleared,
+            rotation: partial.rotation,
+            pageId: partial.pageId ?? pageId,
+          };
+          fromEvicted = true;
+        }
+      }
+      if (!page) {
+        skippedPageIndices.push(pageIndex);
+        continue;
+      }
       const before = (page.rotation ?? 0) as 0 | 90 | 180 | 270;
       // fix(#230): IDB から復元した rotation が NaN や 90 の倍数以外になり得る場合に備え
       // Math.round で最近傍 90 度倍数に丸めてから % 360 する。結果を [0,90,180,270] に強制。
       const raw = (Math.round(before / 90) * 90 + delta) % 360;
       const after = (raw < 0 ? raw + 360 : raw) as 0 | 90 | 180 | 270;
       if (before === after) continue;
-      newPages.set(pageIndex, { ...page, rotation: after, isDirty: true });
+      rotatedByIndex.set(pageIndex, { ...page, rotation: after, isDirty: true });
       changes.push({ pageIndex, before, after });
+      if (fromEvicted) restoredEvictedIndices.add(pageIndex);
     }
 
-    if (changes.length === 0) return;
+    if (changes.length === 0) return { skippedPageIndices };
 
     const action: RotatePagesAction = { type: 'rotate_pages', changes };
-    set({
-      document: { ...state.document, pages: newPages },
-      isDirty: true,
-      undoStack: [...state.undoStack, action].slice(-100),
-      redoStack: [],
+    set((live) => {
+      // await 後にファイル切替が起きていれば適用しない (旧ドキュメント復活の防止)。
+      if (!live.document || live.document.filePath !== capturedFilePath) return live;
+      const newPages = new Map(live.document.pages);
+      for (const [pageIndex, rotated] of rotatedByIndex) {
+        // in-memory の最新ページがあれば rotation だけ差し替えて他の編集を保持、
+        // 退避ページ (live に無い) は復元データをそのまま入れる。
+        const livePage = newPages.get(pageIndex);
+        newPages.set(pageIndex, livePage ? { ...livePage, rotation: rotated.rotation, isDirty: true } : rotated);
+      }
+      return {
+        document: { ...live.document, pages: newPages },
+        isDirty: true,
+        undoStack: [...live.undoStack, action].slice(-100),
+        redoStack: [],
+      };
     });
+
+    // IDB から読み戻して回転したページ (LRU 退避済み) は IDB へも書き戻して同期する。
+    // in-memory に元々あったページは他の経路 (保存時の LRU 退避) で書かれるためここでは不要。
+    const idbWriteBackEntries = Array.from(rotatedByIndex.entries())
+      .filter(([pageIndex]) => restoredEvictedIndices.has(pageIndex))
+      .map(([pageIndex, data]) => ({ filePath: capturedFilePath, pageIndex, data }));
+    if (idbWriteBackEntries.length > 0) {
+      schedulePendingIdbWrite(idbWriteBackEntries, state.pageOrder);
+    }
+
+    return { skippedPageIndices };
   },
 
   setDocumentFilePath: (filePath) => set((state) => {
@@ -1147,28 +1296,37 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   setLastSavedActionIndex: (index) => set({ lastSavedActionIndex: index }),
 
   clearOcrAllPages: () => {
-    const { document } = get();
+    const { document, pageOrder } = get();
     if (!document) return;
     const filePath = document.filePath;
     const totalPages = document.totalPages;
+    // PCT-181 (#412): 遅延 IDB 書き込みが live getState() を読まないよう、
+    // set() 実行時点 (同期) の pageOrder / クリア後ページを呼び出し元でキャプチャして渡す。
+    // documentEpoch も同様にキャプチャし、実行時にファイル切替が起きていたら no-op にする。
+    const capturedPageOrder = pageOrder;
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
     ocrClearGeneration += 1;
+    // perf(#241): totalPages 件の空 PageData を生成する代わりに、
+    // in-memory に存在するページのみを走査して textBlocks を空にする。
+    // LRU で退避済みページ (Map に無いもの) は IDB に空 OCR 状態を書いて同期する。
+    const newPages = new Map<number, PageData>();
+    for (const [idx, page] of document.pages.entries()) {
+      newPages.set(idx, clearedOcrPage(idx, page));
+    }
     set((state) => {
       if (!state.document) return state;
-      // perf(#241): totalPages 件の空 PageData を生成する代わりに、
-      // in-memory に存在するページのみを走査して textBlocks を空にする。
-      // LRU で退避済みページ (Map に無いもの) は IDB に空 OCR 状態を書いて同期する。
-      const newPages = new Map<number, PageData>();
-      for (const [idx, page] of state.document.pages.entries()) {
-        newPages.set(idx, clearedOcrPage(idx, page));
-      }
       return {
         document: { ...state.document, pages: newPages },
         isDirty: true,
         undoStack: [],
         redoStack: [],
+        // SH-6 (#431 / PCT-200): undoStack を [] にリセットするなら lastSavedActionIndex も
+        // setDocument (622行目付近) と対称に 0 へリセットする。据え置くと次の保存の
+        // diff プレビュー確認が古い index を基準に判定され、1 回無言スキップされる。
+        lastSavedActionIndex: 0,
       };
     });
-    scheduleClearOcrAllPagesIdbWrite(filePath, totalPages);
+    scheduleClearOcrAllPagesIdbWrite(filePath, totalPages, newPages, capturedPageOrder, capturedEpoch);
   },
 
   /**

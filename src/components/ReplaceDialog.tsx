@@ -144,8 +144,12 @@ function SingleReplaceTab({ id, onClose, onConfirm, hasSelection }: SingleReplac
 
   const patternInputRef = useRef<HTMLInputElement>(null);
 
+  // PCT-187: isSearching 中 (debounce 窓・scope='all' のみ 300ms) は counts.hits/regexError が
+  // 直前の検索条件のまま (stale)。ここで無効化しないと、debounce 完了前に実行すると
+  // stale な hits が expectedHits として渡り「50件超確認ダイアログ」をすり抜ける。
+  // 未検証の regex も同様にすり抜けて catch なしの経路へ流れうる。
   const isExecuteDisabled =
-    pattern.length === 0 || regexError !== null || counts.hits === 0;
+    pattern.length === 0 || regexError !== null || counts.hits === 0 || isSearching;
 
   const handleConfirm = () => {
     if (isExecuteDisabled) return;

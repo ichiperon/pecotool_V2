@@ -232,6 +232,28 @@ describe("useReportOcr", () => {
     expect(result.current.isRunning).toBe(false);
   });
 
+  it("readFile（PDF 読み込み自体）が失敗すると既存の cells を空 Map で上書きしない", async () => {
+    // PDF 読み込み段階の失敗は matrix が空のまま finally に落ちるため、
+    // loadFailed フラグで区別しないと setCells(空Map) が既存データを消してしまう。
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([["field-1", "既存値"]])]]]),
+    });
+
+    const pluginFs = await import("@tauri-apps/plugin-fs");
+    const readFileStub = vi.mocked(pluginFs.readFile);
+    readFileStub.mockRejectedValueOnce(new Error("PDF読み込み失敗"));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.isRunning).toBe(false);
+    // 既存の cells が空 Map で上書きされていないこと
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("既存値");
+  });
+
   it("cancelOcr を呼ぶと cells が setCells されない（キャンセル時は格納しない）", async () => {
     // invoke を遅延させてキャンセルのタイミングを作る
     invokeStub.mockImplementation(
@@ -291,6 +313,93 @@ describe("useReportOcr", () => {
   it("初期状態は reocrTarget=null", () => {
     const { result } = renderHook(() => useReportOcr());
     expect(result.current.reocrTarget).toBeNull();
+  });
+
+  it("一部ページの処理が例外を投げると failedPages に該当ページが積まれ、成功ページの cells は残る", async () => {
+    // runOcrSinglePage 内で invoke の reject は握りつぶされ fieldMap.set(id, "") になるため
+    // (useReportOcr.ts:106-113)、ページ単位の catch (235-237) に到達させるには
+    // runOcrSinglePage 自体が throw する必要がある。renderPageOffscreen をページ2だけ
+    // reject させることでページ単位のエラー経路を再現する。
+    const ocrCrop = await import("../../lib/ocrCrop");
+    const renderPageOffscreenStub = vi.mocked(ocrCrop.renderPageOffscreen);
+    renderPageOffscreenStub
+      .mockImplementationOnce(async () => ({
+        canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+        pageWidth: 595,
+        pageHeight: 842,
+      }))
+      .mockImplementationOnce(async () => {
+        throw new Error("render失敗");
+      });
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    // page 2 が failedPages に積まれる
+    expect(result.current.failedPages).toEqual([2]);
+    // page 1（成功ページ）の cells は生成されている
+    const cells = useReportStore.getState().cells;
+    expect(cells.get(1)?.[0]?.get("field-1")).toBe("テスト値");
+    // page 2（失敗ページ）の cells は欠落している
+    expect(cells.has(2)).toBe(false);
+
+    // mockImplementationOnce のキューは vi.clearAllMocks() では消費されず後続テストへ
+    // 持ち越されるため、明示的にデフォルト実装へ戻して他テストへの汚染を防ぐ。
+    renderPageOffscreenStub.mockImplementation(async () => ({
+      canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+      pageWidth: 595,
+      pageHeight: 842,
+    }));
+  });
+
+  it("再実行で failedPages がクリアされる", async () => {
+    const ocrCrop = await import("../../lib/ocrCrop");
+    const renderPageOffscreenStub = vi.mocked(ocrCrop.renderPageOffscreen);
+    renderPageOffscreenStub
+      .mockImplementationOnce(async () => ({
+        canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+        pageWidth: 595,
+        pageHeight: 842,
+      }))
+      .mockImplementationOnce(async () => {
+        throw new Error("render失敗");
+      });
+
+    const { result } = renderHook(() => useReportOcr());
+
+    // 1回目: 一部失敗させて failedPages を非空にする
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.failedPages).toEqual([2]);
+
+    // 2回目: renderPageOffscreen を全成功のデフォルト実装に戻して再実行
+    renderPageOffscreenStub.mockImplementation(async () => ({
+      canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+      pageWidth: 595,
+      pageHeight: 842,
+    }));
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.failedPages).toEqual([]);
+
+    // 次に続く describe ブロックへの汚染防止。
+    // 特に confidences: runOcrForPage describe の beforeEach は confidences を明示的に
+    // リセットしていない（既存の設計）ため、直前の runOcr(全成功) で page1+2 両方に
+    // confidence が投入された状態を残すと、後続の
+    // 「runOcrForPage は他ページの confidences を変更しない」検証が汚染される。
+    renderPageOffscreenStub.mockImplementation(async () => ({
+      canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+      pageWidth: 595,
+      pageHeight: 842,
+    }));
+    useReportStore.setState({ confidences: new Map() });
   });
 });
 
@@ -386,6 +495,48 @@ describe("useReportOcr: runOcrForPage", () => {
     expect(result.current.isRunning).toBe(false);
     // cells は変化しない
     expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("旧値");
+  });
+
+  // 注: #419 が指摘した非対称の実体は「pdfjs-dist / plugin-fs の動的 import 自体
+  // (`await import(...)`) が try ブロックの外にある」点。readFile/getDocument の
+  // 呼び出しはこの2テストが書かれる以前から try 内にあったため、以下2テストは
+  // #419 の非対称性そのものは再現しない（vi.mock でモジュール解決自体を reject
+  // させる検証は resetModules がテスト内の store インスタンスを分離してしまい
+  // 安定して書けなかったため見送り）。ただし読込段階の例外がボタン永久 disable を
+  // 引き起こさないことを保証する安全網として残す。#419 の本質的な修正
+  // （動的 import を try 内に移動）はコードレビューで確認する。
+  it("readFile が throw しても isRunning が false に戻る（読込段階エラーでのボタン永久 disable 防止）", async () => {
+    const pluginFs = await import("@tauri-apps/plugin-fs");
+    const readFileStub = vi.mocked(pluginFs.readFile);
+    readFileStub.mockRejectedValueOnce(new Error("読み込み失敗"));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    // readFile 失敗時も isRunning/reocrTarget が確実に戻り、ボタンが永久 disable にならないこと
+    expect(result.current.isRunning).toBe(false);
+    expect(result.current.reocrTarget).toBeNull();
+  });
+
+  it("getDocument が throw しても isRunning が false に戻る（破損PDF等の読込段階エラー）", async () => {
+    const pdfjsLib = await import("pdfjs-dist");
+    const getDocumentStub = vi.mocked(pdfjsLib.getDocument);
+    // 破損 PDF 等で getDocument が同期的に throw するケースを模す
+    getDocumentStub.mockImplementationOnce(() => {
+      throw new Error("Invalid PDF structure");
+    });
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    expect(result.current.isRunning).toBe(false);
+    expect(result.current.reocrTarget).toBeNull();
   });
 
   it("欄が 0 件のとき runOcrForPage は即座に終了して cells を変えない", async () => {

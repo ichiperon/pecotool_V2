@@ -14,6 +14,7 @@ import { perf } from '../utils/perfLogger';
 import { loadPage } from '../utils/pdfTextExtractor';
 import { parsePageRange } from '../utils/pageRangeParser';
 import { displayToSourcePageIndex, resolvePageId } from '../utils/pageOrder';
+import { bboxRectToRotatedScreenRect, rotatedScreenRectToBbox } from '../utils/canvasRotation';
 
 const RENDER_SCALE = 2.0;
 
@@ -877,11 +878,20 @@ export function useOcrEngine(
       return;
     }
 
-    // canvas ピクセル座標での矩形
-    const sx = Math.round(rect.x);
-    const sy = Math.round(rect.y);
-    const sw = Math.round(rect.width);
-    const sh = Math.round(rect.height);
+    // #405 (PCT-174): rect は bbox 空間 (回転前) の座標。UI rotation が
+    // かかっているとき、sourceCanvas は回転後の実描画 canvas なので、
+    // crop 前に bbox 空間 → rotated screen 空間へ変換する必要がある。
+    const pageRotation = pageData.rotation ?? 0;
+    const rotParams = pageRotation !== 0
+      ? { rotation: pageRotation, vw: sourceCanvas.width, vh: sourceCanvas.height }
+      : null;
+    const cropRect = rotParams ? bboxRectToRotatedScreenRect(rect, rotParams) : rect;
+
+    // canvas ピクセル座標での矩形 (rotated screen 空間 = sourceCanvas と同じ座標系)
+    const sx = Math.round(cropRect.x);
+    const sy = Math.round(cropRect.y);
+    const sw = Math.round(cropRect.width);
+    const sh = Math.round(cropRect.height);
 
     if (sw < 2 || sh < 2) return;
 
@@ -964,20 +974,31 @@ export function useOcrEngine(
       }
 
       // クロップ画像での bbox を元ページの viewport 座標に変換する。
-      // OCR 結果の bbox はクロップ画像基準 (renderScale=zoom/100 でスケール済み) なので、
-      // 元ページ viewport 座標に戻すには: bbox_viewport = bbox_ocr / (zoom/100) + offset_viewport
-      // offset_viewport = { x: sx / scale, y: sy / scale }
-      const offsetX = sx / scale;
-      const offsetY = sy / scale;
-      const adjustedBlocks = ocrBlocks.map((b) => ({
-        ...b,
-        bbox: {
-          x: b.bbox.x + offsetX,
-          y: b.bbox.y + offsetY,
+      // OCR 結果の bbox はクロップ画像基準 (renderScale=zoom/100 でスケール済み・
+      // rotated screen 空間) なので、元ページ viewport 座標に戻すには:
+      //   1. crop 内ローカル座標 → 絶対 rotated screen 座標 (sx, sy を加算)
+      //   2. #405: rotation !== 0 のときは rotated screen 空間 → bbox 空間へ逆変換
+      //   3. bbox 空間 → scale (zoom/100) で割って viewport 座標に戻す
+      const adjustedBlocks = ocrBlocks.map((b) => {
+        const absRotatedRect = {
+          x: b.bbox.x + sx,
+          y: b.bbox.y + sy,
           width: b.bbox.width,
           height: b.bbox.height,
-        },
-      }));
+        };
+        const bboxSpaceRect = rotParams
+          ? rotatedScreenRectToBbox(absRotatedRect, rotParams)
+          : absRotatedRect;
+        return {
+          ...b,
+          bbox: {
+            x: bboxSpaceRect.x / scale,
+            y: bboxSpaceRect.y / scale,
+            width: bboxSpaceRect.width / scale,
+            height: bboxSpaceRect.height / scale,
+          },
+        };
+      });
 
       const newBlocks = toTextBlocks(adjustedBlocks, settings);
       const currentPage = usePecoStore.getState().document?.pages.get(pageIndex);

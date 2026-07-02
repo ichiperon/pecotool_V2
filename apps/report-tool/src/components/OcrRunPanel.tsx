@@ -2,7 +2,12 @@ import type { FC } from "react";
 import { useCallback } from "react";
 import { useReportStore } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
-import { useReportOcr } from "../hooks/useReportOcr";
+import type { UseReportOcrReturn } from "../hooks/useReportOcr";
+
+interface Props {
+  /** App 上位で生成された単一の OCR フックインスタンス。 */
+  ocrHook: UseReportOcrReturn;
+}
 
 /**
  * OCR 実行パネル。
@@ -15,13 +20,18 @@ import { useReportOcr } from "../hooks/useReportOcr";
  * - OCR 実行中は進捗バーと "N/M ページ" ラベルを表示
  * - cells が非空のとき OCR 再実行前に確認ダイアログを表示（手編集データ損失防止）
  * - aria-live="polite" で進捗をスクリーンリーダーに通知
+ * - OCR 完了後、処理エラーになったページ（failedPages）があれば一覧表示する
+ *
+ * OCR フックは App 上位で 1 インスタンスのみ生成し props 経由で受け取る
+ * （このコンポーネントが独自に useReportOcr() を呼ぶと、isRunning/epoch/cancel が
+ * ConfirmLayout 側のインスタンスと分離し、並走・相互キャンセル不成立を招く）。
  */
-const OcrRunPanel: FC = () => {
+const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
   const fields = useReportStore((s) => s.template.fields);
   const cells = useReportStore((s) => s.cells);
   const filePath = usePdfStore((s) => s.filePath);
   const numPages = usePdfStore((s) => s.numPages);
-  const { isRunning, progress, runOcr, cancelOcr } = useReportOcr();
+  const { isRunning, progress, failedPages, runOcr, cancelOcr } = ocrHook;
 
   const canRun = !isRunning && !!filePath && numPages > 0 && fields.length > 0;
   const progressPct =
@@ -93,6 +103,13 @@ const OcrRunPanel: FC = () => {
             {progress.done} / {progress.total} ページ
           </span>
         </div>
+      )}
+
+      {/* OCR 処理エラーになったページの通知 */}
+      {!isRunning && failedPages.length > 0 && (
+        <p className="ocr-run-panel__failed" role="alert">
+          ページ {failedPages.join(", ")} の処理に失敗しました（該当ページのデータは抽出されていません）
+        </p>
       )}
 
       {/* 無効化理由のヒント */}

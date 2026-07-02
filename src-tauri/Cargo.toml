@@ -17,16 +17,25 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# PCT-201: devtools feature は既定で無効。`npm run tauri dev`（package.json 側）が
+# `--features devtools` を明示的に渡した時のみ有効になる。`npm run tauri build`（release）は
+# 何も渡さないため無効のまま。Cargo は debug_assertions ベースの依存切り替えを
+# サポートしない（`[target.'cfg(debug_assertions)'.dependencies]` は無効な構文）ため、
+# 自前 feature + フロント側の呼び分けで代替する。
+devtools = ["tauri/devtools"]
+
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "devtools"] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-updater = "2"
+# PCT-184: ダイアログ由来の runtime fs scope をディスクへ永続化し、アプリ再起動後も維持する。
+tauri-plugin-persisted-scope = "2.3.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "time"] }
-lopdf = "0.35"
 windows = { version = "0.61", features = [
     "Foundation",
     "Foundation_Collections",
@@ -36,4 +45,6 @@ windows = { version = "0.61", features = [
     "Storage",
     "Storage_Streams",
     "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Foundation",
 ] }

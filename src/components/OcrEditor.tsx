@@ -56,6 +56,7 @@ export function OcrEditor({
   const setSearchTerm = useSearchStore(s => s.setSearchTerm);
   const nextSearchHit = useSearchStore(s => s.nextSearchHit);
   const prevSearchHit = useSearchStore(s => s.prevSearchHit);
+  const clampSearchHitIndex = useSearchStore(s => s.clampSearchHitIndex);
   const [activeId, setActiveId] = useState<string | null>(null);
 
   // PCT-048: トグル状態を購読して problematicIds の useMemo に含める
@@ -232,6 +233,14 @@ export function OcrEditor({
     if (searchHitBlocksRef.current.length === 0) return;
     scrollToHitBlock(searchHitIndex, searchHitBlocksRef.current);
   }, [searchHitIndex, scrollToHitBlock]);
+
+  // SH-7 (#431 / PCT-200): ページ切替等で totalHits (現在ページのヒット数) が
+  // searchHitIndex を下回ると「8/3」のような不正なバッジ表示になる。
+  // totalHits 変化を検知して範囲内にクランプする。
+  useEffect(() => {
+    if (!searchTerm) return;
+    clampSearchHitIndex(totalHits);
+  }, [searchTerm, totalHits, clampSearchHitIndex]);
 
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== 'Enter') return;

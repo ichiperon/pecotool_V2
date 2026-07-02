@@ -13,8 +13,9 @@ import { useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
-import { exportTextFromDocument } from '../utils/textExport';
+import { exportTextFromDocument, buildLruAwarePageDataGetter } from '../utils/textExport';
 import { getJson, setJson, removeJson } from '../utils/jsonStorage';
+import { getAllTemporaryPageData } from '../utils/pdfLoader';
 
 const STORAGE_KEY = 'peco-batch-job-v1';
 
@@ -66,10 +67,42 @@ function persistJob(job: BatchJob | null): void {
   }
 }
 
+/**
+ * #430 (AQ-6): 'id' in parsed だけでは files 欠落等の shape 不正を検出できず、
+ * useState 初期化子（mount 時）が persisted.files.some(...) で TypeError を throw
+ * → ErrorBoundary → 再読み込みでも同じ破損データを読み直して毎回 throw、という
+ * 起動不能ループを引き起こしていた。実行に必要な最低限のフィールド（id/files配列/
+ * files各要素のpath・status）を検証し、不正なら破棄する。
+ */
+function isValidBatchFileEntry(v: unknown): v is BatchFileEntry {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as Record<string, unknown>;
+  return typeof f.path === 'string' && typeof f.status === 'string';
+}
+
+function isValidBatchJob(v: unknown): v is BatchJob {
+  if (!v || typeof v !== 'object') return false;
+  const j = v as Record<string, unknown>;
+  return (
+    typeof j.id === 'string' &&
+    typeof j.folderPath === 'string' &&
+    typeof j.outputDir === 'string' &&
+    typeof j.exportFormat === 'string' &&
+    typeof j.saveMode === 'string' &&
+    Array.isArray(j.files) &&
+    j.files.every(isValidBatchFileEntry)
+  );
+}
+
 function loadPersistedJob(): BatchJob | null {
   const parsed = getJson<unknown>(STORAGE_KEY);
-  if (parsed && typeof parsed === 'object' && 'id' in parsed) {
-    return parsed as BatchJob;
+  if (isValidBatchJob(parsed)) {
+    return parsed;
+  }
+  if (parsed !== null) {
+    // shape 不正（破損データ）は起動不能ループを防ぐため破棄する。
+    console.warn('[useBatchJob] persisted job has invalid shape; discarding.', parsed);
+    removeJson(STORAGE_KEY);
   }
   return null;
 }
@@ -114,6 +147,13 @@ export interface UseBatchJobCallbacks {
    * the store directly. Decouples executeLoop from usePecoStore internals.
    */
   getDocumentSnapshot: () => import('../types').PecoDocument | null;
+  /**
+   * #427: Return the current pageOrder without accessing the store directly.
+   * Needed to resolve LRU-evicted pages (IDB pageId) back to displayIndex when
+   * exporting all pages. pageOrder is intentionally excluded from PecoDocument (#209),
+   * so it must be supplied via callback like getDocumentSnapshot.
+   */
+  getPageOrder: () => number[];
   /** Show a toast notification. */
   showToast: (msg: string, isError?: boolean) => void;
 }
@@ -272,7 +312,20 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
                 const ext = job.exportFormat;
                 const exportFileName = `${stem}.ocr.${ext}`;
                 exportPath = await join(job.outputDir, exportFileName);
-                const text = exportTextFromDocument(exportDoc, job.exportFormat);
+                // #427: バッチジョブのテキストエクスポートは全ページ対象。LRU 退避済み
+                // ページ（大量ページの OCR 中に document.pages から追い出されたもの）が
+                // 無警告で欠落しないよう IDB から読み戻す（replaceText 系 #104 と同方式）。
+                const pageOrder = callbacks.getPageOrder();
+                const restored = await buildLruAwarePageDataGetter(exportDoc.filePath, pageOrder, getAllTemporaryPageData);
+                if (restored.droppedPageIds.length > 0) {
+                  callbacks.showToast(
+                    `${fileName}: ${restored.droppedPageIds.length} ページの復元に失敗したためエクスポートから除外されました。`,
+                    true,
+                  );
+                }
+                const text = exportTextFromDocument(exportDoc, job.exportFormat, {
+                  getPageData: restored.getPageData,
+                });
                 await writeTextFile(exportPath, text);
               }
             }

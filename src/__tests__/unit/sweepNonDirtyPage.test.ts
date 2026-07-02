@@ -23,6 +23,7 @@ import { inflate, deflate } from 'pako';
 import {
   collectPageContentRefCounts,
   sweepNonDirtyPage,
+  pageHasTextOperatorDamage,
 } from '../../utils/pdfSaverCore';
 import { hasTextOperatorsOutsideTextObjects } from '../../utils/pdfContentStream';
 
@@ -257,5 +258,41 @@ describe('sweepNonDirtyPage — decode 回数 (PCT-059 維持)', () => {
     const run = await loadWithSpy(source);
     runSweep(run.doc);
     expect(run.spy).toHaveBeenCalledTimes(1);
+  }, 30_000);
+});
+
+// ── 3. pageHasTextOperatorDamage — ストリーム跨ぎ BT...ET の連結判定 (PCT-177 / #408) ──
+
+describe('pageHasTextOperatorDamage — ストリーム跨ぎ判定 (PCT-177)', () => {
+  function damageOfPage0(doc: PDFDocument): boolean {
+    return pageHasTextOperatorDamage(getPage0Node(doc), doc.context);
+  }
+
+  it('BT が stream A・ET が stream B に分かれる合法構成を損傷と誤判定しない', async () => {
+    // PDF 32000-1 §7.8.2: トークン境界での content stream 分割は合法。
+    // 連結すると BT (Hi) Tj ET は正常に閉じるため損傷なし。
+    const source = await buildPdf([
+      { content: 'q 1 0 0 1 0 0 cm\nBT\n/F1 12 Tf\n(Hi) Tj\n', filter: 'flate' },
+      { content: 'ET\nQ\n', filter: 'flate' },
+    ]);
+    const doc = await loadDoc(source);
+    expect(damageOfPage0(doc)).toBe(false);
+  }, 30_000);
+
+  it('真に BT 外へ表示演算子が漏れた構成は連結後も損傷と判定する', async () => {
+    const source = await buildPdf([
+      { content: 'BT (inside) Tj ET\n', filter: 'flate' },
+      { content: '(orphan) Tj\n', filter: 'flate' },
+    ]);
+    const doc = await loadDoc(source);
+    expect(damageOfPage0(doc)).toBe(true);
+  }, 30_000);
+
+  it('単一 stream 内で閉じた BT...ET は損傷なし（非退行）', async () => {
+    const source = await buildPdf([
+      { content: 'q\nBT /F1 12 Tf (keep) Tj ET\nQ\n0 0 100 100 re f', filter: 'flate' },
+    ]);
+    const doc = await loadDoc(source);
+    expect(damageOfPage0(doc)).toBe(false);
   }, 30_000);
 });

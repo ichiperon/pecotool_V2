@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useReducer, memo } from 'react';
+import type { CSSProperties } from 'react';
 import { listen, emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -23,6 +24,9 @@ interface ThumbnailFileOpenedPayload {
   totalPages: number;
   dirtyPages: number[];
   pageOrder: number[];
+  // issue #431 (FB-6): 表示 (pageOrder) 順の回転角度一覧。未着手だった旧バージョンとの
+  // 互換のため任意フィールドとして扱い、未受信時は 0 度扱いにフォールバックする。
+  rotations?: number[];
 }
 
 interface ThumbnailPageOrderChangedPayload {
@@ -30,6 +34,7 @@ interface ThumbnailPageOrderChangedPayload {
   totalPages: number;
   dirtyPages: number[];
   pageOrder: number[];
+  rotations?: number[];
 }
 
 type PendingThumbnail = {
@@ -40,13 +45,15 @@ type PendingThumbnail = {
 
 // ---- Thumbnail アイテム ----
 const ThumbnailItem = memo(({
-  index, currentPageIndex, isDirty, loadEpoch, onSelect, onRequest,
+  index, currentPageIndex, isDirty, loadEpoch, rotation, onSelect, onRequest,
   onSubscribeThumbnail, onGetThumbnail,
 }: {
   index: number;
   currentPageIndex: number;
   isDirty?: boolean;
   loadEpoch: number;
+  // issue #431 (FB-6): 内蔵パネル (ThumbnailPanel.tsx) と対称の UI 回転反映
+  rotation: number;
   onSelect: (i: number) => void;
   onRequest: (i: number) => void;
   onSubscribeThumbnail: (index: number, cb: () => void) => () => void;
@@ -67,17 +74,31 @@ const ThumbnailItem = memo(({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, thumbnailUrl, onRequest, loadEpoch]);
 
+  // issue #207 由来・ThumbnailPanel.tsx と同じ CSS variable 方式。
+  // 90/270 度では元の縦横比が入れ替わるため box の枠を回転後の向きに合わせる。
+  const THUMB_W = 120;
+  const THUMB_H = 160;
+  const isLandscape = rotation === 90 || rotation === 270;
+  const boxVarStyle: CSSProperties | undefined = isLandscape
+    ? { '--thumb-box-w': `${THUMB_H}px`, '--thumb-box-h': `${THUMB_W}px` } as CSSProperties
+    : undefined;
+  const rotationVarStyle: CSSProperties | undefined = rotation !== 0
+    ? { '--thumbnail-rotation': `${rotation}deg` } as CSSProperties
+    : undefined;
+  const imgClassName = rotation !== 0 ? 'thumbnail-img thumbnail-img--rotated' : 'thumbnail-img';
+
   return (
     <div
       className={`thumbnail-item ${index === currentPageIndex ? 'active' : ''}`}
       onClick={() => onSelect(index)}
     >
-      <div className="thumbnail-box">
+      <div className="thumbnail-box" style={boxVarStyle}>
         {thumbnailUrl ? (
           <img
+            className={imgClassName}
             src={thumbnailUrl}
             alt={`Page ${index + 1}`}
-            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            style={rotationVarStyle}
           />
         ) : (
           <span style={{ color: '#d1d5db', fontSize: 24 }}>{index + 1}</span>
@@ -94,6 +115,8 @@ export function ThumbnailWindow() {
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [dirtyPages, setDirtyPages] = useState<Set<number>>(new Set());
   const [loadEpoch, setLoadEpoch] = useState(0);
+  // issue #431 (FB-6): 表示 (pageOrder) 順の回転角度一覧
+  const [rotations, setRotations] = useState<number[]>([]);
 
   // サムネイルデータはRefで保持（Reactの外）
   const thumbnailsRef = useRef<Map<number, string>>(new Map());
@@ -379,7 +402,7 @@ export function ThumbnailWindow() {
 
     const setup = async () => {
       unlisteners.push(await listen<ThumbnailFileOpenedPayload>('thumbnail:file-opened', (e) => {
-        const { filePath: fp, currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder } = e.payload;
+        const { filePath: fp, currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder, rotations: rot } = e.payload;
 
         epochRef.current++;
         pdfLoadEpochRef.current++;
@@ -413,6 +436,7 @@ export function ThumbnailWindow() {
         setTotalPages(total);
         setCurrentPageIndex(page);
         setDirtyPages(new Set(dirty));
+        setRotations(rot ?? []);
         setLoadEpoch(prev => prev + 1);
 
         const workers = workersRef.current;
@@ -470,11 +494,12 @@ export function ThumbnailWindow() {
         setTotalPages(0);
         setCurrentPageIndex(0);
         setDirtyPages(new Set());
+        setRotations([]);
         setLoadEpoch(prev => prev + 1);
       }));
 
       unlisteners.push(await listen<ThumbnailPageOrderChangedPayload>('thumbnail:page-order-changed', (e) => {
-        const { currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder } = e.payload;
+        const { currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder, rotations: rot } = e.payload;
         const nextPageOrder = [...pageOrder];
 
         epochRef.current++;
@@ -499,10 +524,15 @@ export function ThumbnailWindow() {
         setTotalPages(total);
         setCurrentPageIndex(page);
         setDirtyPages(new Set(dirty));
+        setRotations(rot ?? []);
         setLoadEpoch(prev => prev + 1);
         if (isPdfReadyRef.current) {
           setTimeout(() => processThumbnailQueue(epoch), 0);
         }
+      }));
+
+      unlisteners.push(await listen<{ rotations: number[] }>('thumbnail:rotation-update', (e) => {
+        setRotations(e.payload.rotations);
       }));
 
       unlisteners.push(await listen<{ pageIndex: number }>('thumbnail:page-changed', (e) => {
@@ -551,6 +581,7 @@ export function ThumbnailWindow() {
               currentPageIndex={currentPageIndex}
               isDirty={dirtyPages.has(i)}
               loadEpoch={loadEpoch}
+              rotation={rotations[i] ?? 0}
               onSelect={handleSelectPage}
               onRequest={requestThumbnail}
               onSubscribeThumbnail={subscribeThumbnail}

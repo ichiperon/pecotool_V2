@@ -359,8 +359,15 @@ describe('pdfLoader / loadPage', () => {
     })
   })
 
-  describe('U-PL-17: getTextContent が throw → loadPage は graceful に空 textBlocks を返す', () => {
-    it('getTextContent が throw するページでも loadPage は reject せず textBlocks=[] で返る', async () => {
+  describe('U-PL-17: getTextContent が throw したときの loadPage の実挙動', () => {
+    // #410 (PCT-179) 是正: 元テストは try/catch で reject も合格扱いにし、
+    // 「graceful に textBlocks=[] を返る」ことを一度もアサートしていなかった (vacuous)。
+    // 実装 (pdfTextExtractor.ts:73 `await page.getTextContent()`) を実測すると、
+    // getTextContent の throw は try/catch で捕捉されず loadPage をそのまま reject させる。
+    // graceful degradation は現状実装されていないため、期待動作を「reject する」に
+    // 是正し、reject しなくなった (=無条件で catch される化けが起きた) 場合や、
+    // 逆に別のエラー型に変質した場合に検出できるようにする。
+    it('getTextContent が throw すると loadPage は同じエラーで reject する (現状: graceful degradation 未実装)', async () => {
       const errorPdf = {
         getPage: vi.fn().mockResolvedValue({
           getViewport: vi.fn().mockReturnValue({
@@ -377,26 +384,9 @@ describe('pdfLoader / loadPage', () => {
       // 共有 proxy を pre-seed
       await getSharedPdfProxy('error.pdf')
 
-      // bboxMeta を渡さない場合、pdfjs 経路で getTextContent が throw する
-      // loadPage が graceful に処理するかを検証
-      let caughtError: unknown = null
-      let result: Awaited<ReturnType<typeof loadPage>> | null = null
-      try {
-        result = await loadPage(errorPdf as any, 0, 'error.pdf')
-      } catch (e) {
-        caughtError = e
-      }
-
-      // getTextContent が throw した場合、loadPage は throw するか空で返すかのどちらか。
-      // 実装が throw する場合: caughtError が non-null
-      // 実装が空で返す場合: result.textBlocks が空
-      // 少なくとも「アプリがクラッシュしない」ことを検証する
-      if (caughtError !== null) {
-        // throw した場合は Error であること (RangeError 等の予期しないクラッシュではない)
-        expect(caughtError).toBeInstanceOf(Error)
-      } else {
-        expect(result).not.toBeNull()
-      }
+      // bboxMeta を渡さない場合、pdfjs 経路で getTextContent が throw する。
+      // 現状の実装はこれを吸収せず、そのまま reject で伝播する。
+      await expect(loadPage(errorPdf as any, 0, 'error.pdf')).rejects.toThrow('text extraction failed')
     })
   })
 
@@ -486,8 +476,14 @@ describe('pdfLoader / loadPage', () => {
     })
   })
 
-  describe('U-PL-18: bboxMeta に malformed エントリがあっても crash しない', () => {
-    it('bboxMeta["0"] の各エントリが null でも graceful に処理される', async () => {
+  describe('U-PL-18: bboxMeta に malformed エントリがあるときの loadPage の実挙動', () => {
+    // #410 (PCT-179) 是正: 元テストは try/catch で reject も合格扱いにし、
+    // 「crash しない」ことを一度も明確にアサートしていなかった (vacuous)。
+    // 実装 (pdfTextExtractor.ts:92 `savedMeta.map((meta) => ({ ..., text: meta.text, ... }))`)
+    // を実測すると、null エントリは `meta.text` アクセスで TypeError を投げ、
+    // loadPage はそのまま reject する (graceful に無視されない)。
+    // 期待動作を「reject する」に是正し、null エントリの扱いが変わったら検出できるようにする。
+    it('bboxMeta["0"] に null エントリがあると loadPage は TypeError で reject する (現状: null エントリは無視されない)', async () => {
       const pdf = makeMockPdf([
         { str: 'テスト', transform: [1, 0, 0, 12, 100, 700], width: 50, height: 12 },
       ])
@@ -499,21 +495,22 @@ describe('pdfLoader / loadPage', () => {
         { text: '正常エントリ', bbox: { x: 0, y: 0, width: 50, height: 12 }, writingMode: 'horizontal', order: 1 },
       ]
 
-      let caughtError: unknown = null
-      let result: Awaited<ReturnType<typeof loadPage>> | null = null
-      try {
-        result = await loadPage(pdf as any, 0, 'test.pdf', { '0': malformedMeta })
-      } catch (e) {
-        caughtError = e
-      }
+      await expect(loadPage(pdf as any, 0, 'test.pdf', { '0': malformedMeta })).rejects.toThrow(TypeError)
+    })
 
-      // crash せず、何らかの結果が返ること
-      if (caughtError !== null) {
-        expect(caughtError).toBeInstanceOf(Error)
-      } else {
-        expect(result).not.toBeNull()
-        expect(Array.isArray(result?.textBlocks)).toBe(true)
-      }
+    it('bboxMeta["0"] が全エントリ正常なら malformed 経路を通らず textBlocks が meta どおりに返る', async () => {
+      const pdf = makeMockPdf([
+        { str: 'テスト', transform: [1, 0, 0, 12, 100, 700], width: 50, height: 12 },
+      ])
+      setupGetDocument(pdf)
+
+      const wellFormedMeta = [
+        { text: '正常エントリ', bbox: { x: 0, y: 0, width: 50, height: 12 }, writingMode: 'horizontal', order: 1 },
+      ]
+
+      const result = await loadPage(pdf as any, 0, 'test.pdf', { '0': wellFormedMeta })
+      expect(result.textBlocks).toHaveLength(1)
+      expect(result.textBlocks[0].text).toBe('正常エントリ')
     })
   })
 

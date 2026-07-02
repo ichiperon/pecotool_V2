@@ -98,6 +98,63 @@ export function rotatedScreenToBbox(
   }
 }
 
+export interface RectXYWH {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * bbox 空間の axis-aligned 矩形を rotated screen 空間の axis-aligned 矩形に変換する。
+ *
+ * 回転は axis-aligned 矩形を別の axis-aligned 矩形に写すため、4隅を
+ * bboxToRotatedScreen で変換して bounding box (min/max) を取れば求まる。
+ * #405 (PCT-174): 範囲指定 OCR の crop 領域を回転後 canvas 座標に合わせるために使用。
+ */
+export function bboxRectToRotatedScreenRect(
+  rect: RectXYWH,
+  params: CanvasRotationParams,
+): RectXYWH {
+  const corners = [
+    bboxToRotatedScreen(rect.x, rect.y, params),
+    bboxToRotatedScreen(rect.x + rect.width, rect.y, params),
+    bboxToRotatedScreen(rect.x, rect.y + rect.height, params),
+    bboxToRotatedScreen(rect.x + rect.width, rect.y + rect.height, params),
+  ];
+  const xs = corners.map((c) => c.x);
+  const ys = corners.map((c) => c.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * rotated screen 空間の axis-aligned 矩形を bbox 空間の axis-aligned 矩形に逆変換する。
+ * bboxRectToRotatedScreenRect の逆変換（4隅を rotatedScreenToBbox で変換して bounding box）。
+ * #405 (PCT-174): crop 画像内で得られた OCR 結果 bbox を bbox 空間に戻すために使用。
+ */
+export function rotatedScreenRectToBbox(
+  rect: RectXYWH,
+  params: CanvasRotationParams,
+): RectXYWH {
+  const corners = [
+    rotatedScreenToBbox(rect.x, rect.y, params),
+    rotatedScreenToBbox(rect.x + rect.width, rect.y, params),
+    rotatedScreenToBbox(rect.x, rect.y + rect.height, params),
+    rotatedScreenToBbox(rect.x + rect.width, rect.y + rect.height, params),
+  ];
+  const xs = corners.map((c) => c.x);
+  const ys = corners.map((c) => c.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
 /**
  * canvas context に UI rotation 分の変換を適用する。
  * この関数を ctx.save() 直後に呼び、描画後に ctx.restore() を呼ぶこと。

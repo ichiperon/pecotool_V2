@@ -3,7 +3,7 @@ import type { RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { usePecoStore, waitForPendingIdbSaves } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
-import { resolveDisplayIndex } from '../utils/pageOrder';
+import { displayToSourcePageIndex, parsePageId } from '../utils/pageOrder';
 import { PageData } from '../types';
 import { logger } from '../utils/logger';
 
@@ -205,22 +205,30 @@ export function useAutoBackup(
       // メモリ上のダーティページを収集（サムネイルは除外）
       const dirtyPages: Record<string, Omit<PageData, 'thumbnail'>> = {};
 
-      for (const [idx, page] of document.pages.entries()) {
+      // PCT-173 (#404): dirtyPages のキーは sourceIndex（= pageOrder[displayIndex]）で統一する。
+      // document.pages Map のキーは movePage/deletePages で displayIndex に再キーされるが、
+      // 復元側 (pecoStore.setDocument) は fresh open = identity 前提で
+      // pageId = "src:" + key（= sourceIndex）として解釈する。
+      // 書く側で displayIndex キーのまま保存すると、pageOrder≠identity の状態でクラッシュ→復元時に
+      // 編集が別ページへ注入される（保証ライン①抵触）。ここで sourceIndex へ正規化して契約を成立させる。
+      const pageOrder = usePecoStore.getState().pageOrder;
+
+      for (const [displayIdx, page] of document.pages.entries()) {
         if (page.isDirty) {
           const { thumbnail: _t, ...cleanPage } = page;
-          dirtyPages[String(idx)] = cleanPage;
+          const sourceIdx = displayToSourcePageIndex(pageOrder, displayIdx);
+          dirtyPages[String(sourceIdx)] = cleanPage;
         }
       }
 
       // PCT-104 (A-lite 段階2): IDB 退避済みのページをマージ（メモリ側が優先）。
-      // idbDirtyPages は Map<pageId, Partial<PageData>> なので resolveDisplayIndex で変換。
-      // dirtyPages のキーは displayIndex の文字列表現（復元時に parseInt で使われる）。
+      // idbDirtyPages は Map<pageId, Partial<PageData>>。pageId は既に "src:" + sourceIndex 形式のため
+      // parsePageId で sourceIndex を直接取り出し、dirtyPages と同じ sourceIndex キーに揃える。
       {
-        const pageOrder = usePecoStore.getState().pageOrder;
         for (const [pageId, page] of idbDirtyPages.entries()) {
-          const display = resolveDisplayIndex(pageOrder, pageId);
-          if (display < 0) continue;
-          const key = String(display);
+          const sourceIdx = parsePageId(pageId);
+          if (sourceIdx === null) continue;
+          const key = String(sourceIdx);
           if (!dirtyPages[key]) {
             const { thumbnail: _t, ...cleanPage } = page;
             // cleanPage は Partial のため PageData に満たない可能性があるが
@@ -231,6 +239,18 @@ export function useAutoBackup(
       }
 
       if (Object.keys(dirtyPages).length === 0) return;
+
+      // PCT-185 (#416): TOCTOU 再評価。冒頭ガード通過後、await
+      // (waitForPendingIdbSaves / getAllTemporaryPageData) の間に手動保存が完走すると、
+      // clear_backup 実行済みなのに古い dirty 状態を書き戻し「偽の未保存バックアップ」を生成する
+      // （write-after-clear レース）。invoke 直前に最新 state を読み直し、
+      //   - 手動保存が進行/完走している (externalIsSavingRef=true)
+      //   - 保存完走で dirty が解消した (isDirty=false)
+      //   - 対象ドキュメントが差し替わった (filePath 変化)
+      // のいずれかなら書き戻しを中止する。
+      if (externalIsSavingRef?.current) return;
+      const latest = usePecoStore.getState();
+      if (!latest.isDirty || latest.document?.filePath !== document.filePath) return;
 
       const timestamp = new Date().toISOString();
 

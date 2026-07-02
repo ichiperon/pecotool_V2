@@ -28,6 +28,8 @@ export interface UseReportOcrReturn {
   progress: ReportOcrProgress | null;
   /** 単一ページ再 OCR の対象ページ番号。実行中以外は null。 */
   reocrTarget: number | null;
+  /** 直近の全ページ OCR で処理エラーになったページ番号（昇順）。エラーなし・未実行時は空配列。 */
+  failedPages: number[];
   runOcr: () => Promise<void>;
   cancelOcr: () => void;
   /** 指定ページのみを再 OCR して setCellsForPage で部分更新する。 */
@@ -161,6 +163,7 @@ export function useReportOcr(): UseReportOcrReturn {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState<ReportOcrProgress | null>(null);
   const [reocrTarget, setReocrTarget] = useState<number | null>(null);
+  const [failedPages, setFailedPages] = useState<number[]>([]);
 
   // キャンセル制御: epoch が変わったらループを中断する
   const epochRef = useRef(0);
@@ -179,20 +182,30 @@ export function useReportOcr(): UseReportOcrReturn {
 
     setIsRunning(true);
     setProgress({ done: 0, total: numPages });
-
-    const pdfjsLib = await import("pdfjs-dist");
-    const { readFile } = await import("@tauri-apps/plugin-fs");
-
-    const bytes = await readFile(filePath);
-    const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    setFailedPages([]);
 
     const matrix: CellMatrix = new Map();
     const confMatrix: ConfidenceMatrix = new Map();
+    const failed: number[] = [];
 
     const isCancelled = () =>
       cancelledRef.current || epochRef.current !== currentEpoch;
 
+    let pdfDoc: Awaited<ReturnType<typeof import("pdfjs-dist").getDocument>["promise"]> | null =
+      null;
+    // PDF 読み込み自体が失敗した場合は matrix が空のまま finally に落ちる。
+    // 既存の cells/confidences を空 Map で上書きしないようフラグで区別する。
+    let loadFailed = false;
+
     try {
+      // readFile/getDocument も try 内で実行し、ここで throw しても
+      // finally で isRunning を確実に false へ戻す（読み込み失敗時のボタン永久 disable 防止）。
+      const pdfjsLib = await import("pdfjs-dist");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+
+      const bytes = await readFile(filePath);
+      pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+
       for (let pageIndex = 0; pageIndex < numPages; pageIndex++) {
         if (isCancelled()) break;
 
@@ -221,6 +234,7 @@ export function useReportOcr(): UseReportOcrReturn {
           }
         } catch (e) {
           console.error(`[ReportOCR] ページ ${pageNumber} 処理エラー:`, e);
+          failed.push(pageNumber);
         }
 
         if (isCancelled()) break;
@@ -230,15 +244,19 @@ export function useReportOcr(): UseReportOcrReturn {
         // UI スレッドを解放
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
+    } catch (e) {
+      console.error("[ReportOCR] PDF 読み込みエラー:", e);
+      loadFailed = true;
     } finally {
-      pdfDoc.destroy().catch(() => {});
+      pdfDoc?.destroy().catch(() => {});
       setIsRunning(false);
 
-      if (!cancelledRef.current && epochRef.current === currentEpoch) {
+      if (!cancelledRef.current && epochRef.current === currentEpoch && !loadFailed) {
         setCells(matrix);
         // setCells が confidences をクリアするので後から setConfidences を呼ぶ
         setConfidences(confMatrix);
         setProgress(null);
+        setFailedPages(failed);
       } else {
         setProgress(null);
       }
@@ -263,13 +281,16 @@ export function useReportOcr(): UseReportOcrReturn {
     setIsRunning(true);
     setReocrTarget(pageNum);
 
-    const pdfjsLib = await import("pdfjs-dist");
-    const { readFile } = await import("@tauri-apps/plugin-fs");
-
     const isCancelled = () =>
       cancelledRef.current || epochRef.current !== currentEpoch;
 
     try {
+      // pdfjs-dist / plugin-fs の動的 import と readFile/getDocument も try 内で実行し、
+      // ここで throw しても finally で isRunning を確実に false へ戻す
+      // （runOcr と対称化。読み込み失敗時のボタン永久 disable 防止）。
+      const pdfjsLib = await import("pdfjs-dist");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+
       const bytes = await readFile(filePath);
       const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
 
@@ -301,5 +322,5 @@ export function useReportOcr(): UseReportOcrReturn {
     }
   }, []);
 
-  return { isRunning, progress, reocrTarget, runOcr, cancelOcr, runOcrForPage };
+  return { isRunning, progress, reocrTarget, failedPages, runOcr, cancelOcr, runOcrForPage };
 }

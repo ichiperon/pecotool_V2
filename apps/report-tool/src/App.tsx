@@ -117,7 +117,7 @@ const App: FC = () => {
                       先に欄を定義してください（ステップ 1）
                     </p>
                   )}
-                  <OcrRunPanel />
+                  <OcrRunPanel ocrHook={ocrHook} />
                 </div>
               )}
               {currentStep === 4 && (

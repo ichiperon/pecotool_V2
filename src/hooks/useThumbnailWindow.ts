@@ -23,9 +23,23 @@ export function useThumbnailWindow() {
     doc.pages.forEach((page, idx) => { if (page.isDirty) parts.push(idx); });
     return parts.join(',');
   });
+  // issue #431 (FB-6): 回転状態をシリアライズしたプリミティブのみ購読する。
+  // dirtyPagesSerialized と同じ設計 (issue #35) — document 全体購読を避け、
+  // rotation が変化したときだけ effect を再実行する。
+  const rotationsSerialized = usePecoStore((s) => {
+    const doc = s.document;
+    if (!doc) return '';
+    const parts: number[] = [];
+    doc.pages.forEach((page, idx) => { parts[idx] = page.rotation ?? 0; });
+    return parts.join(',');
+  });
   // Dirty なページインデックス一覧を追跡
   const prevDirtyRef = useRef<string>('');
   const prevPageOrderRef = useRef<string>('');
+  // 直近で通知した表示 (pageOrder) 順 rotations 文字列 (emit 内容の重複排除用)
+  const prevRotationsRef = useRef<string>('');
+  // rotationsSerialized (pages Map の displayIndex キー順) の直近値。effect の再実行判定用。
+  const prevRotationsSourceRef = useRef<string>('');
 
   const getDirtyPages = useCallback((): number[] => {
     const doc = usePecoStore.getState().document;
@@ -33,6 +47,18 @@ export function useThumbnailWindow() {
     const result: number[] = [];
     doc.pages.forEach((page, idx) => { if (page.isDirty) result.push(idx); });
     return result;
+  }, []);
+
+  // issue #431 (FB-6): 表示順 (display index) に沿って rotation 値を並べた配列を返す。
+  // document.pages Map は displayIndex キー (movePage / deletePages / reorder undo が
+  // すべて display index で再構築、内蔵の ThumbnailPanel も pages.get(displayIndex) 参照)。
+  // pageOrder の中身 (source page index) で引くと、並べ替え・削除後に別ページの
+  // rotation を返してしまう (pageOrder が identity のうちだけ偶然一致していた)。
+  // 表示スロット数 (= pageOrder.length) 分、displayIndex 0..n-1 で引く。
+  const getRotations = useCallback((pageOrder: number[]): number[] => {
+    const doc = usePecoStore.getState().document;
+    if (!doc) return [];
+    return pageOrder.map((_, displayIdx) => doc.pages.get(displayIdx)?.rotation ?? 0);
   }, []);
 
   // --- ウィンドウ初期化（遅延生成）---
@@ -100,6 +126,7 @@ export function useThumbnailWindow() {
             totalPages: doc.totalPages,
             dirtyPages: getDirtyPages(),
             pageOrder,
+            rotations: getRotations(pageOrder),
           }).catch(logUnlessTauriWindowNotFound);
         }
       });
@@ -111,7 +138,7 @@ export function useThumbnailWindow() {
     let unlisten: (() => void) | undefined;
     const p = setup().then(fn => { unlisten = fn; }).catch(logUnlessTauriWindowNotFound);
     return () => { p.then(() => unlisten?.()); };
-  }, [getDirtyPages]);
+  }, [getDirtyPages, getRotations]);
 
   // --- ページ選択をサムネイル窓から受け取る ---
   useEffect(() => {
@@ -126,6 +153,7 @@ export function useThumbnailWindow() {
   useEffect(() => {
     if (document) {
       const pageOrder = usePecoStore.getState().pageOrder;
+      const rotations = getRotations(pageOrder);
       emit('thumbnail:file-opened', {
         filePath: document.filePath,
         documentEpoch,
@@ -133,11 +161,16 @@ export function useThumbnailWindow() {
         totalPages: document.totalPages,
         dirtyPages: getDirtyPages(),
         pageOrder,
+        rotations,
       }).catch(logUnlessTauriWindowNotFound);
       prevPageOrderRef.current = pageOrder.join(',');
+      prevRotationsRef.current = rotations.join(',');
+      prevRotationsSourceRef.current = rotationsSerialized;
     } else {
       emit('thumbnail:file-closed').catch(logUnlessTauriWindowNotFound);
       prevPageOrderRef.current = '';
+      prevRotationsRef.current = '';
+      prevRotationsSourceRef.current = '';
     }
     prevDirtyRef.current = '';
   }, [document?.filePath, openDocumentEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -148,13 +181,17 @@ export function useThumbnailWindow() {
     prevPageOrderRef.current = pageOrderSerialized;
     const { document: doc, currentPageIndex: page, pageOrder } = usePecoStore.getState();
     if (!doc) return;
+    const rotations = getRotations(pageOrder);
+    prevRotationsRef.current = rotations.join(',');
+    prevRotationsSourceRef.current = rotationsSerialized;
     emit('thumbnail:page-order-changed', {
       currentPageIndex: page,
       totalPages: doc.totalPages,
       dirtyPages: getDirtyPages(),
       pageOrder,
+      rotations,
     }).catch(logUnlessTauriWindowNotFound);
-  }, [pageOrderSerialized, getDirtyPages]);
+  }, [pageOrderSerialized, getDirtyPages, getRotations, rotationsSerialized]);
 
   // --- ページ変更をサムネイル窓に通知 ---
   useEffect(() => {
@@ -170,6 +207,26 @@ export function useThumbnailWindow() {
     const dirty = dirtyPagesSerialized === '' ? [] : dirtyPagesSerialized.split(',').map(Number);
     emit('thumbnail:dirty-update', { dirtyPages: dirty }).catch(logUnlessTauriWindowNotFound);
   }, [dirtyPagesSerialized]);
+
+  // --- 回転状態の変化をサムネイル窓に通知 (issue #431 / FB-6) ---
+  // dirty-update と同じ設計 (issue #35): 回転値をシリアライズしたプリミティブのみ
+  // 購読することで、rotation に無関係な store 更新では effect が再実行されない。
+  // rotationsSerialized (購読トリガー、source page index 順) が変化した時だけ
+  // 実行し、実際に emit する payload は表示 (pageOrder) 順に変換する。
+  // prevRotationsRef は常に「直近で通知した表示順 rotations の文字列」を保持する
+  // (thumbnail:file-opened / thumbnail:page-order-changed の emit 時にも更新される)。
+  useEffect(() => {
+    if (rotationsSerialized === prevRotationsSourceRef.current) return;
+    prevRotationsSourceRef.current = rotationsSerialized;
+    const pageOrder = usePecoStore.getState().pageOrder;
+    const rotations = getRotations(pageOrder);
+    const nextSerialized = rotations.join(',');
+    // pageOrder 変更由来の effect (上の thumbnail:file-opened / page-order-changed) が
+    // 同一レンダーで既に同じ内容を通知済みなら重複 emit しない。
+    if (nextSerialized === prevRotationsRef.current) return;
+    prevRotationsRef.current = nextSerialized;
+    emit('thumbnail:rotation-update', { rotations }).catch(logUnlessTauriWindowNotFound);
+  }, [rotationsSerialized, getRotations]);
 
   return { initThumbnailWindow, isThumbnailOpen, toggleThumbnailWindow };
 }

@@ -7,7 +7,7 @@
  * - 正規表現エラーがインライン表示される
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, fireEvent, screen, cleanup } from '@testing-library/react';
+import { render, fireEvent, screen, cleanup, act } from '@testing-library/react';
 
 vi.mock('lucide-react', () => ({
   X: () => null,
@@ -205,6 +205,78 @@ describe('ReplaceDialog: 正規表現エラー表示', () => {
 
     // '123' と '456' で 2 ヒット
     expect(screen.getByText('2 件 / 1 ブロック / 1 ページ')).toBeTruthy();
+  });
+});
+
+describe('ReplaceDialog: PCT-187 debounce 窓中の実行ボタン無効化', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('全ページスコープで検索文字列を変更した直後 (debounce 完了前) は置換実行ボタンが disabled のまま', () => {
+    const p0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'foo' })] });
+    const p1 = makePage({ pageIndex: 1, textBlocks: [makeBlock({ text: 'foo foo' })] });
+    setupDocument(new Map([[0, p0], [1, p1]]));
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    // 全ページスコープへ切り替え、'foo' を検索して debounce (300ms) を完了させる
+    fireEvent.click(screen.getByLabelText('全ページ'));
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'foo' } });
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(screen.getByText('3 件 / 2 ブロック / 2 ページ')).toBeTruthy();
+    const btn = screen.getByRole('button', { name: '置換実行' }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+
+    // pattern を書き換えた直後 (debounce 完了前): stale な counts.hits=3 のままだが
+    // isSearching=true のため実行ボタンは disabled でなければならない
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'f' } });
+    expect(screen.getByText('検索中...')).toBeTruthy();
+    expect(btn.disabled).toBe(true);
+
+    // debounce 完了後は新しい件数で再度 enable される
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('全ページスコープの debounce 窓中に Enter しても onConfirm が呼ばれない (stale hits のすり抜け防止)', () => {
+    const p0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ text: 'foo' })] });
+    const p1 = makePage({ pageIndex: 1, textBlocks: [makeBlock({ text: 'foo foo' })] });
+    setupDocument(new Map([[0, p0], [1, p1]]));
+    const onConfirm = vi.fn();
+    render(<ReplaceDialog onClose={() => {}} onConfirm={onConfirm} hasSelection={false} />);
+
+    fireEvent.click(screen.getByLabelText('全ページ'));
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'foo' } });
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+
+    // debounce 完了前に pattern を変更して即 Enter
+    const findInput = screen.getByLabelText('検索文字列');
+    fireEvent.change(findInput, { target: { value: 'f' } });
+    fireEvent.keyDown(findInput, { key: 'Enter' });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('現ページ / 選択BB スコープは debounce 0ms のため isSearching が発生せず即時反映される', () => {
+    setupDocument(
+      new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'foo' })] })]]),
+    );
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+
+    fireEvent.change(screen.getByLabelText('検索文字列'), { target: { value: 'foo' } });
+    // debounce 0ms スコープでは検索中表示は出ない
+    expect(screen.queryByText('検索中...')).toBeNull();
+    const btn = screen.getByRole('button', { name: '置換実行' }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
   });
 });
 

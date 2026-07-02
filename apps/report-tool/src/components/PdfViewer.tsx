@@ -58,6 +58,7 @@ const PdfViewer: FC = () => {
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
 
   const mode = useReportStore((s) => s.mode);
+  const resetExtractedData = useReportStore((s) => s.resetExtractedData);
 
   const {
     filePath,
@@ -132,6 +133,13 @@ const PdfViewer: FC = () => {
       // 再読込でも描画が再実行される（エラー後の再読込で canvas が
       // 空白のままになる問題を解消する）。
       setPdfDoc(newDoc);
+
+      // MA-1: 別 PDF への差し替え時は前 PDF 固有の抽出データ（cells/confidences/
+      // pageOffsets）を初期化する。同一パスの再オープンでは編集内容を消さないよう
+      // filePath が変わる場合のみリセットする。template（欄定義）は保持する。
+      if (selectedPath !== filePath) {
+        resetExtractedData();
+      }
 
       setPdf(selectedPath, newDoc.numPages);
     } catch (e) {

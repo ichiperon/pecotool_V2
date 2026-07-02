@@ -402,11 +402,31 @@ export function pageHasTextOperatorDamage(
 
   const resolved = context.lookup(rawContents);
   const streams = resolved instanceof PDFArray ? resolved.asArray() : [rawContents];
+
+  // PCT-177 (#408): 損傷判定は「全 decode 済み stream を連結した全体」に対して 1 回行う。
+  // PDF 32000-1 §7.8.2 はトークン境界での content stream 分割を許すため、BT が stream A・
+  // ET が stream B に分かれる合法な構成がありうる。per-stream 判定だと BT だけの stream A で
+  // textDepth!==0 → 損傷と誤判定し、bloat 検知が不要にページを再描画対象へ入れてしまう。
+  // stream は実行時に (whitespace 区切りで) 連結されるため、連結後の全体で判定するのが正しい。
+  const decodedStreams: Uint8Array[] = [];
   for (const streamRef of streams) {
     const stream = context.lookup(streamRef);
     if (!(stream instanceof PDFRawStream)) continue;
     const decoded = decodeStreamContents(stream);
-    if (decoded !== null && hasTextOperatorsOutsideTextObjects(decoded)) return true;
+    // decode 不能 stream は判定に含められない。連結の連続性が切れるため、そこで
+    // 区切って「連結済みの塊ごと」に判定する（decode 不能 stream を跨いだ BT...ET は
+    // どのみち安全に解釈できないため、塊単位の判定が最も保守的）。
+    if (decoded === null) {
+      if (decodedStreams.length > 0 && hasTextOperatorsOutsideTextObjects(concatWithNewlines(decodedStreams))) {
+        return true;
+      }
+      decodedStreams.length = 0;
+      continue;
+    }
+    decodedStreams.push(decoded);
+  }
+  if (decodedStreams.length > 0 && hasTextOperatorsOutsideTextObjects(concatWithNewlines(decodedStreams))) {
+    return true;
   }
   return false;
 }

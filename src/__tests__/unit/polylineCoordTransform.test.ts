@@ -1,10 +1,24 @@
 /**
- * #205: polyline 作成 UI で使う座標変換ロジックのユニットテスト。
+ * #205: polyline 作成 UI で使う座標変換の代数的性質（往復変換・スケール式）のユニットテスト。
  * canvas 座標 (zoom 適用済み) <-> viewport 座標 (zoom 等倍) の変換を検証。
+ *
+ * 注意 (#409 / PCT-178): このファイルの canvasToPdf/pdfToCanvas は製品コードを import しない
+ * 複製実装であり、実装側の回帰は検出できない（代数的な変換公式そのものの検証に限定）。
+ * 実装 (useCurveEditor.ts の canvasToViewport) を直接 import して回帰を検出するテストは
+ * useCurveEditor.test.ts の `describe('useCurveEditor — canvasToViewport', ...)` および
+ * `describe('useCurveEditor — polyline creation flow', ...)` 内の zoom!=100 ケース
+ * （#409 regression guard とコメントしたテスト）を参照すること。
+ * canvasToViewport は useCurveEditor フックのクロージャとして定義されており、
+ * renderHook を介さずに素の関数として import できないため、このファイル単体を
+ * 実装 import 版へ置き換えることはできない。pdfToCanvas 相当の逆変換関数は
+ * 現状 PdfCanvas.tsx 側にインライン実装のみで export された関数が存在しないため
+ * （#409 は座標変換の共有 util 抽出を提案しているが、PdfCanvas.tsx は別担当が
+ * 変更中のため本セッションでは触らない）、同様に複製検証のまま据え置く。
  */
 import { describe, it, expect } from 'vitest'
 
 // PdfCanvas 内の canvasToPdf / pdfToCanvas に相当するインライン実装を検証
+// (製品コード非 import。実装回帰の検出は useCurveEditor.test.ts が担う。上記注意参照)
 function canvasToPdf(pos: { x: number; y: number }, zoom: number): { x: number; y: number } {
   const scale = zoom / 100
   return { x: pos.x / scale, y: pos.y / scale }
