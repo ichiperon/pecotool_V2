@@ -19,7 +19,12 @@ function getFallbackFontPaths(): string[] {
   return SYMBOL_FALLBACK_FONT_PATHS;
 }
 
-function toArrayBuffer(bytes: number[] | Uint8Array): ArrayBuffer {
+// PCT-199 AQ-8: load_meiryo_font は tauri::ipc::Response で raw binary を返すようになった
+// (JSON number 配列だと数MBフォントのシリアライズで大きなヒープスパイクが起きるため)。
+// raw binary 応答の invoke は ArrayBuffer を返す。旧来の number[]/Uint8Array 応答
+// (JSON 経路) にも後方互換で対応しておく。
+function toArrayBuffer(bytes: ArrayBuffer | number[] | Uint8Array): ArrayBuffer {
+  if (bytes instanceof ArrayBuffer) return bytes;
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 }
@@ -60,7 +65,7 @@ export async function loadFontLazy(): Promise<ArrayBuffer | null> {
     try {
       if (!systemFontDisabledForSession) {
         try {
-          const meiryoBytes = await invoke<number[] | Uint8Array>('load_meiryo_font');
+          const meiryoBytes = await invoke<ArrayBuffer | number[] | Uint8Array>('load_meiryo_font');
           fontBytesCache = toArrayBuffer(meiryoBytes);
           primaryFontKind = 'meiryo';
           fontLoadPromise = null;

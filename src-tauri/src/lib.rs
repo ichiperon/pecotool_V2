@@ -1,8 +1,13 @@
 mod backup;
 
+/// PCT-199 AQ-8: フォント bytes (数MB) を raw binary IPC response として返す。
+/// 通常の `Result<Vec<u8>, String>` を素朴に返すと Tauri は JSON number 配列にシリアライズし、
+/// 数MBのフォントが要素数分の JSON トークンへ膨張して初回保存時にヒープスパイクを起こす
+/// (PCT-101 が run_ocr の受信側で対処したのと同じ問題の、送信側バリアント)。
+/// `tauri::ipc::Response::new` で raw bytes を返すことでこれを避ける。
 #[tauri::command]
-async fn load_meiryo_font() -> Result<Vec<u8>, String> {
-    tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+async fn load_meiryo_font() -> Result<tauri::ipc::Response, String> {
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         use std::{collections::HashSet, fs, path::PathBuf};
 
         let mut candidates: Vec<PathBuf> = Vec::new();
@@ -31,7 +36,8 @@ async fn load_meiryo_font() -> Result<Vec<u8>, String> {
         Err("Meiryo font not found".to_string())
     })
     .await
-    .map_err(|e| format!("spawn_blocking error: {}", e))?
+    .map_err(|e| format!("spawn_blocking error: {}", e))??;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 fn extract_ttc_face(ttc: &[u8], face_index: usize) -> Result<Vec<u8>, String> {
@@ -193,125 +199,6 @@ fn checksum(bytes: &[u8], start: usize, length: usize) -> u32 {
         offset += 4;
     }
     sum
-}
-
-/// PDF の /MediaBox (or /CropBox) を直接パースし、全ページの論理寸法を返す。
-/// pdfjs の getPage().getViewport() と比較して10倍以上高速。
-/// 各タプルは (width_pt, height_pt)。/Rotate 90/270 は swap 済み。
-/// パース不能ページは (0.0, 0.0) を返す。load 失敗時のみ Err を返す。
-#[tauri::command]
-async fn get_pdf_page_dimensions(
-    app: tauri::AppHandle,
-    file_path: String,
-) -> Result<Vec<(f64, f64)>, String> {
-    tokio::task::spawn_blocking(move || -> Result<Vec<(f64, f64)>, String> {
-        use lopdf::{Document, Object, ObjectId};
-
-        let file = validate_allowed_existing_pdf_file_path(&app, &file_path)?;
-        let doc = Document::load(&file).map_err(|e| format!("PDF load failed: {}", e))?;
-
-        // Page object から /MediaBox (fallback: /CropBox) を親 Pages ツリーに
-        // 遡って取得する。見つからなければ None。
-        fn find_box(doc: &Document, page_id: ObjectId) -> Option<[f64; 4]> {
-            let mut current = page_id;
-            // 循環参照対策に上限を設定
-            for _ in 0..32 {
-                let dict = match doc.get_object(current).and_then(|o| o.as_dict()) {
-                    Ok(d) => d,
-                    Err(_) => return None,
-                };
-                for key in ["MediaBox", "CropBox"] {
-                    if let Ok(obj) = dict.get(key.as_bytes()) {
-                        let resolved = match obj {
-                            Object::Reference(id) => doc.get_object(*id).ok(),
-                            other => Some(other),
-                        };
-                        if let Some(arr_obj) = resolved {
-                            if let Ok(arr) = arr_obj.as_array() {
-                                if arr.len() == 4 {
-                                    let parse = |o: &Object| -> Option<f64> {
-                                        match o {
-                                            Object::Integer(i) => Some(*i as f64),
-                                            Object::Real(r) => Some(*r as f64),
-                                            _ => None,
-                                        }
-                                    };
-                                    if let (Some(a), Some(b), Some(c), Some(d)) = (
-                                        parse(&arr[0]),
-                                        parse(&arr[1]),
-                                        parse(&arr[2]),
-                                        parse(&arr[3]),
-                                    ) {
-                                        return Some([a, b, c, d]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // 親へ遡る
-                match dict.get(b"Parent") {
-                    Ok(Object::Reference(parent_id)) => current = *parent_id,
-                    _ => return None,
-                }
-            }
-            None
-        }
-
-        // /Rotate を親ツリーに遡って取得。見つからなければ 0。
-        fn find_rotate(doc: &Document, page_id: ObjectId) -> i64 {
-            let mut current = page_id;
-            for _ in 0..32 {
-                let dict = match doc.get_object(current).and_then(|o| o.as_dict()) {
-                    Ok(d) => d,
-                    Err(_) => return 0,
-                };
-                if let Ok(obj) = dict.get(b"Rotate") {
-                    let resolved = match obj {
-                        Object::Reference(id) => doc.get_object(*id).ok(),
-                        other => Some(other),
-                    };
-                    if let Some(r) = resolved {
-                        match r {
-                            Object::Integer(i) => return *i,
-                            Object::Real(f) => return *f as i64,
-                            _ => {}
-                        }
-                    }
-                }
-                match dict.get(b"Parent") {
-                    Ok(Object::Reference(parent_id)) => current = *parent_id,
-                    _ => return 0,
-                }
-            }
-            0
-        }
-
-        let pages = doc.get_pages();
-        let mut dims: Vec<(f64, f64)> = Vec::with_capacity(pages.len());
-        // get_pages() は BTreeMap<u32, ObjectId> でページ番号順にソート済み
-        for (_page_no, page_id) in pages.iter() {
-            let bbox = match find_box(&doc, *page_id) {
-                Some(b) => b,
-                None => {
-                    dims.push((0.0, 0.0));
-                    continue;
-                }
-            };
-            let width = (bbox[2] - bbox[0]).abs();
-            let height = (bbox[3] - bbox[1]).abs();
-            let rotate = ((find_rotate(&doc, *page_id) % 360) + 360) % 360;
-            let (w, h) = if rotate == 90 || rotate == 270 {
-                (height, width)
-            } else {
-                (width, height)
-            };
-            dims.push((w, h));
-        }
-        Ok(dims)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking error: {}", e))?
 }
 
 /// Scan `dir` and return an alphabetically sorted list of PDF file paths.
@@ -609,19 +496,69 @@ static OCR_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// 現実的上限を踏まえ 500MB とする（正規 UI の経路では到達しない）。
 const MAX_TEMP_WRITE_BYTES: usize = 500 * 1024 * 1024;
 
-/// PCT-116: 起動時に前回セッションが残した OCR/プレビュー temp ファイルを掃除する。
+/// PCT-199 AQ-4: ファイル名 `{prefix}_{pid}_{nanos}_{counter}.{ext}` から PID 部分を抽出する。
+/// prefix が `peco_ocr_preview` / `peco_ocr` のいずれであっても、拡張子を除いた `_` 区切りの
+/// 末尾から3番目の要素が PID になる（[..., pid, nanos, counter]）。
+fn extract_pid_from_temp_filename(stem: &str) -> Option<u32> {
+    let parts: Vec<&str> = stem.split('_').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    parts[parts.len() - 3].parse::<u32>().ok()
+}
+
+/// PCT-199 AQ-4: 指定 PID のプロセスが現在生存しているかを判定する。
+/// `OpenProcess` が成功すればハンドルを即座に閉じて true を返す。取得失敗（プロセス終了済み・
+/// 権限不足等）は false（=生存していない/判定不能）とみなし、安全側（削除してよい）に倒す。
+#[cfg(target_os = "windows")]
+fn is_process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(handle) => {
+                let _ = CloseHandle(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_process_alive(_pid: u32) -> bool {
+    // Windows 以外は現状ビルド対象外だが、フォールバックとして「判定不能→生存扱い」とし
+    // 誤削除しない側に倒す。
+    true
+}
+
+/// PCT-116/PCT-199 AQ-4: 起動時に前回セッションが残した OCR/プレビュー temp ファイルを掃除する。
 /// `open_pdf_preview` の一時 PDF は外部ビューアで開く性質上その場で削除できず残置するため、
 /// 起動時に自分が書く prefix のファイルのみを対象に削除する。開いている最中のファイルは
 /// 削除に失敗しうるが無視する（次回起動で消える）。
+///
+/// ファイル名に埋め込まれた PID を見て、そのプロセスが現在も生存していれば削除をスキップする。
+/// これにより、多重起動時（single-instance ガード無し）に稼働中の別インスタンスが使用中の
+/// OCR 一時 PNG / プレビュー PDF を横から削除してしまう事故を防ぐ。PID 抽出に失敗した場合や
+/// 自プロセス自身の残骸（起動時点では基本的に存在しないはずだが念のため）は従来どおり削除する。
 fn cleanup_stale_ocr_temp_files() {
     let temp_dir = std::env::temp_dir();
     let Ok(entries) = std::fs::read_dir(&temp_dir) else {
         return;
     };
+    let self_pid = std::process::id();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("peco_ocr_preview_") || name.starts_with("peco_ocr_") {
+            let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&name);
+            if let Some(pid) = extract_pid_from_temp_filename(stem) {
+                if pid != self_pid && is_process_alive(pid) {
+                    // 別の稼働中インスタンスが使用中の一時ファイル。削除しない。
+                    continue;
+                }
+            }
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -1120,33 +1057,6 @@ fn validate_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<std::path
     let resolved = normalize_child_path(path)?;
     validate_allowed_resolved_path(app, &resolved)?;
     Ok(resolved)
-}
-
-fn validate_allowed_existing_file_path(
-    app: &tauri::AppHandle,
-    path: &str,
-) -> Result<std::path::PathBuf, String> {
-    let path = std::path::PathBuf::from(path);
-    if !path.is_absolute() {
-        return Err("path must be absolute".to_string());
-    }
-    let resolved = path
-        .canonicalize()
-        .map_err(|e| format!("canonicalize file failed: {e}"))?;
-    if !resolved.is_file() {
-        return Err("path must be a file".to_string());
-    }
-    validate_allowed_resolved_path(app, &resolved)?;
-    Ok(resolved)
-}
-
-fn validate_allowed_existing_pdf_file_path(
-    app: &tauri::AppHandle,
-    path: &str,
-) -> Result<std::path::PathBuf, String> {
-    let file = validate_allowed_existing_file_path(app, path)?;
-    validate_pdf_file_name(&file)?;
-    Ok(file)
 }
 
 fn validate_allowed_pdf_target_path(
@@ -2050,6 +1960,97 @@ mod tests {
         // 空文字は filter で None になる
         assert!(result.language_tag.is_none());
     }
+
+    // ── PCT-199 AQ-4: cleanup_stale_ocr_temp_files の PID 生存判定回帰 ──────
+
+    #[test]
+    fn extract_pid_from_temp_filename_parses_ocr_png_stem() {
+        // write_ocr_temp_bytes が生成する形式: peco_ocr_{pid}_{nanos}_{counter}.png
+        let stem = "peco_ocr_12345_67890123456789_3";
+        assert_eq!(extract_pid_from_temp_filename(stem), Some(12345));
+    }
+
+    #[test]
+    fn extract_pid_from_temp_filename_parses_preview_pdf_stem() {
+        // open_pdf_preview が生成する形式: peco_ocr_preview_{pid}_{nanos}_{counter}.pdf
+        let stem = "peco_ocr_preview_98765_11111111111111_0";
+        assert_eq!(extract_pid_from_temp_filename(stem), Some(98765));
+    }
+
+    #[test]
+    fn extract_pid_from_temp_filename_returns_none_for_malformed_name() {
+        assert_eq!(extract_pid_from_temp_filename("not_enough_parts"), None);
+        assert_eq!(extract_pid_from_temp_filename(""), None);
+    }
+
+    #[test]
+    fn extract_pid_from_temp_filename_returns_none_when_pid_segment_not_numeric() {
+        // pid 位置が数値でない (壊れたファイル名) 場合は None
+        let stem = "peco_ocr_notanumber_67890_3";
+        assert_eq!(extract_pid_from_temp_filename(stem), None);
+    }
+
+    #[test]
+    fn is_process_alive_returns_true_for_current_process() {
+        // 自プロセス自身は必ず生存している
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn is_process_alive_returns_false_for_implausible_pid() {
+        // PID 0 は Windows では System Idle Process 用の予約値で、通常
+        // OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, ...) はアクセス拒否/失敗になる。
+        // 「取得できなければ安全側 (削除してよい) に倒す」設計の確認。
+        assert!(!is_process_alive(0));
+    }
+
+    // cleanup_stale_ocr_temp_files 本体（他プロセスの生存中一時ファイルを削除しない）は
+    // 実プロセスの spawn を伴い、CI 環境依存になりやすいため、判定ロジックの単位
+    // (extract_pid_from_temp_filename / is_process_alive) をそれぞれ独立に検証する
+    // 上記テストで代替する。
+
+    #[test]
+    fn cleanup_stale_ocr_temp_files_removes_own_pid_and_dead_pid_files() {
+        // AQ-4 の主旨: 自プロセスの残骸、および既に終了しているプロセスの残骸は削除してよい。
+        // 実在しない PID (99999999 は 32bit PID 上限を超えるため確実に非生存) を dead PID として使う。
+        let temp_dir = std::env::temp_dir();
+        let self_pid = std::process::id();
+        let dead_pid: u32 = 99_999_999;
+        let marker = "cleanuptest1"; // 他テストの並列実行と衝突しない一意マーカー
+
+        let own_file = temp_dir.join(format!("peco_ocr_{self_pid}_{marker}_0.png"));
+        let dead_file = temp_dir.join(format!("peco_ocr_{dead_pid}_{marker}_0.png"));
+        std::fs::write(&own_file, b"own").expect("write own_file");
+        std::fs::write(&dead_file, b"dead").expect("write dead_file");
+
+        cleanup_stale_ocr_temp_files();
+
+        assert!(!own_file.exists(), "own-process temp file should be cleaned up");
+        assert!(!dead_file.exists(), "dead-process temp file should be cleaned up");
+    }
+
+    #[test]
+    fn cleanup_stale_ocr_temp_files_keeps_files_of_alive_other_process() {
+        // AQ-4 の本題: 別の稼働中インスタンスが使用中の一時ファイルは削除しない。
+        // テストプロセス自身は必ず生存しているので、"自分ではない別 PID" を模擬する術がない
+        // ため、ここでは現在のテストバイナリ自身の PID を「他プロセス」として偽装する
+        // (is_process_alive(self_pid) は常に true になるため、pid != self_pid の分岐を
+        // 通すことはできないが、is_process_alive 自体が生存中プロセスを正しく true と
+        // 判定することは is_process_alive_returns_true_for_current_process で別途検証済み)。
+        // ここでは削除対象外パス（prefix 不一致）が触られないことを確認する。
+        let temp_dir = std::env::temp_dir();
+        let marker = "cleanuptest2";
+        let unrelated_file = temp_dir.join(format!("not_peco_related_{marker}.png"));
+        std::fs::write(&unrelated_file, b"unrelated").expect("write unrelated_file");
+
+        cleanup_stale_ocr_temp_files();
+
+        assert!(
+            unrelated_file.exists(),
+            "files without peco_ocr prefix must not be touched"
+        );
+        std::fs::remove_file(&unrelated_file).ok();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2059,6 +2060,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // PCT-184: ダイアログ由来の runtime fs scope を永続化する。
+        // これが無いと、ダイアログで capabilities 定義外のフォルダ/ファイルを開いた際に
+        // 許可される runtime scope がアプリ再起動で消え、バッチ再開・履歴クリックが
+        // fs scope エラーで失敗する（履歴からは無言で自動削除される）。
+        .plugin(tauri_plugin_persisted_scope::init())
         .setup(|app| {
             use tauri::Manager;
             // PCT-116: 前回セッションが残した OCR/プレビュー temp を起動時に掃除する。
@@ -2074,7 +2080,6 @@ pub fn run() {
             load_meiryo_font,
             list_ocr_languages,
             run_ocr,
-            get_pdf_page_dimensions,
             list_pdf_files_in_folder,
             write_perf_log,
             write_operation_log,

@@ -98,4 +98,28 @@ describe('useFontLoader loadFallbackFontsLazy 並列呼び出し', () => {
 
     fetchSpy.mockRestore();
   });
+
+  // PCT-199 AQ-8 回帰: load_meiryo_font は tauri::ipc::Response 経由の raw binary 応答へ
+  // 変更された (JSON number 配列だと数MBフォントのシリアライズでヒープスパイクが起きるため)。
+  // raw binary 応答の invoke は ArrayBuffer を返すため、toArrayBuffer がそれを
+  // number[]/Uint8Array と同様にそのまま扱えることを確認する。
+  it('load_meiryo_font が ArrayBuffer (raw binary IPC 応答) を返しても正しくキャッシュされる', async () => {
+    vi.doMock('@tauri-apps/api/core', () => ({
+      invoke: vi.fn(async (cmd: string) => {
+        if (cmd === 'load_meiryo_font') {
+          return new Uint8Array([0x00, 0x01, 0x00, 0x00]).buffer;
+        }
+        return undefined;
+      }),
+    }));
+
+    const { loadFontLazy, getPrimaryFontKind } = await import('../../hooks/useFontLoader');
+
+    const fontBytes = await loadFontLazy();
+
+    expect(fontBytes).not.toBeNull();
+    expect(fontBytes).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(fontBytes!)).toEqual(new Uint8Array([0x00, 0x01, 0x00, 0x00]));
+    expect(getPrimaryFontKind()).toBe('meiryo');
+  });
 });
