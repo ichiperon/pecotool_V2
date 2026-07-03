@@ -77,7 +77,13 @@ fn write_backup_file_atomically(path: &Path, json_str: &str) -> Result<(), Strin
     })();
 
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        // PCT-119: 掃除失敗を握りつぶさず可視化する（動作自体は継続=fail-open のまま）。
+        if let Err(cleanup_err) = std::fs::remove_file(&temp) {
+            eprintln!(
+                "[backup] failed to remove temp file after write error: {} ({cleanup_err})",
+                temp.display()
+            );
+        }
     }
     result
 }
@@ -144,6 +150,28 @@ fn clear_backup_targets(backup_dir: &PathBuf, file_path: &str) -> Vec<PathBuf> {
     ]
 }
 
+/// `check_pending_backups` が復元ダイアログへ表示する originalFilePath の健全性を検証する。
+///
+/// SECURITY (PCT-119): backups/ 配下の JSON はハッシュ命名で書込/読込経路こそ閉じているが、
+/// ファイル自体はディスク上の平文であり、外部から差し替えられる前提を置く必要がある。
+/// 細工された originalFilePath（空文字・相対パス・非 PDF 拡張子・異常に長い文字列）を
+/// 無検証のまま `unwrap_or("")` で通すと、復元ダイアログに任意文字列を表示できてしまい
+/// パス偽装によるユーザー誤誘導の余地になる。無効な場合はエントリごと一覧から除外する
+/// （表示だけを誤魔化す方向ではなく、疑わしいバックアップそのものを見せない）。
+fn is_valid_backup_original_path(file_path: &str) -> bool {
+    const MAX_PATH_LEN: usize = 4096;
+    if file_path.is_empty() || file_path.len() > MAX_PATH_LEN {
+        return false;
+    }
+    let path = Path::new(file_path);
+    if !path.is_absolute() {
+        return false;
+    }
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
 fn readable_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> PathBuf {
     // SECURITY #63: direct backup file path 経路は意図的に除外する。
     // Webview から `invoke('load_backup', { filePath: '<backup_dir>/任意.json' })` で
@@ -192,7 +220,13 @@ pub async fn save_backup(
         write_backup_file_atomically(&bpath, &json_str)?;
         let legacy_bpath = legacy_backup_file_path(&backup_dir, &file_path);
         if legacy_bpath != bpath && legacy_bpath.exists() {
-            let _ = std::fs::remove_file(legacy_bpath);
+            // PCT-119: 掃除失敗を握りつぶさず可視化する（動作自体は継続=fail-open のまま）。
+            if let Err(e) = std::fs::remove_file(&legacy_bpath) {
+                eprintln!(
+                    "[backup] failed to remove legacy backup file: {} ({e})",
+                    legacy_bpath.display()
+                );
+            }
         }
         Ok(())
     })
@@ -223,7 +257,7 @@ pub async fn check_pending_backups(app: AppHandle) -> Result<Vec<BackupInfo>, St
                     let file_path = data["originalFilePath"].as_str().unwrap_or("").to_string();
                     let timestamp = data["timestamp"].as_str().unwrap_or("").to_string();
                     let backup_path = path.to_string_lossy().to_string();
-                    if !file_path.is_empty() {
+                    if is_valid_backup_original_path(&file_path) {
                         backups.push(BackupInfo {
                             file_path,
                             timestamp,
@@ -279,8 +313,9 @@ pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_file_path, clear_backup_targets, legacy_backup_file_path, legacy_path_hash,
-        path_hash, read_backup_file, write_backup_file_atomically,
+        backup_file_path, clear_backup_targets, is_valid_backup_original_path,
+        legacy_backup_file_path, legacy_path_hash, path_hash, read_backup_file,
+        write_backup_file_atomically,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -476,5 +511,55 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
+    // ── PCT-119: is_valid_backup_original_path (check_pending_backups の表示前検証) ──
+
+    /// 空文字は拒否される（細工 JSON で originalFilePath が欠落/空の場合）。
+    #[test]
+    fn is_valid_backup_original_path_rejects_empty() {
+        assert!(!is_valid_backup_original_path(""));
+    }
+
+    /// 相対パスは拒否される。
+    #[test]
+    fn is_valid_backup_original_path_rejects_relative_path() {
+        assert!(!is_valid_backup_original_path("docs\\sample.pdf"));
+        assert!(!is_valid_backup_original_path("../../etc/sample.pdf"));
+    }
+
+    /// .pdf 以外の拡張子は拒否される。
+    #[test]
+    fn is_valid_backup_original_path_rejects_non_pdf_extension() {
+        assert!(!is_valid_backup_original_path("C:\\docs\\sample.txt"));
+        assert!(!is_valid_backup_original_path("C:\\docs\\sample"));
+    }
+
+    /// 異常に長い文字列は拒否される（サイズ上限ガード）。
+    #[test]
+    fn is_valid_backup_original_path_rejects_oversized_path() {
+        let huge = format!("C:\\{}\\sample.pdf", "a".repeat(5000));
+        assert!(!is_valid_backup_original_path(&huge));
+    }
+
+    /// 正規の絶対 PDF パス（大文字拡張子含む）は許可される。
+    #[test]
+    fn is_valid_backup_original_path_accepts_normal_absolute_pdf_path() {
+        assert!(is_valid_backup_original_path("C:\\docs\\sample.pdf"));
+        assert!(is_valid_backup_original_path("C:\\docs\\SAMPLE.PDF"));
+    }
+
+    /// check_pending_backups と同じフィルタ条件で、originalFilePath が欠落した
+    /// 細工 JSON がバックアップ一覧から除外されること（unwrap_or("") 経路の回帰）。
+    #[test]
+    fn check_pending_backups_filter_excludes_missing_original_file_path() {
+        let data: serde_json::Value =
+            serde_json::from_str(r#"{"version":1,"timestamp":"T1","pages":[]}"#).unwrap();
+        let file_path = data["originalFilePath"].as_str().unwrap_or("").to_string();
+        assert_eq!(file_path, "", "欠落時は空文字にフォールバックする（従来仕様）");
+        assert!(
+            !is_valid_backup_original_path(&file_path),
+            "空文字は check_pending_backups の一覧に含めてはいけない"
+        );
     }
 }
