@@ -108,6 +108,9 @@ class FakeDatabase {
   readonly objectStoreNames = {
     contains: (name: string) => this.stores.has(name),
   } as DOMStringList
+  // PCT-117: どのストアに対してどの mode でトランザクションが開かれたかを記録する
+  // (readonly/readwrite の分離を検証するため)
+  readonly transactionLog: Array<{ store: string; mode: string }> = []
 
   createObjectStore(name: string): IDBObjectStore {
     const store = new Map<string, unknown>()
@@ -115,9 +118,10 @@ class FakeDatabase {
     return new FakeObjectStore(store, new FakeTransaction(store)) as unknown as IDBObjectStore
   }
 
-  transaction(name: string): IDBTransaction {
+  transaction(name: string, mode?: IDBTransactionMode): IDBTransaction {
     const store = this.stores.get(name)
     if (!store) throw new Error(`missing store: ${name}`)
+    this.transactionLog.push({ store: name, mode: mode ?? 'readonly' })
     return new FakeTransaction(store) as unknown as IDBTransaction
   }
 }
@@ -209,6 +213,94 @@ describe('pdfTemporaryStorage page cache GC', () => {
     expect(await getCachedPage('doc.pdf:0:1:m1')).toMatchObject({ pageIndex: 0 })
     expect(await getCachedPage('doc.pdf:1:1:m1')).toBeNull()
     expect(await getCachedPage('doc.pdf:800:1:m1')).toMatchObject({ pageIndex: 800, thumbnail: null })
+  })
+
+  // ── PCT-117: getCachedPage の readonly 読み取り / LRU touch 分離 ──────────────
+
+  it('PCT-117: getCachedPage の読み取りは readonly トランザクションを使い、LRU touch は別の readwrite トランザクションで行う', async () => {
+    const { setCachedPage, getCachedPage } = await import('../../utils/pdfTemporaryStorage')
+    const key = 'mode.pdf:0:1:m1'
+    await setCachedPage(key, makePage(0))
+    // setCachedPage 分のログをクリアし、getCachedPage 呼び出しのみを計測する
+    fakeDb.transactionLog.length = 0
+
+    const result = await getCachedPage(key)
+    expect(result).toMatchObject({ pageIndex: 0 })
+    // touch は fire-and-forget のため、非同期完了を待つ
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const pagesLog = fakeDb.transactionLog.filter((entry) => entry.store === 'pages')
+    // 読み取り本体は readwrite ではなく readonly（他の並列読み取りをブロックしない）
+    expect(pagesLog[0]).toEqual({ store: 'pages', mode: 'readonly' })
+    // LRU タッチ（updatedAt 更新）は読み取りとは別の readwrite トランザクションで行われる
+    expect(pagesLog.some((entry) => entry.mode === 'readwrite')).toBe(true)
+  })
+
+  it('PCT-117: readonly 読み取り経路でも正しい値が返り、touch分離後も lastAccess (updatedAt) が更新される', async () => {
+    const { setCachedPage, getCachedPage } = await import('../../utils/pdfTemporaryStorage')
+    const key = 'touch.pdf:0:1:m1'
+    await setCachedPage(key, makePage(0))
+
+    const beforeTouch = fakeDb.stores.get('pages')!.get(key) as Record<string, unknown>
+    const updatedAtBeforeTouch = beforeTouch.__pecotoolCacheUpdatedAt as number
+
+    const result = await getCachedPage(key)
+    expect(result).toMatchObject({ pageIndex: 0 })
+    expect(result).not.toHaveProperty('__pecotoolCacheUpdatedAt') // メタデータは剥がされて返る
+
+    // touch (別 readwrite tx) の非同期完了を待つ
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const afterTouch = fakeDb.stores.get('pages')!.get(key) as Record<string, unknown>
+    expect(afterTouch.__pecotoolCacheUpdatedAt).toBeGreaterThan(updatedAtBeforeTouch)
+    // 内容（LRUメタデータ以外）は touch で書き換わらない
+    expect(afterTouch.pageIndex).toBe(0)
+  })
+
+  it('PCT-117: GET直後にtouch対象がevict済みになっても put で復活させない（幽霊レコード防止）', async () => {
+    const { setCachedPage, getCachedPage } = await import('../../utils/pdfTemporaryStorage')
+    const key = 'ghost.pdf:0:1:m1'
+    await setCachedPage(key, makePage(0))
+
+    const originalUpdatedAt = (fakeDb.stores.get('pages')!.get(key) as Record<string, unknown>)
+      .__pecotoolCacheUpdatedAt as number
+
+    // 「GET は成功したが、その後 touch の存在確認時点では既に evict 済み」を再現する。
+    // FakeObjectStore.get の 1 回目 (getCachedPage 本体の読み取り) は実データを返し、
+    // 2 回目以降 (touch 側の存在確認) は undefined (evict 済み) を返すよう差し替える。
+    let callCount = 0
+    const originalGet = FakeObjectStore.prototype.get
+    const getSpy = vi.spyOn(FakeObjectStore.prototype, 'get').mockImplementation(function (
+      this: FakeObjectStore,
+      k: IDBValidKey,
+    ) {
+      callCount++
+      if (callCount === 1) {
+        return originalGet.call(this, k)
+      }
+      const request = makeRequest<unknown>(undefined)
+      queueMicrotask(() => {
+        request.onsuccess?.call(request as unknown as IDBRequest<unknown>, new Event('success'))
+      })
+      return request as unknown as IDBRequest<unknown>
+    })
+
+    try {
+      const result = await getCachedPage(key)
+      // 読み取り自体はヒット扱いのまま返る（evict はこの後起きた想定のため）
+      expect(result).toMatchObject({ pageIndex: 0 })
+
+      // touch の非同期完了を待つ（例外が伝播しないことも併せて確認）
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(callCount).toBeGreaterThanOrEqual(2)
+      // touch が「存在しない」と判定した場合に put しなかったことを検証:
+      // updatedAt が touch 前の値のまま変化していない（= 幽霊レコードとして復活していない）
+      const afterTouch = fakeDb.stores.get('pages')!.get(key) as Record<string, unknown>
+      expect(afterTouch.__pecotoolCacheUpdatedAt).toBe(originalUpdatedAt)
+    } finally {
+      getSpy.mockRestore()
+    }
   })
 
   // ── PCT-070 / PCT-104: 保存完了後のページ限定クリア ─────────────────────────
