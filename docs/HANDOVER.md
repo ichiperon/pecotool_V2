@@ -1,5 +1,16 @@
 # 引継書: サムネイル・PDF Canvas 表示不具合の調査
 
+> **※本書は 2026-04 時点（参照コミット `e61b0e8` = 2026-04-02）の引継ぎ記録です。以下に記載された「最有力の怪しい箇所」および「怪しいロジック」は、その後のリファクタリングで現行コード（検証日 2026-07-03）では解消済みであることを確認しました。歴史的記録として本文はそのまま残します。**
+>
+> **各課題の解消状況（検証日 2026-07-03）:**
+>
+> - **1. `pdfSaver.ts` の `fontBytes` ArrayBuffer 転送 detach バグ** — 解消済み。現行の `src/utils/pdfSaver.ts:282-283` は `fontBytes.slice(0)` でクローンを作り、そのクローンだけを transfer する。メインスレッド側の元 `fontBytes` は detach されない。同ファイル 275-281 の `TODO(#184)` コメントが「都度 clone して transfer する」現方針を明記している。関連コミット: `203090b`（2026-04-02 `fontBytes.slice(0)` 導入）、`be4361d`（2026-04-03 保存ロジック大型改修で transferables 配列化）。
+> - **2. `PdfCanvas.tsx` の旧 `await import` readFile の謎** — 解消済み（該当コード消滅）。PDF 描画ロジックは `src/hooks/usePdfRendering.ts` に抽出され、現行 `PdfCanvas.tsx` に `readFile` の記述は無い。コミット `68963b3`（2026-04-17）で `PdfCanvas.tsx` から `import * as pdfjsLib` を削除し `usePdfRendering` フックへ委譲。
+> - **3. `PdfCanvas.tsx` 内で workerSrc 未設定の疑い** — 解消済み（構造的に解消）。現行 `PdfCanvas.tsx` は `pdfjsLib` を直接 import せず `pdfjsLib.getDocument()` も呼ばない（`68963b3`）。ページ取得は `usePdfRendering` → `getCachedPageProxy`（`src/utils/pdfLoader.ts`）経由に一本化され、`workerSrc` はその `pdfLoader.ts:44-45` のモジュールトップレベルで設定される。getDocument 経路と workerSrc 設定が同一モジュールに収束したため、初期化順の競合は起きない。
+> - **末尾「怪しいロジック」の `originalPdfBytes.buffer` 転送** — 解消済み。現行の `src/utils/pdfSaver.ts:292-293` は `sourceBytes.slice()` のクローンの `buffer` を transfer する。元 `sourceBytes` は detach されない。
+>
+> ※上記は本書が列挙した個別課題の検証結果です。冒頭「症状（サムネイル/Canvas 白紙）」そのものの再現確認は行っていません（描画パイプライン全体が `68963b3` で書き換えられているため、症状は解消済みと推測されますが未再現）。
+
 ## 問題の概要
 - **症状**: サムネイルエリアとPDF Canvasが白紙のみ表示される
 - **正常**: OCRテキストエリアは正常動作

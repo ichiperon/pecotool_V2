@@ -19,7 +19,8 @@
     "test:ci": "npm run test:quality",
     "test:pdf:soak": "vitest run \"src/__tests__/integration/realPdf*.test.ts\" src/__tests__/integration/tjErrorRegression.test.ts src/__tests__/integration/loadTest500Pages.test.ts src/__tests__/integration/pdfMetadataLoaderReal.test.ts src/__tests__/integration/lruIdbRoundtrip.test.ts src/__tests__/integration/clipboardRoundtrip.test.ts src/__tests__/integration/undoRedoRoundtrip.test.ts --exclude \"**/.claude/**\"",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:coverage": "vitest run --coverage --testTimeout=300000 --hookTimeout=120000 src/__tests__/unit src/__tests__/components src/__tests__/integration --exclude \"**/realPdf*.test.ts\" --exclude \"**/tjErrorRegression.test.ts\" --exclude \"**/loadTest500Pages.test.ts\" --exclude \"**/pdfMetadataLoaderReal.test.ts\" --exclude \"**/lruIdbRoundtrip.test.ts\" --exclude \"**/clipboardRoundtrip.test.ts\" --exclude \"**/undoRedoRoundtrip.test.ts\" --exclude \"**/savePathologicalAbnormal.test.ts\""
   },
   "dependencies": {
     "@cantoo/pdf-lib": "^2.6.5",

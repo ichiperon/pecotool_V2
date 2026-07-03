@@ -17,7 +17,7 @@ on:
 jobs:
   quality:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +29,35 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            src-tauri
+            apps/report-tool/src-tauri
+            crates/launcher
+
       - run: npm ci
 
       - run: npx playwright install chromium
 
       - run: npm run test:quality
+
+      - name: Install report-tool deps
+        working-directory: apps/report-tool
+        run: npm ci
+
+      - name: Run report-tool vitest
+        working-directory: apps/report-tool
+        run: npm test
+
+      - name: Run report-tool src-tauri cargo test
+        working-directory: apps/report-tool/src-tauri
+        run: cargo test
+
+      - name: Run launcher cargo test
+        working-directory: crates/launcher
+        run: cargo test
 
       - uses: actions/upload-artifact@v4
         if: always()
