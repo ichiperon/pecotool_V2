@@ -404,6 +404,11 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   const handleInputKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>, pageNum: number, rowIndex: number, fieldIndex: number) => {
       if (e.key === "Enter") {
+        // IME 変換確定の Enter はセル編集の commit に渡さない（変換確定しただけで
+        // 編集が閉じてしまうのを防ぐ）。ブラウザの変換確定処理に委ねる。
+        // keyCode 229 は isComposing が false で届く IME 確定キーの互換フォールバック
+        // （Modal.tsx Issue #65 と同じ二重ガード）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         commitEdit();
         const nextFieldIdx = fieldIndex + 1;
@@ -413,6 +418,9 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
         return;
       }
       if (e.key === "Escape") {
+        // IME 変換中の Escape は変換候補のキャンセル用なので cancelEdit へ渡さない
+        // （Modal.tsx Issue #65 と同じ方針・keyCode 229 は互換フォールバック）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         cancelEdit();
         return;
@@ -444,6 +452,9 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       fieldId: string
     ) => {
       if (e.key === "Escape") {
+        // IME 変換中の Escape は変換候補のキャンセル用なので cancelEdit へ渡さない
+        // （Modal.tsx Issue #65 と同じ方針・keyCode 229 は互換フォールバック）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         cancelEdit();
         return;
@@ -462,6 +473,9 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
 
       // Ctrl+Enter: 段分割
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        // IME 変換確定と Ctrl+Enter が競合するケースへの防御的ガード
+        // （keyCode 229 は互換フォールバック）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         const textarea = e.currentTarget;
         const cursorPos = textarea.selectionStart ?? 0;

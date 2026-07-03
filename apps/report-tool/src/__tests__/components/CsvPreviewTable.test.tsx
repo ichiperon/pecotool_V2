@@ -453,6 +453,49 @@ describe("CsvPreviewTable: 段グリッド — Ctrl+Enter 逐次分割", () => {
     const rows = useReportStore.getState().cells.get(1)!;
     expect(rows).toHaveLength(1);
   });
+
+  // レビュー指摘（MEDIUM）: IME 変換中の Ctrl+Enter で isComposing を見ずに
+  // 段分割していたため、変換確定と分割操作が競合する可能性があった。
+  it("IME 変換中（isComposing）の Ctrl+Enter では段分割されず編集が閉じない", async () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "品名");
+    const fields = useReportStore.getState().template.fields;
+    useReportStore.getState().setFieldLineItem(fields[0].id, true);
+    setCells([[1, [[fields[0].id, "ABCDE"]]]]);
+    render(<CsvPreviewTable />);
+
+    const cells = screen.getAllByRole("gridcell");
+    fireEvent.doubleClick(cells[0]);
+
+    const textarea = await screen.findByRole("textbox");
+    expect(textarea.tagName).toBe("TEXTAREA");
+
+    Object.defineProperty(textarea, "selectionStart", { value: 3, configurable: true });
+    Object.defineProperty(textarea, "selectionEnd", { value: 3, configurable: true });
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true, isComposing: true });
+
+    // 段分割は起きず、編集も閉じない
+    const rows = useReportStore.getState().cells.get(1)!;
+    expect(rows).toHaveLength(1);
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
+  });
+
+  it("IME 変換中（isComposing）の Escape では cancelEdit されず編集が閉じない（明細欄）", async () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "品名");
+    const fields = useReportStore.getState().template.fields;
+    useReportStore.getState().setFieldLineItem(fields[0].id, true);
+    setCells([[1, [[fields[0].id, "ABCDE"]]]]);
+    render(<CsvPreviewTable />);
+
+    const cells = screen.getAllByRole("gridcell");
+    fireEvent.doubleClick(cells[0]);
+
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "変換中" } });
+    fireEvent.keyDown(textarea, { key: "Escape", isComposing: true });
+
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
+    expect((textarea as HTMLTextAreaElement).value).toBe("変換中");
+  });
 });
 
 describe("CsvPreviewTable: 段グリッド — ドラッグの rowIndex 対応", () => {
@@ -736,6 +779,44 @@ describe("CsvPreviewTable: 固定欄 input 編集 — handleInputKeyDown", () =>
     await waitFor(() => {
       expect(document.activeElement).toHaveAttribute("data-field-id", fields[0].id);
     });
+  });
+
+  // レビュー指摘（MEDIUM）: IME 変換確定の Enter で isComposing を見ずに
+  // commitEdit していたため、「摘要」等の日本語入力中に変換確定しただけで
+  // 編集が閉じてしまう可能性があった。isComposing 中は commit/cancel を
+  // ブラウザの変換処理に委ね、編集状態を維持する。
+  it("IME 変換中（isComposing）の Enter では commit されず編集が閉じない", async () => {
+    setFields(["摘要"]);
+    const fields = useReportStore.getState().template.fields;
+    setCells([[1, [[fields[0].id, "元の値"]]]]);
+    render(<CsvPreviewTable />);
+
+    const cells = screen.getAllByRole("gridcell");
+    fireEvent.doubleClick(cells[0]);
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "変換中のテキスト" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+
+    // 編集モードは閉じず、store の値も変換確定前のまま
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
+    expect(useReportStore.getState().cells.get(1)![0]?.get(fields[0].id)).toBe("元の値");
+  });
+
+  it("IME 変換中（isComposing）の Escape では cancelEdit されず編集が閉じない", async () => {
+    setFields(["摘要"]);
+    const fields = useReportStore.getState().template.fields;
+    setCells([[1, [[fields[0].id, "元の値"]]]]);
+    render(<CsvPreviewTable />);
+
+    const cells = screen.getAllByRole("gridcell");
+    fireEvent.doubleClick(cells[0]);
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "変換中のテキスト" } });
+    fireEvent.keyDown(input, { key: "Escape", isComposing: true });
+
+    // 変換候補のキャンセルとして扱われ、セル編集自体はキャンセルされない
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
+    expect((input as HTMLInputElement).value).toBe("変換中のテキスト");
   });
 });
 
