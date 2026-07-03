@@ -247,6 +247,20 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       rowIndex: number,
       fieldIndex: number
     ) => {
+      // 編集中の input/textarea からバブリングしてきたキー操作は、専用ハンドラ
+      // （handleInputKeyDown/handleTextareaKeyDown）で完結させる。ここで
+      // Enter/F2/Delete/Backspace 等を再処理すると、コミット直前の古い cells
+      // クロージャで startEdit や handleDelete が二重発火し、確定値の巻き戻りや
+      // セル全体の誤消去につながる（BLOCKER）。OffsetAdjustOverlay の MA-4 と
+      // 同じガードパターン。
+      const eventTarget = e.target as HTMLElement | null;
+      if (
+        eventTarget &&
+        (eventTarget.tagName === "INPUT" || eventTarget.tagName === "TEXTAREA")
+      ) {
+        return;
+      }
+
       const fieldId = fields[fieldIndex]?.id;
       const fieldName = fields[fieldIndex]?.name ?? "";
       const isLineItem = fields[fieldIndex]?.isLineItem === true;

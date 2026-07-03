@@ -623,34 +623,22 @@ describe("CsvPreviewTable: 固定欄 input 編集 — handleInputKeyDown", () =>
   });
 
   // -------------------------------------------------------------------
-  // BLOCKER 級の既知バグ（本セッションで新規発見。制約によりテストのみ追加、
-  // プロダクトコードは未修正。/bugfix への回付を推奨）:
+  // 回帰テスト（旧 BLOCKER バグ、CsvPreviewTable.tsx で修正済み）:
   //
-  // handleInputKeyDown（本ファイル L390-417）は Enter キーを e.preventDefault() の
-  // みで処理し e.stopPropagation() を呼ばない。そのため同じ keydown イベントが
-  // 親 <td onKeyDown={handleCellKeyDown}>（L815-817）までバブリングし、
-  // handleCellKeyDown 側の「Enter/F2 で編集開始」分岐（L266-269）が同一イベントで
-  // 二重発火する。この2回目の startEdit 呼び出しは commitEdit 実行前の古い cells
-  // クロージャから値を読むため、コミット直後に「編集前の値」で編集モードが
-  // 再オープンされてしまう。
+  // handleInputKeyDown/handleTextareaKeyDown からのキー操作は、編集中の
+  // input/textarea から親 <td onKeyDown={handleCellKeyDown}> へバブリングする
+  // 経路を持つ。修正前は handleCellKeyDown 側の「Enter/F2 で編集開始」分岐や
+  // 「Delete/Backspace でセルクリア」分岐が同一イベントで二重発火し、
+  // commitEdit 実行前の古い cells クロージャから値を読み直すことで確定値の
+  // サイレントな巻き戻りやセル全体の誤消去を引き起こしていた。
   //
-  // 実害:
-  //  - 見た目上コミットが失敗したように見える／次欄へフォーカスが進まない（it.fails #1）
-  //  - この再オープン状態のままユーザーが他セルへ移動する（blur）と、古い値で
-  //    commitEdit が再実行され、直前に確定したはずの新しい値が「サイレントに
-  //    元の値へ巻き戻る」（it.fails #2）。これはプロジェクトのリリース最低保証ライン
-  //    「①保存の正しさ（絶対）」に抵触する BLOCKER。
-  //
-  // 修正案: handleInputKeyDown / handleTextareaKeyDown の Enter 分岐冒頭で
-  // e.stopPropagation() を追加する。
-  //
-  // it.fails により「現状は失敗する」ことを明示しつつスイート全体は緑を維持する。
-  // 修正後は it.fails が「意図せず成功」してテスト失敗になるため、修正時に
-  // 通常の it へ戻すことを忘れないこと。
+  // 修正: handleCellKeyDown 冒頭で「e.target が INPUT/TEXTAREA（＝編集中）なら
+  // 何もしない」ガードを追加し、編集中のキー操作を専用ハンドラのみで完結させた
+  // （OffsetAdjustOverlay の MA-4 と同型のガード）。
   // -------------------------------------------------------------------
 
-  it.fails(
-    "【既知バグ】Enter で確定後、編集モードが閉じて次欄にフォーカスが移動するはず（実際は td への Enter バブリングで編集が再オープンする）",
+  it(
+    "Enter で確定後、編集モードが閉じて次欄にフォーカスが移動する",
     async () => {
       setFields(["金額", "摘要"]);
       const fields = useReportStore.getState().template.fields;
@@ -669,8 +657,8 @@ describe("CsvPreviewTable: 固定欄 input 編集 — handleInputKeyDown", () =>
     }
   );
 
-  it.fails(
-    "【既知バグ・データ損失】Enter で確定後に blur しても確定値が保持されるはず（実際は再オープン時の古い値で上書きされ確定内容が消える）",
+  it(
+    "Enter で確定後に blur しても確定値が保持される",
     async () => {
       setFields(["金額"]);
       const fields = useReportStore.getState().template.fields;
@@ -684,29 +672,19 @@ describe("CsvPreviewTable: 固定欄 input 編集 — handleInputKeyDown", () =>
       fireEvent.keyDown(input, { key: "Enter" });
 
       await waitFor(() => {
-        expect(useReportStore.getState().cells.get(1)!.at(0)?.get(fields[0].id)).toBe("9999");
+        expect(useReportStore.getState().cells.get(1)![0]?.get(fields[0].id)).toBe("9999");
       });
 
       // ユーザーが確定後に別セル/別UIへ移動する操作を想定した blur
       fireEvent.blur(input);
 
-      // 期待: 確定済みの "9999" が保持され続ける
-      expect(useReportStore.getState().cells.get(1)!.at(0)?.get(fields[0].id)).toBe("9999");
+      // 確定済みの "9999" が保持され続ける
+      expect(useReportStore.getState().cells.get(1)![0]?.get(fields[0].id)).toBe("9999");
     }
   );
 
-  // -------------------------------------------------------------------
-  // 上と同根の追加発見（BLOCKER 級）: handleCellKeyDown の Delete/Backspace 分岐
-  // （L316-320）は isEditing 中かどうかを判定しないため、編集用 <input> 内で
-  // 文字を消そうとして Backspace/Delete を押しただけで、同じイベントが td まで
-  // バブリングして handleDelete が誤発火し、セル全体が空にクリアされてしまう
-  // （かつ e.preventDefault() により実際の文字削除も行われない）。
-  // 通常のタイプミス訂正操作で即座に再現するため、影響範囲は Enter バブリングの
-  // ケースより広い。
-  // -------------------------------------------------------------------
-
-  it.fails(
-    "【既知バグ・データ損失】編集中に Backspace を押しても文字編集のみのはず（実際は td の handleDelete が誤発火しセル全体が消える）",
+  it(
+    "編集中に Backspace を押しても文字編集のみでセルは消えない",
     async () => {
       setFields(["金額"]);
       const fields = useReportStore.getState().template.fields;
@@ -720,9 +698,9 @@ describe("CsvPreviewTable: 固定欄 input 編集 — handleInputKeyDown", () =>
 
       fireEvent.keyDown(input, { key: "Backspace" });
 
-      // 期待: 編集中の Backspace はテキスト編集専用であり、セル削除は起きないはず
+      // 編集中の Backspace はテキスト編集専用であり、セル削除は起きない
       expect(liveRegion!.textContent).not.toContain("を削除しました");
-      expect(useReportStore.getState().cells.get(1)!.at(0)?.get(fields[0].id)).toBe("100");
+      expect(useReportStore.getState().cells.get(1)![0]?.get(fields[0].id)).toBe("100");
     }
   );
 
@@ -928,7 +906,7 @@ describe("CsvPreviewTable: セル編集 → buildTemplateCsv end-to-end（CSV正
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
-      expect(useReportStore.getState().cells.get(1)!.at(0)?.get(fields[0].id)).toBe("8888");
+      expect(useReportStore.getState().cells.get(1)![0]?.get(fields[0].id)).toBe("8888");
     });
 
     const { template, cells: storeCells } = useReportStore.getState();
