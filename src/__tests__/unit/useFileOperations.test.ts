@@ -74,6 +74,13 @@ import { ask } from '@tauri-apps/plugin-dialog';
 import { readFile, stat } from '@tauri-apps/plugin-fs';
 import type { PecoDocument, PageData } from '../../types';
 import { invalidateBBoxMetaCache } from '../../utils/pdfMetadataLoader';
+import {
+  loadFontLazy,
+  loadFallbackFontsLazy,
+  loadBundledIpAmjFontLazy,
+  getPrimaryFontKind,
+  disableSystemFontForSession,
+} from '../../hooks/useFontLoader';
 
 beforeEach(() => {
   // issue #37: Recent Files は localStorage に保存される。両方クリアして検証ノイズを排除。
@@ -2295,5 +2302,761 @@ describe('useFileOperations 全ページ位置補正適用 (PCT-106 / PCT-109)',
       ([msg]) => typeof msg === 'string' && msg.includes('位置補正適用に失敗'),
     );
     expect(offsetFail.length).toBe(0);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// coverage gap-fill wave 5: 保存失敗時のサイレント失敗ガード、監査ログ書き込み
+// 失敗時の保存継続性 (#413隣接)、上書き/別名保存の未カバー分岐、
+// handleSaveTo / previewOcrOffset / saveAllPagesWithOffset のガード・失敗系、
+// PCT-118 (temp 書込先は fs scope 検証しない設計) の回帰ガードを追加する。
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * 保存対象になる単一 dirty ページを持つ doc を store にセットする共通ヘルパ。
+ * withCache=false のときは originalBytes module-level cache を投入しない
+ * (readFile 経由の再取得パスを検証したいテスト向け)。
+ */
+function makeSingleDirtyPageDoc(
+  filePath: string,
+  opts: { withCache?: boolean } = {},
+): PecoDocument {
+  const { withCache = true } = opts;
+  const dirtyPage = {
+    pageIndex: 0,
+    width: 595,
+    height: 842,
+    textBlocks: [{ id: 'blk', text: 'T', isDirty: true }],
+    isDirty: true,
+    thumbnail: null,
+  } as unknown as PageData;
+  const doc: PecoDocument = {
+    filePath,
+    fileName: filePath.split('/').pop()!,
+    totalPages: 1,
+    metadata: {},
+    pages: new Map([[0, dirtyPage]]),
+  } as unknown as PecoDocument;
+  usePecoStore.setState({
+    document: doc,
+    isDirty: true,
+    undoStack: [],
+    redoStack: [],
+    lastSavedActionIndex: 0,
+  });
+  if (withCache) {
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+  }
+  return doc;
+}
+
+describe('useFileOperations _executeSave サイレント失敗ガード (coverage gap-fill wave5)', () => {
+  it('原本PDF (originalBytes) の再取得に失敗した場合、savePDFを呼ばずユーザーへ通知して失敗する', async () => {
+    // cache 未投入 + readFile が失敗するケース。ensurePrefetchOriginalBytes は
+    // 例外を内部で握りつぶし null を返す (console.warn のみ)。この null を
+    // _executeSave が確実にユーザー通知へ変換していることを検証する。
+    makeSingleDirtyPageDoc('/silent/original-bytes.pdf', { withCache: false });
+    (readFile as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('ENOENT: no such file or directory'),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/元のPDFファイルが移動または削除された可能性があります/),
+      true,
+    );
+  });
+
+  it('日本語フォントの読み込みに失敗した場合、savePDFを呼ばずユーザーへ通知して失敗する', async () => {
+    makeSingleDirtyPageDoc('/silent/font.pdf');
+    (loadFontLazy as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/日本語フォントの読み込みに失敗しました/),
+      true,
+    );
+  });
+
+  it('記号フォールバックフォントの読み込みに失敗した場合、savePDFを呼ばずユーザーへ通知して失敗する', async () => {
+    makeSingleDirtyPageDoc('/silent/fallback-font.pdf');
+    (loadFallbackFontsLazy as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/記号フォントの読み込みに失敗しました/),
+      true,
+    );
+  });
+
+  it('Meiryoフォントで保存に失敗した場合、内蔵IPAmjMinchoへ自動リトライして保存を完走する', async () => {
+    makeSingleDirtyPageDoc('/silent/meiryo-retry-ok.pdf');
+    (getPrimaryFontKind as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce('meiryo');
+    (savePDF as unknown as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('meiryo embed failed'))
+      .mockResolvedValueOnce(new Uint8Array([9, 9, 9]));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(true);
+    expect(disableSystemFontForSession).toHaveBeenCalledTimes(1);
+    expect(loadBundledIpAmjFontLazy).toHaveBeenCalledTimes(1);
+    expect(savePDF).toHaveBeenCalledTimes(2);
+    expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/保存しました/));
+  });
+
+  it('Meiryoリトライでも内蔵フォント読込に失敗した場合は元のエラーで保存失敗になる', async () => {
+    makeSingleDirtyPageDoc('/silent/meiryo-retry-fail.pdf');
+    (getPrimaryFontKind as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce('meiryo');
+    const originalErr = new Error('meiryo embed failed hard');
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(originalErr);
+    (loadBundledIpAmjFontLazy as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(false);
+    expect(savePDF).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存に失敗しました.*meiryo embed failed hard/),
+      true,
+    );
+  });
+
+  it('Meiryo以外のフォント種別でsavePDFが失敗した場合はリトライせず即座に失敗する', async () => {
+    makeSingleDirtyPageDoc('/silent/non-meiryo-fail.pdf');
+    // getPrimaryFontKind はデフォルト 'bundled' のまま (meiryo ではない)
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('bundled font embed failed'),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(false);
+    expect(savePDF).toHaveBeenCalledTimes(1);
+    expect(loadBundledIpAmjFontLazy).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存に失敗しました.*bundled font embed failed/),
+      true,
+    );
+  });
+
+  it('保存中 (writeFile完了直後) に別のPDFへ切り替わっていた場合、状態反映を中止してエラー通知する', async () => {
+    makeSingleDirtyPageDoc('/silent/race-switch.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') {
+        // replace_pdf_file (atomic rename) が完了した直後に別PDFが開かれた状況を再現する。
+        usePecoStore.setState({
+          document: {
+            filePath: '/other/switched-during-save.pdf',
+            fileName: 'switched-during-save.pdf',
+            totalPages: 1,
+            metadata: {},
+            pages: new Map(),
+          } as unknown as PecoDocument,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/別のPDFへ切り替わったため、状態反映を中止しました/),
+      true,
+    );
+  });
+});
+
+describe('useFileOperations 監査ログ書き込み失敗時の保存継続性 (issue #413隣接)', () => {
+  function setupAuditableDirtyDoc(filePath: string): void {
+    makeSingleDirtyPageDoc(filePath);
+    // computeSaveDiff が entries>0 を返すよう undoStack に更新エントリを積む
+    usePecoStore.setState({
+      undoStack: [
+        {
+          type: 'update_page',
+          pageIndex: 0,
+          before: { textBlocks: [{ id: 'blk', text: 'OLD', isDirty: false }] },
+          after: { textBlocks: [{ id: 'blk', text: 'T', isDirty: true }] },
+        },
+      ] as unknown as ReturnType<typeof usePecoStore.getState>['undoStack'],
+      lastSavedActionIndex: 0,
+    });
+  }
+
+  it('write_audit_log が失敗しても handleSave は成功として扱われ、成功トーストが出る', async () => {
+    setupAuditableDirtyDoc('/audit/handle-save-fail.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'write_audit_log') return Promise.reject(new Error('disk full'));
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(true);
+    const successCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] !== true);
+    expect(successCalls.some((args) => String(args[0]).includes('保存しました'))).toBe(true);
+  });
+
+  it('write_audit_log が失敗しても executeSaveAs (別名保存) は成功として扱われる', async () => {
+    setupAuditableDirtyDoc('/audit/save-as-fail.pdf');
+
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce('/audit/save-as-target.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'write_audit_log') return Promise.reject(new Error('disk full'));
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    const successCalls = showToast.mock.calls.filter((args: unknown[]) => args[1] !== true);
+    expect(successCalls.some((args) => String(args[0]).includes('名前を付けて保存しました'))).toBe(true);
+  });
+});
+
+describe('useFileOperations executeSaveAs 未カバー分岐 (coverage gap-fill wave5)', () => {
+  it('compression=rasterized を指定すると警告トーストを出して none にフォールバックする', async () => {
+    makeSingleDirtyPageDoc('/saveas/rasterized.pdf');
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce('/saveas/rasterized-out.pdf');
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.executeSaveAs({ compression: 'rasterized' });
+    });
+
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/高圧縮.*未実装/),
+      true,
+    );
+    const lastCall = (savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls.slice(-1)[0] as unknown[];
+    const effectiveOptions = lastCall[6] as { compression: string };
+    expect(effectiveOptions.compression).toBe('none');
+  });
+
+  it('OCR実行中は executeSaveAs が保存ダイアログを開かず通知して終了する', async () => {
+    makeSingleDirtyPageDoc('/saveas/ocr-guard.pdf');
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true } as React.MutableRefObject<boolean>;
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef),
+    );
+
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    expect(save).not.toHaveBeenCalled();
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/OCR実行中は保存できません/),
+      true,
+    );
+  });
+
+  it('保存ダイアログの選択待ち中に別の保存が開始していたら executeSaveAs は中断する', async () => {
+    makeSingleDirtyPageDoc('/saveas/race-dialog.pdf');
+
+    let resolveDialog!: (path: string) => void;
+    const dialogPromise = new Promise<string>((resolve) => { resolveDialog = resolve; });
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(dialogPromise);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const saveAsPromise = result.current.executeSaveAs();
+    await waitFor(() => expect(save).toHaveBeenCalled());
+
+    // ダイアログ表示中に別経路の保存が開始した状況を isSavingRef 直接操作で再現する
+    result.current.isSavingRef.current = true;
+    resolveDialog('/saveas/race-dialog-target.pdf');
+    await saveAsPromise;
+
+    expect(showToast).toHaveBeenCalledWith('別の保存処理が進行中です。完了してから再度お試しください。');
+    expect(savePDF).not.toHaveBeenCalled();
+
+    result.current.isSavingRef.current = false;
+  });
+
+  it('別名保存中に別のPDFへ切り替わっていた場合、名前を付けて保存に失敗した旨を通知する', async () => {
+    makeSingleDirtyPageDoc('/saveas/race-switch.pdf');
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    (save as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce('/saveas/race-switch-target.pdf');
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') {
+        usePecoStore.setState({
+          document: {
+            filePath: '/other/switched.pdf',
+            fileName: 'switched.pdf',
+            totalPages: 1,
+            metadata: {},
+            pages: new Map(),
+          } as unknown as PecoDocument,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    expect(showToast).toHaveBeenCalledWith('名前を付けて保存に失敗しました。', true);
+  });
+});
+
+describe('useFileOperations handleSaveTo ガード・失敗系 (coverage gap-fill wave5)', () => {
+  it('保存処理が進行中のとき handleSaveTo は即座に false を返しsavePDFを呼ばない', async () => {
+    makeSingleDirtyPageDoc('/saveto/busy.pdf');
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    result.current.isSavingRef.current = true;
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/saveto/busy-target.pdf');
+    });
+
+    expect(ok).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith('保存処理が進行中です。');
+    result.current.isSavingRef.current = false;
+  });
+
+  it('OCR実行中かつ bypassOcrGuard 未指定なら handleSaveTo は false を返す', async () => {
+    makeSingleDirtyPageDoc('/saveto/ocr-guard.pdf');
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true } as React.MutableRefObject<boolean>;
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef),
+    );
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/saveto/ocr-target.pdf');
+    });
+
+    expect(ok).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/OCR実行中は保存できません/),
+      true,
+    );
+  });
+
+  it('savePDFが失敗した場合 handleSaveTo は false を返しエラートーストを出す', async () => {
+    makeSingleDirtyPageDoc('/saveto/save-fail.pdf');
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/saveto/save-fail-target.pdf');
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/保存に失敗しました.*boom/), true);
+    expect(result.current.isSavingRef.current).toBe(false);
+  });
+
+  it('開いているドキュメントが無い状態で handleSaveTo を呼ぶと savePDF を呼ばず false を返す', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/saveto/no-doc-target.pdf');
+    });
+
+    expect(ok).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+  });
+});
+
+describe('useFileOperations previewOcrOffset ガード・失敗系 (coverage gap-fill wave5)', () => {
+  it('開いているPDFが無い場合 previewOcrOffset はユーザーへ通知して false を返す', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.previewOcrOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/プレビューするPDFが開かれていません/),
+      true,
+    );
+  });
+
+  it('保存処理が進行中のとき previewOcrOffset は false を返す', async () => {
+    makeSingleDirtyPageDoc('/preview/busy.pdf');
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    result.current.isSavingRef.current = true;
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.previewOcrOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存処理が進行中です.*プレビュー/),
+    );
+    result.current.isSavingRef.current = false;
+  });
+
+  it('OCR実行中は previewOcrOffset がユーザーへ通知して false を返す', async () => {
+    makeSingleDirtyPageDoc('/preview/ocr-guard.pdf');
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true } as React.MutableRefObject<boolean>;
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef),
+    );
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.previewOcrOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/OCR実行中はプレビューできません/),
+      true,
+    );
+  });
+
+  it('open_pdf_preview の起動に失敗した場合、失敗を通知して false を返す', async () => {
+    makeSingleDirtyPageDoc('/preview/open-fail.pdf');
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'open_pdf_preview') return Promise.reject(new Error('viewer launch failed'));
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.previewOcrOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/プレビューに失敗しました.*viewer launch failed/),
+      true,
+    );
+    expect(result.current.isSavingRef.current).toBe(false);
+  });
+});
+
+describe('useFileOperations saveAllPagesWithOffset ガード・成功・失敗系 (coverage gap-fill wave5)', () => {
+  it('開いているPDFが無い場合はユーザーへ通知して false を返す', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAllPagesWithOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存するPDFが開かれていません/),
+      true,
+    );
+    expect(savePDF).not.toHaveBeenCalled();
+  });
+
+  it('保存処理が進行中のときは false を返しsavePDFを呼ばない', async () => {
+    makeSingleDirtyPageDoc('/offset-save/busy.pdf');
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    result.current.isSavingRef.current = true;
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAllPagesWithOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith('保存処理が進行中です。');
+    expect(savePDF).not.toHaveBeenCalled();
+    result.current.isSavingRef.current = false;
+  });
+
+  it('OCR実行中はユーザーへ通知して false を返す', async () => {
+    makeSingleDirtyPageDoc('/offset-save/ocr-guard.pdf');
+    const showToast = vi.fn();
+    const isOcrRunningRef = { current: true } as React.MutableRefObject<boolean>;
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, undefined, undefined, undefined, isOcrRunningRef),
+    );
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAllPagesWithOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/OCR実行中は保存できません/),
+      true,
+    );
+    expect(savePDF).not.toHaveBeenCalled();
+  });
+
+  it('成功時は dirty を解除し、位置補正保存の成功トーストとバックアップ削除を行う', async () => {
+    const doc = makeSingleDirtyPageDoc('/offset-save/success.pdf');
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAllPagesWithOffset();
+    });
+
+    expect(ok).toBe(true);
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/全ページに位置補正を適用して保存しました/),
+    );
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    const clearBackupCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'clear_backup');
+    expect(clearBackupCalls.length).toBeGreaterThan(0);
+    expect(clearBackupCalls[0][1]).toEqual({ filePath: doc.filePath });
+  });
+
+  it('savePDFが失敗した場合 false を返しエラートーストを出し isSavingRef をリセットする', async () => {
+    makeSingleDirtyPageDoc('/offset-save/save-fail.pdf');
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('offset save boom'));
+
+    const showToast = vi.fn();
+    const setIsSaving = vi.fn();
+    const setSaveStep = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(showToast, setIsSaving, undefined, undefined, undefined, setSaveStep),
+    );
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAllPagesWithOffset();
+    });
+
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存に失敗しました.*offset save boom/),
+      true,
+    );
+    expect(result.current.isSavingRef.current).toBe(false);
+    expect(setIsSaving).toHaveBeenLastCalledWith(false);
+    expect(setSaveStep).toHaveBeenLastCalledWith(null);
+  });
+});
+
+describe('useFileOperations handleOpen 未保存変更の破棄失敗 (coverage gap-fill wave5)', () => {
+  it('別PDFを開く際に旧ファイルの temporary changes 破棄が失敗した場合、ユーザーへ通知して document を差し替えない', async () => {
+    const dirtyPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const currentDoc: PecoDocument = {
+      filePath: '/discard-fail/current.pdf',
+      fileName: 'current.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, dirtyPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: currentDoc, isDirty: true });
+    (ask as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
+    (clearTemporaryChanges as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('idb transaction aborted'),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let opened: boolean | undefined;
+    await act(async () => {
+      opened = await result.current.handleOpen('/discard-fail/next.pdf');
+    });
+
+    expect(opened).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/未保存の変更を破棄できませんでした/),
+      true,
+    );
+    // 破棄失敗時は setDocument されず、旧ドキュメントのまま維持される
+    expect(usePecoStore.getState().document).toBe(currentDoc);
+  });
+});
+
+describe('useFileOperations handleSave 保存前diffプレビューのキャンセル経路 (coverage gap-fill wave5)', () => {
+  it('diffプレビューでユーザーがキャンセルすると savePDF を呼ばず false を返す', async () => {
+    makeSingleDirtyPageDoc('/diff-preview/cancel.pdf');
+    usePecoStore.setState({
+      undoStack: [
+        {
+          type: 'update_page',
+          pageIndex: 0,
+          before: { textBlocks: [{ id: 'blk', text: 'OLD', isDirty: false }] },
+          after: { textBlocks: [{ id: 'blk', text: 'T', isDirty: true }] },
+        },
+      ] as unknown as ReturnType<typeof usePecoStore.getState>['undoStack'],
+      lastSavedActionIndex: 0,
+    });
+
+    const onRequestDiffPreview = vi.fn().mockResolvedValueOnce(false);
+    const showToast = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(
+        showToast,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        onRequestDiffPreview,
+      ),
+    );
+
+    let saveResult: boolean | undefined;
+    await act(async () => {
+      saveResult = await result.current.handleSave();
+    });
+
+    expect(saveResult).toBe(false);
+    expect(onRequestDiffPreview).toHaveBeenCalledTimes(1);
+    expect(savePDF).not.toHaveBeenCalled();
+    // キャンセルは isSavingRef が true になる前の分岐なので、保存中フラグは立たない
+    expect(result.current.isSavingRef.current).toBe(false);
+  });
+});
+
+describe('useFileOperations temp書込先 fs scope 非検証契約の回帰ガード (PCT-118)', () => {
+  it('保存は必ず "<元パス>.pecotool-*.tmp" 命名の一時ファイル経由で atomic replace される', async () => {
+    // PCT-118: temp(.pecotool-*.tmp) への書込は fs scope 検証しない設計。
+    // この契約はフック層が writeFileAtomically へ渡す writePath を勝手に
+    // 書き換えていないこと (= 常に document.filePath そのもの) に依存している。
+    // フック層が writePath を別物に差し替えると、Rust 側の temp 生成規約や
+    // scope 前提が崩れて保存全滅 (PCT-118 の再発) につながるため、ここで固定する。
+    const doc = makeSingleDirtyPageDoc('/pct118/target file with space.pdf');
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    const chunkCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'write_pdf_chunk');
+    expect(chunkCalls.length).toBeGreaterThan(0);
+    const [, , chunkOpts] = chunkCalls[0] as [string, ArrayBuffer, { headers: Record<string, string> }];
+    const tempPathUsed = decodeURIComponent(chunkOpts.headers['x-path']);
+    // 一時ファイルは元パスを prefix に持ち、.pecotool-<timestamp>-<uuid>.tmp で終わる
+    expect(tempPathUsed.startsWith(doc.filePath)).toBe(true);
+    expect(tempPathUsed).toMatch(/\.pecotool-\d+-[0-9a-f-]+\.tmp$/);
+
+    const replaceCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'replace_pdf_file');
+    expect(replaceCalls.length).toBe(1);
+    const [, replaceArgs] = replaceCalls[0] as [string, { tempPath: string; targetPath: string }];
+    // 最終書き込み先 (targetPath) はユーザーが開いた実パスそのまま (改変されない)
+    expect(replaceArgs.targetPath).toBe(doc.filePath);
+    expect(replaceArgs.tempPath).toBe(tempPathUsed);
   });
 });
