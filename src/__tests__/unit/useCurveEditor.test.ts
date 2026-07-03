@@ -82,6 +82,7 @@ function makeParams(
 ): UseCurveEditorParams {
   const getPageData = vi.fn(() => undefined as PageData | undefined);
   const updatePageData = vi.fn();
+  const pushAction = vi.fn();
 
   const overlayCanvasRef: RefObject<HTMLCanvasElement | null> = {
     current: {
@@ -99,6 +100,7 @@ function makeParams(
     currentTextBlocksById: new Map([['block1', makeTextBlock('block1')]]),
     getPageData,
     updatePageData,
+    pushAction,
     overlayCanvasRef,
     renderOverlaysRef,
     overlayRafRef,
@@ -516,7 +518,12 @@ describe('useCurveEditor — handle drag lifecycle', () => {
     expect(lastCall[2]).toBe(false); // undoable=false during drag
   });
 
-  it('mouseUp after drag calls updatePageData with undoable=true and clears dragRef', () => {
+  // #356 (PCT-133): 以前は mouseUp の最終書き込みを undoable=true にしていたため
+  // pecoStore の undo エントリの before がドラッグ後の状態を指してしまい undo が
+  // 効かなかった。修正後は useBlockDragResize と同じく、mouseUp の書き込みは
+  // すべて undoable=false にし、before/after を手動構築した 1 件の Action を
+  // pushAction で積む。
+  it('mouseUp after drag: final write is undoable=false and pushes exactly one undo Action, and clears dragRef', () => {
     const arc: CurveDefinition = {
       type: 'arc',
       center: { x: 50, y: 50 },
@@ -528,10 +535,12 @@ describe('useCurveEditor — handle drag lifecycle', () => {
     const page = makePageData([block]);
     const getPageData = vi.fn(() => page);
     const updatePageData = vi.fn();
+    const pushAction = vi.fn();
     const params = makeParams({
       currentTextBlocksById: new Map([['block1', block]]),
       getPageData,
       updatePageData,
+      pushAction,
       zoom: 100,
     });
     const { result } = renderHook(() => useCurveEditor(params));
@@ -547,9 +556,17 @@ describe('useCurveEditor — handle drag lifecycle', () => {
     });
 
     expect(result.current.curveHandleDragRef.current).toBeNull();
-    // Last updatePageData call must be undoable=true
-    const lastCall = updatePageData.mock.calls[updatePageData.mock.calls.length - 1];
-    expect(lastCall[2]).toBe(true);
+    // Every updatePageData call during the drag lifecycle (including the
+    // mouseUp confirm write) must be undoable=false — the undo Action is
+    // pushed separately via pushAction, not via updatePageData's own pushUndo.
+    for (const call of updatePageData.mock.calls) {
+      expect(call[2]).toBe(false);
+    }
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const action = pushAction.mock.calls[0][0];
+    expect(action.type).toBe('update_page');
+    expect(action.before).toBeDefined();
+    expect(action.after).toBeDefined();
   });
 
   // #431 FB-5: curve handle drag の mousemove が RAF に coalesce され、
@@ -611,10 +628,12 @@ describe('useCurveEditor — handle drag lifecycle', () => {
       const page = makePageData([block]);
       const getPageData = vi.fn(() => page);
       const updatePageData = vi.fn();
+      const pushAction = vi.fn();
       const params = makeParams({
         currentTextBlocksById: new Map([['block1', block]]),
         getPageData,
         updatePageData,
+        pushAction,
         zoom: 100,
       });
       const { result } = renderHook(() => useCurveEditor(params));
@@ -626,17 +645,18 @@ describe('useCurveEditor — handle drag lifecycle', () => {
         result.current.handleMouseMoveCurve({ x: 90, y: 55 });
       });
       // mouseUp fires before the queued RAF callback runs (fast drag release).
-      // The drag-position update must still be applied synchronously, then
-      // the undoable=true commit follows — not dropped by the pending RAF.
+      // The drag-position update must still be applied synchronously (flushed
+      // pending pos), and the confirm write that follows is also undoable=false
+      // — the single undo Action is pushed via pushAction (#356).
       act(() => {
         result.current.handleMouseUpCurve();
       });
 
       expect(updatePageData.mock.calls.length).toBeGreaterThanOrEqual(2);
-      const undoableFalseCall = updatePageData.mock.calls.find((c) => c[2] === false);
-      const undoableTrueCall = updatePageData.mock.calls[updatePageData.mock.calls.length - 1];
-      expect(undoableFalseCall).toBeDefined();
-      expect(undoableTrueCall[2]).toBe(true);
+      for (const call of updatePageData.mock.calls) {
+        expect(call[2]).toBe(false);
+      }
+      expect(pushAction).toHaveBeenCalledTimes(1);
       // No RAF should remain queued after mouseUp flushes it.
       expect(rafQueue.length).toBe(0);
     });
@@ -651,6 +671,118 @@ describe('useCurveEditor — handle drag lifecycle', () => {
       handled = result.current.handleMouseUpCurve();
     });
     expect(handled).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #356 (PCT-133): curve ハンドルドラッグの undo が壊れていた regression guard。
+// mousemove 中は undoable=false で逐次書き込み、mouseUp で「最新状態をそのまま
+// undoable=true で再書き込み」していたため、pecoStore が undo エントリの before
+// に取る「直前の oldPage」が既にドラッグ後の状態になり、before=after 同値で
+// undo が効かなかった (100% 再現)。useBlockDragResize と同じ preDragPageRef +
+// 手動 pushAction 方式に揃えた修正の効果を、ここでは stateful mock
+// (getPageData が updatePageData の書き込みを反映する) で検証する。
+describe('useCurveEditor — #356 (PCT-133) handle drag undo correctness', () => {
+  function makeStatefulPageMock(initialBlocks: TextBlock[]) {
+    let currentPage = makePageData(initialBlocks);
+    const getPageData = vi.fn(() => currentPage);
+    const updatePageData = vi.fn((_idx: number, partial: Partial<PageData>) => {
+      currentPage = { ...currentPage, ...partial };
+    });
+    return { getPageData, updatePageData, getCurrentPage: () => currentPage };
+  }
+
+  const arc: CurveDefinition = {
+    type: 'arc',
+    center: { x: 50, y: 50 },
+    radius: 30,
+    startAngle: 0,
+    endAngle: Math.PI,
+  };
+
+  it('pushes an Action whose before.curve is the pre-drag shape and after.curve is the dragged shape (before !== after)', () => {
+    const block = makeTextBlock('block1', arc);
+    const { getPageData, updatePageData } = makeStatefulPageMock([block]);
+    const pushAction = vi.fn();
+    const params = makeParams({
+      currentTextBlocksById: new Map([['block1', block]]),
+      getPageData,
+      updatePageData,
+      pushAction,
+      zoom: 100,
+    });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    // Grab the arc's start handle (index 0) and drag it to a new position.
+    act(() => { result.current.handleMouseDownCurve({ x: 80, y: 50 }); });
+    act(() => { result.current.handleMouseMoveCurve({ x: 90, y: 55 }); });
+    act(() => { flushRaf(); });
+    act(() => { result.current.handleMouseUpCurve(); });
+
+    expect(pushAction).toHaveBeenCalledTimes(1);
+    const action = pushAction.mock.calls[0][0];
+    const beforeCurve = action.before.textBlocks.find((b: TextBlock) => b.id === 'block1').curve;
+    const afterCurve = action.after.textBlocks.find((b: TextBlock) => b.id === 'block1').curve;
+
+    // before must be the untouched pre-drag arc (the bug's failure mode was
+    // before === after, which made undo a no-op).
+    expect(beforeCurve).toEqual(arc);
+    expect(afterCurve).not.toEqual(beforeCurve);
+  });
+
+  it('a single handle drag (mousedown → several mousemoves → mouseup) pushes exactly 1 undo Action', () => {
+    const block = makeTextBlock('block1', arc);
+    const { getPageData, updatePageData } = makeStatefulPageMock([block]);
+    const pushAction = vi.fn();
+    const params = makeParams({
+      currentTextBlocksById: new Map([['block1', block]]),
+      getPageData,
+      updatePageData,
+      pushAction,
+      zoom: 100,
+    });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => { result.current.handleMouseDownCurve({ x: 80, y: 50 }); });
+    // Several intermediate mousemove ticks during the same drag — none of
+    // these (nor the RAF-coalesced updatePageData calls behind them) may
+    // push their own undo Action; only the final mouseUp does.
+    act(() => { result.current.handleMouseMoveCurve({ x: 82, y: 51 }); });
+    act(() => { flushRaf(); });
+    act(() => { result.current.handleMouseMoveCurve({ x: 86, y: 53 }); });
+    act(() => { flushRaf(); });
+    act(() => { result.current.handleMouseMoveCurve({ x: 90, y: 55 }); });
+    act(() => { flushRaf(); });
+    act(() => { result.current.handleMouseUpCurve(); });
+
+    expect(pushAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('undo restores the pre-drag curve: applying action.before back onto the page yields the original shape', () => {
+    // This does not exercise pecoStore.undo() directly (out of this hook's
+    // scope), but confirms the Action carries what pecoStore.undo() needs:
+    // setting the page to action.before must reproduce the exact pre-drag
+    // block (curve unchanged, same reference-equal object).
+    const block = makeTextBlock('block1', arc);
+    const { getPageData, updatePageData } = makeStatefulPageMock([block]);
+    const pushAction = vi.fn();
+    const params = makeParams({
+      currentTextBlocksById: new Map([['block1', block]]),
+      getPageData,
+      updatePageData,
+      pushAction,
+      zoom: 100,
+    });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => { result.current.handleMouseDownCurve({ x: 80, y: 50 }); });
+    act(() => { result.current.handleMouseMoveCurve({ x: 90, y: 55 }); });
+    act(() => { flushRaf(); });
+    act(() => { result.current.handleMouseUpCurve(); });
+
+    const action = pushAction.mock.calls[0][0];
+    const restoredBlock = action.before.textBlocks.find((b: TextBlock) => b.id === 'block1');
+    expect(restoredBlock.curve).toEqual(arc);
   });
 });
 

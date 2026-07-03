@@ -202,6 +202,7 @@ export function PdfCanvas({
     currentTextBlocksById,
     getPageData,
     updatePageData,
+    pushAction,
     overlayCanvasRef,
     renderOverlaysRef,
     overlayRafRef,
