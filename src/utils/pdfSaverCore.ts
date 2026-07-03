@@ -1484,6 +1484,14 @@ export async function buildPdfDocumentCore(
           );
           if (ops.length > 0) {
             page.pushOperators(...ops);
+          } else {
+            // PCT-193: 退化した curve（例: 全点同一の polyline）は layoutTextOnCurve が
+            // 空配列を返し、buildCurveBlockOperators も [] を返す。このブロックの文字は
+            // 無警告で保存 PDF から消えていた。ロジックは変更せず（curve 経路の再描画や
+            // axis-aligned フォールバックは別 issue）、可観測性のみ最小追加する。
+            console.warn(
+              `[buildPdfDocumentCore] Page ${pageIndex}: skipped curve block (degenerate curve, 0 layout ops) text="${block.text.slice(0, 20)}"`,
+            );
           }
           continue;
         }

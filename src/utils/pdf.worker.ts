@@ -42,6 +42,14 @@ export const __handleSavePdfForTest = handleSavePdf;
 // Worker scope での self 型付け。WebWorker lib を tsconfig で有効化しているため DedicatedWorkerGlobalScope が使える。
 declare const self: DedicatedWorkerGlobalScope;
 
+// PCT-194 (#425): main 殻 (pdfSaver.ts) の PREVIOUS_SAVE_TIMEOUT_MS は、旧実装では
+// 「前回保存タスクが完了したか」のみを見ていたため、5秒を超える正常な保存中に
+// 2回目の保存が実行されると進行中の worker を誤って terminate していた。
+// SAVE_PDF 処理中はこの周期で軽量 heartbeat を postMessage し、main 殻側で
+// 「進捗ベースの生存判定」（直近 heartbeat から一定時間無応答なら stale とみなす）
+// を行えるようにする。PREVIOUS_SAVE_TIMEOUT_MS(5000ms) より十分短い周期にすること。
+const SAVE_PDF_HEARTBEAT_INTERVAL_MS = 1000;
+
 /**
  * payload から元 PDF bytes を取得する。
  * - bytes 指定: 従来経路（main thread から transfer された Uint8Array をそのまま使う）
@@ -78,6 +86,12 @@ self.onmessage = async (e: MessageEvent<SavePdfWorkerRequest>) => {
   const msg = e.data;
   switch (msg.type) {
     case 'SAVE_PDF': {
+      // PCT-194 (#425): 処理中は heartbeat を周期送信し、main 殻が「生きている保存」を
+      // 進捗ベースで判定できるようにする。成功/失敗いずれの応答後も必ず停止する。
+      const heartbeatId = setInterval(() => {
+        const heartbeat: SavePdfWorkerResponse = { type: 'SAVE_PDF_HEARTBEAT' };
+        self.postMessage(heartbeat);
+      }, SAVE_PDF_HEARTBEAT_INTERVAL_MS);
       try {
         const { documentState, fallbackFontBytes, fontBytes, pageOrder, options } = msg.data;
         const originalPdfBytes = await resolvePdfBytes(msg.data);
@@ -88,6 +102,8 @@ self.onmessage = async (e: MessageEvent<SavePdfWorkerRequest>) => {
         const message = err instanceof Error ? err.message : String(err);
         const response: SavePdfWorkerResponse = { type: 'ERROR', message };
         self.postMessage(response);
+      } finally {
+        clearInterval(heartbeatId);
       }
       break;
     }

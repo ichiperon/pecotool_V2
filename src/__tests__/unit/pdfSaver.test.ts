@@ -1417,6 +1417,13 @@ class ControllableMockWorker {
     }
   }
 
+  /** テストから heartbeat 応答を発火（PCT-194 / #425: 進捗ベース生存判定の検証用） */
+  emitHeartbeat() {
+    if (this.onmessage) {
+      this.onmessage({ data: { type: 'SAVE_PDF_HEARTBEAT' } } as MessageEvent<any>)
+    }
+  }
+
   /** テストからエラー応答を発火 */
   emitError(message: string) {
     if (this.onmessage) {
@@ -1556,6 +1563,84 @@ describe('pdfSaver / Worker 経路', () => {
 
         warnSpy.mockRestore()
       } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  describe('U-W-02b: heartbeat 経路 — 進捗ベース生存判定 (PCT-194 / #425残余)', () => {
+    it('PREVIOUS_SAVE_TIMEOUT_MS(5秒)より短い周期で heartbeat が届き続ける限り、5秒を超えても前回 worker は terminate されない', async () => {
+      vi.useFakeTimers()
+      try {
+        const doc = makeSimpleDoc()
+
+        // 1 回目: 応答を発火せず hung 状態のまま置くが、heartbeat だけは送り続ける想定
+        const p1 = savePDF(new Uint8Array(), doc)
+        const w1 = ControllableMockWorker.instances[0]
+
+        const p2 = savePDF(new Uint8Array(), doc)
+
+        // 4秒間隔で heartbeat を送りながら合計 12 秒経過させる。
+        // 固定 5 秒タイムアウトなら 2 周目 (t=8s) の時点で terminate されているはずだが、
+        // 進捗ベース判定では heartbeat のたびに猶予がリセットされるため terminate されない。
+        for (let i = 0; i < 3; i++) {
+          await vi.advanceTimersByTimeAsync(4000)
+          w1.emitHeartbeat()
+        }
+
+        expect(w1.terminateCount).toBe(0)
+        expect(ControllableMockWorker.instances.length).toBe(1) // w2 はまだ作られていない (p2 は待機中)
+
+        // p1 を正常完了させる
+        w1.emitSuccess(new Uint8Array([1, 2, 3]))
+        await p1
+
+        // p2 は p1 完了を受けて新 worker を作成し、正常に進む
+        await vi.advanceTimersByTimeAsync(0)
+        expect(ControllableMockWorker.instances.length).toBe(2)
+        const w2 = ControllableMockWorker.instances[1]
+        w2.emitSuccess(new Uint8Array([9]))
+        await p2
+
+        // heartbeat が続いた前回 worker は誤 terminate されていない（成功 cleanup の 1 回のみ）
+        expect(w1.terminateCount).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('heartbeat が途絶えると、直近 heartbeat から5秒経過した時点で従来どおり stale terminate される', async () => {
+      vi.useFakeTimers()
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const doc = makeSimpleDoc()
+
+        const p1 = savePDF(new Uint8Array(), doc)
+        const p1Rejection = expect(p1).rejects.toThrow('後続の保存操作により、前回の保存が中断されました。')
+        const w1 = ControllableMockWorker.instances[0]
+
+        const p2 = savePDF(new Uint8Array(), doc)
+
+        // 3秒後に heartbeat を1回だけ送る（生存確認の延命）
+        await vi.advanceTimersByTimeAsync(3000)
+        w1.emitHeartbeat()
+        expect(w1.terminateCount).toBe(0)
+
+        // その後 heartbeat が途絶える。直近 heartbeat (t=3s) から5秒 = t=8s で terminate される
+        // はず。ここでは合計 5001ms 進める（t=3s起点+5001ms=t=8.001s）。
+        await vi.advanceTimersByTimeAsync(5001)
+
+        expect(w1.terminateCount).toBe(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Previous save did not complete within timeout'),
+        )
+        await p1Rejection
+
+        const w2 = ControllableMockWorker.instances[1]
+        w2.emitSuccess(new Uint8Array([9, 9]))
+        await p2
+      } finally {
+        warnSpy.mockRestore()
         vi.useRealTimers()
       }
     })
