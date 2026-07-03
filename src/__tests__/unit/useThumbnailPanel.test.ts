@@ -418,7 +418,9 @@ describe('flushBatch logic', () => {
 // ---------------------------------------------------------------------------
 // S-07: 実 hook でファイル切替時の世代管理（epoch / URL revoke / unmount cleanup）
 // ---------------------------------------------------------------------------
-describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
+// 広域 npm test のフル並列時、実タイマー flush を多用する本 describe は
+// 既定タイムアウトを超えて flaky になる実績あり（単独では常に緑・2026-07-03 実測）。
+describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', { timeout: 30_000 }, () => {
   // テスト中に生成された Worker を全て参照できるようにする
   const createdWorkers: Array<MockThumbnailWorker> = []
   // URL.createObjectURL の連番カウンタ

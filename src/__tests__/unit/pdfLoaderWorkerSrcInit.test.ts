@@ -25,7 +25,9 @@ vi.mock('../../utils/bitmapCache', () => ({
 
 import { GlobalWorkerOptions } from 'pdfjs-dist'
 
-describe('pdfLoader モジュール初期化: workerSrc が既に設定済みなら上書きしない', () => {
+// 広域 npm test のフル並列時、pdfjs-dist を含む重い動的 import が既定 5s を
+// 超えて flaky になる実績あり（単独実行では常に緑・2026-07-03 実測）。
+describe('pdfLoader モジュール初期化: workerSrc が既に設定済みなら上書きしない', { timeout: 20_000 }, () => {
   it('GlobalWorkerOptions.workerSrc が既に truthy な場合、import 後も値が変わらない', async () => {
     await import('../../utils/pdfLoader')
 
