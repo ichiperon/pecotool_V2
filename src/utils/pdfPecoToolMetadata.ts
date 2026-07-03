@@ -178,11 +178,20 @@ export interface PecoToolBBoxMetaRead {
 export function readPecoToolBBoxMetaWithStatus(pdfDoc: PDFDocument): PecoToolBBoxMetaRead {
   const privateMeta = readPrivateBBoxMeta(pdfDoc);
   if (privateMeta) return { status: 'ok', meta: privateMeta };
-  // legacy が読めるなら従来どおりそれを返す（旧 `private ?? legacy ?? {}` フォールバックを温存）。
-  // undecodable は private が読めず legacy でも救えない場合に限る（= 真に読めない時だけ preserve）。
+  // #428 / PCT-197: private BBox stream が「存在するが decode/parse 不能」なら、legacy が読めても
+  // 'undecodable' を優先する。private は新形式で、破損した private にのみ存在した新しい編集データを、
+  // 古い legacy を 'ok' として返すことで黙って上書き喪失させないため（保存パスの byte-preserve と
+  // load 側の警告バナーへ合流させる）。
+  //   ここで「壊れている」と「最初から無い」を区別するのが核心: hasUnreadablePrivateBBoxStream は
+  //   private stream が無い場合は false を返すため、この分岐は素通りして下の legacy フォールバックへ
+  //   進む（= 旧来の正常系）。「昔の legacy のみ PDF」を undecodable と誤判定して開けなくする誤爆は
+  //   起きない（private が最初から無いため）。
+  // #392 時点はこの判定を legacy フォールバックの後段に置いていたが、それだと本 issue の
+  //   「private 破損 + legacy 可読」ケースを legacy が 'ok' で先取りして preserve が不発だった。
+  if (hasUnreadablePrivateBBoxStream(pdfDoc)) return { status: 'undecodable', meta: {} };
+  // private が存在しない場合のみ legacy フォールバックへ（旧 `private ?? legacy ?? {}` を温存）。
   const legacy = readLegacyInfoBBoxMeta(pdfDoc);
   if (legacy) return { status: 'ok', meta: legacy };
-  if (hasUnreadablePrivateBBoxStream(pdfDoc)) return { status: 'undecodable', meta: {} };
   return { status: 'empty', meta: {} };
 }
 

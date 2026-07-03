@@ -356,9 +356,12 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
     expect(read.meta).toEqual({});
   });
 
-  // ── U-PM-15 (#392): undecodable private + 読める legacy は status='ok' で legacy を返す ──
-  // 旧 readPecoToolBBoxMetaFromPdfDoc の `private ?? legacy ?? {}` フォールバックを温存する回帰。
-  it("U-PM-15: undecodable private + 読める legacy → status='ok' で legacy を返す", async () => {
+  // ── U-PM-15 (#428 / PCT-197): undecodable private + 読める legacy → status='undecodable' ──
+  // #392 時点は legacy を 'ok' で返していた（`private ?? legacy ?? {}` フォールバック温存）が、
+  // これだと破損 private にのみ存在した新しい編集データが、古い legacy を 'ok' で先取りされて
+  // 黙って上書き喪失する（#428）。private が「存在するが壊れている」ときは legacy 可読でも
+  // 'undecodable' を優先し、save 側の byte-preserve と load 側の警告バナーへ合流させる。
+  it("U-PM-15: undecodable private + 読める legacy → status='undecodable'（#428 で 'ok'→'undecodable'）", async () => {
     const pdfDoc = await makePdfDocWithInvalidFlateStream(); // private は decode 不能
     const legacyMeta = { legacy: true, pages: { '0': [] } };
     (pdfDoc as unknown as Record<string, unknown>).getInfoDict = () => ({
@@ -370,9 +373,9 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
       delete: (_k: PDFName) => {},
     });
     const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
-    expect(read.status).toBe('ok');
-    expect(read.meta).toEqual(legacyMeta);
-    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual(legacyMeta);
+    expect(read.status).toBe('undecodable');
+    expect(read.meta).toEqual({});
+    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual({});
   });
 
   // ── U-PM-16 (#392): bytes 経路と pdfDoc 経路の undecodable 判定が一致する ──
@@ -387,5 +390,63 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
     const bytes = await pdfDoc.save({ useObjectStreams: false });
     const fromBytes = await readPecoToolBBoxMetaWithStatusFromBytes(bytes);
     expect(fromBytes.status).toBe('undecodable');
+  });
+});
+
+// ── #428 / PCT-197: 「private 破損 × legacy 可読」の4象限マトリクス ──────────────
+// 核心は「private が存在するが壊れている」と「private が最初から無い」の区別。
+// 前者だけを 'undecodable'（byte-preserve + 警告）に合流させ、後者（legacy のみ PDF）は
+// 従来どおり正常に開ける（過剰ブロックの誤爆を起こさない）。
+describe("#428 / PCT-197: private 破損 × legacy 可読 の4象限", () => {
+  const legacyMeta = { legacy: true, pages: { '0': [] } };
+
+  /** getInfoDict に legacy /PecoToolBBoxes を注入する（null 指定で legacy 無し）。 */
+  function injectLegacy(
+    pdfDoc: PDFDocument,
+    meta: Record<string, unknown> | null,
+  ): void {
+    (pdfDoc as unknown as Record<string, unknown>).getInfoDict = () => ({
+      get(key: PDFName): unknown {
+        if (meta === null) return undefined;
+        return key.asString() === '/PecoToolBBoxes'
+          ? { decodeText: () => JSON.stringify(meta) }
+          : undefined;
+      },
+      delete: (_k: PDFName) => {},
+    });
+  }
+
+  it('Q1: private 無し + legacy 可読 → status=ok, meta=legacy（正常系・誤爆しない）', async () => {
+    const pdfDoc = await PDFDocument.create(); // PecoTool private stream 無し
+    injectLegacy(pdfDoc, legacyMeta);
+    const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
+    expect(read.status).toBe('ok');
+    expect(read.meta).toEqual(legacyMeta);
+  });
+
+  it('Q2: private 可読 → status=ok, meta=private（正常系）', async () => {
+    const privateMeta = { pages: { '0': [{ x: 1, y: 2, w: 3, h: 4, text: 'p' }] } };
+    const pdfDoc = await makePdfDocWithArrayFilterFlateStream(privateMeta);
+    // legacy も併存させても private が優先される
+    injectLegacy(pdfDoc, legacyMeta);
+    const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
+    expect(read.status).toBe('ok');
+    expect(read.meta).toEqual(privateMeta);
+  });
+
+  it('Q3: private 破損 + legacy 可読 → status=undecodable（#428 核心: legacy で黙って上書きさせない）', async () => {
+    const pdfDoc = await makePdfDocWithInvalidFlateStream();
+    injectLegacy(pdfDoc, legacyMeta);
+    const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
+    expect(read.status).toBe('undecodable');
+    expect(read.meta).toEqual({});
+  });
+
+  it('Q4: private 破損 + legacy 無し → status=undecodable（既存 #392 挙動を維持）', async () => {
+    const pdfDoc = await makePdfDocWithInvalidFlateStream();
+    injectLegacy(pdfDoc, null);
+    const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
+    expect(read.status).toBe('undecodable');
+    expect(read.meta).toEqual({});
   });
 });
