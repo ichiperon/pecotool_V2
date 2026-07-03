@@ -12,6 +12,7 @@ import { describe, it, expect } from 'vitest';
 import {
   stripStrayTextOperatorsOutsideTextObjects,
   hasTextOperatorsOutsideTextObjects,
+  hasUnbalancedTextBlockBoundary,
 } from '../../utils/pdfContentStream';
 
 function enc(s: string): Uint8Array {
@@ -70,5 +71,32 @@ describe('stripStrayTextOperatorsOutsideTextObjects', () => {
     const once = stripStrayTextOperatorsOutsideTextObjects(input);
     const twice = stripStrayTextOperatorsOutsideTextObjects(once);
     expect(Array.from(twice)).toEqual(Array.from(once));
+  });
+});
+
+// PCT-177 (#408) 残余: stream 単体で BT/ET が閉じているかの判定（ストリーム跨ぎ検出用ガード）
+describe('hasUnbalancedTextBlockBoundary', () => {
+  it('単体で閉じた BT...ET は false', () => {
+    expect(hasUnbalancedTextBlockBoundary(enc('q\nBT /F1 12 Tf (keep) Tj ET\nQ\n0 0 100 100 re f'))).toBe(false);
+  });
+
+  it('BT 演算子が無い stream は false', () => {
+    expect(hasUnbalancedTextBlockBoundary(enc('q\n0 0 100 100 re f\nQ'))).toBe(false);
+  });
+
+  it('BT が終端まで閉じない（stream B に ET がある想定）は true', () => {
+    expect(hasUnbalancedTextBlockBoundary(enc('q 1 0 0 1 0 0 cm\nBT\n/F1 12 Tf\n(Hi) Tj\n'))).toBe(true);
+  });
+
+  it('先頭付近に textDepth===0 での ET（stream A の BT を継続して閉じる想定）は true', () => {
+    expect(hasUnbalancedTextBlockBoundary(enc('ET\nQ\n'))).toBe(true);
+  });
+
+  it('文字列リテラル内の "BT"/"ET" は誤認識しない', () => {
+    expect(hasUnbalancedTextBlockBoundary(enc('BT (a ET b) Tj ET'))).toBe(false);
+  });
+
+  it('複数 BT...ET が単体 stream 内で全て閉じていれば false', () => {
+    expect(hasUnbalancedTextBlockBoundary(enc('BT (a) Tj ET\nBT (b) Tj ET'))).toBe(false);
   });
 });

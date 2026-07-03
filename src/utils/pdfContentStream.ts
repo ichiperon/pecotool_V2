@@ -535,6 +535,78 @@ export function hasTextOperatorsOutsideTextObjects(decoded: Uint8Array): boolean
   return textDepth !== 0;
 }
 
+/**
+ * PCT-177 (#408) 残余分: この stream 単体で見て BT/ET の対応が閉じているかを判定する。
+ *
+ * PDF 32000-1 §7.8.2 はトークン境界での content stream 分割を許すため、BT が stream A・
+ * ET が stream B に分かれる合法な構成がありうる。この場合、stream A だけを見ると
+ * 「BT が閉じないまま終端に達する」（textDepth !== 0 で終了）状態になり、stream B だけを
+ * 見ると「先頭付近に textDepth===0 の状態で ET が来る」（＝継続の ET を孤児 ET と誤認しうる）
+ * 状態になる。per-stream の非破壊修復（stripStrayTextOperatorsOutsideTextObjects）や
+ * per-stream の strip（stripTextBlocks, decode 失敗併存時の経路）は、この stream 単体の
+ * 構造だけを見て「外側の孤児 ET」「BT〜終端」を判定するため、上記のような跨ぎ構成では
+ * 誤って本来保持すべきテキスト/演算子を破棄しうる。
+ *
+ * 呼び出し側は、この関数が true を返す stream に対しては安全側で修復/strip をスキップし、
+ * 原本を温存する（テキスト層・非テキスト演算子の欠落より、Acrobat エラーが残る方がまし）。
+ *
+ * hasTextOperatorsOutsideTextObjects と異なり、Tj/TJ/text-state 演算子の有無は見ない
+ * （BT/ET の対応関係のみを追跡する）。
+ */
+export function hasUnbalancedTextBlockBoundary(decoded: Uint8Array): boolean {
+  const len = decoded.length;
+  let state: State = 'NORMAL';
+  let stringDepth = 0;
+  let textDepth = 0;
+  let i = 0;
+
+  while (i < len) {
+    if (state === 'NORMAL') {
+      if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+        i = copyInlineImage(decoded, i, new Uint8Array(0), 0).inputIdx;
+        continue;
+      }
+      if (matchesToken(decoded, i, 0x42, 0x54 /* BT */)) {
+        textDepth += 1;
+        i += 2;
+        continue;
+      }
+      if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
+        if (textDepth === 0) return true;
+        textDepth -= 1;
+        i += 2;
+        continue;
+      }
+
+      const entry = enterNonNormalState(decoded, i);
+      if (entry) {
+        state = entry.state;
+        stringDepth = entry.stringDepth;
+        i += entry.advance;
+        continue;
+      }
+      i += 1;
+    } else if (state === 'STRING') {
+      const r = scanString(decoded, i, stringDepth);
+      state = r.state;
+      stringDepth = r.stringDepth;
+      i += r.advance;
+    } else if (state === 'HEX') {
+      const r = scanHex(decoded, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    } else {
+      const r = scanComment(decoded, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    }
+  }
+
+  return textDepth !== 0;
+}
+
 function stripEmptyGraphicsStateBlocks(decoded: Uint8Array): Uint8Array {
   const len = decoded.length;
   const result = new Uint8Array(len);

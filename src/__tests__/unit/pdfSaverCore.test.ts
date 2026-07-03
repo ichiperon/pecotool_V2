@@ -96,12 +96,14 @@ vi.mock('./pdfContentStream', () => ({
   stripTextBlocks: vi.fn((b: Uint8Array) => b),
   stripEmptyGraphicsStateBlocksOnly: vi.fn((b: Uint8Array) => b),
   hasTextOperatorsOutsideTextObjects: vi.fn(() => false),
+  hasUnbalancedTextBlockBoundary: vi.fn(() => false),
 }));
 
 vi.mock('../../utils/pdfContentStream', () => ({
   stripTextBlocks: vi.fn((b: Uint8Array) => b),
   stripEmptyGraphicsStateBlocksOnly: vi.fn((b: Uint8Array) => b),
   hasTextOperatorsOutsideTextObjects: vi.fn(() => false),
+  hasUnbalancedTextBlockBoundary: vi.fn(() => false),
 }));
 
 vi.mock('../../utils/pdfPecoToolMarkers', () => ({

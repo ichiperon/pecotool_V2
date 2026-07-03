@@ -37,6 +37,7 @@ import {
   stripEmptyGraphicsStateBlocksOnly,
   hasTextOperatorsOutsideTextObjects,
   stripStrayTextOperatorsOutsideTextObjects,
+  hasUnbalancedTextBlockBoundary,
 } from './pdfContentStream';
 import {
   PECO_FONT_KEY_TAG,
@@ -368,6 +369,20 @@ export function replacePageTextContentStreams(
   // 代わりに decode 成功 stream を個別に strip して in-place 書き戻す。
   if (anyDecodeFailed) {
     for (const entry of resolvedEntries) {
+      // PCT-177 (#408) 残余1: BT...ET がストリーム境界を跨ぐ合法構成 (§7.8.2) では、
+      // この stream 単体では BT/ET が閉じない（先頭に継続の ET が来る、または BT が
+      // 閉じないまま終端に達する）。stripTextBlocks は「BT から見つからない ET まで
+      // （＝終端まで）」を丸ごと破棄するため、この状態で per-stream strip を行うと、
+      // 本来 BT の外側にある q/Q/cm 等の非テキスト演算子まで巻き添えで失いうる。
+      // decode 失敗 stream が混在するこの経路は元々 merge（連結 strip）の恩恵を
+      // 受けられないため、安全側でこの stream への strip をスキップし原本を温存する。
+      if (hasUnbalancedTextBlockBoundary(entry.decoded)) {
+        console.warn(
+          `${logPrefix} Skipping text strip: content stream has an unbalanced BT/ET boundary ` +
+          '(likely split across streams while another stream failed to decode)',
+        );
+        continue;
+      }
       const cleaned = stripTextBlocks(entry.decoded);
       if (bytesEqual(cleaned, entry.decoded)) continue;
       entry.stream.updateContents(deflate(cleaned));
@@ -546,6 +561,19 @@ export function sweepNonDirtyPage(
     if (!(stream instanceof PDFRawStream)) continue;
     const decoded = decodeStreamContents(stream);
     if (decoded === null) continue;
+    // PCT-177 (#408) 残余2: BT...ET がストリーム境界を跨ぐ合法構成 (§7.8.2) では、
+    // この stream 単体では BT/ET が閉じない。stripStrayTextOperatorsOutsideTextObjects は
+    // per-stream 適用のため、後続 stream 先頭の「継続の ET」を孤児 ET と誤認して破棄しうる
+    // （前段 stream の BT は温存されたままになり、結果として BT が閉じない出力になる）。
+    // 安全側でこの stream への修復をスキップし、原本を温存する。
+    // 単一 stream ページでは跨ぐ相手がいない（不均衡 = 真の損傷）ため、従来どおり修復に進む
+    // （レビュー指摘: 無条件ガードだと単一 stream の損傷ページ修復が退行する）。
+    if (streams.length > 1 && hasUnbalancedTextBlockBoundary(decoded)) {
+      console.warn(
+        `${_logPrefix} #408: BT/ET がストリーム境界を跨ぐ可能性があるため、この stream の非破壊修復をスキップします (原本温存)`,
+      );
+      continue;
+    }
     // 非破壊修復: BT...ET（テキスト層）を温存し、BT 外の漏れテキスト演算子＋空 q-Q のみ除去。
     const cleaned = stripStrayTextOperatorsOutsideTextObjects(decoded);
     if (bytesEqual(cleaned, decoded)) continue;
