@@ -348,6 +348,13 @@ export interface SaveDialogOptions {
    * OCR 設定の forceFullRewriteOnSave（永続トグル）由来で全保存経路に乗る。
    */
   forceFullRewrite?: boolean;
+  /**
+   * PCT-165: OCR 位置補正の「全ページ適用」モード。true のとき buildPdfDocumentCore は
+   * isDirty に依存せず、textBlocks を持つ全ページを再描画対象に含めてオフセットを焼き込む。
+   * これにより保存後（全ページ isDirty=false）でも再オフセット適用が no-op にならない。
+   * 通常保存では未指定＝false で、従来どおり dirty ページのみ再描画する（バイト温存を維持）。
+   */
+  applyOffsetToAllPages?: boolean;
 }
 
 type SaveInvocationOptions = {
@@ -768,6 +775,9 @@ export function useFileOperations(
       // 明示的な per-call 指定があればそれも尊重する（OR）。
       // 改竄された localStorage の truthy ゴミ（"false"/1 等）で誤発火しないよう厳密 true 比較する。
       forceFullRewrite: ocrSettings.forceFullRewriteOnSave === true || saveOptions?.forceFullRewrite === true,
+      // PCT-165: 全ページ適用モードでは core に isDirty 非依存の再描画対象拡張を指示する。
+      // 保存後（全ページ isDirty=false）でもオフセットが確実に焼き込まれるようにする。
+      applyOffsetToAllPages: executeOptions.applyOffsetAllPages === true,
     };
 
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>

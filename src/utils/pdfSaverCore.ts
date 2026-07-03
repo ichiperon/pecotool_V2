@@ -1015,6 +1015,11 @@ export async function buildPdfDocumentCore(
   const textOffsetDx = options?.textLayerOffsetPt?.dx ?? 0;
   const textOffsetDy = options?.textLayerOffsetPt?.dy ?? 0;
 
+  // PCT-165: OCR 位置補正の「全ページ適用」モード。true のとき、isDirty に依存せず
+  // textBlocks を持つ全ページを再描画対象に含める。保存後（全ページ isDirty=false）でも
+  // dirtyPages フィルタが空になって描画ループがゼロ周になる no-op を防ぐ。
+  const applyOffsetToAllPages = options?.applyOffsetToAllPages === true;
+
   // 緊急対応 (escape hatch): true のとき、下記 Acrobat dirty-flag 回避 short-circuit を
   // 無効化して、編集が無く PecoTool メタも無いファイルでも通常パス（sweepNonDirtyPage に
   // よる空 q-Q 除去・BT 外テキスト演算子 strip、stripCatalogVersion 等）を必ず通す。
@@ -1097,6 +1102,7 @@ export async function buildPdfDocumentCore(
   // この core では main 版 (earlySweep あり・invariants A-06 準拠) を採用する。
   if (
     !forceFullRewrite &&
+    !applyOffsetToAllPages &&
     isDefaultOrder &&
     dirtyPages.length === 0 &&
     !hadLegacyBBoxMeta &&
@@ -1125,6 +1131,22 @@ export async function buildPdfDocumentCore(
     const pageIndex = asPageIndex(pageIndexValue);
     if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfPageCount) continue;
     pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
+  }
+
+  // PCT-165: 全ページオフセット適用モードでは、保存後（全ページ isDirty=false）でも
+  // オフセットを焼き込むため、textBlocks を持つ非 dirty ページも再描画対象に追加する。
+  // dirty ページは上のループで登録済み（ユーザー編集＝空 textBlocks による意図的削除も尊重）。
+  // 安全策: 「実 textBlocks を持つページのみ」を追加し、テキストの無いページの content stream を
+  // 誤って strip しない（原本テキスト層の温存: 呼び出し側 loadAllPagesWithTextBlocks の PCT-106 と同義）。
+  // 描画元 textBlocks は meta-first でロード済みのため bbox/writingMode/curve/confidence が faithful。
+  if (applyOffsetToAllPages) {
+    for (const [pageIndexValue, pageData] of documentState.pages.entries()) {
+      const pageIndex = asPageIndex(pageIndexValue);
+      if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfPageCount) continue;
+      if (pagesToWrite.has(pageIndex)) continue;
+      if (!pageData.textBlocks || pageData.textBlocks.length === 0) continue;
+      pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
+    }
   }
 
   // issue #96 要件2 (Option B): 「未編集だが明らかに bloated」なページを自動検知して
