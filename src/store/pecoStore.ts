@@ -329,9 +329,13 @@ interface PecoState {
    *
    * @param rules 適用するルール配列 (enabled=false は呼び出し元で除外済み前提)
    * @param scope 'current' = 現在ページのみ, 'all' = 全ページ (IDB 退避ページ含む)
-   * @returns totalHits: 全ルール合計ヒット数, perRuleHits: ルールごとのヒット数配列
+   * @returns totalHits: 全ルール合計ヒット数, perRuleHits: ルールごとのヒット数配列,
+   *          invalidRuleIndices: pattern の RegExp コンパイルに失敗した rules 配列上の index
    *
    * - isRegex=true の場合は RegExp を 1 度だけ生成して使い回す
+   * - 不正な正規表現 (isRegex=true でコンパイル失敗) のルールは throw せずスキップする。
+   *   perRuleHits は 0 のまま・invalidRuleIndices に index を積んで返す (呼び出し元で通知用)。
+   *   1 ルールの不正が同一バッチ内の他の正常なルールを巻き添えにしない。
    * - 各ルールの出力テキストが次ルールの入力になる (連鎖適用)
    * - undoStack には 1 entry のみ追加 (Ctrl+Z 1 回で全部巻き戻し)
    * - IDB 書き込みは変更があったページのみ 1 度ずつ
@@ -344,7 +348,7 @@ interface PecoState {
       caseSensitive: boolean;
     }>,
     scope: 'current' | 'all',
-  ) => Promise<{ totalHits: number; perRuleHits: number[] }>;
+  ) => Promise<{ totalHits: number; perRuleHits: number[]; invalidRuleIndices: number[] }>;
 }
 
 const MAX_CACHED_PAGES = 50;
@@ -1517,16 +1521,34 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   replaceTextBatch: async (rules, scope) => {
     const state = get();
     const document = state.document;
-    if (!document) return { totalHits: 0, perRuleHits: rules.map(() => 0) };
-    if (rules.length === 0) return { totalHits: 0, perRuleHits: [] };
+    if (!document) return { totalHits: 0, perRuleHits: rules.map(() => 0), invalidRuleIndices: [] };
+    if (rules.length === 0) return { totalHits: 0, perRuleHits: [], invalidRuleIndices: [] };
 
     // 各ルールの RegExp と置換文字列を事前にコンパイルする (1 度だけ生成して使い回す)
     // perf(#223): isRegex=true の後方参照解決用 non-global 版も outer scope で 1 度だけ生成する
-    const compiledRules = rules.map((rule) => {
+    //
+    // 不正な正規表現 (isRegex=true でコンパイル失敗) は throw させず null にして
+    // invalidRuleIndices に記録する。UI 層で検証済みの想定だが、ここでも防御する
+    // ことで 1 ルールの不正が同一バッチ内の他ルールを巻き添えにしないようにする。
+    type CompiledRule = {
+      re: RegExp;
+      safeReplacement: string;
+      isRegex: boolean;
+      literalReplacement: string;
+      oneShotRe: RegExp | null;
+    };
+    const invalidRuleIndices: number[] = [];
+    const compiledRules: Array<CompiledRule | null> = rules.map((rule, i) => {
       const flags = `g${rule.caseSensitive ? '' : 'i'}`;
-      const re = rule.isRegex
-        ? new RegExp(rule.pattern, flags)
-        : new RegExp(rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+      let re: RegExp;
+      try {
+        re = rule.isRegex
+          ? new RegExp(rule.pattern, flags)
+          : new RegExp(rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+      } catch {
+        invalidRuleIndices.push(i);
+        return null;
+      }
       // useRegex=false のとき '$' → '$$' エスケープ (issue #105 と同じロジック)
       const safeReplacement = rule.isRegex
         ? rule.replacement
@@ -1591,7 +1613,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
         // 全ルールをインメモリで順次適用 (前ルールの出力が次ルールの入力)
         for (let ri = 0; ri < compiledRules.length; ri++) {
-          const { re, safeReplacement, isRegex, literalReplacement, oneShotRe } = compiledRules[ri];
+          const compiled = compiledRules[ri];
+          if (!compiled) continue; // 不正な正規表現ルールはスキップ (invalidRuleIndices で通知済み)
+          const { re, safeReplacement, isRegex, literalReplacement, oneShotRe } = compiled;
           re.lastIndex = 0;
 
           let ruleHits = 0;
@@ -1631,7 +1655,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const totalHits = perRuleHits.reduce((sum, h) => sum + h, 0);
 
     if (entries.length === 0) {
-      return { totalHits: 0, perRuleHits };
+      return { totalHits: 0, perRuleHits, invalidRuleIndices };
     }
 
     // store に反映し、undoStack に 1 entry だけ積む
@@ -1659,7 +1683,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       get().pageOrder,
     );
 
-    return { totalHits, perRuleHits };
+    return { totalHits, perRuleHits, invalidRuleIndices };
   },
 }));
 

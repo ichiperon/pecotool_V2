@@ -957,46 +957,105 @@ describe('ReplaceDialog: ルールセット JSON エクスポート/インポー
 });
 
 /**
- * 既知バグ記録 (it.fails・未修正): ルールセットタブは正規表現の構文検証を行わない。
+ * 修正済みバグ記録: ルールセットタブの正規表現構文検証 (単発置換タブとの非対称の解消)。
  *
  * 単発置換タブは useFindReplace 経由で regexError を計算し、構文エラー時は
  * 置換実行ボタンを disabled にしてエラーメッセージを表示する (このファイル上部の
  * describe('ReplaceDialog: 正規表現エラー表示') 参照)。
  *
- * 一方ルールセットタブの RuleRow は「正規表現として扱う」チェックのみで、入力された
- * pattern が有効な正規表現かどうかを一切検証しない。無効な正規表現のまま
- * 「一括適用」まで到達すると、store.replaceTextBatch 内の `new RegExp(rule.pattern, flags)`
- * が同期的に throw し、handleBatchApply (ReplaceDialog.tsx) はこれを try/catch していないため
- * Promise が unhandled rejection となる。実際に手元で再現したところ:
- *   - 「一括適用」ボタンは disabled にならない (無効な正規表現でもクリック可能)
- *   - クリック後、進捗表示は "適用中… 0 / 1 ルール" のまま永久に止まる
- *   - ユーザーに見えるエラーメッセージは一切表示されない (成功したのか失敗したのか分からない)
- *   - 該当ルールだけでなく、同一バッチ内の他の (有効な) ルールも一切適用されない
- *     (compiledRules の生成が全ルール分をまとめて行う1回の map() のため)
+ * 修正前はルールセットタブの RuleRow が「正規表現として扱う」チェックのみで pattern の
+ * 構文を一切検証せず、無効な正規表現のまま「一括適用」まで到達すると
+ * store.replaceTextBatch 内の `new RegExp(rule.pattern, flags)` が同期的に throw し、
+ * handleBatchApply が catch していないため unhandled rejection になっていた
+ * (進捗表示が "適用中…" のまま止まり、正常なルールも巻き添えで適用されない)。
  *
- * 本テストは「せめて入力時点でエラーが分かるべき」という期待値を検証するが、現状は
- * 検証が一切ないため失敗する。実際に一括適用をクリックして unhandled rejection を
- * 発生させるとテストスイート全体を巻き込む (プロセスレベルの unhandled rejection に
- * より exit code が汚染される) ため、そのクリックは本テストでは行わず、
- * 「バグの根本原因 (入力時未検証)」のみを安全に再現している。
+ * 修正後は以下の二層防御を入れている:
+ *  - UI層: isRegex=true のルールを buildRegexOrError (単発置換タブと同じロジック) で検証し、
+ *    行にエラー表示 + 一括適用ボタンを disable する
+ *  - ストア層: replaceTextBatch は不正な正規表現ルールを try/catch でスキップし、
+ *    invalidRuleIndices として返す (他の正常なルールは巻き添えにしない)
  */
-describe('ReplaceDialog: 既知バグ記録 (未修正)', () => {
-  it.fails(
-    'ルールセットタブは無効な正規表現パターンを入力時に検証しない (単発置換タブとの非対称・未修正)',
-    () => {
-      setupDocument(new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'abc' })] })]]));
+describe('ReplaceDialog: ルールセットの正規表現構文検証 (issue #198 修正)', () => {
+  it('無効な正規表現パターンを入力すると行にエラー表示され、一括適用ボタンが disabled になる', () => {
+    setupDocument(new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'abc' })] })]]));
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'ルールセット' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ ルール追加' }));
+
+    fireEvent.change(screen.getByLabelText('検索パターン'), { target: { value: '[invalid' } });
+    fireEvent.click(screen.getByLabelText('正規表現として扱う'));
+
+    // 単発置換タブと同様、構文エラーが可視化され、一括適用ボタンが disabled になる。
+    const alert = screen.queryByRole('alert');
+    const applyBtn = screen.getByRole('button', { name: /一括適用/ }) as HTMLButtonElement;
+    expect(alert !== null || applyBtn.disabled).toBe(true);
+
+    const patternInput = screen.getByLabelText('検索パターン') as HTMLInputElement;
+    expect(patternInput.getAttribute('aria-invalid')).toBe('true');
+    expect(applyBtn.disabled).toBe(true);
+  });
+
+  it('正規表現として扱わない (isRegex=false) パターンは構文エラー扱いされない (単発置換と同じ escape 経路)', () => {
+    setupDocument(new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'a[bc' })] })]]));
+    render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'ルールセット' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ ルール追加' }));
+
+    // '[invalid' は正規表現としては不正だが、isRegex=false (デフォルト) なら literal 扱いなので
+    // エラーにならず、一括適用ボタンも有効なまま。
+    fireEvent.change(screen.getByLabelText('検索パターン'), { target: { value: '[invalid' } });
+
+    expect(screen.queryByRole('alert')).toBeNull();
+    const applyBtn = screen.getByRole('button', { name: /一括適用/ }) as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(false);
+  });
+
+  /**
+   * 回帰テスト: まつり (tester_integration) が「実行すると unhandled rejection で
+   * exit code を汚染するため文書化のみ」とした二次症状 (進捗ハング・正常ルール巻き添え)。
+   * 修正後の replaceTextBatch は throw せず invalidRuleIndices を返す設計になったため、
+   * store.replaceTextBatch を差し替えて「不正ルールがストアまで到達した (defense-in-depth)」
+   * ケースを安全にシミュレートし、UI が進捗を完了させエラーを通知することを検証する。
+   * (UI層のバリデーションで通常は防がれるが、ストア層の防御が独立して機能することの確認)
+   */
+  it('不正ルールが混在した結果 (invalidRuleIndices) を受け取ると、進捗はハングせず完了しエラーが通知される', async () => {
+    setupDocument(new Map([[0, makePage({ textBlocks: [makeBlock({ text: 'foo bar' })] })]]));
+
+    // store singleton を汚染しないよう、実体を退避して afterEach 相当で復元する
+    const originalReplaceTextBatch = usePecoStore.getState().replaceTextBatch;
+    const mockReplaceTextBatch = vi.fn().mockResolvedValue({
+      totalHits: 1,
+      perRuleHits: [0, 1],
+      invalidRuleIndices: [0],
+    });
+    usePecoStore.setState({ replaceTextBatch: mockReplaceTextBatch });
+
+    try {
       render(<ReplaceDialog onClose={() => {}} onConfirm={() => {}} hasSelection={false} />);
       fireEvent.click(screen.getByRole('tab', { name: 'ルールセット' }));
+
+      // 2 ルール追加 (どちらも isRegex=false のまま追加するため UI バリデーションはパスする —
+      // ストア側が不正ルールとして返してきた場合のハンドリングを検証する)
       fireEvent.click(screen.getByRole('button', { name: '+ ルール追加' }));
+      let row = screen.getAllByRole('row')[1];
+      fireEvent.change(within(row).getByLabelText('検索パターン'), { target: { value: 'foo' } });
 
-      fireEvent.change(screen.getByLabelText('検索パターン'), { target: { value: '[invalid' } });
-      fireEvent.click(screen.getByLabelText('正規表現として扱う'));
+      fireEvent.click(screen.getByRole('button', { name: '+ ルール追加' }));
+      row = screen.getAllByRole('row')[2];
+      fireEvent.change(within(row).getByLabelText('検索パターン'), { target: { value: 'bar' } });
+      fireEvent.change(within(row).getByLabelText('置換文字列'), { target: { value: 'BAZ' } });
 
-      // 期待 (あるべき挙動): 単発置換タブと同様に構文エラーが可視化されるか、
-      // 少なくとも一括適用ボタンが disabled になるべき。
-      const alert = screen.queryByRole('alert');
-      const applyBtn = screen.getByRole('button', { name: /一括適用/ }) as HTMLButtonElement;
-      expect(alert !== null || applyBtn.disabled).toBe(true);
-    },
-  );
+      fireEvent.click(screen.getByRole('button', { name: /一括適用/ }));
+
+      // 進捗表示がハングせず完了状態に到達する
+      await waitFor(() => {
+        expect(screen.getByText(/完了: 1 件置換 \(2 ルール中 1 件失敗\)/)).toBeTruthy();
+      });
+
+      // エラーがユーザーに通知される
+      expect(screen.getByRole('alert').textContent).toMatch(/1 件のルールが不正な正規表現/);
+    } finally {
+      usePecoStore.setState({ replaceTextBatch: originalReplaceTextBatch });
+    }
+  });
 });

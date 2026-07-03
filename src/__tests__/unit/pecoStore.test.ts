@@ -2386,6 +2386,66 @@ describe('pecoStore', () => {
       expect(result.perRuleHits).toEqual([])
       expect(usePecoStore.getState().undoStack).toHaveLength(0)
     })
+
+    // 回帰テスト: 不正な正規表現ルールが同一バッチ内の正常なルールを巻き添えにしないこと
+    // (旧実装は new RegExp が同期的に throw し、compiledRules の生成自体が失敗するため
+    // バッチ全体が unhandled rejection になっていた)
+    it('U-RB-08: 不正な正規表現ルールが混在しても throw せずスキップし、正常なルールは適用される', async () => {
+      const b = makeBlock({ id: 'b0', text: 'foo bar' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: '[invalid', replacement: 'X', isRegex: true, caseSensitive: false },
+          { pattern: 'bar', replacement: 'BAZ', isRegex: false, caseSensitive: false },
+        ],
+        'all',
+      )
+
+      // throw せず resolve する
+      expect(result.invalidRuleIndices).toEqual([0])
+      // 不正ルールのヒット数は 0、正常ルールは適用される
+      expect(result.perRuleHits).toEqual([0, 1])
+      expect(result.totalHits).toBe(1)
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('foo BAZ')
+
+      // 正常ルールによる変更は undoStack に 1 entry として記録される
+      expect(usePecoStore.getState().undoStack).toHaveLength(1)
+    })
+
+    it('U-RB-09: 全ルールが不正な正規表現の場合、変化なしで invalidRuleIndices に全件記録される', async () => {
+      const b = makeBlock({ id: 'b0', text: 'foo bar' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch(
+        [
+          { pattern: '[invalid', replacement: 'X', isRegex: true, caseSensitive: false },
+          { pattern: '(unterminated', replacement: 'Y', isRegex: true, caseSensitive: false },
+        ],
+        'all',
+      )
+
+      expect(result.invalidRuleIndices).toEqual([0, 1])
+      expect(result.perRuleHits).toEqual([0, 0])
+      expect(result.totalHits).toBe(0)
+      expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe('foo bar')
+      // 変化がないため undoStack も増えない
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+    })
   })
 
   // ── issue #189: toggleCurveMode ───────────────────────────────

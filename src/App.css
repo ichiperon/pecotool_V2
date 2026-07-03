@@ -2300,6 +2300,16 @@ body, #root {
   outline-offset: 1px;
 }
 
+/* issue #198: ルールセット行内の正規表現構文エラー表示 (単発置換タブの regex-input-error と対応) */
+.ruleset-row-error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #dc2626;
+}
+
 .ruleset-table input[type="checkbox"] {
   cursor: pointer;
   width: 14px;

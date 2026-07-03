@@ -15,6 +15,7 @@ import { X, AlertCircle } from 'lucide-react';
 import { Modal, useModalTitleId } from './ui/Modal';
 import {
   useFindReplace,
+  buildRegexOrError,
   type ReplaceScope,
   type MatchPreviewItem,
 } from '../hooks/useFindReplace';
@@ -313,7 +314,7 @@ function SingleReplaceTab({ id, onClose, onConfirm, hasSelection }: SingleReplac
 interface ApplyProgress {
   total: number;
   done: number;
-  results: Array<{ pattern: string; hits: number; blocks: number; pages: number }>;
+  results: Array<{ pattern: string; hits: number; blocks: number; pages: number; failed?: boolean }>;
 }
 
 function RuleSetTab({ id }: { id: string }) {
@@ -322,6 +323,7 @@ function RuleSetTab({ id }: { id: string }) {
   const [ruleSet, setRuleSet] = useState<ProofreadingRuleSet>(() => loadRuleSet());
   const [progress, setProgress] = useState<ApplyProgress | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Persist whenever ruleSet changes
@@ -398,32 +400,71 @@ function RuleSetTab({ id }: { id: string }) {
     [ruleSet.rules],
   );
 
+  // isRegex=true のルールは単発置換タブと同じ buildRegexOrError で構文検証する。
+  // (isRegex=false は常にエスケープ後の literal なので構文エラーは起こらない)
+  // rule.id -> エラーメッセージ の Map。
+  const ruleErrors = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of ruleSet.rules) {
+      if (!r.isRegex || r.pattern.length === 0) continue;
+      const result = buildRegexOrError({ pattern: r.pattern, caseSensitive: r.caseSensitive, useRegex: true });
+      if ('error' in result && result.error) {
+        map.set(r.id, result.error);
+      }
+    }
+    return map;
+  }, [ruleSet.rules]);
+
+  const hasInvalidEnabledRule = useMemo(
+    () => enabledRules.some((r) => ruleErrors.has(r.id)),
+    [enabledRules, ruleErrors],
+  );
+
   const handleBatchApply = useCallback(async () => {
-    if (enabledRules.length === 0) return;
+    if (enabledRules.length === 0 || hasInvalidEnabledRule) return;
+    setApplyError(null);
     setProgress({ total: enabledRules.length, done: 0, results: [] });
 
-    // issue #213: replaceTextBatch で 1-pass 適用 (IDB 読み込み 1 回 / undoStack 1 entry)
-    const { perRuleHits } = await replaceTextBatch(
-      enabledRules.map((r) => ({
-        pattern: r.pattern,
-        replacement: r.replacement,
-        isRegex: r.isRegex,
-        caseSensitive: r.caseSensitive,
-      })),
-      'all',
-    );
+    try {
+      // issue #213: replaceTextBatch で 1-pass 適用 (IDB 読み込み 1 回 / undoStack 1 entry)
+      const { perRuleHits, invalidRuleIndices } = await replaceTextBatch(
+        enabledRules.map((r) => ({
+          pattern: r.pattern,
+          replacement: r.replacement,
+          isRegex: r.isRegex,
+          caseSensitive: r.caseSensitive,
+        })),
+        'all',
+      );
 
-    const results: ApplyProgress['results'] = enabledRules.map((rule, i) => ({
-      pattern: rule.pattern,
-      hits: perRuleHits[i] ?? 0,
-      blocks: 0,
-      pages: 0,
-    }));
-    setProgress({ total: enabledRules.length, done: enabledRules.length, results });
-  }, [enabledRules, replaceTextBatch]);
+      const invalidSet = new Set(invalidRuleIndices);
+      const results: ApplyProgress['results'] = enabledRules.map((rule, i) => ({
+        pattern: rule.pattern,
+        hits: perRuleHits[i] ?? 0,
+        blocks: 0,
+        pages: 0,
+        failed: invalidSet.has(i),
+      }));
+      setProgress({ total: enabledRules.length, done: enabledRules.length, results });
+
+      if (invalidRuleIndices.length > 0) {
+        setApplyError(
+          `${invalidRuleIndices.length} 件のルールが不正な正規表現のため適用をスキップしました。`,
+        );
+      }
+    } catch (e) {
+      // ストア層は不正な正規表現を throw しない設計だが、IDB エラー等の予期しない
+      // 失敗で reject されても進捗表示がハングし続けないよう、必ずここで拾う。
+      setProgress(null);
+      setApplyError(e instanceof Error ? e.message : String(e));
+    }
+  }, [enabledRules, hasInvalidEnabledRule, replaceTextBatch]);
 
   const totalApplied = progress
     ? progress.results.reduce((sum, r) => sum + r.hits, 0)
+    : 0;
+  const failedCount = progress
+    ? progress.results.filter((r) => r.failed).length
     : 0;
 
   return (
@@ -438,7 +479,11 @@ function RuleSetTab({ id }: { id: string }) {
             type="button"
             className="ruleset-toolbar-btn primary"
             onClick={handleBatchApply}
-            disabled={enabledRules.length === 0 || (progress !== null && progress.done < progress.total)}
+            disabled={
+              enabledRules.length === 0 ||
+              hasInvalidEnabledRule ||
+              (progress !== null && progress.done < progress.total)
+            }
           >
             一括適用
             {enabledRules.length > 0 && ` (${enabledRules.length} 件)`}
@@ -466,12 +511,21 @@ function RuleSetTab({ id }: { id: string }) {
           </div>
         )}
 
+        {applyError && (
+          <div className="ruleset-error" role="alert">
+            <AlertCircle size={13} aria-hidden="true" className="ruleset-error-icon" />
+            {applyError}
+          </div>
+        )}
+
         {/* Progress */}
         {progress !== null && (
           <div className="ruleset-progress" aria-live="polite">
             {progress.done < progress.total
               ? `適用中… ${progress.done} / ${progress.total} ルール`
-              : `完了: ${totalApplied} 件置換 (${progress.total} ルール適用)`}
+              : failedCount > 0
+                ? `完了: ${totalApplied} 件置換 (${progress.total} ルール中 ${failedCount} 件失敗)`
+                : `完了: ${totalApplied} 件置換 (${progress.total} ルール適用)`}
           </div>
         )}
 
@@ -497,6 +551,7 @@ function RuleSetTab({ id }: { id: string }) {
                   <RuleRow
                     key={rule.id}
                     rule={rule}
+                    regexError={ruleErrors.get(rule.id) ?? null}
                     onChange={handleRuleChange}
                     onDelete={handleDeleteRule}
                   />
@@ -519,11 +574,14 @@ function RuleSetTab({ id }: { id: string }) {
 // ---------------------------------------------------------------------------
 interface RuleRowProps {
   rule: ProofreadingRule;
+  /** issue #198: isRegex=true のパターンが構文エラーの場合のメッセージ (buildRegexOrError 由来) */
+  regexError: string | null;
   onChange: (id: string, field: keyof Omit<ProofreadingRule, 'id'>, value: unknown) => void;
   onDelete: (id: string) => void;
 }
 
-function RuleRow({ rule, onChange, onDelete }: RuleRowProps) {
+function RuleRow({ rule, regexError, onChange, onDelete }: RuleRowProps) {
+  const patternErrorId = regexError ? `ruleset-pattern-error-${rule.id}` : undefined;
   return (
     <tr>
       <td className="ruleset-td-center">
@@ -537,11 +595,20 @@ function RuleRow({ rule, onChange, onDelete }: RuleRowProps) {
       <td>
         <input
           type="text"
+          className={regexError ? 'regex-input-error' : undefined}
           value={rule.pattern}
           onChange={(e) => onChange(rule.id, 'pattern', e.target.value)}
           placeholder="検索文字列"
           aria-label="検索パターン"
+          aria-invalid={regexError !== null ? 'true' : 'false'}
+          aria-describedby={patternErrorId}
         />
+        {regexError && (
+          <div id={patternErrorId} className="ruleset-row-error" role="alert">
+            <AlertCircle size={12} aria-hidden="true" />
+            <span>{regexError}</span>
+          </div>
+        )}
       </td>
       <td>
         <input
