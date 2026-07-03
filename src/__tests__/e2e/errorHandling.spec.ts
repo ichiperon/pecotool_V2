@@ -74,9 +74,15 @@ test.describe('ErrorHandling: エラー系 E2E', () => {
     await expect(page.locator('.toast-error').first()).toBeVisible({ timeout: 10000 });
     // R04D-2/R04D-3: エラートーストは原因の仮説と次アクションを案内する文言
     // （OS エラー生文字列は表示しない）。
+    // issue #333: 旧文言の語（失敗・エラー・EACCES 等）を含む広域 OR だと
+    // どんなエラートーストでも緑になり文言退行を検出できないため、
+    // R04D-2/3 で統一済みの現行固有語のみに絞る。
     //   prefetch 失敗: 「元のPDFファイルが移動または削除された可能性があります。ファイルを再度開き直してください。」
     //   write access: 「他のアプリでこの PDF が開かれている可能性があります。閉じてから再度保存してください。」
-    await expect(page.locator('.toast-error').first()).toContainText(/失敗|エラー|error|EACCES|保存先|開けません|開かれている|開き直して|許可|permission/i);
+    //   （本テストは write_pdf_chunk/replace_pdf_file を EACCES で throw させるため
+    //    実際に到達するのは write access 文言だが、cachedBytes が無い場合の
+    //    prefetch 失敗文言も救済導線として許容する）
+    await expect(page.locator('.toast-error').first()).toContainText(/開かれている|開き直して/);
   });
 
   /**

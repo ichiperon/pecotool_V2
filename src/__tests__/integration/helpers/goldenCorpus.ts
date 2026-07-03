@@ -266,20 +266,30 @@ export async function buildC03(): Promise<CorpusEntry> {
 // Helvetica テキストを持つ PDF — 保存後も pdfjs で文字が取れること
 // ---------------------------------------------------------------------------
 
+// #358: 既存テキスト層の strip/二重化検証用の識別文字列。
+// PecoTool の TextBlock（OCR 結果）とは意図的に**別の文字列**にすることで
+// 「既存層が strip された後、この文字列が出現しない」ことをアサートできる。
+export const C04_LEGACY_TEXT = 'LEGACY_LAYER_x7';
+// PecoTool が OCR した結果のテキスト（TextBlock の text フィールド）
+export const C04_BLOCK_TEXT_0 = 'Existing text layer content';
+export const C04_BLOCK_TEXT_1 = 'Second line of external OCR';
+
 export async function buildC04(): Promise<CorpusEntry> {
   const W = 595, H = 842;
   const pdf = await PDFDocument.create();
   const helvetica = await pdf.embedFont(StandardFonts.Helvetica);
   const page = pdf.addPage([W, H]);
-  // 可視テキストを埋め込む（外部 OCR PDF が持つような既存テキスト層相当）
-  page.drawText('Existing text layer content', {
+  // #358: 既存テキスト層を C04_LEGACY_TEXT で識別可能にする。
+  // drawText で埋め込む文字列を TextBlock テキストとは別の文字列にして、
+  // stripTextBlocks 後に pdfjs が C04_LEGACY_TEXT を返さないことを検証できるようにする。
+  page.drawText(C04_LEGACY_TEXT, {
     x: 50,
     y: H - 100,
     size: 12,
     font: helvetica,
     color: rgb(0, 0, 0),
   });
-  page.drawText('Second line of external OCR',  {
+  page.drawText(C04_LEGACY_TEXT + '_LINE2',  {
     x: 50,
     y: H - 130,
     size: 12,
@@ -289,10 +299,11 @@ export async function buildC04(): Promise<CorpusEntry> {
   const inputBytes = await pdf.save({ useObjectStreams: false, addDefaultPage: false });
 
   // PecoTool が OCR した結果（TextBlock 座標は viewport-space で一致させる）
+  // TextBlock のテキストは既存層文字列（C04_LEGACY_TEXT）とは別にする
   const pages = new Map<number, PageData>([
     [0, makePageData(0, W, H, [
-      makeBlock(0, 0, 'Existing text layer content', 50, 100 - 20, 260, 20),
-      makeBlock(0, 1, 'Second line of external OCR',  50, 130 - 20, 260, 20),
+      makeBlock(0, 0, C04_BLOCK_TEXT_0, 50, 100 - 20, 260, 20),
+      makeBlock(0, 1, C04_BLOCK_TEXT_1,  50, 130 - 20, 260, 20),
     ])],
   ]);
 
