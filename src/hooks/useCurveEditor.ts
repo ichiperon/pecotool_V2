@@ -18,6 +18,10 @@ const DOUBLE_CLICK_GUARD_MS = 300;
 const MIN_POLYLINE_SEGMENT_LENGTH = 0.01;
 import { arcFromThreePoints, arcHandlePositions } from "../utils/arcFromThreePoints";
 import { isCurveDefinition } from "../utils/curveDefinition";
+import {
+  canvasToViewport as canvasToViewportUtil,
+  viewportToCanvas as viewportToCanvasUtil,
+} from "../utils/coordTransform";
 import type { Action, CurveDefinition, PageData, TextBlock } from "../types";
 
 export interface UseCurveEditorParams {
@@ -94,11 +98,13 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
   /**
    * canvas 座標 (zoom 適用済み) → viewport 座標 (zoom 等倍) に戻す。
    * curveDefinition / arcFromThreePoints は zoom 非適用の viewport 座標で扱う。
+   * #409 (PCT-178): 実体は共有 util coordTransform.ts の canvasToViewport に抽出済み。
+   * ここでは zoom を閉じ込めた useCallback でラップして従来の呼び出し形を維持する。
    */
-  const canvasToViewport = useCallback((pos: { x: number; y: number }) => {
-    const scale = zoom / 100;
-    return { x: pos.x / scale, y: pos.y / scale };
-  }, [zoom]);
+  const canvasToViewport = useCallback(
+    (pos: { x: number; y: number }) => canvasToViewportUtil(pos, zoom),
+    [zoom],
+  );
 
   /**
    * 選択中 BB の arc handle に pos が当たっているか確認し、
@@ -106,7 +112,6 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
    */
   const hitTestCurveHandle = useCallback((pos: { x: number; y: number }): { blockId: string; handleIndex: number } | null => {
     if (!isCurveMode) return null;
-    const scale = zoom / 100;
     const HIT_RADIUS = 10; // px
 
     for (const id of selectedIds) {
@@ -120,8 +125,7 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
           : curve.points;
 
       for (let hi = 0; hi < handles.length; hi++) {
-        const hx = handles[hi].x * scale;
-        const hy = handles[hi].y * scale;
+        const { x: hx, y: hy } = viewportToCanvasUtil(handles[hi], zoom);
         const dist = Math.sqrt((pos.x - hx) ** 2 + (pos.y - hy) ** 2);
         if (dist <= HIT_RADIUS) {
           return { blockId: id, handleIndex: hi };
