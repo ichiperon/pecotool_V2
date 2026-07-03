@@ -257,17 +257,23 @@ describe('pdfReachabilityGc — sweepUnreachableObjects (integration)', () => {
       context.register(context.stream(bytes, {}));
     }
 
+    // #429 TW-3: 孤児が末尾番号のままだと sweep 後も番号列が dense になり
+    // renumbered=0 → 旧来の条件ガードで検証が丸ごとスキップされる vacuous
+    // テストだった。孤児の「後ろ」に到達可能オブジェクト（ページ）を追加して
+    // sweep 後のギャップを必発させ、無条件アサートに変える。
+    pdfDoc.addPage([595, 842]);
+
     sweepUnreachableObjects(pdfDoc);
     const compactResult = compactIndirectObjectNumbers(pdfDoc);
 
-    // compact 後は全オブジェクトが 1..N の連番になる
+    // 孤児10個より後ろに到達可能オブジェクトがあるため、必ず詰め直しが発生する
+    expect(compactResult.renumbered).toBeGreaterThan(0);
+
+    // compact 後は全オブジェクトが 1..N の連番になる（無条件検証）
     const entries = context.enumerateIndirectObjects();
-    if (entries.length > 0 && compactResult.renumbered > 0) {
-      for (let i = 0; i < entries.length; i++) {
-        expect(entries[i][0].objectNumber).toBe(i + 1);
-      }
+    expect(entries.length).toBeGreaterThan(0);
+    for (let i = 0; i < entries.length; i++) {
+      expect(entries[i][0].objectNumber).toBe(i + 1);
     }
-    // compactResult は非負
-    expect(compactResult.renumbered).toBeGreaterThanOrEqual(0);
   });
 });
