@@ -151,7 +151,9 @@ describe('pecoStore', () => {
       usePecoStore.getState().undo()
 
       const state = usePecoStore.getState()
-      expect(state.document!.pages.get(0)).toEqual(beforePage)
+      // #350 (PCT-127): 保存フィルタ (p.isDirty) から漏れないよう、undo で復元した
+      // ページは before.isDirty の値に関わらず isDirty: true を強制する。
+      expect(state.document!.pages.get(0)).toEqual({ ...beforePage, isDirty: true })
       expect(state.undoStack).toHaveLength(0)
       expect(state.redoStack).toHaveLength(1)
       expect(state.redoStack[0]).toBe(action)
@@ -306,7 +308,8 @@ describe('pecoStore', () => {
       usePecoStore.setState({ document: doc, undoStack: [action], redoStack: [] })
 
       usePecoStore.getState().undo()
-      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(before)
+      // #350 (PCT-127): undo は before.isDirty の値に関わらず isDirty: true を強制する。
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual({ ...before, isDirty: true })
 
       usePecoStore.getState().redo()
       expect(usePecoStore.getState().document!.pages.get(0)).toEqual(after)
@@ -1401,14 +1404,15 @@ describe('pecoStore', () => {
       await waitForPendingIdbSaves()
 
       // メモリ Map は巻き戻されている
-      expect(usePecoStore.getState().document!.pages.get(0)).toEqual(beforePage)
-      // IDB にも before が書き込まれている (LRU 退避フローと対称)
+      // #350 (PCT-127): undo は before.isDirty の値に関わらず isDirty: true を強制する。
+      expect(usePecoStore.getState().document!.pages.get(0)).toEqual({ ...beforePage, isDirty: true })
+      // IDB にも before (isDirty: true 強制後) が書き込まれている (LRU 退避フローと対称)
       // PCT-104 (段階2): エントリは {filePath, pageId, data} 形式。pageOrder=[0] なので pageId="src:0"
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
       const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
-      expect(matched!.data).toEqual(beforePage)
+      expect(matched!.data).toEqual({ ...beforePage, isDirty: true })
     })
 
     it('redo() で IDB の該当ページが action.after に書き換わる', async () => {
@@ -1442,13 +1446,14 @@ describe('pecoStore', () => {
 
       await waitForPendingIdbSaves()
 
-      // IDB へ before が書き込まれている (save 時のマージで before が反映される)
+      // IDB へ before (isDirty: true 強制後) が書き込まれている (save 時のマージで反映される)
       // PCT-104 (段階2): pageId キー形式
+      // #350 (PCT-127): undo は before.isDirty の値に関わらず isDirty: true を強制する。
       const calls = vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mock.calls
       const allEntries = calls.flatMap((c) => c[0])
       const matched = allEntries.find((e) => e.filePath === 'test.pdf' && e.pageId === 'src:0')
       expect(matched).toBeDefined()
-      expect(matched!.data).toEqual(beforePage)
+      expect(matched!.data).toEqual({ ...beforePage, isDirty: true })
     })
   })
 
@@ -1616,6 +1621,140 @@ describe('pecoStore', () => {
       // 巻き戻す実体 (textBlocks) が無いため、{pageIndex, rotation, isDirty} だけの
       // 骨格レコードを書いてはいけない = saveTemporaryPageDataBatch 自体が呼ばれない
       expect(pdfLoader.saveTemporaryPageDataBatch).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── 回帰(#367 残余 / PCT-144 MEDIUM): delete_pages / reorder_pages / rotate_pages の
+  //    undo()/redo() でも lastSavedActionIndex を newUndo.length へ追従させる ──
+  //
+  // #350 (PCT-127) で update_page / update_pages の undo()/redo() には
+  // newLastSavedActionIndex 切り下げが入ったが、delete_pages / reorder_pages /
+  // rotate_pages の分岐は追従漏れだった。「rotate→保存→undo→新規編集→保存」のように
+  // チェックポイント (lastSavedActionIndex) より前へ undo すると、切り下げ漏れの分岐では
+  // lastSavedActionIndex が stale なまま残り、以降 computeSaveDiff の
+  // undoStack.slice(lastSavedActionIndex) が新しい編集を含められず (start > length で
+  // 空配列)、diff プレビュー/監査ログから新規編集が欠落する。
+  describe('回帰(#367残余/PCT-144): delete_pages/reorder_pages/rotate_pages の undo/redo が lastSavedActionIndex を追従', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
+      vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined)
+    })
+
+    it('delete_pages の undo() は lastSavedActionIndex を newUndo.length へ切り下げる', async () => {
+      const beforePages = new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]])
+      const afterPages = new Map([[0, makePage({ pageIndex: 0 })]])
+      const action: Action = {
+        type: 'delete_pages',
+        beforePages,
+        afterPages,
+        beforeOrder: [0, 1],
+        afterOrder: [0],
+        beforeCurrentPageIndex: 0,
+        afterCurrentPageIndex: 0,
+        beforeTotalPages: 2,
+        afterTotalPages: 1,
+        deletedPageIndices: [1],
+      }
+      usePecoStore.setState({
+        document: makeDoc(afterPages),
+        pageOrder: [0],
+        undoStack: [action],
+        redoStack: [],
+        // 保存済みチェックポイントが直前 (delete 込みで保存済み) だった想定
+        lastSavedActionIndex: 1,
+      })
+
+      usePecoStore.getState().undo()
+      await waitForPendingIdbSaves()
+
+      // undo で undoStack は空 (length 0) になるので、チェックポイントも 0 へ追従するはず
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+      expect(usePecoStore.getState().lastSavedActionIndex).toBe(0)
+
+      // 追従が効いていれば、直後の新規編集 (テキスト変更) は computeSaveDiff の対象に
+      // 正しく含まれる。computeSaveDiff は update_page/update_pages のみを集計対象と
+      // するため (delete_pages/reorder_pages/rotate_pages 自体は skip)、ここでは
+      // テキスト変更を伴う update_page を積んで検証する。
+      const block = makeBlock({ id: 'b0', text: 'before-text' })
+      const beforePage = makePage({ pageIndex: 0, textBlocks: [block] })
+      const afterPage = makePage({ pageIndex: 0, textBlocks: [{ ...block, text: 'after-text' }] })
+      usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: beforePage, after: afterPage })
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(computeSaveDiff(undoStack, lastSavedActionIndex).entries).toHaveLength(1)
+    })
+
+    it('reorder_pages の undo() は lastSavedActionIndex を newUndo.length へ切り下げる', async () => {
+      const pages = new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]])
+      const action: Action = { type: 'reorder_pages', beforeOrder: [0, 1], afterOrder: [1, 0] }
+      usePecoStore.setState({
+        document: makeDoc(pages),
+        pageOrder: [1, 0],
+        undoStack: [action],
+        redoStack: [],
+        lastSavedActionIndex: 1,
+      })
+
+      usePecoStore.getState().undo()
+
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+      expect(usePecoStore.getState().lastSavedActionIndex).toBe(0)
+
+      const block = makeBlock({ id: 'b0', text: 'before-text' })
+      const beforePage = makePage({ pageIndex: 0, textBlocks: [block] })
+      const afterPage = makePage({ pageIndex: 0, textBlocks: [{ ...block, text: 'after-text' }] })
+      usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: beforePage, after: afterPage })
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(computeSaveDiff(undoStack, lastSavedActionIndex).entries).toHaveLength(1)
+    })
+
+    it('rotate_pages の undo() は lastSavedActionIndex を newUndo.length へ切り下げる (回転→保存→undo→新規編集→保存 の再現)', async () => {
+      const block = makeBlock({ id: 'b0', text: 'before-text' })
+      const memPage = makePage({ pageIndex: 0, rotation: 90, isDirty: true, textBlocks: [block] })
+      const action: Action = { type: 'rotate_pages', changes: [{ pageIndex: 0, before: 0, after: 90 }] }
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, memPage]])),
+        pageOrder: [0],
+        undoStack: [action],
+        redoStack: [],
+        // 回転を含めて保存済み (チェックポイント=1) だった想定
+        lastSavedActionIndex: 1,
+      })
+
+      usePecoStore.getState().undo()
+      await waitForPendingIdbSaves()
+
+      expect(usePecoStore.getState().undoStack).toHaveLength(0)
+      // 旧実装 (切り下げ漏れ) では lastSavedActionIndex が 1 のまま残っていた
+      expect(usePecoStore.getState().lastSavedActionIndex).toBe(0)
+
+      // 新規編集 (テキスト変更) を1件積むと、切り下げが効いていれば diff に現れる
+      const afterPage = { ...memPage, rotation: 0 as const, textBlocks: [{ ...block, text: 'after-text' }] }
+      usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: memPage, after: afterPage })
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(computeSaveDiff(undoStack, lastSavedActionIndex).entries).toHaveLength(1)
+    })
+
+    it('rotate_pages の redo() でも lastSavedActionIndex は不変条件 (<= undoStack.length) を保つ', async () => {
+      const memPage = makePage({ pageIndex: 0, rotation: 0 })
+      const action: Action = { type: 'rotate_pages', changes: [{ pageIndex: 0, before: 0, after: 90 }] }
+      // undo で古い分岐へ切り下がった直後 (lastSavedActionIndex=0, undoStack=[]) の redo を再現
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, memPage]])),
+        pageOrder: [0],
+        undoStack: [],
+        redoStack: [action],
+        lastSavedActionIndex: 0,
+      })
+
+      usePecoStore.getState().redo()
+      await waitForPendingIdbSaves()
+
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(undoStack).toHaveLength(1)
+      // Math.min(0, 1) = 0 のまま (安全側を維持、undoStack.length を超えない)
+      expect(lastSavedActionIndex).toBe(0)
+      expect(lastSavedActionIndex).toBeLessThanOrEqual(undoStack.length)
     })
   })
 
@@ -2953,6 +3092,48 @@ describe('pecoStore', () => {
       state = usePecoStore.getState()
       expect(state.pageOrder).toEqual([2, 3])
       expect(state.document!.pages.get(1)?.textBlocks[0].text).toBe('page-3')
+    })
+
+    // ── 回帰(#349 / PCT-126) ──────────────────────────────────────
+    // pages Map は未訪問/LRU退避ページを欠いた疎 Map になり得る。旧実装は新インデックス
+    // (newIdx) を afterPages.size (= 在メモリの生存ページ数) で採番していたため、疎な
+    // survivor を挟むと後続の在メモリページが本来より前のスロットに詰められ、
+    // 別ページの編集済みデータが誤ったページへ紐付いたまま保存される事故を起こしていた。
+    it('回帰(#349): 疎 Map (未訪問/LRU退避 survivor 混在) を挟んだ delete でも生存ページが正しい詰め位置に配置される', async () => {
+      // 4ページ構成。表示index=1 は未訪問/LRU退避を模して pages Map から意図的に欠落させる。
+      // 表示index0 を削除 → survivor は [1(疎), 2(編集済み), 3] → 新index [0, 1, 2] のはず。
+      const pages = new Map([
+        [0, makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0', text: 'page-0' })] })],
+        // index1: 意図的に欠落 (未訪問 / LRU 退避を模す)
+        [2, makePage({ pageIndex: 2, textBlocks: [makeBlock({ id: 'p2', text: 'page-2-edited' })], isDirty: true })],
+        [3, makePage({ pageIndex: 3, textBlocks: [makeBlock({ id: 'p3', text: 'page-3' })] })],
+      ])
+      usePecoStore.setState({
+        document: { ...makeDoc(pages), totalPages: 4 },
+        pageOrder: [0, 1, 2, 3],
+        currentPageIndex: 2,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      await usePecoStore.getState().deletePages([0])
+
+      const state = usePecoStore.getState()
+      expect(state.pageOrder).toEqual([1, 2, 3])
+      expect(state.document!.totalPages).toBe(3)
+      // 新index0 (旧表示index1) は在メモリではないので pages Map に現れない。
+      expect(state.document!.pages.has(0)).toBe(false)
+      // 旧表示index2 (編集済みページ) は新index1 に正しく詰められる。
+      // 旧バグでは afterPages.size が疎ページ分カウントされず、ここが新index0 に誤配置されていた。
+      const relocated1 = state.document!.pages.get(1)
+      expect(relocated1?.textBlocks[0].text).toBe('page-2-edited')
+      expect(relocated1?.pageIndex).toBe(1)
+      expect(relocated1?.isDirty).toBe(true)
+      // 旧表示index3 は新index2 に正しく詰められる。
+      // 旧バグではここが新index1 に誤配置され、編集済みページ (page-2) の内容と衝突していた。
+      const relocated2 = state.document!.pages.get(2)
+      expect(relocated2?.textBlocks[0].text).toBe('page-3')
+      expect(relocated2?.pageIndex).toBe(2)
     })
   })
 

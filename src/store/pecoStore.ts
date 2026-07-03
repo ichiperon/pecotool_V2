@@ -10,6 +10,7 @@ import {
 } from '../utils/pdfLoader';
 import { resolvePageId, resolveDisplayIndex } from '../utils/pageOrder';
 import { perf } from '../utils/perfLogger';
+import { remapBboxForRotation } from '../utils/pdfSaverCore';
 
 // 進行中のLRU退避IDB書き込みPromiseを追跡する。
 // 保存処理はこれらが完了してからIDBを読み込む必要がある。
@@ -522,14 +523,19 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // afterOrder に残った表示ページを新しい連番 (0-based) に再マッピング
     // 新しい pages Map: key=新pageIndex, value=元ページデータ (pageIndex フィールドを更新)
     // perf(#221): pageIndex が変わらないページは shallow copy を避けてオブジェクト参照を再利用する
+    // #349 (PCT-126): newIdx は afterPages.size (= メモリに存在した生存ページの件数) では
+    // なく、survivor の通し位置カウンタで採番する。pages Map は未訪問/LRU退避ページを
+    // 欠いた疎 Map なので、afterPages.size を使うと「メモリに無い生存ページ」を挟んだ
+    // 後続の在メモリページが本来より前のスロットに詰められる (movePage :638 と同型の修正)。
     const afterPages = new Map<number, PageData>();
+    let newIdx = 0;
     beforeOrder.forEach((_, oldDisplayIndex) => {
       if (deleteDisplaySet.has(oldDisplayIndex)) return;
-      const newIdx = afterPages.size;
       const page = beforePages.get(oldDisplayIndex);
       if (page) {
         afterPages.set(newIdx, page.pageIndex === newIdx ? page : { ...page, pageIndex: newIdx });
       }
+      newIdx++;
     });
 
     // 削除後の currentPageIndex を調整
@@ -1047,7 +1053,36 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       for (const [idx, savedPage] of savedPageSnapshots.entries()) {
         const livePage = newPages.get(idx);
         if (livePage === savedPage && livePage.isDirty) {
-          newPages.set(idx, { ...livePage, isDirty: false });
+          // #367 (PCT-144): 保存に userRotation が乗っていたページは、pdfSaverCore が
+          // 「元 /Rotate + userRotation」を合成して書き込み済み (#352)。呼び出し元
+          // (useFileOperations.ts) は保存直後に setOriginalBytesCache で保存済みバイトを
+          // 次回保存の基準にリベースするため、この合成値は次回保存では「新しい元 /Rotate」
+          // として扱われる。ここで rotation をクリアしないと、次回保存で
+          // 「新originalRotation(=旧合成値) + stale rotation(=旧userRotation)」が
+          // 再度合成され /Rotate がドリフトする (回転90°→保存→再保存で90°のはずが180°になる)。
+          // 合わせて in-memory textBlocks の bbox / ページ width・height も合成後フレームへ
+          // リベースし、保存直後の表示・再編集・再保存のいずれでも座標が捕捉フレームと
+          // 一致し続けるようにする (bbox 側は remapBboxForRotation を originalRotation=0 /
+          // finalRotation=userRotation で呼ぶことで、PageData.width/height に保持している
+          // 「捕捉時 viewport 寸法」をそのまま vw0/vh0 として使える)。
+          const userRotation = livePage.rotation;
+          if (userRotation !== undefined && userRotation !== 0) {
+            const rebasedBlocks = livePage.textBlocks.map((block) => ({
+              ...block,
+              bbox: remapBboxForRotation(block.bbox, 0, userRotation, livePage.width, livePage.height),
+            }));
+            const swapDims = userRotation === 90 || userRotation === 270;
+            newPages.set(idx, {
+              ...livePage,
+              isDirty: false,
+              rotation: undefined,
+              textBlocks: rebasedBlocks,
+              width: swapDims ? livePage.height : livePage.width,
+              height: swapDims ? livePage.width : livePage.height,
+            });
+          } else {
+            newPages.set(idx, { ...livePage, isDirty: false, rotation: undefined });
+          }
         }
       }
       for (const page of newPages.values()) {
@@ -1154,45 +1189,61 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   }),
 
   undo: () => {
-    const { undoStack, redoStack, document, pageOrder: pageOrderAtAction } = get();
+    const { undoStack, redoStack, document, pageOrder: pageOrderAtAction, lastSavedActionIndex } = get();
     if (undoStack.length === 0 || !document) return;
 
     const action = undoStack[undoStack.length - 1];
     const newUndo = undoStack.slice(0, -1);
     const newRedo = [action, ...redoStack];
+    // #350 (PCT-127): undo で undoStack がチェックポイント (lastSavedActionIndex) を
+    // 下回ると、以降 computeSaveDiff の undoStack.slice(lastSavedActionIndex) が常に
+    // 空を返し、新しい編集が diff プレビュー/監査ログから漏れる。チェックポイントを
+    // 現在の undoStack 長へ追従させて切り下げる (保存対象を減らす方向には作用しない)。
+    const newLastSavedActionIndex = Math.min(lastSavedActionIndex, newUndo.length);
 
     if (action.type === 'update_page') {
       const newPages = new Map(document.pages);
-      newPages.set(action.pageIndex, action.before);
+      // #350 (PCT-127): action.before の isDirty をそのまま復元すると、保存を挟んだ
+      // undo で「保存フィルタ (p.isDirty) から漏れる」事故になる。rotate_pages の undo
+      // と同じく常に isDirty: true を強制する (保存対象が増えるだけで安全側)。
+      const restoredPage: PageData = { ...action.before, isDirty: true };
+      newPages.set(action.pageIndex, restoredPage);
       const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true
       });
       // LRU 退避済みページが IDB に残っている可能性があるため、
       // 巻き戻し後の状態を IDB へも書き込んでメモリと完全同期させる。
       // (issue #3: undo が LRU 退避ページの IDB と非整合になる)
       // PCT-108: この action は pageOrder を変えないので action 時点の pageOrder を渡す
-      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.before }], pageOrderAtAction);
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: restoredPage }], pageOrderAtAction);
     } else if (action.type === 'update_pages') {
       // issue #93: 全ページスコープの置換等で複数ページを atomic に巻き戻す。
       const newPages = new Map(document.pages);
-      for (const e of action.entries) {
-        newPages.set(e.pageIndex, e.before);
+      // #350 (PCT-127): update_page と同様、復元ページは常に isDirty: true にする。
+      const restoredEntries = action.entries.map(e => ({
+        pageIndex: e.pageIndex,
+        data: { ...e.before, isDirty: true } as PageData,
+      }));
+      for (const e of restoredEntries) {
+        newPages.set(e.pageIndex, e.data);
       }
       const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // 全 entry を IDB へまとめて同期 (LRU 退避ページがあっても整合性を担保)
       // PCT-108: update_pages は pageOrder を変えないので action 時点の pageOrder を渡す
       schedulePendingIdbWrite(
-        action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.before })),
+        restoredEntries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.data })),
         pageOrderAtAction,
       );
     } else if (action.type === 'delete_pages') {
@@ -1207,6 +1258,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         currentPageIndex: action.beforeCurrentPageIndex,
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // PCT-104 (A-lite 段階3): pageId が不変なため rename 巻き戻し不要。
@@ -1233,6 +1285,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         pageOrder: action.beforeOrder,
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // PCT-104 (A-lite 段階3): pageId が不変なため rename 巻き戻し不要。
@@ -1254,6 +1307,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // #393 (PCT-162): update_page/update_pages と対称に IDB write-through する。
@@ -1270,42 +1324,57 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   },
 
   redo: () => {
-    const { undoStack, redoStack, document, pageOrder: pageOrderAtAction } = get();
+    const { undoStack, redoStack, document, pageOrder: pageOrderAtAction, lastSavedActionIndex } = get();
     if (redoStack.length === 0 || !document) return;
 
     const action = redoStack[0];
     const newRedo = redoStack.slice(1);
     const newUndo = [...undoStack, action];
+    // #350 (PCT-127): redo でも undoStack の長さが変わるため、undo と対称にチェック
+    // ポイントを追従させる (通常は newUndo.length が増える方向なので no-op だが、
+    // undo で古い分岐へ切り下がった直後の redo でも不変条件 lastSavedActionIndex <=
+    // undoStack.length を安全側に保つ)。
+    const newLastSavedActionIndex = Math.min(lastSavedActionIndex, newUndo.length);
 
     if (action.type === 'update_page') {
       const newPages = new Map(document.pages);
-      newPages.set(action.pageIndex, action.after);
+      // #350 (PCT-127): undo と対称に、redo で再適用するページも常に isDirty: true を
+      // 強制する (rotate_pages の redo と同じ扱い。保存対象が増えるだけで安全側)。
+      const restoredPage: PageData = { ...action.after, isDirty: true };
+      newPages.set(action.pageIndex, restoredPage);
       const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true
       });
       // undo と対称: redo 後の状態を IDB へも書き込んで整合性を担保
       // PCT-108: update_page は pageOrder を変えないので action 時点の pageOrder を渡す
-      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: action.after }], pageOrderAtAction);
+      schedulePendingIdbWrite([{ filePath, pageIndex: action.pageIndex, data: restoredPage }], pageOrderAtAction);
     } else if (action.type === 'update_pages') {
       // issue #93: 全ページスコープの置換等で複数ページを atomic にやり直す。
       const newPages = new Map(document.pages);
-      for (const e of action.entries) {
-        newPages.set(e.pageIndex, e.after);
+      // #350 (PCT-127): update_page と同様、再適用ページは常に isDirty: true にする。
+      const restoredEntries = action.entries.map(e => ({
+        pageIndex: e.pageIndex,
+        data: { ...e.after, isDirty: true } as PageData,
+      }));
+      for (const e of restoredEntries) {
+        newPages.set(e.pageIndex, e.data);
       }
       const filePath = document.filePath;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // PCT-108: update_pages は pageOrder を変えないので action 時点の pageOrder を渡す
       schedulePendingIdbWrite(
-        action.entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
+        restoredEntries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.data })),
         pageOrderAtAction,
       );
     } else if (action.type === 'delete_pages') {
@@ -1320,6 +1389,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         currentPageIndex: action.afterCurrentPageIndex,
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // PCT-104 (A-lite 段階3): 削除時と同じ IDB キー操作 (delete) を再適用してから
@@ -1352,6 +1422,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         pageOrder: action.afterOrder,
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // PCT-104 (A-lite 段階3): pageId が不変なため rename 再適用不要。
@@ -1373,6 +1444,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
+        lastSavedActionIndex: newLastSavedActionIndex,
         isDirty: true,
       });
       // #393 (PCT-162): undo と対称に IDB write-through する。

@@ -1090,6 +1090,73 @@ describe('useFileOperations save-diff: 編集が保存出力に反映される (
   });
 });
 
+describe('useFileOperations 回帰(#350/PCT-127): 保存を跨ぐ undo の isDirty フィルタ漏れ', () => {
+  it('#350: 編集→保存→undo→再保存で、undo が巻き戻した内容が2回目の保存対象に載る (isDirty フィルタを通過する)', async () => {
+    // 初期テキスト ORIGINAL を持つ非 dirty ページ (開いた直後の状態を模す)
+    const originalBlock = { id: 'edit-blk', text: 'ORIGINAL', isDirty: false };
+    const cleanPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [originalBlock],
+      isDirty: false,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/undo-save/test.pdf',
+      fileName: 'test.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, cleanPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0],
+      isDirty: false,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set('/undo-save/test.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    // ユーザー編集: テキストを EDITED に変更 (dirty 化・undoStack に積む)
+    const page = usePecoStore.getState().document!.pages.get(0)!;
+    usePecoStore.getState().updatePageData(0, {
+      textBlocks: page.textBlocks.map((b: any) =>
+        b.id === 'edit-blk' ? { ...b, text: 'EDITED', isDirty: true } : b,
+      ),
+      isDirty: true,
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    // 1回目の保存: 編集後テキストが保存される
+    await act(async () => {
+      await result.current.handleSave();
+    });
+    const firstSavedDoc = getLastSavedDoc();
+    expect(firstSavedDoc.pages.get(0)!.textBlocks[0].text).toBe('EDITED');
+    // resetDirty により保存直後は page.isDirty が落ちている
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+
+    // undo: 編集前の ORIGINAL に巻き戻す (ディスク上にはまだ EDITED が残っている)
+    usePecoStore.getState().undo();
+    expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks[0].text).toBe('ORIGINAL');
+    // #350 の核心: before スナップショットの isDirty=false をそのまま復元すると、
+    // 保存フィルタ (p.isDirty) から漏れて 2 回目の保存が対象ゼロで完了してしまう。
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true);
+
+    // 2回目の保存: undo で巻き戻った ORIGINAL が保存対象に載り、実際にディスクへ反映される
+    await act(async () => {
+      await result.current.handleSave();
+    });
+    const secondSavedDoc = getLastSavedDoc();
+    expect(secondSavedDoc.pages.has(0)).toBe(true);
+    expect(secondSavedDoc.pages.get(0)!.textBlocks[0].text).toBe('ORIGINAL');
+  });
+});
+
 describe('formatSkippedCharWarning メッセージ改善 (issue #115 Fix 3)', () => {
   // formatSkippedCharWarning は内部関数のため、save 経由 (skippedChars 付き savePDF) で
   // トースト文言を観測する。savePDF の 5 引数目 onSkipped(chars) を呼び出すと
