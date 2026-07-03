@@ -137,18 +137,90 @@ function matchesToken(data: Uint8Array, i: number, t0: number, t1: number): bool
   return isDelimiterOrEnd(prev) && isDelimiterOrEnd(next);
 }
 
+/**
+ * `data[i]` が BI 辞書内の name key (`/L` または `/Length`) の先頭 `/` を指す前提で、
+ * その値（非負整数）を読み取る。key が /L / /Length のいずれでもない、または値が
+ * 数字として読み取れない（間接参照・欠落等）場合は null を返す。
+ */
+function tryParseInlineImageLengthKey(data: Uint8Array, i: number): number | null {
+  let j = i + 1;
+  const nameStart = j;
+  while (j < data.length && !isDelimiterOrEnd(data[j])) j += 1;
+  const nameLen = j - nameStart;
+  const isL = nameLen === 1 && data[nameStart] === 0x4c; // 'L'
+  const isLength =
+    nameLen === 6 &&
+    data[nameStart] === 0x4c && // L
+    data[nameStart + 1] === 0x65 && // e
+    data[nameStart + 2] === 0x6e && // n
+    data[nameStart + 3] === 0x67 && // g
+    data[nameStart + 4] === 0x74 && // t
+    data[nameStart + 5] === 0x68; // h
+  if (!isL && !isLength) return null;
+
+  let k = j;
+  while (k < data.length && data[k] <= 0x20) k += 1; // 値前の空白
+  const numStart = k;
+  while (k < data.length && data[k] >= 0x30 && data[k] <= 0x39) k += 1; // 数字のみ（間接参照は非対応）
+  if (k === numStart) return null; // 数字が続かない（欠落・間接参照等の不正値）
+  if (!isDelimiterOrEnd(data[k])) return null; // 数字直後が delimiter でない不正値
+
+  let value = 0;
+  for (let m = numStart; m < k; m += 1) value = value * 10 + (data[m] - 0x30);
+  return value;
+}
+
+/**
+ * `ID` 直後の位置 `dataFieldStart` から、宣言された `length` バイトのバイナリデータを
+ * スキップした先に delimiter 境界付き `EI` トークンが実在するかを検証する。
+ *
+ * `ID` と画像データの間の区切りバイトは PDF 仕様上 1 byte が正だが、実装差を考慮して
+ * 「区切り 1 byte あり」「区切りなし」の両方を試す。EI 直前の空白/改行（Length に
+ * 含まれない慣行）も許容する。整合しない場合は null を返し、呼び出し元は素朴な
+ * EI 探索へフォールバックする。
+ */
+function tryFastForwardInlineImageData(data: Uint8Array, dataFieldStart: number, length: number): number | null {
+  for (const sep of [1, 0]) {
+    const dataStart = dataFieldStart + sep;
+    const dataEnd = dataStart + length;
+    if (dataEnd > data.length) continue;
+    let end = dataEnd;
+    while (end < data.length && data[end] <= 0x20) end += 1; // EI 直前の空白/改行を許容
+    if (matchesToken(data, end, 0x45, 0x49 /* EI */)) return end;
+  }
+  return null;
+}
+
 function copyInlineImage(data: Uint8Array, start: number, result: Uint8Array, resultIdx: number): {
   inputIdx: number;
   resultIdx: number;
 } {
   let i = start;
   let inImageData = false;
+  // BI 辞書の /L (または /Length) から読み取ったバイナリデータ長（未検出/不正時は null）
+  let declaredLength: number | null = null;
   while (i < data.length) {
     result[resultIdx++] = data[i];
+    if (!inImageData && declaredLength === null && data[i] === 0x2f /* / */) {
+      declaredLength = tryParseInlineImageLengthKey(data, i);
+    }
     if (!inImageData && matchesToken(data, i, 0x49, 0x44 /* ID */)) {
       if (i + 1 < data.length) result[resultIdx++] = data[i + 1];
       i += 2;
       inImageData = true;
+
+      // issue #431 点6 (F-ORC-4): /L が確認できればバイナリ長が確定するため、素朴な
+      // EI 探索（バイナリ内の偶発的な delimiter 境界付き "EI" バイト列に脆弱）を
+      // スキップし、直接終端を特定する。宣言値が実データと整合しない場合（不正値・
+      // 破損データ）のみ、下の素朴探索にフォールバックする。
+      if (declaredLength !== null) {
+        const eiStart = tryFastForwardInlineImageData(data, i, declaredLength);
+        if (eiStart !== null) {
+          const copyEnd = Math.min(eiStart + 2, data.length);
+          for (let k = i; k < copyEnd; k += 1) result[resultIdx++] = data[k];
+          return { inputIdx: copyEnd, resultIdx };
+        }
+      }
       continue;
     }
     if (inImageData && matchesToken(data, i, 0x45, 0x49 /* EI */)) {

@@ -22,9 +22,6 @@
         { "path": "$DESKTOP/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" },
-        { "path": "$APPDATA/pecotool/**" },
-        { "path": "$APPCONFIG/pecotool/**" },
-        { "path": "$APPLOCALDATA/pecotool/**" },
         { "path": "$TEMP/**" }
       ]
     },
@@ -34,9 +31,6 @@
         { "path": "$DESKTOP/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" },
-        { "path": "$APPDATA/pecotool/**" },
-        { "path": "$APPCONFIG/pecotool/**" },
-        { "path": "$APPLOCALDATA/pecotool/**" },
         { "path": "$TEMP/**" }
       ]
     },
@@ -46,9 +40,6 @@
         { "path": "$DESKTOP/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" },
-        { "path": "$APPDATA/pecotool/**" },
-        { "path": "$APPCONFIG/pecotool/**" },
-        { "path": "$APPLOCALDATA/pecotool/**" },
         { "path": "$TEMP/**" }
       ]
     },
@@ -58,18 +49,13 @@
         { "path": "$DESKTOP/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DOWNLOAD/**" },
-        { "path": "$APPDATA/pecotool/**" },
-        { "path": "$APPCONFIG/pecotool/**" },
-        { "path": "$APPLOCALDATA/pecotool/**" },
         { "path": "$TEMP/**" }
       ]
     },
     {
       "identifier": "fs:allow-remove",
       "allow": [
-        { "path": "$TEMP/**" },
-        { "path": "$APPDATA/pecotool/**" },
-        { "path": "$APPLOCALDATA/pecotool/**" }
+        { "path": "$TEMP/**" }
       ]
     }
   ]

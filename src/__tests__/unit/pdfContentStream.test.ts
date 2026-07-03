@@ -7,7 +7,11 @@
  *   (旧実装は delimiter まで丸ごと喰っていた)。
  */
 import { describe, it, expect } from 'vitest';
-import { hasTextOperatorsOutsideTextObjects, stripTextBlocks } from '../../utils/pdfContentStream';
+import {
+  hasTextOperatorsOutsideTextObjects,
+  hasUnbalancedTextBlockBoundary,
+  stripTextBlocks,
+} from '../../utils/pdfContentStream';
 
 const enc = (s: string): Uint8Array => {
   const out = new Uint8Array(s.length);
@@ -144,5 +148,77 @@ describe('hasTextOperatorsOutsideTextObjects', () => {
     it('文字列リテラル内の " Tf " は誤検出しない（状態機械の非退行）', () => {
       expect(hasTextOperatorsOutsideTextObjects(enc('BT\n(set Tf here) Tj\nET\n'))).toBe(false);
     });
+  });
+});
+
+/**
+ * issue #431 点6 (F-ORC-4): copyInlineImage が BI...ID...EI のバイナリ内に
+ * 偶発的な delimiter 境界付き "EI" バイト列が現れると誤って早期終了する問題。
+ *
+ * BI 辞書の /L (または /Length) キーを参照してバイナリ長を確定し、素朴な EI
+ * 探索をバイパスすることで回避する。/L が無い、または実データと整合しない
+ * 場合は既存の素朴探索へフォールバックする。
+ *
+ * copyInlineImage は hasTextOperatorsOutsideTextObjects / hasUnbalancedTextBlockBoundary /
+ * stripEmptyGraphicsStateBlocks(Only) / stripTextBlocks / stripStrayTextOperatorsOutsideTextObjects
+ * の全スキャナで共有されているため、ここでは代表として hasTextOperatorsOutsideTextObjects と
+ * hasUnbalancedTextBlockBoundary の双方で修正の効果を確認する。
+ */
+describe('copyInlineImage: /L (Length) 参照による偶発 EI 誤検出の回避 (#431 点6 / F-ORC-4)', () => {
+  // BI 辞書 (/L 12 …) の後、ID の 12 byte バイナリデータ内に
+  // delimiter 境界付きの偽 "EI"（誤検出させる罠）と偽 "ET"（早期終了時の症状を可視化する罠）
+  // を仕込む。12 byte ちょうど: \x01 \x02 ' EI ' \x03 ' ET ' \x04
+  const trapBinary = '\x01\x02 EI \x03 ET \x04';
+  const trapLength = trapBinary.length;
+
+  it('前提: trapBinary は 12 byte ちょうど（テストの自己検証）', () => {
+    expect(trapLength).toBe(12);
+  });
+
+  const buildStream = (biDict: string): string =>
+    `q\nBI ${biDict} ID ${trapBinary}\nEI\nQ\n`;
+
+  it('/L ありでバイナリ内の偽 EI を無視し、正しい EI まで一気に確定スキップする（false positive 解消）', () => {
+    const input = enc(buildStream(`/L ${trapLength} /W 1 /H 1 /BPC 8 /CS /G`));
+    // 修正前: 偽 "EI" で早期終了 → 残りバイナリ中の偽 "ET" が孤児 ET として検出され true になる
+    // 修正後: /L 12 により正しい EI まで一気に確定スキップ → 偽 ET は inline image 内部として無視される
+    expect(hasTextOperatorsOutsideTextObjects(input)).toBe(false);
+    expect(hasUnbalancedTextBlockBoundary(input)).toBe(false);
+  });
+
+  it('/L なし（従来挙動）: 偽 EI で早期終了し、残存バイナリの偽 ET を孤児検出する', () => {
+    // /L キーが無い場合は declaredLength が確定しないため、既存の素朴な EI 探索のみで動く
+    // （回帰確認: 本修正が /L 非対応ケースの挙動を変えていないこと）
+    const input = enc(buildStream('/W 1 /H 1 /BPC 8 /CS /G'));
+    expect(hasTextOperatorsOutsideTextObjects(input)).toBe(true);
+    expect(hasUnbalancedTextBlockBoundary(input)).toBe(true);
+  });
+
+  it('/L が実データと整合しない不正値の場合、素朴探索へフォールバックする（従来挙動と同じ結果）', () => {
+    // /L 999 は実際のバイナリ長 (12) と一致しないため、fast path の検証に失敗し
+    // 素朴探索にフォールバックする。フォールバック先は /L なしケースと同じ挙動になる。
+    const input = enc(buildStream('/L 999 /W 1 /H 1 /BPC 8 /CS /G'));
+    expect(hasTextOperatorsOutsideTextObjects(input)).toBe(true);
+    expect(hasUnbalancedTextBlockBoundary(input)).toBe(true);
+  });
+
+  it('/L 値が非数値（不正トークン）の場合も安全にフォールバックする', () => {
+    const input = enc(buildStream('/L abc /W 1 /H 1 /BPC 8 /CS /G'));
+    expect(hasTextOperatorsOutsideTextObjects(input)).toBe(true);
+    expect(hasUnbalancedTextBlockBoundary(input)).toBe(true);
+  });
+
+  it('/Length（非省略形）キーでも /L と同様に確定スキップが働く', () => {
+    const input = enc(buildStream(`/Length ${trapLength} /W 1 /H 1 /BPC 8 /CS /G`));
+    expect(hasTextOperatorsOutsideTextObjects(input)).toBe(false);
+    expect(hasUnbalancedTextBlockBoundary(input)).toBe(false);
+  });
+
+  it('/L ありのケースで stripTextBlocks がバイナリを一切破壊せず素通りする（BT/ET 罠が inline image 内部として保持される）', () => {
+    // stripTextBlocks は top-level の BT...ET のみ除去するため、inline image 内部の
+    // 偽 BT/ET まで巻き込んで破壊していないか（境界誤認による損傷）を出力の完全一致で確認する。
+    const input = enc(buildStream(`/L ${trapLength} /W 1 /H 1 /BPC 8 /CS /G`));
+    const out = stripTextBlocks(input);
+    expect(dec(out)).toBe(dec(input));
   });
 });
