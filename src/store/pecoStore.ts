@@ -206,6 +206,77 @@ function scheduleClearOcrAllPagesIdbWrite(
   trackPendingIdbWork(work);
 }
 
+/**
+ * #393 (PCT-162): undo/redo の rotate_pages 分岐を update_page/update_pages と対称に
+ * IDB write-through させる。RotatePagesAction は差分 (before/after rotation) のみを
+ * 保持し全 PageData を持たないため、in-memory に残っているページはそのまま書けるが、
+ * LRU 退避 (in-memory に無い) ページは saveTemporaryPageDataBatch が store.put で
+ * レコード全体を置換する仕様上、rotation だけの部分データを書くと textBlocks 等の
+ * 既存フィールドが消えてしまう (scheduleClearOcrAllPagesIdbWrite と同じ制約)。
+ * そのため退避ページのみ既存 IDB レコードを読み戻し、rotation を上書きしてから書く。
+ *
+ * PCT-108: pageOrder は呼び出し元が action 時点の値をキャプチャして渡す。
+ * PCT-181 (#412 先例): waitForPendingIdbSaves() → getAllTemporaryPageData() と
+ * 2 つの await を跨ぐ read-modify-write のため、scheduleClearOcrAllPagesIdbWrite と
+ * 同型の documentEpoch 二重ガード (待機後 / IDB read 後) を持つ。呼び出し元がキャプチャした
+ * capturedEpoch と不一致なら、途中経過を破棄して no-op にする (ファイル切替後の誤書込防止)。
+ */
+function scheduleRotateUndoRedoIdbWrite(
+  filePath: string,
+  changes: Array<{ pageIndex: number; rotation: 0 | 90 | 180 | 270 }>,
+  livePages: Map<number, PageData>,
+  pageOrder: number[],
+  capturedEpoch: number,
+): void {
+  if (changes.length === 0) return;
+  const pendingBeforeWrite = waitForPendingIdbSaves();
+  const work = pendingBeforeWrite
+    .then(async () => {
+      // documentEpoch ガード: 待機中にファイル切替/開き直しが起きていたら中止する。
+      if (useInfraStore.getState().documentEpoch !== capturedEpoch) return;
+      const hasEvicted = changes.some((c) => !livePages.has(c.pageIndex));
+      const idbAll = hasEvicted ? await getAllTemporaryPageData(filePath) : null;
+      // epoch ガード再確認: getAllTemporaryPageData の await 中にも切替が起きうる。
+      if (useInfraStore.getState().documentEpoch !== capturedEpoch) return;
+      const pageIdEntries: Array<{ filePath: string; pageId: string; data: Partial<PageData> }> = [];
+      for (const { pageIndex, rotation } of changes) {
+        const pageId = resolvePageId(pageOrder, pageIndex);
+        const livePage = livePages.get(pageIndex);
+        if (livePage) {
+          pageIdEntries.push({ filePath, pageId, data: livePage });
+          continue;
+        }
+        // LRU 退避ページ: 既存 IDB レコードを保持しつつ rotation だけ更新する。
+        // stored が無い (textBlocks を持たない = 巻き戻す実体が無い) 場合は
+        // {pageIndex, rotation, isDirty} のみの骨格レコードを書かない。forward の
+        // rotatePages が `if (partial && partial.textBlocks)` で同じケースを除外する
+        // のと対称にする (骨格レコードは PageData 型不変条件を破り、保存時のテキスト層
+        // strip に繋がりうるため)。
+        const stored = idbAll?.get(pageId);
+        if (!stored || !stored.textBlocks) continue;
+        const data: Partial<PageData> = {
+          ...stored,
+          pageIndex,
+          rotation,
+          isDirty: true,
+          pageId: stored.pageId ?? pageId,
+        };
+        pageIdEntries.push({ filePath, pageId, data });
+      }
+      if (pageIdEntries.length === 0) return;
+      await saveTemporaryPageDataBatch(pageIdEntries);
+    })
+    .then(() => {
+      useInfraStore.getState().clearLastIdbErrorIfSet();
+    })
+    .catch((e: unknown) => {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.error('[Store] scheduleRotateUndoRedoIdbWrite 失敗:', err);
+      useInfraStore.getState().setLastIdbError(err);
+    });
+  trackPendingIdbWork(work);
+}
+
 interface PecoState {
   document: PecoDocument | null;
   /**
@@ -1175,12 +1246,26 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         if (!page) continue;
         newPages.set(change.pageIndex, { ...page, rotation: change.before, isDirty: true });
       }
+      const filePath = document.filePath;
+      // PCT-181 (#412 先例): 非同期書き込みが live documentEpoch を読まないよう、
+      // set() 実行時点 (同期) の epoch をキャプチャして渡す。
+      const capturedEpoch = useInfraStore.getState().documentEpoch;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true,
       });
+      // #393 (PCT-162): update_page/update_pages と対称に IDB write-through する。
+      // LRU 退避 (in-memory に無い) ページの巻き戻しも無音スキップせず IDB へ同期する。
+      // PCT-108: pageOrder は action 時点の値 (pageOrderAtAction) を渡す。
+      scheduleRotateUndoRedoIdbWrite(
+        filePath,
+        action.changes.map((c) => ({ pageIndex: c.pageIndex, rotation: c.before })),
+        newPages,
+        pageOrderAtAction,
+        capturedEpoch,
+      );
     }
   },
 
@@ -1280,12 +1365,25 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         if (!page) continue;
         newPages.set(change.pageIndex, { ...page, rotation: change.after, isDirty: true });
       }
+      const filePath = document.filePath;
+      // PCT-181 (#412 先例): 非同期書き込みが live documentEpoch を読まないよう、
+      // set() 実行時点 (同期) の epoch をキャプチャして渡す。
+      const capturedEpoch = useInfraStore.getState().documentEpoch;
       set({
         document: { ...document, pages: newPages },
         undoStack: newUndo,
         redoStack: newRedo,
         isDirty: true,
       });
+      // #393 (PCT-162): undo と対称に IDB write-through する。
+      // PCT-108: pageOrder は action 時点の値 (pageOrderAtAction) を渡す。
+      scheduleRotateUndoRedoIdbWrite(
+        filePath,
+        action.changes.map((c) => ({ pageIndex: c.pageIndex, rotation: c.after })),
+        newPages,
+        pageOrderAtAction,
+        capturedEpoch,
+      );
     }
   },
 
@@ -1346,6 +1444,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const document = state.document;
     if (!document) return { hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 };
     if (pattern.length === 0) return { hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 };
+    // #394 (PCT-163): entry 時点の pageOrder をキャプチャし、以降の IDB read await 中に
+    // movePage 等が割り込んでも entries の displayIndex 解決と IDB write を同一体系で行う。
+    // PCT-108 と同じ「遅延 getState 参照禁止」規律を、await 直後の live 参照にも適用する。
+    const pageOrderAtEntry = state.pageOrder;
 
     // 検索用の RegExp を組み立てる。useRegex=false は escape して flag 'g' を必ず付ける。
     // useRegex=true の場合は構文エラーが上に伝播する (UI で catch する想定)。
@@ -1379,7 +1481,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // PCT-104 (A-lite 段階2): IDB から退避ページを読み戻し、in-memory に無い idx だけ追加。
       // getAllTemporaryPageData は Map<pageId, data> を返すので resolveDisplayIndex で変換する。
       const idbAll = await getAllTemporaryPageData(filePath);
-      const pageOrderForResolve = state.pageOrder;
+      // #394 (PCT-163): entry 時点のスナップショットで解決する (live state.pageOrder は不可)。
+      const pageOrderForResolve = pageOrderAtEntry;
       for (const [pageId, partial] of idbAll.entries()) {
         const idx = resolveDisplayIndex(pageOrderForResolve, pageId);
         if (idx < 0) continue;
@@ -1507,11 +1610,14 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
 
     // LRU 退避済みページの IDB と整合させるため、変更ページ全部を IDB にも書き込む
-    // PCT-108: replaceText は pageOrder を変えない。set() 直後 (同一マイクロタスク内) の
-    // pageOrder を固定して渡し、書き込み遅延中の並べ替え undo/redo の影響を受けないようにする。
+    // #394 (PCT-163): entries の pageIndex は pageOrderAtEntry 体系で解決済みのため、
+    // 書き込みも同じ pageOrderAtEntry を使う。get().pageOrder (live) を使うと、
+    // 冒頭の getAllTemporaryPageData await 中に movePage が割り込んだ場合、
+    // entries 解決時の pageOrder と書き込み時の pageOrder が食い違い、
+    // resolvePageId が別ページの pageId に誤マップする (PCT-108 違反)。
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
-      get().pageOrder,
+      pageOrderAtEntry,
     );
 
     return { hits: totalHits, blocks: totalBlocks, pages: entries.length, skippedBlocks };
@@ -1523,6 +1629,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const document = state.document;
     if (!document) return { totalHits: 0, perRuleHits: rules.map(() => 0), invalidRuleIndices: [] };
     if (rules.length === 0) return { totalHits: 0, perRuleHits: [], invalidRuleIndices: [] };
+    // #394 (PCT-163): replaceText と同様、entry 時点の pageOrder をキャプチャして
+    // entries 解決と IDB write の両方で一貫して使う (live state.pageOrder は不可)。
+    const pageOrderAtEntry = state.pageOrder;
 
     // 各ルールの RegExp と置換文字列を事前にコンパイルする (1 度だけ生成して使い回す)
     // perf(#223): isRegex=true の後方参照解決用 non-global 版も outer scope で 1 度だけ生成する
@@ -1573,7 +1682,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       }
       // PCT-104 (A-lite 段階2): getAllTemporaryPageData は Map<pageId, data> を返す。
       const idbAll = await getAllTemporaryPageData(filePath);
-      const pageOrderForResolve = state.pageOrder;
+      // #394 (PCT-163): entry 時点のスナップショットで解決する (live state.pageOrder は不可)。
+      const pageOrderForResolve = pageOrderAtEntry;
       for (const [pageId, partial] of idbAll.entries()) {
         const idx = resolveDisplayIndex(pageOrderForResolve, pageId);
         if (idx < 0) continue;
@@ -1677,10 +1787,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     });
 
     // IDB 書き込みは変更ページのみ 1 度ずつ
-    // PCT-108: replaceTextBatch も pageOrder を変えない。set() 直後の pageOrder を固定して渡す。
+    // #394 (PCT-163): replaceText と同様、entries 解決に使った pageOrderAtEntry で書く。
+    // get().pageOrder (live) は冒頭の IDB read await 中の movePage 割込みで
+    // entries 解決時点の pageOrder と食い違い、書き込み先 pageId がずれる。
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
-      get().pageOrder,
+      pageOrderAtEntry,
     );
 
     return { totalHits, perRuleHits, invalidRuleIndices };
