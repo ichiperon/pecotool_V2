@@ -38,6 +38,20 @@ describe("normalizeNumeric", () => {
     expect(normalizeNumeric("▲1,000")).toBe("-1000");
   });
 
+  // 根拠 (#389 / PCT-159): △/▲ と明示マイナスはどちらも「負数」を表す。
+  // 冗長表記 "△-50000" を二重マイナス "--50000"（無効値）にすると、出力 CSV に
+  // 不正値が載り保証#3（CSV 値の正しさ）を破る。符号は1つに畳んで -N にする。
+  it("△ + 明示マイナス（冗長表記）→ 二重マイナスにせず -N にする", () => {
+    expect(normalizeNumeric("△-50000")).toBe("-50000");
+    expect(normalizeNumeric("△－50000")).toBe("-50000"); // 全角ハイフン
+    expect(normalizeNumeric("▲-1,000")).toBe("-1000");
+  });
+
+  it('△ + 明示マイナスでも二重マイナス "--N" を生成しない', () => {
+    expect(normalizeNumeric("△-50000")).not.toBe("--50000");
+    expect(normalizeNumeric("△－50000")).not.toBe("--50000");
+  });
+
   it("△ + 全角数字 → マイナス + 半角数字", () => {
     expect(normalizeNumeric("△１，２３４")).toBe("-1234");
   });

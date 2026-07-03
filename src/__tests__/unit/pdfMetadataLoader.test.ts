@@ -11,6 +11,7 @@ import {
   PDFHexString,
   PDFName,
 } from '@cantoo/pdf-lib';
+import { deflate } from 'pako';
 import { writePecoToolBBoxMetaToPdfDoc } from '../../utils/pdfPecoToolMetadata';
 
 /** PDFDocumentProxy.getMetadata() を最小限スタブ化する */
@@ -579,5 +580,84 @@ describe('PCT-101/C1: invalidateBBoxMetaCache', () => {
     invalidateBBoxMetaCache();
     await loadPecoToolBBoxMeta(fakePdfMeta, source);
     expect(loadCount).toBe(2); // invalidate あり = 再ロード成功
+  });
+});
+
+describe('S-392: undecodable private BBox stream → onUndecodable 通知 (#392/PCT-161)', () => {
+  beforeEach(() => {
+    _resetBBoxMetaCacheForTest();
+  });
+
+  /** 多重フィルタ [/FlateDecode /FlateDecode]（本バージョン未対応＝decode 不能）の BBox stream を持つ PDF */
+  async function makeUndecodableBytes(): Promise<Uint8Array> {
+    const pdf = await PDFDocument.create();
+    pdf.addPage([595, 842]);
+    const ctx = pdf.context as unknown as {
+      register: (o: unknown) => unknown;
+      stream: (b: Uint8Array, d: Record<string, unknown>) => { dict: { set: (k: PDFName, v: unknown) => void } };
+      obj: (d: unknown) => unknown;
+    };
+    const compressed = deflate(
+      new TextEncoder().encode(JSON.stringify({ '0': [{ x: 1, y: 2, w: 3, h: 4, text: 'real' }] })),
+    );
+    const rawStream = ctx.stream(compressed, { Subtype: 'BBoxes' });
+    rawStream.dict.set(
+      PDFName.of('Filter'),
+      ctx.obj([PDFName.of('FlateDecode'), PDFName.of('FlateDecode')]) as never,
+    );
+    const ref = ctx.register(rawStream);
+    (pdf.catalog as unknown as { set: (k: PDFName, v: unknown) => void }).set(
+      PDFName.of('PecoTool'),
+      ctx.obj({ Version: 1, BBoxes: ref }) as never,
+    );
+    return pdf.save({ useObjectStreams: false, addDefaultPage: false });
+  }
+
+  it('decode 不能なら onUndecodable が1回呼ばれ、読めるメタは無い', async () => {
+    const bytes = await makeUndecodableBytes();
+    let called = 0;
+    const result = await loadPecoToolBBoxMeta(makeFakePdf(null), {
+      loadBytes: async () => bytes,
+      onUndecodable: () => { called += 1; },
+    });
+    expect(called).toBe(1);
+    expect(result).toBeNull();
+  });
+
+  it('decode 可能な通常メタでは onUndecodable は呼ばれない（誤通知なし）', async () => {
+    const pdf = await PDFDocument.create();
+    pdf.addPage([595, 842]);
+    writePecoToolBBoxMetaToPdfDoc(pdf, {
+      '0': [{ bbox: { x: 1, y: 2, width: 3, height: 4 }, writingMode: 'horizontal', order: 0, text: 'ok' }],
+    });
+    const bytes = await pdf.save({ useObjectStreams: false });
+    let called = 0;
+    await loadPecoToolBBoxMeta(makeFakePdf(null), {
+      loadBytes: async () => bytes,
+      onUndecodable: () => { called += 1; },
+    });
+    expect(called).toBe(0);
+  });
+
+  // Round3 修正: cache-hit でも undecodable は再通知される。
+  // 先行ロード（ページナビ等・onUndecodable 無し）が filePath+mtime キャッシュを充填しても、
+  // 後続の onUndecodable 付き呼び出しで警告が確実に発火することを固定する。
+  it('cache-hit でも undecodable は再通知される（先行 no-callback ロードを後続が拾う）', async () => {
+    const bytes = await makeUndecodableBytes();
+    // 1回目: onUndecodable 無しで同一キーを読み、キャッシュを undecodable=true で充填
+    await loadPecoToolBBoxMeta(makeFakePdf(null), {
+      loadBytes: async () => bytes,
+      filePath: 'undecodable.pdf',
+      mtime: 1,
+    });
+    // 2回目: 同一 filePath+mtime で onUndecodable 付き → cache-hit だが onUndecodable は発火すべき
+    let called = 0;
+    await loadPecoToolBBoxMeta(makeFakePdf(null), {
+      loadBytes: async () => bytes,
+      filePath: 'undecodable.pdf',
+      mtime: 1,
+      onUndecodable: () => { called += 1; },
+    });
+    expect(called).toBe(1);
   });
 });

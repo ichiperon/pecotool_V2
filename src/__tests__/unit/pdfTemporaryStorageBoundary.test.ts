@@ -548,4 +548,21 @@ describe('pdfTemporaryStorage 境界値 (wave 4)', () => {
       deleteTemporaryPageKeys('delete-fail.pdf', ['src:0']),
     ).rejects.toThrow('delete transaction failed');
   });
+
+  // ── テスト A: saveTemporaryPageDataBatch は IDB 書込失敗を reject する ──────
+  // 背景: LRU 退避時の IDB 書込失敗 → ロールバックの安全網を固定する。
+  // delete のみ固定されており、save batch が未固定だったため、その穴を埋める。
+
+  it('saveTemporaryPageDataBatch は IDB 失敗を reject する', async () => {
+    vi.resetModules();
+    setupFakeIdb(new FailingDirtyTransactionDatabase('save transaction failed'));
+    const { saveTemporaryPageDataBatch } =
+      await import('../../utils/pdfTemporaryStorage');
+
+    await expect(
+      saveTemporaryPageDataBatch([
+        { filePath: 'save-fail.pdf', pageId: 'src:0', data: makePartialPage(0) },
+      ]),
+    ).rejects.toThrow('save transaction failed');
+  });
 });

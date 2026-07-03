@@ -19,6 +19,7 @@ import {
   selectIsRangeOcrMode,
 } from "./store/viewerStore";
 import { useOcrSettingsStore } from "./store/ocrSettingsStore";
+import { useInfraStore } from "./store/infraStore";
 import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
 import { ask, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
@@ -50,7 +51,9 @@ import { useAppUpdater, UPDATER_ENABLED } from "./hooks/useAppUpdater";
 import { usePageExtraction } from "./hooks/usePageExtraction";
 import { useBatchJob } from "./hooks/useBatchJob";
 import { usePageManagement } from "./hooks/usePageManagement";
+import { useStorageQuotaMonitor } from "./hooks/useStorageQuotaMonitor";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
+import { StorageHealthBanner } from "./components/StorageHealthBanner";
 
 // Components
 import { Ribbon } from "./components/Ribbon/Ribbon";
@@ -378,6 +381,8 @@ function App() {
     }
     destroySharedPdfProxy();
     usePecoStore.getState().setDocument(null);
+    // #392: ファイルを閉じたら undecodable 警告もリセット（無ドキュメント状態で残さない）。
+    useInfraStore.getState().setBboxMetaUnreadable(false);
   }, [isDirty, isSaving, showToast]);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -651,6 +656,9 @@ function App() {
   const isSavingRef = useRef(isSaving);
   isSavingRef.current = isSaving;
 
+  // ストレージ容量逼迫の定期監視（IDB 一時保存の事前警告）
+  useStorageQuotaMonitor();
+
   // --- Effects ---
   // CloseGuard: 保存中 / バックアップ中の close を suppress する (PCT-055: rename race・バックアップ破損回避)。
   useTauriCloseGuard({ isSavingRef, isBackingUpRef });
@@ -911,6 +919,8 @@ function App() {
         onOpenLogFolder={handleOpenLogFolder}
         onCheckUpdate={handleManualCheckUpdate}
       />
+
+      <StorageHealthBanner />
 
       <main className="main-content">
         <ThumbnailPanel

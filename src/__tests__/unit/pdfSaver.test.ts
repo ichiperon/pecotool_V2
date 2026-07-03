@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
 // ── hoisted mocks ──────────────────────────────────────────────
@@ -338,6 +338,51 @@ describe('pdfSaver / savePDF', () => {
       expect(m.translateFn).toHaveBeenCalled()
       const [, y] = m.translateFn.mock.calls[0]
       expect(y).toBe(PAGE_HEIGHT - 100) // 742
+    })
+  })
+
+  describe('U-S-EXC: ブロック描画中の例外でも q/Q が均衡する (#397 / PCT-166)', () => {
+    // 根拠: per-block try-catch (pdfSaverCore.ts L1312-1479) は描画例外を console.warn で
+    // 握り潰す。横書きは L1444 で pushGraphicsState (q) をコミットしてから L1454 drawText、
+    // 最後に L1475 popGraphicsState (Q)。縦書きは run ごとに L1387 push → L1393 drawText →
+    // L1394 pop。q コミット後〜pop 発行前に drawText が throw すると catch が飲み込み Q が
+    // 発行されず、content stream の graphics-state スタックが不均衡（未対応 q 残存＝保証#3 の
+    // 構造破損）になる。pushGraphicsState/popGraphicsState は {type:'pushGs'}/{type:'popGs'}
+    // として page.pushOperators(=m.pushOperators) 経由で積まれるので、その数で均衡を検査する。
+    afterEach(() => {
+      m.drawText.mockReset()
+    })
+
+    function countGs(): { push: number; pop: number } {
+      const ops = m.pushOperators.mock.calls.flat() as Array<{ type?: string }>
+      return {
+        push: ops.filter((o) => o && o.type === 'pushGs').length,
+        pop: ops.filter((o) => o && o.type === 'popGs').length,
+      }
+    }
+
+    it('横書き: drawText が throw しても popGraphicsState が必ず発行され pushGs===popGs', async () => {
+      m.drawText.mockImplementation(() => {
+        throw new Error('simulated font encode failure')
+      })
+      const doc = makeDoc([{ writingMode: 'horizontal', bbox: { x: 10, y: 100, width: 200, height: 20 } }])
+      await savePDF(new Uint8Array(), doc)
+
+      const { push, pop } = countGs()
+      expect(push).toBeGreaterThan(0) // 実際に q を発行した（描画経路を通った）
+      expect(pop).toBe(push) // 現状 RED: pop=0 < push。try/finally 修正で GREEN
+    })
+
+    it('縦書き: drawText が throw しても run ごとの popGraphicsState が必ず発行される', async () => {
+      m.drawText.mockImplementation(() => {
+        throw new Error('simulated font encode failure')
+      })
+      const doc = makeDoc([{ writingMode: 'vertical', bbox: { x: 10, y: 100, width: 15, height: 200 } }])
+      await savePDF(new Uint8Array(), doc)
+
+      const { push, pop } = countGs()
+      expect(push).toBeGreaterThan(0)
+      expect(pop).toBe(push)
     })
   })
 
