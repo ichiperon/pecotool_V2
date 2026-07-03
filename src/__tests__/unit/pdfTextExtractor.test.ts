@@ -25,7 +25,7 @@ vi.mock('../../utils/perfLogger', () => ({
   perf: { mark: vi.fn() },
 }));
 
-import { loadPage } from '../../utils/pdfTextExtractor';
+import { loadPage, shouldUseSavedMeta } from '../../utils/pdfTextExtractor';
 import { getCachedPageProxy } from '../../utils/pdfLoader';
 import { getTemporaryPageData } from '../../utils/pdfTemporaryStorage';
 
@@ -281,5 +281,96 @@ describe('loadPage writing mode detection (#39)', () => {
     expect(result.textBlocks).toHaveLength(2);
     expect(result.textBlocks[0].writingMode).toBe('horizontal');
     expect(result.textBlocks[1].writingMode).toBe('vertical');
+  });
+});
+
+// ── issue #347: shouldUseSavedMeta のフラグメント過多閾値の境界値テスト ──
+//
+// 閾値: overFragmentedThreshold = Math.max(count * 2, count + 25)
+//   (count = 空文字を除いた textItems 件数)
+// savedMeta.length <= overFragmentedThreshold なら true (meta 経路採用)。
+//
+// count が小さいうちは `count + 25` が支配的、count >= 25 では `count * 2` が
+// 支配的になる (交点は count=25、両辺とも 50)。
+describe('shouldUseSavedMeta 閾値の境界値 (#347 / PCT-124)', () => {
+  type MinimalTextItem = { str: string };
+
+  function makeTextItems(count: number): MinimalTextItem[] {
+    return Array.from({ length: count }, (_, i) => ({ str: `item${i}` }));
+  }
+
+  function makeSavedMeta(count: number) {
+    return Array.from({ length: count }, (_, i) => ({
+      bbox: { x: 0, y: 0, width: 1, height: 1 },
+      writingMode: 'horizontal' as const,
+      order: i,
+      text: `meta${i}`,
+    }));
+  }
+
+  it('savedMeta が undefined なら false を返す', () => {
+    expect(shouldUseSavedMeta(undefined, makeTextItems(10) as any)).toBe(false);
+  });
+
+  it('savedMeta が空配列なら false を返す', () => {
+    expect(shouldUseSavedMeta(makeSavedMeta(0), makeTextItems(10) as any)).toBe(false);
+  });
+
+  it('count=0 の縮退: textItems が全て空文字でも savedMeta があれば true (早期 return)', () => {
+    // nonEmptyTextItemCount === 0 の場合、閾値計算を経由せず true を返す。
+    const emptyTextItems = [{ str: '' }, { str: '   ' }];
+    expect(shouldUseSavedMeta(makeSavedMeta(1), emptyTextItems as any)).toBe(true);
+    // savedMeta が大量でも (閾値を無視して) true になる
+    expect(shouldUseSavedMeta(makeSavedMeta(1000), emptyTextItems as any)).toBe(true);
+  });
+
+  it('count が小さい時 (count+25 が支配的): count=1 → 閾値=26', () => {
+    // threshold = max(1*2, 1+25) = max(2, 26) = 26
+    const textItems = makeTextItems(1);
+    expect(shouldUseSavedMeta(makeSavedMeta(26), textItems as any)).toBe(true);  // ちょうど閾値
+    expect(shouldUseSavedMeta(makeSavedMeta(27), textItems as any)).toBe(false); // 閾値+1
+    expect(shouldUseSavedMeta(makeSavedMeta(25), textItems as any)).toBe(true);  // 閾値-1
+  });
+
+  it('count が大きい時 (count*2 が支配的): count=100 → 閾値=200', () => {
+    // threshold = max(100*2, 100+25) = max(200, 125) = 200
+    const textItems = makeTextItems(100);
+    expect(shouldUseSavedMeta(makeSavedMeta(200), textItems as any)).toBe(true);  // ちょうど閾値
+    expect(shouldUseSavedMeta(makeSavedMeta(201), textItems as any)).toBe(false); // 閾値+1
+    expect(shouldUseSavedMeta(makeSavedMeta(199), textItems as any)).toBe(true);  // 閾値-1
+  });
+
+  it('count=24 (count+25=49 が支配的、count*2=48 未満): 閾値=49', () => {
+    // threshold = max(48, 49) = 49
+    const textItems = makeTextItems(24);
+    expect(shouldUseSavedMeta(makeSavedMeta(49), textItems as any)).toBe(true);
+    expect(shouldUseSavedMeta(makeSavedMeta(50), textItems as any)).toBe(false);
+  });
+
+  it('count=25 (交点: count*2 === count+25 === 50): 閾値=50', () => {
+    // threshold = max(50, 50) = 50 (両辺が一致する切替点)
+    const textItems = makeTextItems(25);
+    expect(shouldUseSavedMeta(makeSavedMeta(50), textItems as any)).toBe(true);
+    expect(shouldUseSavedMeta(makeSavedMeta(51), textItems as any)).toBe(false);
+  });
+
+  it('count=26 (count*2=52 が支配的に切り替わる、count+25=51): 閾値=52', () => {
+    // threshold = max(52, 51) = 52
+    const textItems = makeTextItems(26);
+    expect(shouldUseSavedMeta(makeSavedMeta(52), textItems as any)).toBe(true);
+    expect(shouldUseSavedMeta(makeSavedMeta(53), textItems as any)).toBe(false);
+  });
+
+  it('空文字/空白のみの textItems は非空カウントから除外される', () => {
+    // str.trim() === '' の item は count に含めない。
+    // 実質 count=2 (非空 2 件) → threshold = max(4, 27) = 27
+    const textItems = [
+      { str: 'a' },
+      { str: '' },
+      { str: '   ' },
+      { str: 'b' },
+    ];
+    expect(shouldUseSavedMeta(makeSavedMeta(27), textItems as any)).toBe(true);
+    expect(shouldUseSavedMeta(makeSavedMeta(28), textItems as any)).toBe(false);
   });
 });

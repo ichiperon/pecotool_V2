@@ -1403,6 +1403,36 @@ describe('runOcrOnRegion: 未カバー分岐', () => {
     expect(p0.textBlocks).toHaveLength(1);
     expect(p0.textBlocks[0].text).toBe('AFTER_EVICT');
   });
+
+  it('#365 (PCT-142): 既存 order が非連続な場合でも範囲 OCR 追記の order は既存と衝突しない', async () => {
+    // 削除後などで order が歯抜けになった状態 (3件から order=0 を削除して [1, 2] が残った想定)
+    const doc = makeDoc(1);
+    const existing: TextBlock[] = [
+      { id: 'e1', text: 'A', originalText: 'A', bbox: { x: 0, y: 0, width: 10, height: 10 },
+        writingMode: 'horizontal', order: 1, isNew: false, isDirty: false },
+      { id: 'e2', text: 'B', originalText: 'B', bbox: { x: 0, y: 10, width: 10, height: 10 },
+        writingMode: 'horizontal', order: 2, isNew: false, isDirty: false },
+    ];
+    doc.pages.get(0)!.textBlocks = existing;
+    usePecoStore.getState().setDocument(doc);
+
+    h.invokeMock.mockImplementation(async (cmd: string) => (cmd === 'run_ocr' ? okOcrResult('NEW') : ''));
+
+    const canvas = makeOffscreenCanvas(400, 600);
+    const { result } = renderHook(() => useOcrEngine(() => {}));
+    await act(async () => {
+      await result.current.runOcrOnRegion(canvas, { x: 0, y: 0, width: 40, height: 20 }, 0, 100);
+    });
+
+    const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks;
+    expect(blocks).toHaveLength(3);
+    // length ベースの旧採番だと existingBlocks.length=2 から order=2 が付き、既存 order=2 (e2) と衝突する。
+    // 修正後は既存最大値 (2) + 1 を起点に採番するため 3 になる。
+    const newBlock = blocks.find((b) => b.text === 'NEW')!;
+    expect(newBlock.order).toBe(3);
+    const orders = blocks.map((b) => b.order);
+    expect(new Set(orders).size).toBe(orders.length);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

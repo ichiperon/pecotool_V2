@@ -3127,3 +3127,254 @@ describe('useFileOperations temp書込先 fs scope 非検証契約の回帰ガ�
     expect(replaceArgs.tempPath).toBe(tempPathUsed);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// #361 (PCT-138): 読込中保存ガードの非対称 — executeSaveAs / handleSaveTo にも
+// handleSave (:944 相当) と対称の isLoadingFileRef ガードを追加した回帰テスト。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('useFileOperations 読込中保存ガードの対称性 (PCT-138 #361)', () => {
+  function setupCleanLoadedDoc(filePath: string): PecoDocument {
+    const cleanPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: false,
+      thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath,
+      fileName: filePath.split('/').pop()!,
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, cleanPage]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: doc, isDirty: false, undoStack: [], redoStack: [] });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    return doc;
+  }
+
+  it('ファイル読込中 (loadPDF await 中) の executeSaveAs は save ダイアログを開かず通知して no-op', async () => {
+    setupCleanLoadedDoc('/pct138/loaded.pdf');
+
+    let resolveLoad!: (doc: unknown) => void;
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => { resolveLoad = resolve; }),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const openPromise = result.current.handleOpen('/pct138/incoming.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct138/incoming.pdf'));
+
+    // 読込中に Ctrl+Shift+S 相当 (別名保存) を実行
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    await act(async () => {
+      await result.current.executeSaveAs();
+    });
+
+    // 修正前: save ダイアログが開き savePDF まで進みうる。修正後: ガードで即拒否。
+    expect(save).not.toHaveBeenCalled();
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/読み込み中は保存できません/),
+    );
+
+    // 後片付け: ロードを完走させる
+    await act(async () => {
+      resolveLoad({
+        filePath: '/pct138/incoming.pdf',
+        fileName: 'incoming.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map(),
+      });
+      await openPromise;
+    });
+  });
+
+  it('save ダイアログ await 中に読込が開始した場合も executeSaveAs は保存を中断する', async () => {
+    setupCleanLoadedDoc('/pct138/dialog-race.pdf');
+
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    let resolveSaveDialog!: (path: string | null) => void;
+    (save as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => { resolveSaveDialog = resolve; }),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const saveAsPromise = result.current.executeSaveAs();
+    await waitFor(() => expect(save).toHaveBeenCalled());
+
+    // ダイアログでユーザーがパスを選ぶ前に、別経路 (loadPDF) の読込が始まった状況を再現
+    let resolveLoad!: (doc: unknown) => void;
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => { resolveLoad = resolve; }),
+    );
+    const openPromise = result.current.handleOpen('/pct138/incoming-race.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct138/incoming-race.pdf'));
+
+    // ダイアログがパスを返す (読込は依然進行中)
+    resolveSaveDialog('/pct138/dialog-race-target.pdf');
+    await saveAsPromise;
+
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/読み込み中は保存できません/),
+    );
+
+    // 後片付け
+    await act(async () => {
+      resolveLoad({
+        filePath: '/pct138/incoming-race.pdf',
+        fileName: 'incoming-race.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map(),
+      });
+      await openPromise;
+    });
+  });
+
+  it('ファイル読込中 (loadPDF await 中) の handleSaveTo は false を返し savePDF を呼ばない', async () => {
+    setupCleanLoadedDoc('/pct138/saveto-loaded.pdf');
+
+    let resolveLoad!: (doc: unknown) => void;
+    (loadPDF as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => { resolveLoad = resolve; }),
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const openPromise = result.current.handleOpen('/pct138/saveto-incoming.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct138/saveto-incoming.pdf'));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.handleSaveTo('/pct138/saveto-target.pdf');
+    });
+
+    // 修正前: sidecar 保存が素通りして savePDF が呼ばれる。修正後: ガードで拒否。
+    expect(ok).toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/読み込み中は保存できません/),
+    );
+
+    // 後片付け
+    await act(async () => {
+      resolveLoad({
+        filePath: '/pct138/saveto-incoming.pdf',
+        fileName: 'saveto-incoming.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map(),
+      });
+      await openPromise;
+    });
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// #364 (PCT-141): clear_backup fire-and-forget が失敗を握りつぶしていた点の
+// 回帰テスト。失敗を console.warn で可視化し 1 回リトライすること、かつ
+// 保存自体の成否 (戻り値・成功トースト) には影響させないことを確認する。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('useFileOperations clear_backup 失敗時の warn + リトライ (PCT-141 #364)', () => {
+  it('clear_backup が1回目失敗しても console.warn の上でリトライされ、保存自体は成功扱いのまま', async () => {
+    const doc = makeSingleDirtyPageDoc('/pct141/retry.pdf');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    let clearBackupCallCount = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'clear_backup') {
+        clearBackupCallCount += 1;
+        if (clearBackupCallCount === 1) {
+          return Promise.reject(new Error('EBUSY: backup file locked'));
+        }
+        return Promise.resolve(undefined);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    // clear_backup の失敗は保存の成否に影響しない (保存自体は成功扱い)
+    expect(ok).toBe(true);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存しました/),
+    );
+
+    // clear_backup は fire-and-forget の外側からは待てないため、リトライが
+    // 完走するまで待機してから呼び出し回数と warn ログを確認する。
+    await waitFor(() => expect(clearBackupCallCount).toBe(2));
+    const clearBackupCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'clear_backup');
+    expect(clearBackupCalls.length).toBe(2);
+    expect(clearBackupCalls[0][1]).toEqual({ filePath: doc.filePath });
+    expect(clearBackupCalls[1][1]).toEqual({ filePath: doc.filePath });
+
+    await waitFor(() => {
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/clear_backup failed, retrying once/),
+        expect.anything(),
+      );
+    });
+    // リトライが成功したので「リトライも失敗した」警告は出ない
+    expect(
+      warnSpy.mock.calls.some(([msg]) => String(msg).includes('clear_backup retry failed')),
+    ).toBe(false);
+
+    warnSpy.mockRestore();
+  });
+
+  it('clear_backup が2回とも失敗した場合も保存自体は成功扱いのまま、両方の警告が出る', async () => {
+    const doc = makeSingleDirtyPageDoc('/pct141/retry-fail-both.pdf');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    let clearBackupCallCount = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'clear_backup') {
+        clearBackupCallCount += 1;
+        return Promise.reject(new Error('EBUSY: backup file locked'));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(true);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/保存しました/),
+    );
+
+    await waitFor(() => expect(clearBackupCallCount).toBe(2));
+
+    await waitFor(() => {
+      expect(
+        warnSpy.mock.calls.some(([msg]) => String(msg).includes('clear_backup retry failed')),
+      ).toBe(true);
+    });
+
+    warnSpy.mockRestore();
+  });
+});

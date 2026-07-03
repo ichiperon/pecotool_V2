@@ -374,7 +374,10 @@ interface PecoState {
    *   - 'selection': 選択中の BB のみ
    *   - 'current': 現在ページの全 BB
    *   - 'all': document.totalPages 全範囲。issue #104: LRU 退避ページも IDB から読み戻して走査する
-   * - useRegex=true のときの構文エラーは throw する (UI 側でハンドルする)
+   * - #338 (PCT-115): useRegex=true のときの構文エラーは throw せず、hits:0 の安全な戻り値に
+   *   `regexError` (エラーメッセージ) を添えて返す。UI 層 (useFindReplace の regexError) が
+   *   一次防御だが、呼び出し元の実装変更に対する store 側の defense-in-depth として、
+   *   replaceTextBatch の invalidRuleIndices と対称な設計にしている。
    *   useRegex=false のとき、replacement 内の $&, $0, $1, $$ などの特殊扱いを避けるため
    *   String.prototype.replace に渡す前に '$' → '$$' エスケープを行う (issue #105)
    * - skipBlockIds: 編集中などで保護したいブロック ID。スキップしたページに対する skip 数も返す
@@ -389,7 +392,7 @@ interface PecoState {
     caseSensitive: boolean;
     useRegex: boolean;
     skipBlockIds?: ReadonlySet<string>;
-  }) => Promise<{ hits: number; blocks: number; pages: number; skippedBlocks: number }>;
+  }) => Promise<{ hits: number; blocks: number; pages: number; skippedBlocks: number; regexError?: string }>;
 
   /**
    * issue #213: 複数の置換ルールを 1-pass で適用する高速バッチ版。
@@ -1151,6 +1154,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const pastedIds = new Set<string>();
     let offsetX = 10;
     let offsetY = 10;
+    // #365 (PCT-142): order を newBlocks.length ベースで採番すると、削除後の非連続 order
+    // (例: [0, 5]) 環境で既存ブロックの order と衝突しうる。既存 order の最大値 + 1 を起点に
+    // 採番する (useOcrEngine.ts の範囲 OCR 追記と同じ方針)。
+    let nextOrder = newBlocks.reduce((max, b) => Math.max(max, b.order), -1) + 1;
 
     if (targetCenter) {
       const minX = Math.min(...clipboard.map(b => b.bbox.x));
@@ -1167,7 +1174,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         ...b,
         id: newId,
         bbox: { ...b.bbox, x: b.bbox.x + offsetX, y: b.bbox.y + offsetY },
-        order: newBlocks.length,
+        order: nextOrder++,
         isNew: true,
         isDirty: true
       };
@@ -1522,11 +1529,25 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const pageOrderAtEntry = state.pageOrder;
 
     // 検索用の RegExp を組み立てる。useRegex=false は escape して flag 'g' を必ず付ける。
-    // useRegex=true の場合は構文エラーが上に伝播する (UI で catch する想定)。
+    // #338 (PCT-115): useRegex=true の構文エラーは throw せず catch し、安全な戻り値
+    // (hits:0 + regexError) を返す。replaceTextBatch の invalidRuleIndices と対称な
+    // store 層 defense-in-depth。UI 層 (useFindReplace の regexError) が一次防御だが、
+    // 呼び出し元の実装変更に脆くならないよう二層目として構文エラーを吸収する。
     const flags = `g${caseSensitive ? '' : 'i'}`;
-    const re = useRegex
-      ? new RegExp(pattern, flags)
-      : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    let re: RegExp;
+    try {
+      re = useRegex
+        ? new RegExp(pattern, flags)
+        : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    } catch (e) {
+      return {
+        hits: 0,
+        blocks: 0,
+        pages: 0,
+        skippedBlocks: 0,
+        regexError: e instanceof Error ? e.message : String(e),
+      };
+    }
 
     // issue #105: String.prototype.replace は replacement 内の $&, $0, $1, $$ を
     // 特殊解釈する。useRegex=false では replacement を literal として扱うため '$' を

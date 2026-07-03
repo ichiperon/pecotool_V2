@@ -1075,9 +1075,13 @@ export function useOcrEngine(
       const newBlocks = toTextBlocks(adjustedBlocks, settings);
       const currentPage = usePecoStore.getState().document?.pages.get(pageIndex);
       const existingBlocks = currentPage?.textBlocks ?? [];
+      // #365 (PCT-142): existingBlocks.length ベースの採番は、削除後の非連続 order
+      // (例: [0, 5]) 環境で既存ブロックの order と衝突しうる。既存 order の最大値 + 1 を
+      // 起点に採番する (pecoStore.ts pasteClipboard と同じ方針)。
+      const baseOrder = existingBlocks.reduce((max, b) => Math.max(max, b.order), -1) + 1;
       const mergedBlocks = [
         ...existingBlocks,
-        ...newBlocks.map((b, i) => ({ ...b, order: existingBlocks.length + i })),
+        ...newBlocks.map((b, i) => ({ ...b, order: baseOrder + i })),
       ];
 
       usePecoStore.getState().updatePageData(pageIndex, {

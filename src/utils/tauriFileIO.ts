@@ -66,9 +66,22 @@ export async function writeFileAtomically(path: string, bytes: Uint8Array): Prom
  * ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33) が返るため、
  * これらを「別名で保存」フォールバックの引き金にする。
  *
- * Rust 側は std::io::Error の英文メッセージや `os error 32` 番号を含む文字列を
- * 返してくる。コード番号 (os error 32) や英語フレーズの両方で検出できるように
- * 緩めの正規表現でマッチする。
+ * Rust std::io::Error の Display は Windows ではロケール依存メッセージ +
+ * `(os error N)` を返す。日本語 Windows では ERROR_ACCESS_DENIED が
+ * 「アクセスが拒否されました。 (os error 5)」のように出力され、英語フレーズ
+ * 照合をすり抜けるため、`os error` の番号照合をロケールに依存しない
+ * フォールバックとして併用する (issue #363)。
+ *
+ * 番号は以下を対象にする:
+ *   5    = ERROR_ACCESS_DENIED (読み取り専用属性・権限不足を含む)
+ *   19   = ERROR_WRITE_PROTECT
+ *   32   = ERROR_SHARING_VIOLATION (他プロセスがファイルを占有)
+ *   33   = ERROR_LOCK_VIOLATION
+ *   1224 = ERROR_USER_MAPPED_FILE
+ *
+ * os error 5 は純粋な権限不足 (書込先フォルダの ACL 不足など) でも発生しうるが、
+ * その場合も「別名で保存」への誘導は妥当な救済導線であるため、番号だけで
+ * ロック検知と権限不足を区別する必要はない。
  */
 export function isWriteAccessError(message: string): boolean {
   const lower = message.toLowerCase();
@@ -80,6 +93,6 @@ export function isWriteAccessError(message: string): boolean {
     lower.includes('being used by another process') ||
     lower.includes('sharing violation') ||
     lower.includes('lock violation') ||
-    /os error (32|33)\b/.test(lower)
+    /os error (5|19|32|33|1224)\b/.test(lower)
   );
 }

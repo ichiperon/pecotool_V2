@@ -653,6 +653,31 @@ describe('pecoStore', () => {
       expect(blocks[3].order).toBe(3)
     })
 
+    it('#365 (PCT-142): 既存 order が非連続な場合でも paste の order は既存と衝突しない', () => {
+      // 削除後などで order が歯抜けになった状態 (例: 3件から order=1 を削除して [0, 2] が残った想定)
+      const e1 = makeBlock({ order: 0 })
+      const e2 = makeBlock({ order: 2 })
+      const c1 = makeBlock()
+      const c2 = makeBlock()
+      const page = makePage({ textBlocks: [e1, e2] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        clipboard: [c1, c2],
+      })
+
+      usePecoStore.getState().pasteClipboard()
+
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      // length ベースの旧採番だと newBlocks.length=2 から order=2 が付き、既存 order=2 と衝突する。
+      // 修正後は既存最大値 (2) + 1 を起点に採番するため 3, 4 になる。
+      expect(blocks[2].order).toBe(3)
+      expect(blocks[3].order).toBe(4)
+      // order の一意性を明示的に検証 (読み順ソートのタイ回避)
+      const orders = blocks.map(b => b.order)
+      expect(new Set(orders).size).toBe(orders.length)
+    })
+
     it('U-PS-45: clipboard が空なら pasteClipboard は no-op', () => {
       const page = makePage({ textBlocks: [] })
       usePecoStore.setState({
@@ -2110,7 +2135,7 @@ describe('pecoStore', () => {
       expect(blocks[0].text).toBe('X hello HELLO')
     })
 
-    it('U-FR-05: useRegex=true で正規表現が機能し、構文エラーは throw する', async () => {
+    it('U-FR-05: useRegex=true で正規表現が機能する', async () => {
       const b = makeBlock({ id: 'b', text: 'abc123 def456' })
       const page = makePage({ pageIndex: 0, textBlocks: [b] })
       usePecoStore.setState({
@@ -2129,17 +2154,39 @@ describe('pecoStore', () => {
       expect(result.hits).toBe(2)
       const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
       expect(blocks[0].text).toBe('abc# def#')
+    })
 
-      // 構文エラーは throw (async なので rejects.toThrow)
-      await expect(
-        usePecoStore.getState().replaceText({
-          scope: 'current',
-          pattern: '[invalid',
-          replacement: 'x',
-          caseSensitive: false,
-          useRegex: true,
-        }),
-      ).rejects.toThrow()
+    it('#338 (PCT-115): useRegex=true の構文エラーは throw せず、hits:0 + regexError で安全に返る', async () => {
+      const b = makeBlock({ id: 'b', text: 'abc123 def456' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '[invalid',
+        replacement: 'x',
+        caseSensitive: false,
+        useRegex: true,
+      })
+
+      expect(result).toEqual({ hits: 0, blocks: 0, pages: 0, skippedBlocks: 0, regexError: expect.any(String) })
+      // store 側は無変更のままであること (安全な戻り値であって副作用を残さない)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('abc123 def456')
+
+      // 続く正常な呼び出し (正しい正規表現) は不変のまま機能する
+      const result2 = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '\\d+',
+        replacement: '#',
+        caseSensitive: false,
+        useRegex: true,
+      })
+      expect(result2.hits).toBe(2)
+      expect(result2.regexError).toBeUndefined()
     })
 
     it('U-FR-06: 1 回の replaceText は 1 つの update_pages Action として undo / redo できる', async () => {

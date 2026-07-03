@@ -921,6 +921,25 @@ export function useFileOperations(
   };
 
   /**
+   * PCT-141 (#364): 正常保存後の clear_backup は fire-and-forget のまま (保存自体の
+   * 成否には影響させない設計を維持) だが、失敗を無条件に握りつぶさず console.warn +
+   * 1 回リトライする。リトライも失敗した場合はバックアップ残骸が残るが、これは
+   * Rust 側 (backup.rs の mtime 比較・stale 判定) の対応が別途必要 (#364 の別Issue化推奨)。
+   */
+  const clearBackupWithRetry = async (filePath: string): Promise<void> => {
+    try {
+      await invoke('clear_backup', { filePath });
+    } catch (err) {
+      console.warn('[save] clear_backup failed, retrying once:', err);
+      try {
+        await invoke('clear_backup', { filePath });
+      } catch (retryErr) {
+        console.warn('[save] clear_backup retry failed, backup file may remain:', retryErr);
+      }
+    }
+  };
+
+  /**
    * Ctrl+S 経路と「フォルダ OCR の自動上書き保存」(#48) の共通エントリ。
    * - 成功時: true
    * - 失敗 / アボート (PDF 未オープン、保存中ロック、_executeSave が null、例外) は false
@@ -1024,8 +1043,8 @@ export function useFileOperations(
         void _writeAuditLog(document.filePath, preSaveActionIndex).catch((e) => {
           console.warn('[save] audit log write failed (ignored):', e);
         });
-        // 正常保存後はバックアップファイルを削除する（fire-and-forget）
-        invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
+        // 正常保存後はバックアップファイルを削除する（fire-and-forget、失敗時は警告+リトライ1回）
+        void clearBackupWithRetry(document.filePath);
         return true;
       }
       return false;
@@ -1085,6 +1104,12 @@ export function useFileOperations(
     }
     const { document } = usePecoStore.getState();
     if (!document) return;
+    // PCT-138 (#361): handleSave (:944 相当) と対称のガード。読込中の別名保存は
+    // 読込完了時の clearTemporaryChanges / setDocument と交差して部分保存になりうるため拒否する。
+    if (isLoadingFileRef.current) {
+      showToast('PDFの読み込み中は保存できません。読み込みが完了してから再度お試しください。');
+      return;
+    }
     if (isOcrRunningRef?.current) {
       showToast('OCR実行中は保存できません。OCRを中止または完了してから保存してください。', true);
       return;
@@ -1106,6 +1131,12 @@ export function useFileOperations(
         // チェックはダイアログ表示前の値しか見ていない。
         if (isSavingRef.current) {
           showToast('別の保存処理が進行中です。完了してから再度お試しください。');
+          return;
+        }
+        // PCT-138 (#361): 同じ理由でダイアログ await 中に別ファイルの読込が
+        // 開始していないかも再チェックする (冒頭のチェックはダイアログ表示前の値)。
+        if (isLoadingFileRef.current) {
+          showToast('PDFの読み込み中は保存できません。読み込みが完了してから再度お試しください。');
           return;
         }
         isSavingRef.current = true;
@@ -1144,9 +1175,9 @@ export function useFileOperations(
               console.warn('[save-as] audit log write failed (ignored):', e);
             });
             addToRecent(path);
-            // 元のパスのバックアップも新しいパスのバックアップも削除する
-            if (prevPath) invoke('clear_backup', { filePath: prevPath }).catch(() => {});
-            invoke('clear_backup', { filePath: path }).catch(() => {});
+            // 元のパスのバックアップも新しいパスのバックアップも削除する（失敗時は警告+リトライ1回）
+            if (prevPath) void clearBackupWithRetry(prevPath);
+            void clearBackupWithRetry(path);
           }
         } finally {
           isSavingRef.current = false;
@@ -1195,6 +1226,11 @@ export function useFileOperations(
    * 成功時 true / 失敗時 false を返す。
    */
   const handleSaveTo = async (targetPath: string, options?: SaveInvocationOptions): Promise<boolean> => {
+    // PCT-138 (#361): handleSave / executeSaveAs と対称のガード。読込中の sidecar 保存は拒否する。
+    if (isLoadingFileRef.current) {
+      showToast('PDFの読み込み中は保存できません。読み込みが完了してから再度お試しください。');
+      return false;
+    }
     if (isSavingRef.current) {
       showToast('保存処理が進行中です。');
       return false;
@@ -1324,7 +1360,7 @@ export function useFileOperations(
       } else {
         showToast(formatSaveToast('全ページに位置補正を適用して保存しました', result.size, result.skippedChars));
       }
-      invoke('clear_backup', { filePath: document.filePath }).catch(() => {});
+      void clearBackupWithRetry(document.filePath);
       return true;
     } catch (err) {
       console.error('[saveAllPagesWithOffset] failed:', err);
