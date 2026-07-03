@@ -602,7 +602,9 @@ describe('S-07: useThumbnailPanel epoch & URL lifecycle (real hook)', () => {
     await Promise.resolve()
   }
 
-  it('S-07-01: stale epoch URL is revoked and not stored on file switch mid-flight', async () => {
+  // 広域 npm test のフル並列時に既定タイムアウト超過で flaky になる実績あり
+  // （単独実行では常に緑・2026-07-03 実測）。負荷余裕を持たせる。
+  it('S-07-01: stale epoch URL is revoked and not stored on file switch mid-flight', { timeout: 20_000 }, async () => {
     const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
     await setDoc('/path/A.pdf', 5)
 

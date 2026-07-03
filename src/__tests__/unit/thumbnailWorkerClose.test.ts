@@ -52,7 +52,9 @@ afterEach(() => {
   ;(globalThis as Record<string, unknown>).onmessage = originalOnMessage
 })
 
-describe('thumbnail.worker CLOSE_PDF (PCT-073)', () => {
+// 広域 npm test のフル並列時に既定 5s タイムアウトを超えて flaky になる実績あり
+// （単独実行では常に緑・2026-07-03 実測）。負荷余裕を持たせる。
+describe('thumbnail.worker CLOSE_PDF (PCT-073)', { timeout: 20_000 }, () => {
   it('ロード完了後の CLOSE_PDF で pdfDoc.destroy() が呼ばれる', async () => {
     const docDestroy = vi.fn().mockResolvedValue(undefined)
     const taskDestroy = vi.fn().mockResolvedValue(undefined)
