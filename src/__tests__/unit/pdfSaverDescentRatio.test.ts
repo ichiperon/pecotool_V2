@@ -81,4 +81,17 @@ describe('PCT-092: descent 比の上限キャップ (0.12)', () => {
     const broken = { embedder: {}, heightAtSize: () => 0 } as unknown as Parameters<typeof getFontDescentRatio>[0];
     expect(getFontDescentRatio(broken, 12)).toBe(0.12);
   });
+
+  it('embedder スパン (ascent-descent) が 0 以下の異常フォントは heightAtSize ベースのフォールバックへ倒れる', () => {
+    // descent > ascent という壊れたメトリクス (span<=0) は embedder ベース計算を
+    // スキップし、heightAtSize(size)/heightAtSize(size,{descender:false}) の比較
+    // フォールバックへ倒れる。
+    const font = {
+      embedder: { font: { ascent: 100, descent: 200 } }, // span = 100-200 = -100 <= 0
+      heightAtSize: (_size: number, opts?: { descender?: boolean }) =>
+        opts?.descender === false ? 8 : 10,
+    } as unknown as Parameters<typeof getFontDescentRatio>[0];
+    // フォールバック生比: (10-8)/10 = 0.2 → 0.12 にキャップされる
+    expect(getFontDescentRatio(font, 12)).toBe(0.12);
+  });
 });

@@ -43,8 +43,17 @@ const m = vi.hoisted(() => {
       this._map = new Map(entries);
     }
     lookup(key: PDFNameStub) { return this._map.get(key.asString()) ?? null; }
-    lookupMaybe(_key: PDFNameStub, _type: unknown) { return undefined; }
-    entries() { return this._map.entries(); }
+    // 実 pdf-lib の lookupMaybe(key, type) は型一致時のみ値を返すが、このスタブは
+    // テスト側が正しい型の値を格納する前提で単純な map lookup として振る舞う
+    // (undefined = 未登録キー、= 実装の「無ければ undefined」と同じ観測結果)。
+    lookupMaybe(key: PDFNameStub, _type: unknown) { return this._map.get(key.asString()); }
+    // 実 pdf-lib の PDFDict#entries() は [PDFName, PDFObject][] を返す。
+    // 呼び出し側 (cleanFormXObjectsInResources / pruneStalePecoToolResources 等) は
+    // key.asString() / key.toString() を呼ぶため、素の string ではなく PDFNameStub
+    // でラップして返す。
+    entries(): [PDFNameStub, unknown][] {
+      return Array.from(this._map.entries()).map(([k, v]) => [new PDFNameStub(k), v]);
+    }
     set(key: PDFNameStub, value: unknown) { this._map.set(key.asString(), value); }
     delete(key: PDFNameStub) { this._map.delete(key.asString()); }
   }
@@ -125,6 +134,15 @@ import {
   measureRuns,
   isPdfRef,
   addRefCount,
+  cleanContentStream,
+  cleanFormXObjectsInResources,
+  pruneStalePecoToolResources,
+  replacePageTextContentStreams,
+  pageHasTextOperatorDamage,
+  collectPageContentRefCounts,
+  sweepNonDirtyPage,
+  findExistingFontKey,
+  getOrRegisterPageFontKey,
 } from '../../utils/pdfSaverCore';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -251,6 +269,24 @@ describe('pdfSaverCore — decodeStreamContents', () => {
     const stream = makeStream(compressed, filterArray);
     const result = decodeStreamContents(stream as never);
     expect(result).toEqual(original);
+  });
+
+  it('returns null for a truthy Filter that is neither a PDFName nor a PDFArray', () => {
+    // Defensive branch: malformed/unexpected Filter value type (e.g. a raw PDFDict).
+    // Must not attempt to modify the stream — return null to skip modification.
+    const raw = new Uint8Array([1, 2, 3]);
+    const weirdFilter = { unexpected: true };
+    const stream = makeStream(raw, weirdFilter);
+    const result = decodeStreamContents(stream as never);
+    expect(result).toBeNull();
+  });
+
+  it('returns raw bytes for an empty PDFArray filter (Filter=[])', () => {
+    const raw = new Uint8Array([9, 8, 7]);
+    const emptyFilterArray = new m.PDFArray([]);
+    const stream = makeStream(raw, emptyFilterArray);
+    const result = decodeStreamContents(stream as never);
+    expect(result).toEqual(raw);
   });
 });
 
@@ -379,6 +415,10 @@ describe('pdfSaverCore — isRepairTextBlock', () => {
     const withBrokenCurve = { ...validBlock, curve: { type: 'unknown' } };
     expect(isRepairTextBlock(withBrokenCurve)).toBe(true);
   });
+
+  it('returns false when order is not a number', () => {
+    expect(isRepairTextBlock({ ...validBlock, order: '0' })).toBe(false);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +452,29 @@ describe('pdfSaverCore — sanitizeBBoxMetaTexts', () => {
   it('skips non-array page entries without throwing', () => {
     const meta = { '0': 'not-array' as unknown as never[] };
     expect(() => sanitizeBBoxMetaTexts(meta, {} as never)).not.toThrow();
+  });
+
+  it('treats a non-integer page key as normalizedPageIndex=undefined but still processes entries', async () => {
+    const pdfSkippedModule = vi.mocked(await import('../../utils/pdfSkippedTextChars'));
+    (pdfSkippedModule.sanitizeTextForPdfCopy as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => 'CLEANED');
+
+    const meta: Record<string, unknown[]> = { 'abc': [{ text: 'dirty', order: 0 }] };
+    const result = sanitizeBBoxMetaTexts(meta, {} as never);
+    expect(result).toBe(true);
+    expect(pdfSkippedModule.sanitizeTextForPdfCopy).toHaveBeenCalledWith('dirty', {}, undefined);
+  });
+
+  it('skips null/primitive array entries without throwing and reports no change', () => {
+    const meta: Record<string, unknown[]> = { '0': [null, 'a raw string entry', 42] as unknown[] };
+    expect(() => sanitizeBBoxMetaTexts(meta, {} as never)).not.toThrow();
+    expect(sanitizeBBoxMetaTexts(meta, {} as never)).toBe(false);
+  });
+
+  it('skips entries whose text field is not a string', () => {
+    const meta: Record<string, unknown[]> = { '0': [{ text: 42, order: 0 }] };
+    const result = sanitizeBBoxMetaTexts(meta, {} as never);
+    expect(result).toBe(false);
   });
 });
 
@@ -548,5 +611,246 @@ describe('pdfSaverCore — isPdfRef / addRefCount', () => {
     addRefCount(counts, 42);
     addRefCount(counts, null);
     expect(counts.size).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coverage-gap fill (branch coverage wave): cleanContentStream / cleanFormXObjectsInResources /
+// pruneStalePecoToolResources / replacePageTextContentStreams / pageHasTextOperatorDamage /
+// collectPageContentRefCounts / findExistingFontKey / getOrRegisterPageFontKey / sweepNonDirtyPage
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Minimal PDFDocument.context stub shared by the tests below (mirrors pdfSaver.test.ts's makeSweepableContext). */
+function makeStubContext(overrides: Record<string, unknown> = {}) {
+  return {
+    lookup: vi.fn((value: unknown) => value),
+    delete: vi.fn(),
+    register: vi.fn((value: unknown) => value),
+    flateStream: vi.fn((data: Uint8Array) => new m.PDFRawStream(new m.PDFDict(), data)),
+    ...overrides,
+  };
+}
+
+/** PDFRef-like object matching the `constructor.name === 'PDFRef'` duck-type used by isPdfRef(). */
+function makePdfRef(str: string): { toString: () => string } {
+  function PDFRef(this: { toString: () => string }) {
+    this.toString = () => str;
+  }
+  const ref = new (PDFRef as never)() as { toString: () => string };
+  Object.defineProperty((ref as never).constructor, 'name', { value: 'PDFRef' });
+  return ref;
+}
+
+describe('pdfSaverCore — cleanContentStream', () => {
+  it('returns false and does not call updateContents when stripTextBlocks makes no change (identity mock)', () => {
+    const raw = new TextEncoder().encode('0 0 100 100 re f'); // no filter → decodeStreamContents returns raw as-is
+    const stream = makeStream(raw);
+    const updateSpy = vi.spyOn(stream, 'updateContents');
+    const result = cleanContentStream(stream as never);
+    expect(result).toBe(false);
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('pdfSaverCore — cleanFormXObjectsInResources', () => {
+  it('skips XObject entries that resolve to a non-PDFRawStream (e.g. unresolved ref) without throwing', () => {
+    const xObjectDict = new m.PDFDict([['/Im0', 'not-a-stream-value']]);
+    const resources = new m.PDFDict([['/XObject', xObjectDict]]);
+    const context = makeStubContext();
+    expect(() => cleanFormXObjectsInResources(resources as never, context as never)).not.toThrow();
+  });
+
+  it('skips XObject entries that are PDFRawStream but Subtype != /Form (e.g. an Image), leaving it untouched', () => {
+    const imageDict = new m.PDFDict([['/Subtype', new m.PDFName('/Image')]]);
+    const imageStream = new m.PDFRawStream(imageDict, new Uint8Array([1, 2, 3]));
+    const xObjectDict = new m.PDFDict([['/Im0', imageStream]]);
+    const resources = new m.PDFDict([['/XObject', xObjectDict]]);
+    const context = makeStubContext();
+    const updateSpy = vi.spyOn(imageStream, 'updateContents');
+
+    cleanFormXObjectsInResources(resources as never, context as never);
+
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when resources have no XObject dict', () => {
+    const resources = new m.PDFDict();
+    const context = makeStubContext();
+    expect(() => cleanFormXObjectsInResources(resources as never, context as never)).not.toThrow();
+  });
+});
+
+describe('pdfSaverCore — pruneStalePecoToolResources (ExtGState loop)', () => {
+  it('deletes ExtGState entries matching isPecoToolGraphicsStateKey and keeps non-matching entries', async () => {
+    const markersModule = vi.mocked(await import('../../utils/pdfPecoToolMarkers'));
+    (markersModule.isPecoToolGraphicsStateKey as ReturnType<typeof vi.fn>)
+      .mockImplementation((key: { asString: () => string }) => key.asString() === '/PecoGS-1');
+
+    const extGStateDict = new m.PDFDict([
+      ['/PecoGS-1', 'gs-peco'],
+      ['/GS0', 'gs-other'],
+    ]);
+    const resources = new m.PDFDict([['/ExtGState', extGStateDict]]);
+    const pageNode = { Resources: () => resources as never };
+
+    pruneStalePecoToolResources(pageNode as never);
+
+    const remainingKeys = Array.from(extGStateDict.entries()).map(([k]) => k.asString());
+    expect(remainingKeys).toEqual(['/GS0']);
+
+    (markersModule.isPecoToolGraphicsStateKey as ReturnType<typeof vi.fn>).mockReset().mockReturnValue(false);
+  });
+
+  it('does nothing when resources have no ExtGState dict', () => {
+    const resources = new m.PDFDict();
+    const pageNode = { Resources: () => resources as never };
+    expect(() => pruneStalePecoToolResources(pageNode as never)).not.toThrow();
+  });
+});
+
+describe('pdfSaverCore — replacePageTextContentStreams', () => {
+  it('warns with a typeof fallback when a content stream ref resolves to null, and leaves an unchanged per-entry stream untouched (anyDecodeFailed path)', () => {
+    const rawBytes = new TextEncoder().encode('0 0 100 100 re f'); // no BT/ET → stripTextBlocks(identity) is a no-op
+    const validStream = makeStream(rawBytes); // no filter
+    const streamsArray = new m.PDFArray(['NULL_REF', validStream]);
+    const pageNode = {
+      get: vi.fn(() => streamsArray),
+      set: vi.fn(),
+    };
+    const context = makeStubContext({
+      lookup: vi.fn((v: unknown) => (v === 'NULL_REF' ? null : v)),
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const updateSpy = vi.spyOn(validStream, 'updateContents');
+
+    replacePageTextContentStreams(pageNode as never, context as never, new Map());
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('is not a PDFRawStream'),
+      expect.objectContaining({ streamType: 'object' }), // typeof null fallback
+    );
+    // per-entry strip made no change → updateContents not called for the valid stream
+    expect(updateSpy).not.toHaveBeenCalled();
+    // merge path not taken (anyDecodeFailed skips it)
+    expect(pageNode.set).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+  });
+});
+
+describe('pdfSaverCore — pageHasTextOperatorDamage', () => {
+  it('returns false when the page has no Contents entry at all', () => {
+    expect(pageHasTextOperatorDamage({} as never, makeStubContext() as never)).toBe(false);
+  });
+
+  it('falls back to pageNode.Contents() when .get is absent', () => {
+    const rawBytes = new TextEncoder().encode('BT (x) Tj ET');
+    const stream = makeStream(rawBytes);
+    const pageNode = { Contents: () => stream as never }; // no .get
+    const context = makeStubContext();
+    expect(() => pageHasTextOperatorDamage(pageNode as never, context as never)).not.toThrow();
+    expect(context.lookup).toHaveBeenCalled();
+  });
+
+  it('skips non-PDFRawStream entries and detects damage carried across a decode-failure boundary (PCT-177)', async () => {
+    const contentStreamModule = vi.mocked(await import('../../utils/pdfContentStream'));
+    (contentStreamModule.hasTextOperatorsOutsideTextObjects as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(true);
+
+    const okBytes = new TextEncoder().encode('BT (leaked'); // decodes fine (no filter)
+    const okStream = makeStream(okBytes);
+    const badFilterStream = makeStream(new Uint8Array([1, 2, 3]), new m.PDFName('/LZWDecode')); // decode → null
+    const streamsArray = new m.PDFArray([okStream, 'NOT_A_STREAM', badFilterStream]);
+    const pageNode = { get: vi.fn(() => streamsArray) };
+    const context = makeStubContext({
+      lookup: vi.fn((v: unknown) => (v === 'NOT_A_STREAM' ? {} : v)),
+    });
+
+    const result = pageHasTextOperatorDamage(pageNode as never, context as never);
+    expect(result).toBe(true);
+    // 早期 return (line 421) を通った証跡として、直近の呼び出しが decodedStreams
+    // (okBytes 分) を対象にしていたことを確認する。呼び出し回数はファイル内の
+    // 他テストと mock を共有しているため（本ファイルは vi.clearAllMocks を持たない
+    // 既存の慣習）、絶対回数ではなく直近の呼び出し引数で検証する。
+    const lastCallArg = (contentStreamModule.hasTextOperatorsOutsideTextObjects as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(new TextDecoder().decode(lastCallArg as Uint8Array)).toContain('BT (leaked');
+  });
+
+  it('a decode failure with no prior accumulated content does not throw or falsely report damage', () => {
+    const badFilterStream = makeStream(new Uint8Array([1, 2, 3]), new m.PDFName('/LZWDecode'));
+    const pageNode = { get: vi.fn(() => badFilterStream) }; // single, non-array Contents
+    const context = makeStubContext();
+    expect(pageHasTextOperatorDamage(pageNode as never, context as never)).toBe(false);
+  });
+});
+
+describe('pdfSaverCore — collectPageContentRefCounts', () => {
+  it('returns an empty map when pdfDoc has no getPages function', () => {
+    const counts = collectPageContentRefCounts({} as never);
+    expect(counts.size).toBe(0);
+  });
+});
+
+describe('pdfSaverCore — findExistingFontKey / getOrRegisterPageFontKey', () => {
+  it('reuses an existing PecoTool-tagged font key when a matching ref is found', () => {
+    const targetRef = makePdfRef('5 0 R');
+    const font = { ref: targetRef } as unknown as import('@cantoo/pdf-lib').PDFFont;
+    const fontDict = new m.PDFDict([
+      ['/Helvetica', makePdfRef('1 0 R')], // non-matching ref
+      ['/PecoFont-abc', targetRef],        // matching ref + correct tag → reused
+    ]);
+    const resources = new m.PDFDict([['/Font', fontDict]]);
+    const page = { node: { Resources: () => resources as never } };
+
+    const key = findExistingFontKey(page as never, font);
+    expect(key?.asString()).toBe('/PecoFont-abc');
+  });
+
+  it('does not reuse a matching ref whose key lacks the PecoTool tag prefix', () => {
+    const targetRef = makePdfRef('7 0 R');
+    const font = { ref: targetRef } as unknown as import('@cantoo/pdf-lib').PDFFont;
+    const fontDict = new m.PDFDict([
+      ['/UserFont1', targetRef], // ref matches but not Peco-tagged → must not be reused
+    ]);
+    const resources = new m.PDFDict([['/Font', fontDict]]);
+    const page = { node: { Resources: () => resources as never } };
+
+    expect(findExistingFontKey(page as never, font)).toBeUndefined();
+  });
+
+  it('skips non-PDFRef dict entries while scanning for a matching key', () => {
+    const targetRef = makePdfRef('9 0 R');
+    const font = { ref: targetRef } as unknown as import('@cantoo/pdf-lib').PDFFont;
+    const fontDict = new m.PDFDict([
+      ['/Weird', 'not-a-ref'],
+      ['/PecoFont-xyz', targetRef],
+    ]);
+    const resources = new m.PDFDict([['/Font', fontDict]]);
+    const page = { node: { Resources: () => resources as never } };
+
+    expect(findExistingFontKey(page as never, font)?.asString()).toBe('/PecoFont-xyz');
+  });
+
+  it('getOrRegisterPageFontKey reuses the key found via the findExistingFontKey scan (cache miss, scan hit)', () => {
+    const targetRef = makePdfRef('11 0 R');
+    const font = { ref: targetRef } as unknown as import('@cantoo/pdf-lib').PDFFont;
+    const fontDict = new m.PDFDict([['/PecoFont-found', targetRef]]);
+    const resources = new m.PDFDict([['/Font', fontDict]]);
+    const page = { node: { Resources: () => resources as never } };
+    const fontKeys = new Map<import('@cantoo/pdf-lib').PDFFont, InstanceType<typeof m.PDFName>>();
+
+    const key = getOrRegisterPageFontKey(page as never, font, fontKeys as never);
+    expect(key?.asString()).toBe('/PecoFont-found');
+    expect((fontKeys.get(font) as InstanceType<typeof m.PDFName> | undefined)?.asString()).toBe('/PecoFont-found');
+  });
+});
+
+describe('pdfSaverCore — sweepNonDirtyPage (mock-based edge case)', () => {
+  it('skips content stream refs that do not resolve to a PDFRawStream', () => {
+    const streamsArray = new m.PDFArray(['NOT_A_STREAM']);
+    const pageNode = { get: vi.fn(() => streamsArray), set: vi.fn() };
+    const context = makeStubContext({ lookup: vi.fn(() => ({})) }); // resolves to plain object
+    expect(() => sweepNonDirtyPage(pageNode as never, context as never, new Map())).not.toThrow();
+    expect(pageNode.set).not.toHaveBeenCalled();
   });
 });
