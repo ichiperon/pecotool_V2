@@ -552,6 +552,39 @@ describe('LRU 退避大規模保存 — ブロック無欠落不変則', () => {
   );
 });
 
+// ── らでん監査指摘: 1000 ページ級の検証スケール回復 (env ガード・手動実行) ─────
+//
+// 9e4c627 で loadTest1000Pages.test.ts (env 無しで常時 skip・pdf-lib 直の
+// generate/reload のみで実保存経路を通らない形骸テスト) が削除され、実経路
+// (savePDF 等) を通す本ファイルの 51/120 ページテストへ統合された。
+// らでん指摘: しかし後継は 120 ページどまりで、1000 ページ級の検証スケールが
+// 縮小したまま回復していない。ここで runLargeScaleTest(1000) を、通常の
+// test:critical / CI では重すぎるため PECO_LARGE_SCALE=1000 のときのみ実行する
+// 形で復活させる（既定は skip・手動実行枠 = package.json の test:pdf:largescale）。
+const LARGE_SCALE_1000_ENABLED = process.env.PECO_LARGE_SCALE === '1000';
+
+if (!LARGE_SCALE_1000_ENABLED) {
+  // なぜ skip されるかを明示する（"なぜskipか"を出力する要件）。
+  // eslint-disable-next-line no-console
+  console.log(
+    '[goldenMasterLargeScale] 1000 ページテストは skip します。' +
+      '実行するには環境変数 PECO_LARGE_SCALE=1000 を設定してください' +
+      '（例: npm run test:pdf:largescale）。',
+  );
+}
+
+describe('LRU 退避 1000 ページ規模 — 検証スケール回復 (env ガード・手動実行)', () => {
+  it.skipIf(!LARGE_SCALE_1000_ENABLED)(
+    '1000 ページ（大幅超過: MAX_CACHED_PAGES×20）: 全ブロックが保存後に存在し、IDB 退避が発火している',
+    async () => {
+      await runLargeScaleTest(1000);
+    },
+    // 1000 ページ×3 ブロックの savePDF を 2 サイクル + pdfjs 再ロード 2 回。
+    // 120 ページの 180 秒上限からの外挿で余裕を持って 10 分に設定（手動実行前提のため厳しくしない）。
+    600_000,
+  );
+});
+
 describe('高密度 BB 保存 — 1 ページ大量ブロックの無欠落不変則', () => {
   it(
     '1 ページ × 1000 ブロック: 全マーカー保存後に存在・text/bbox/order 一致・2 サイクル耐久',

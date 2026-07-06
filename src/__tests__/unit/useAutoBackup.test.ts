@@ -1045,6 +1045,133 @@ describe('useAutoBackup performBackup TOCTOU 再評価 (PCT-185 #416)', () => {
   });
 });
 
+// ── F-3 (らでん監査 / いろは指摘): performBackup の pageOrder TOCTOU 再評価 ──────
+
+/**
+ * F-3 回帰:
+ * performBackup は document/isDirty 捕捉と同時に pageOrder も捕捉する。
+ * await (waitForPendingIdbSaves / getAllTemporaryPageData) 中に movePage/deletePages が
+ * 完了して pageOrder が新しい配列参照に差し替わると、captured document.pages
+ * (旧 displayIndex キー) と live pageOrder (新順序) の非整合な組み合わせで
+ * sourceIndex 変換がずれ、別ページキーへ誤ってバックアップされる (実害: 他ページの
+ * データを上書きするバックアップの生成)。
+ *
+ * 修正: await 後に live pageOrder と captured pageOrder の参照一致を検証し、
+ * 不一致ならこのサイクルのバックアップをスキップする（次周期に委ねる・安全側）。
+ *
+ * 検証: deferred-promise で getAllTemporaryPageData の await を一時停止させ、
+ * その間に実際の store アクション movePage を呼んで pageOrder を差し替え、
+ * save_backup が呼ばれないことを確認する。
+ */
+describe('useAutoBackup performBackup pageOrder TOCTOU 再評価 (F-3)', () => {
+  beforeEach(() => {
+    resetStore();
+    vi.mocked(saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(clearTemporaryChanges).mockReset().mockResolvedValue(undefined);
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_pending_backups') return [];
+      if (cmd === 'save_backup') return undefined;
+      return undefined;
+    });
+  });
+
+  // S-F3-01: await 中に実際の movePage が完了して pageOrder が差し替わると
+  // save_backup は呼ばれない (deferred-promise で await 中の割り込みを再現)。
+  it('S-F3-01: await 中に movePage が完了するとバックアップはスキップされる', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    let resolveIdb!: () => void;
+    vi.mocked(getAllTemporaryPageData).mockReset().mockImplementation(async () => {
+      // performBackup を getAllTemporaryPageData の await 中で一時停止させる
+      await new Promise<void>((resolve) => {
+        resolveIdb = resolve;
+      });
+      return new Map();
+    });
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+
+    // 2 ページのドキュメント (pageOrder=[0,1] identity)、displayIndex=0 が dirty
+    nowSpy.mockReturnValue(1);
+    usePecoStore.setState({
+      document: makeDoc(
+        new Map([
+          [0, makePage({ pageIndex: 0 })],
+          [1, makePage({ pageIndex: 1 })],
+        ]),
+      ),
+      pageOrder: [0, 1],
+      isDirty: false,
+    });
+    nowSpy.mockReturnValue(1000);
+    usePecoStore.setState({
+      document: makeDoc(
+        new Map([
+          [0, makePage({ pageIndex: 0, isDirty: true })],
+          [1, makePage({ pageIndex: 1 })],
+        ]),
+      ),
+      pageOrder: [0, 1],
+      isDirty: true,
+    });
+    nowSpy.mockReturnValue(1000 + quietMs + 1);
+
+    const p = act(async () => {
+      await result.current.performBackup();
+    });
+
+    // performBackup が getAllTemporaryPageData の await で止まるまで microtask を進める
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    // await 中に実際の movePage を実行 → pageOrder が [1,0] (新しい配列参照) に差し替わる
+    await usePecoStore.getState().movePage(0, 1);
+
+    // getAllTemporaryPageData の await を解決させて performBackup を再開させる
+    resolveIdb();
+    await p;
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(0);
+
+    nowSpy.mockRestore();
+  });
+
+  // S-F3-02: await 中に pageOrder が変化しなければ通常どおり save_backup が呼ばれる
+  // (再評価ガードが健全な書き込みまで殺していないことの保証 = vacuous 防止)。
+  it('S-F3-02: await 中に pageOrder が変化しなければ save_backup は通常どおり呼ばれる', async () => {
+    const quietMs = 60_000;
+    const nowSpy = vi.spyOn(Date, 'now');
+
+    vi.mocked(getAllTemporaryPageData).mockReset().mockResolvedValue(new Map());
+
+    const { result } = renderHook(() => useAutoBackup(() => {}, 5 * 60 * 1000, quietMs));
+
+    nowSpy.mockReturnValue(1);
+    usePecoStore.setState({
+      document: makeDoc(new Map([[0, makePage({ pageIndex: 0 })]])),
+      pageOrder: [0],
+      isDirty: false,
+    });
+    nowSpy.mockReturnValue(1000);
+    usePecoStore.setState({
+      document: makeDoc(new Map([[0, makePage({ pageIndex: 0, isDirty: true })]])),
+      pageOrder: [0],
+      isDirty: true,
+    });
+    nowSpy.mockReturnValue(1000 + quietMs + 1);
+
+    await act(async () => {
+      await result.current.performBackup();
+    });
+
+    const saveCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_backup');
+    expect(saveCalls).toHaveLength(1);
+
+    nowSpy.mockRestore();
+  });
+});
+
 // ── PCT-055 退行修正: onBackupComplete の ref 安定性 ────────────────────────────
 
 /**
