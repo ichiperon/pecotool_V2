@@ -1144,6 +1144,22 @@ export async function buildPdfDocumentCore(
     (pageOrder.length === originalPdfPageCount &&
       pageOrder.every((v, i) => v === i));
   if (!isDefaultOrder && pageOrder) {
+    // #437 (PCT-204) 一次防御: pageOrder が originalPdfPageCount の範囲外
+    // インデックスを含む場合、@cantoo/pdf-lib の copyPages は素の配列アクセス
+    // (assertRange を通らない) で undefined を返し、その `.node` 参照で
+    // 「Cannot read properties of undefined (reading 'node')」という原因不明の
+    // 例外に落ちる。呼び出し元 (originalBytesCache と pageOrder の番号空間の
+    // 不整合など) を診断できるよう、ここで明示的に範囲チェックして早期に
+    // 原因の分かるエラーを投げる。
+    const outOfRangeIndex = pageOrder.find((sourceIndex) => sourceIndex < 0 || sourceIndex >= originalPdfPageCount);
+    if (outOfRangeIndex !== undefined) {
+      throw new Error(
+        `[pdfSaverCore] pageOrder に元PDFのページ数 (${originalPdfPageCount}) の範囲外の` +
+        `インデックス (${outOfRangeIndex}) が含まれています。pageOrder=[${pageOrder.join(',')}]。` +
+        '保存前のドキュメント状態と originalBytes キャッシュの番号体系が食い違っている可能性があります。',
+      );
+    }
+
     // pageOrder は「新しい表示順に対応する元 pdfDoc ページインデックス」の配列。
     // 例: pageOrder=[2,0,1] → 新ページ0=旧ページ2, 新ページ1=旧ページ0, 新ページ2=旧ページ1
     // pdf-lib では直接 movePage API がないため、copyPages + removePage で並べ替える。

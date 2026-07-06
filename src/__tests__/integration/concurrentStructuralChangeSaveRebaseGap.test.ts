@@ -1,5 +1,5 @@
 /**
- * Repro test for Issue #437 (PCT-204):
+ * Repro / regression test for Issue #437 (PCT-204):
  * 「保存中の並行構造変更で normalizePageOrderAfterSave が no-op になる一方
  *   originalBytes キャッシュは無条件リベース — undo 到達時に pageOrder（旧番号体系）と
  *   リベース済み bytes（新ページ数）のインデックス不整合の恐れ」
@@ -10,7 +10,7 @@
  *
  * 本テストは逆に「保存の非同期区間中に別の構造変更 (再 delete) が割り込む」狭いレース窓を
  * 再現する。useFileOperations._executeSave の post-save ブロック
- *   1. setOriginalBytesCache(writePath, savedBytes, ...) — 無条件実行
+ *   1. setOriginalBytesCache(writePath, savedBytes, ...) — 修正前は無条件実行
  *   2. normalizePageOrderAfterSave(savePageOrder) — ライブ pageOrder が
  *      savePageOrder と一致しない場合は no-op（undoStack はクリアされない）
  * を、実際の pecoStore (deletePages/undo/normalizePageOrderAfterSave)・実際の
@@ -22,6 +22,13 @@
  * 等価なロジックをテスト内で直接組み立てる（#436 と同じ「store + buildPdfDocument
  * 実物を縫い合わせる」流儀）。__originalBytesCacheForTest は実プロダクトコードの
  * setOriginalBytesCache が読み書きするのと同じモジュールレベルキャッシュそのもの。
+ *
+ * #437 修正 (このファイル): useFileOperations.ts の post-save ブロックを
+ * 「pageOrderMatchesSnapshot が true のときだけ originalBytesCache をリベースする」
+ * ようガードした（不一致時は保存前の bytes を温存する）。一致判定は
+ * pecoStore.normalizePageOrderAfterSave と共通の src/utils/pageOrder.ts
+ * pageOrderEquals を使う（判定ロジックの二重実装を避けるため）。
+ * 以降のテストはこのガード済みロジックを直接組み立てて検証する。
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -30,6 +37,7 @@ import { usePecoStore, waitForPendingIdbSaves } from '../../store/pecoStore';
 import { useInfraStore } from '../../store/infraStore';
 import { buildPdfDocument } from '../../utils/pdfSaver';
 import * as pdfLoader from '../../utils/pdfLoader';
+import { pageOrderEquals } from '../../utils/pageOrder';
 import type { PageData, PecoDocument } from '../../types';
 
 // useFileOperations.ts の import グラフを壊さないための最小限モック。
@@ -176,20 +184,22 @@ describe('Issue #437 (PCT-204): 保存中の並行構造変更で normalize no-o
     expect(afterConcurrentEdit.document!.totalPages).toBe(1);
     expect(afterConcurrentEdit.undoStack).toHaveLength(2); // 元の delete + 割り込み delete
 
-    // 4) useFileOperations._executeSave の post-save ブロックを実測する。
+    // 4) useFileOperations._executeSave の post-save ブロックを実測する
+    //    (判定は pecoStore.normalizePageOrderAfterSave と共通の pageOrderEquals を使う)。
     const liveStateBeforeNormalize = usePecoStore.getState();
-    const pageOrderMatchesSnapshot =
-      liveStateBeforeNormalize.pageOrder.length === savePageOrderSnapshot.length &&
-      liveStateBeforeNormalize.pageOrder.every((sourceIndex, displayIndex) => sourceIndex === savePageOrderSnapshot[displayIndex]);
+    const pageOrderMatchesSnapshot = pageOrderEquals(liveStateBeforeNormalize.pageOrder, savePageOrderSnapshot);
     // 割り込みにより、ライブ pageOrder ([2]) は保存スナップショット ([0,2]) と一致しない。
     expect(pageOrderMatchesSnapshot).toBe(false);
 
-    // setOriginalBytesCache 相当: pageOrderMatchesSnapshot を一切見ずに無条件でリベースする
-    // (src/hooks/useFileOperations.ts L863 と同じ挙動)。
+    // setOriginalBytesCache 相当（#437 修正前）: pageOrderMatchesSnapshot を一切見ずに
+    // 無条件でリベースする。この it は「修正前は何が起きていたか」という非対称の premise
+    // をそのまま記録するために、あえて #437 修正前の無条件リベースを再現する
+    // （修正後の実装は次の it 群で検証する — useFileOperations.ts の
+    // pageOrderMatchesSnapshot ガード分岐）。
     __originalBytesCacheForTest.set(FILE_PATH, savedBytes);
 
     // normalizePageOrderAfterSave 相当: snapshot 不一致のため no-op になる
-    // (src/hooks/useFileOperations.ts L873-875 → pecoStore.ts L904-927)。
+    // (src/hooks/useFileOperations.ts → pecoStore.ts normalizePageOrderAfterSave)。
     usePecoStore.getState().normalizePageOrderAfterSave(savePageOrderSnapshot);
     await waitForPendingIdbSaves();
 
@@ -199,48 +209,39 @@ describe('Issue #437 (PCT-204): 保存中の並行構造変更で normalize no-o
     expect(postNormalize.pageOrder).toEqual([2]);
     expect(postNormalize.undoStack).toHaveLength(2);
 
-    // 非対称の核心: originalBytesCache は「2 ページ (source 0,2 の内容)」にリベース済みだが、
-    // undoStack にはまだ「pageOrder [0,2] (旧 3 ページ体系) を前提とする delete_pages」が
-    // 積まれたまま残っている。
+    // 非対称の核心（#437 修正前の premise）: originalBytesCache は「2 ページ
+    // (source 0,2 の内容)」にリベース済みだが、undoStack にはまだ「pageOrder [0,2]
+    // (旧 3 ページ体系) を前提とする delete_pages」が積まれたまま残っている。
     expect(__originalBytesCacheForTest.get(FILE_PATH)!.length).toBe(savedBytes.length);
   });
 
   /**
-   * 【既知バグ・PCT-204】上記の非対称状態で undo すると、割り込み delete が巻き戻され
-   * pageOrder が「旧 3 ページ体系の [0,2]」に戻る。しかし originalBytesCache は既に
-   * 「2 ページにリベース済みの PDF (物理インデックスは 0,1 のみ)」になっている。
-   * この状態で再保存すると、pageOrder=[0,2] が指すインデックス 2 は
-   * リベース済み 2 ページ PDF に存在しないため、buildPdfDocument (pdf-lib
-   * copyPages) が範囲外アクセスで例外を投げる。
+   * #437 修正の検証: pageOrderMatchesSnapshot=false のとき、useFileOperations.ts の
+   * post-save ブロックは setOriginalBytesCache のリベースをスキップし、保存前に
+   * キャッシュされていた originalBytes を温存する（このテストが再現する
+   * pageOrderEquals ガード。実装は useFileOperations.ts の pageOrderMatchesSnapshot
+   * 分岐そのもの）。
    *
-   * 実測結果: 黙ってページが欠落する（サイレント破損）のではなく、pdf-lib が
-   * `Cannot read properties of undefined (reading 'node')` で確実に例外を投げる
-   * （クラッシュ系）。@cantoo/pdf-lib の copyPages は `srcPages[i]` の素の配列
-   * アクセスで assertRange を通さないため、範囲外インデックスは無言で undefined
-   * になり、その `.node` 参照で初めて落ちる。
-   *
-   * 期待する健全な挙動（あるべき姿）: 再保存はクラッシュせずに完了する。これには
-   * Issue が提示した修正の当たりのいずれかが必要:
-   *   (a) pageOrderMatchesSnapshot=false の間は setOriginalBytesCache のリベースも
-   *       保留する（save 前の originalBytes をそのまま維持する）
-   *   (b) undoStack の構造系エントリ (delete_pages/move 等) を pageId ベースで
-   *       再解決してから buildPdfDocument に渡す pageOrder を組み立てる
-   *
-   * 通常の it + rejects.toThrow で「現状は copyPages の範囲外アクセスで例外を投げる」
-   * ことを精密に固定する（レビュー指摘: it.fails だと step 5-6 の前提 expect が
-   * 壊れても緑のままで repro の腐りを検知できない）。#437 修正時はこのアサートを
-   * 「例外を投げず再保存が完了する」へ反転させること。
+   * 温存によって「ライブ pageOrder が指す番号空間」と「originalBytesCache の番号空間」
+   * が保存前のまま揃い続けるため、この後 undo で「旧 3 ページ体系」の pageOrder が
+   * 復元されても、温存された 3 ページの originalBytes に対しては有効なインデックスの
+   * ままであり、次回保存 (buildPdfDocument の pdf-lib copyPages) は範囲外アクセスを
+   * 起こさず正常に完了する。
    */
   it(
-    '【既知バグ・PCT-204】保存中の並行 delete → undo → 再保存 は、現状 pdf-lib copyPages が範囲外アクセス（undefined.node）で例外を投げる（修正時にアサートを反転すること）',
+    '#437 修正: 保存中の並行 delete → undo → 再保存 は、キャッシュ温存ガードにより例外を投げず完了する',
     async () => {
       const originalBytes = await makeThreePagePdf();
       usePecoStore.setState({
         document: makeThreePagesDocState(),
         pageOrder: [0, 1, 2],
       });
+      // background prefetch 相当: 実運用では保存より前に originalBytes が
+      // 一度キャッシュされている（useFileOperations の prefetchOriginalBytes）。
+      // ガードが「保存前のキャッシュを温存する」ためには、この事前投入が前提になる。
+      __originalBytesCacheForTest.set(FILE_PATH, originalBytes);
 
-      // 1) 削除 → 2) 保存の PDF 生成 → 3) 割り込み delete （上のテストと同一シーケンス）
+      // 1) 削除 → 2) 保存の PDF 生成 → 3) 割り込み delete （前提確認 it と同一シーケンス）
       await usePecoStore.getState().deletePages([1]);
       const savePageOrderSnapshot = [...usePecoStore.getState().pageOrder]; // [0, 2]
       const savedBytes = await buildPdfDocument(
@@ -253,8 +254,17 @@ describe('Issue #437 (PCT-204): 保存中の並行構造変更で normalize no-o
       );
       await usePecoStore.getState().deletePages([0]);
 
-      // 4) post-save ブロック: 無条件リベース + normalize no-op
-      __originalBytesCacheForTest.set(FILE_PATH, savedBytes);
+      // 4) post-save ブロック（#437 修正後）: pageOrderMatchesSnapshot=false の間は
+      //    リベースをスキップする（useFileOperations.ts の分岐と同じ判定・同じ帰結）。
+      const liveStateBeforeNormalize = usePecoStore.getState();
+      const pageOrderMatchesSnapshot = pageOrderEquals(liveStateBeforeNormalize.pageOrder, savePageOrderSnapshot);
+      expect(pageOrderMatchesSnapshot).toBe(false);
+      if (pageOrderMatchesSnapshot) {
+        __originalBytesCacheForTest.set(FILE_PATH, savedBytes);
+      }
+      // pageOrderMatchesSnapshot=false のため、上のガードによりリベースはスキップされ、
+      // キャッシュは prefetch 時の originalBytes (3ページ) のまま温存される。
+
       usePecoStore.getState().normalizePageOrderAfterSave(savePageOrderSnapshot);
       await waitForPendingIdbSaves();
 
@@ -267,25 +277,82 @@ describe('Issue #437 (PCT-204): 保存中の並行構造変更で normalize no-o
       expect(restored.pageOrder).toEqual([0, 2]);
       expect(restored.document!.totalPages).toBe(2);
 
-      // 6) 再保存: originalBytesCache は既に 2 ページにリベース済み（物理インデックス 0,1 のみ）。
+      // 6) 再保存: originalBytesCache はガードにより温存されたまま（3 ページ、旧番号体系）。
       const cachedBytes = __originalBytesCacheForTest.get(FILE_PATH)!;
-      expect((await getPageSizes(cachedBytes)).length).toBe(2);
+      expect((await getPageSizes(cachedBytes)).length).toBe(3);
 
-      // 【現状のバグ挙動を精密固定】pageOrder=[0,2] (旧番号体系) と 2 ページの
-      // リベース済み bytes の食い違いで、pdf-lib copyPages が範囲外 index の
-      // undefined に対する .node 参照で TypeError を投げる。
-      // 【#437 修正後のあるべき姿】例外を投げず再保存が完了する — 修正時は
-      // このアサートを resavedBytes.length > 0 の検証へ反転させること。
-      await expect(
-        buildPdfDocument(
-          cachedBytes,
-          restored.document!,
-          undefined,
-          [],
-          undefined,
-          restored.pageOrder,
-        ),
-      ).rejects.toThrow(/node/);
+      // 【#437 修正後のあるべき姿】pageOrder=[0,2] (旧番号体系) と 3 ページの温存された
+      // bytes の番号空間が揃っているため、例外を投げずに再保存が完了する。
+      const resavedBytes = await buildPdfDocument(
+        cachedBytes,
+        restored.document!,
+        undefined,
+        [],
+        undefined,
+        restored.pageOrder,
+      );
+      expect(resavedBytes.length).toBeGreaterThan(0);
+      expect((await getPageSizes(resavedBytes)).length).toBe(2);
+    },
+  );
+
+  it(
+    '#437 修正: pageOrderMatchesSnapshot=false のとき originalBytesCache は savedBytes へリベースされず保存前の bytes のまま温存される',
+    async () => {
+      const originalBytes = await makeThreePagePdf();
+      usePecoStore.setState({
+        document: makeThreePagesDocState(),
+        pageOrder: [0, 1, 2],
+      });
+      __originalBytesCacheForTest.set(FILE_PATH, originalBytes);
+
+      await usePecoStore.getState().deletePages([1]);
+      const savePageOrderSnapshot = [...usePecoStore.getState().pageOrder]; // [0, 2]
+      const savedBytes = await buildPdfDocument(
+        originalBytes,
+        usePecoStore.getState().document!,
+        undefined,
+        [],
+        undefined,
+        savePageOrderSnapshot,
+      );
+      await usePecoStore.getState().deletePages([0]); // 割り込み delete
+
+      const liveState = usePecoStore.getState();
+      const pageOrderMatchesSnapshot = pageOrderEquals(liveState.pageOrder, savePageOrderSnapshot);
+      expect(pageOrderMatchesSnapshot).toBe(false);
+
+      // #437 修正後のガード（useFileOperations.ts の pageOrderMatchesSnapshot 分岐と
+      // 同じ判定・同じ帰結）: 不一致時は savedBytes へのリベースをスキップする。
+      if (pageOrderMatchesSnapshot) {
+        __originalBytesCacheForTest.set(FILE_PATH, savedBytes);
+      }
+      usePecoStore.getState().normalizePageOrderAfterSave(savePageOrderSnapshot);
+      await waitForPendingIdbSaves();
+
+      // キャッシュは savedBytes (2ページ) へリベースされず、prefetch 時の
+      // originalBytes (3ページ・参照そのまま) の状態で温存されている。
+      const preservedBytes = __originalBytesCacheForTest.get(FILE_PATH)!;
+      expect(preservedBytes).toBe(originalBytes);
+      expect((await getPageSizes(preservedBytes)).length).toBe(3);
+      expect(preservedBytes.length).not.toBe(savedBytes.length);
+
+      // normalize も no-op のため、pageOrder は割り込み delete 後の旧番号体系のまま。
+      const postNormalize = usePecoStore.getState();
+      expect(postNormalize.pageOrder).toEqual([2]);
+
+      // 温存されたキャッシュ（3ページ・旧番号体系）と pageOrder（[2]・旧番号体系）は
+      // 番号空間が一致しているため、この時点で保存を試みても例外を投げず完了する。
+      const nextSaveBytes = await buildPdfDocument(
+        preservedBytes,
+        postNormalize.document!,
+        undefined,
+        [],
+        undefined,
+        postNormalize.pageOrder,
+      );
+      expect(nextSaveBytes.length).toBeGreaterThan(0);
+      expect((await getPageSizes(nextSaveBytes)).length).toBe(1);
     },
   );
 });

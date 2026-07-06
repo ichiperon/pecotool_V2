@@ -243,8 +243,13 @@ describe('Issue #436 (PCT-203): delete_pages undo と保存フィルタの相互
     const restored = usePecoStore.getState();
     expect(restored.pageOrder).toEqual([0, 1, 2]);
     const restoredPage1 = restored.document!.pages.get(1);
-    // Issue の指摘どおり isDirty は false のまま (verbatim 復元)。
-    expect(restoredPage1?.isDirty).toBe(false);
+    // #437 (PCT-204) 対応: 本テストが示すとおり delete_pages undo 分岐は
+    // 「到達不能」ではなく実際に到達し得ることが判明したため、#350
+    // (update_page/update_pages) / rotate_pages の undo と対称に、復元ページへ
+    // isDirty: true を強制するよう pecoStore.ts を変更した。verbatim (isDirty:false)
+    // のまま復元すると、保存時の dirty フィルタから漏れて再描画されない事故が
+    // #350 と同型で起こり得るため、「到達しても正しい」側へ倒す。
+    expect(restoredPage1?.isDirty).toBe(true);
 
     // pageOrder が正しく [0,1,2] に復元されていれば、buildPdfDocument の
     // 物理ページ再構成 (copyPages by pageOrder) は isDirty を一切見ずに

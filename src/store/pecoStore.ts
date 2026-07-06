@@ -8,7 +8,7 @@ import {
   getAllTemporaryPageData,
   deleteTemporaryPageKeys,
 } from '../utils/pdfLoader';
-import { resolvePageId, resolveDisplayIndex } from '../utils/pageOrder';
+import { resolvePageId, resolveDisplayIndex, pageOrderEquals } from '../utils/pageOrder';
 import { perf } from '../utils/perfLogger';
 import { remapBboxForRotation } from '../utils/pdfSaverCore';
 
@@ -908,15 +908,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (savedPageOrder) {
       const matchesSavedOrder =
         savedPageOrder.length === doc.totalPages &&
-        state.pageOrder.length === savedPageOrder.length &&
-        state.pageOrder.every((sourceIndex, displayIndex) => sourceIndex === savedPageOrder[displayIndex]);
+        pageOrderEquals(state.pageOrder, savedPageOrder);
       if (!matchesSavedOrder) return state;
     }
 
     const identityOrder = Array.from({ length: doc.totalPages }, (_, i) => i);
-    const alreadyIdentity =
-      state.pageOrder.length === identityOrder.length &&
-      state.pageOrder.every((sourceIndex, displayIndex) => sourceIndex === identityOrder[displayIndex]);
+    const alreadyIdentity = pageOrderEquals(state.pageOrder, identityOrder);
     if (alreadyIdentity) return state;
 
     return {
@@ -1255,10 +1252,28 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       );
     } else if (action.type === 'delete_pages') {
       // issue #193: ページ削除を巻き戻す (削除前の状態に戻す)
+      // #350 (PCT-127) / rotate_pages の undo と対称化: 復元ページは常に isDirty: true
+      // を強制する。
+      // #437 (PCT-204): #436 は「delete_pages undo 分岐は S-03 正規化により到達不能」と
+      // 判定して NOT-A-BUG クローズしたが、保存の非同期区間中に別の構造変更が競合すると
+      // normalizePageOrderAfterSave が no-op になり、この分岐へ実際に到達し得ることが
+      // #437 で判明した。「到達不能にする」前提を崩さず「到達しても正しい」側へ倒し、
+      // isDirty:false のまま復元されたページが保存時の dirty フィルタ (p.isDirty) から
+      // 漏れて古い内容のまま保存される事故を防ぐ。
+      // レビューMEDIUM対応: 強制対象は「実際に削除されていたページ」(deletedPageIndices)
+      // のみに絞る。生存ページの内容は削除前後で不変であり、物理的な存在は pageOrder が
+      // 担保する (#436 Test3 で実証済み)。全ページ強制だと 1 ページの delete→undo で
+      // byte-preserve 短絡を失い、大ページ数 PDF の保存が全ページ再描画になるため。
+      const deletedSet = new Set(action.deletedPageIndices);
+      const restoredPages = new Map(
+        Array.from(action.beforePages.entries()).map(([pi, page]) =>
+          deletedSet.has(pi) ? ([pi, { ...page, isDirty: true }] as const) : ([pi, page] as const),
+        ),
+      );
       set({
         document: {
           ...document,
-          pages: action.beforePages,
+          pages: restoredPages,
           totalPages: action.beforeTotalPages,
         },
         pageOrder: action.beforeOrder,
@@ -1269,10 +1284,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         isDirty: true,
       });
       // PCT-104 (A-lite 段階3): pageId が不変なため rename 巻き戻し不要。
-      // beforePages の内容を書き込んで強制同期する。
+      // restoredPages (isDirty:true 強制済み) の内容を書き込んで強制同期する。
       // PCT-108: set() で pageOrder は action.beforeOrder に確定済み。その値を渡す。
       scheduleStructuralUndoRedoIdbSync(document.filePath, {
-        contentEntries: Array.from(action.beforePages.entries()).map(([pi, page]) => ({
+        contentEntries: Array.from(restoredPages.entries()).map(([pi, page]) => ({
           pageIndex: pi,
           data: page,
         })),

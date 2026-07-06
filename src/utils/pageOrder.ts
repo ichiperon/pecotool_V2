@@ -28,6 +28,21 @@ export function isIdentityPageOrder(pageOrder: number[] | undefined): boolean {
 }
 
 /**
+ * 2つの pageOrder 配列が要素ごとに完全一致するかを判定する。
+ *
+ * #437 (PCT-204): 保存完了後の「ライブ pageOrder は保存スナップショットと
+ * 一致しているか」判定は useFileOperations（originalBytes キャッシュ更新の
+ * ガード）と pecoStore.normalizePageOrderAfterSave（undoStack クリアのガード）
+ * の両方で使われる。この2箇所が同じ条件で一致/不一致を判定しないと、
+ * 「キャッシュはリベースしたが undoStack は残す」のような非対称な状態遷移が
+ * 起こり得るため、判定ロジックをここに集約する。
+ */
+export function pageOrderEquals(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((sourceIndex, displayIndex) => sourceIndex === b[displayIndex]);
+}
+
+/**
  * PCT-104 (A-lite): displayIndex → pageId への変換。
  * pageId の値は "src:" + pageOrder[displayIndex]（= 初期 source index）。
  * pageOrder が空または範囲外の場合は identity 前提で "src:" + displayIndex を返す。

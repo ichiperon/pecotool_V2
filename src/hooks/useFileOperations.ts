@@ -9,7 +9,7 @@ export { isWriteAccessError };
 import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../store/pecoStore';
 import { useInfraStore } from '../store/infraStore';
 import { useOcrSettingsStore } from '../store/ocrSettingsStore';
-import { resolveDisplayIndex, resolvePageId, displayToSourcePageIndex } from '../utils/pageOrder';
+import { resolveDisplayIndex, resolvePageId, displayToSourcePageIndex, pageOrderEquals } from '../utils/pageOrder';
 import {
   loadPDF,
   getAllTemporaryPageData,
@@ -853,14 +853,43 @@ export function useFileOperations(
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
     }
-    const pageOrderMatchesSnapshot =
-      liveStateBeforeNormalize.pageOrder.length === savePageOrder.length &&
-      liveStateBeforeNormalize.pageOrder.every((sourceIndex, displayIndex) => sourceIndex === savePageOrder[displayIndex]);
+    const pageOrderMatchesSnapshot = pageOrderEquals(liveStateBeforeNormalize.pageOrder, savePageOrder);
     const hasPostSnapshotChanges =
       !pageOrderMatchesSnapshot || liveStateBeforeNormalize.undoStack.length > savedActionIndex;
-    // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
-    // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
-    setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
+    // #437 (PCT-204): pageOrderMatchesSnapshot=false のとき、この直後の
+    // normalizePageOrderAfterSave（pecoStore 側、同じ pageOrderEquals 判定）は
+    // no-op になり、ライブ pageOrder は「保存前（旧）のページ番号体系」のまま
+    // 残る。この状態で originalBytesCache だけを無条件に新しい（リナンバー済み）
+    // savedBytes へ差し替えると、pageOrder が指す番号空間とキャッシュ済み
+    // bytes の番号空間がズレる。以後の undo でその旧番号体系の pageOrder が
+    // 復元されると、次回保存の buildPdfDocument (pdf-lib copyPages) が範囲外
+    // インデックスの undefined に対する `.node` 参照で例外を投げる
+    // (実測: TypeError: Cannot read properties of undefined (reading 'node'))。
+    //
+    // rebase（キャッシュ更新）と normalize（pageOrder 更新）は必ず同じ条件で
+    // セットにし、不一致時は保存前の originalBytes を温存する。
+    if (pageOrderMatchesSnapshot) {
+      // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
+      // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
+      setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
+    } else {
+      const preSaveEntry = originalBytesCache.get(writePath);
+      if (preSaveEntry) {
+        // bytes は保存前のものを温存しつつ、fingerprint だけ今書き込んだ
+        // ファイルの状態へ張り替える。fingerprint を更新しないと、次回保存時の
+        // getFreshOriginalBytesCache が「disk の mtime が変わった（＝自分自身の
+        // この書き込みで変わった）」と検知してこのエントリを追い出し、readFile で
+        // 新しい（リナンバー済みの）bytes を再取得してしまう。それは温存した
+        // pageOrder の番号空間とまた食い違うため、温存した意味が失われる。
+        setOriginalBytesCache(writePath, preSaveEntry.bytes, await readOriginalBytesFingerprint(writePath));
+      } else {
+        // 保存前に一度もキャッシュされていなかった（background prefetch が
+        // 完了する前に保存された等）場合、番号空間が整合するフォールバック
+        // 候補が無い。中途半端な savedBytes を残すより、キャッシュを空にして
+        // 次回保存時に readFile で実ファイルから読み直させる方が安全。
+        originalBytesCache.delete(writePath);
+      }
+    }
 
     // PCT-050: savePDF の実行中にユーザーが別ページを編集すると、LRU パージで
     // 新たな saveTemporaryPageDataBatch が pendingIdbSaves へ追加される場合がある。
