@@ -2078,8 +2078,17 @@ mod tests {
     // (extract_pid_from_temp_filename / is_process_alive) をそれぞれ独立に検証する
     // 上記テストで代替する。
 
+    /// cleanup_stale_ocr_temp_files 系のテストは実プロセス共通の std::env::temp_dir() を
+    /// prefix (peco_ocr_) 走査で共有するため、cargo test の並列実行では「あるテストが
+    /// 書いた直後のファイルを別テストの cleanup 呼び出しが削除する」レースが起きる
+    /// (CI 実測: NotFound panic)。static Mutex で当該テスト群のみ直列化する。
+    static CLEANUP_TEMP_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn cleanup_stale_ocr_temp_files_removes_own_pid_and_dead_pid_files() {
+        let _guard = CLEANUP_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // AQ-4 の主旨: 自プロセスの残骸、および既に終了しているプロセスの残骸は削除してよい。
         // 実在しない PID (99999999 は 32bit PID 上限を超えるため確実に非生存) を dead PID として使う。
         let temp_dir = std::env::temp_dir();
@@ -2100,6 +2109,9 @@ mod tests {
 
     #[test]
     fn cleanup_stale_ocr_temp_files_keeps_files_of_alive_other_process() {
+        let _guard = CLEANUP_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // AQ-4 の本題: 別の稼働中インスタンスが使用中の一時ファイルは削除しない。
         // テストプロセス自身は必ず生存しているので、"自分ではない別 PID" を模擬する術がない
         // ため、ここでは現在のテストバイナリ自身の PID を「他プロセス」として偽装する
@@ -2129,6 +2141,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn cleanup_stale_ocr_temp_files_continues_when_one_remove_fails() {
+        let _guard = CLEANUP_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use std::os::windows::fs::OpenOptionsExt;
 
         // レビュー指摘 (マリン, MEDIUM): std::fs::File::open は Windows で既定
