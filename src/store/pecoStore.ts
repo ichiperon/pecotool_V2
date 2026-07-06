@@ -10,7 +10,7 @@ import {
 } from '../utils/pdfLoader';
 import { resolvePageId, resolveDisplayIndex, pageOrderEquals } from '../utils/pageOrder';
 import { perf } from '../utils/perfLogger';
-import { remapBboxForRotation } from '../utils/pdfSaverCore';
+import { remapBboxForRotation, normalizeRotation } from '../utils/pdfSaverCore';
 
 // 進行中のLRU退避IDB書き込みPromiseを追跡する。
 // 保存処理はこれらが完了してからIDBを読み込む必要がある。
@@ -351,7 +351,12 @@ interface PecoState {
   setDocumentFilePath: (filePath: string) => void;
   setCurrentPage: (index: number) => void;
   updatePageData: (pageIndex: number, data: Partial<PageData>, undoable?: boolean) => void;
-  resetDirty: (savedPageSnapshots?: Map<number, PageData>) => void;
+  /**
+   * P1-1/P1-2 (bug-hunt): bytePreserved=true のとき (undecodable byte-preserve 短絡で
+   * 何も焼き込まれなかった保存) は、savedPageSnapshots が渡されていても一切変更しない
+   * (isDirty も rotation/bbox も維持する)。省略時は false 扱い (従来どおり)。
+   */
+  resetDirty: (savedPageSnapshots?: Map<number, PageData>, bytePreserved?: boolean) => void;
 
   toggleSelection: (id: string, multi: boolean) => void;
   // issue #15: lastSelectedId を明示できるようにする (省略時は末尾 id を anchor とする)。
@@ -1041,8 +1046,17 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (perf.enabled) perf.mark('edit.storeExit', { page: pageIndex, pendingSaves: pendingSaves.length });
   },
 
-  resetDirty: (savedPageSnapshots) => set((state) => {
+  resetDirty: (savedPageSnapshots, bytePreserved) => set((state) => {
     if (!state.document) return state;
+    // P1-1 (bug-hunt): bytePreserved=true は「保存が byte-preserve 短絡 (undecodable) で
+    // 原本バイトをそのまま返した」ことを意味し、このページ群には何も焼き込まれていない
+    // (rotation 合成も bbox リベースも content 再描画も一切起きていない)。
+    // ここで下の rotation クリア/bbox リベース/isDirty クリアを実行すると、ファイルには
+    // 存在しない合成を前提にメモリ上の座標だけを動かしてしまう (90°汚染)。
+    // よって bytePreserved のときは savedPageSnapshots を無視し、何も変更せず素通りする。
+    if (savedPageSnapshots && bytePreserved) {
+      return state;
+    }
     // savedPageSnapshots 指定時は「保存スナップショットと同一オブジェクト参照のページ」
     // だけ isDirty を下ろす。保存中に編集されたページは新しいオブジェクト参照になるため
     // 一致せず、その新編集の dirty フラグを巻き込まない (issue #115 / #119)。
@@ -1052,38 +1066,54 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     if (savedPageSnapshots) {
       for (const [idx, savedPage] of savedPageSnapshots.entries()) {
         const livePage = newPages.get(idx);
-        if (livePage === savedPage && livePage.isDirty) {
-          // #367 (PCT-144): 保存に userRotation が乗っていたページは、pdfSaverCore が
-          // 「元 /Rotate + userRotation」を合成して書き込み済み (#352)。呼び出し元
-          // (useFileOperations.ts) は保存直後に setOriginalBytesCache で保存済みバイトを
-          // 次回保存の基準にリベースするため、この合成値は次回保存では「新しい元 /Rotate」
-          // として扱われる。ここで rotation をクリアしないと、次回保存で
-          // 「新originalRotation(=旧合成値) + stale rotation(=旧userRotation)」が
-          // 再度合成され /Rotate がドリフトする (回転90°→保存→再保存で90°のはずが180°になる)。
-          // 合わせて in-memory textBlocks の bbox / ページ width・height も合成後フレームへ
-          // リベースし、保存直後の表示・再編集・再保存のいずれでも座標が捕捉フレームと
-          // 一致し続けるようにする (bbox 側は remapBboxForRotation を originalRotation=0 /
-          // finalRotation=userRotation で呼ぶことで、PageData.width/height に保持している
-          // 「捕捉時 viewport 寸法」をそのまま vw0/vh0 として使える)。
-          const userRotation = livePage.rotation;
-          if (userRotation !== undefined && userRotation !== 0) {
-            const rebasedBlocks = livePage.textBlocks.map((block) => ({
-              ...block,
-              bbox: remapBboxForRotation(block.bbox, 0, userRotation, livePage.width, livePage.height),
-            }));
-            const swapDims = userRotation === 90 || userRotation === 270;
-            newPages.set(idx, {
-              ...livePage,
-              isDirty: false,
-              rotation: undefined,
-              textBlocks: rebasedBlocks,
-              width: swapDims ? livePage.height : livePage.width,
-              height: swapDims ? livePage.width : livePage.height,
-            });
-          } else {
-            newPages.set(idx, { ...livePage, isDirty: false, rotation: undefined });
-          }
+        if (!livePage) continue;
+        const isRefMatch = livePage === savedPage;
+        // #367 (PCT-144) / P1-2 (bug-hunt): savedPage.rotation は「このページの保存対象
+        // (savedPageSnapshots) が実際に buildPdfDocumentCore へ渡ったときの userRotation」
+        // であり、pdfSaverCore が「元 /Rotate + savedPage.rotation」を合成して書き込み済み
+        // (#352)。呼び出し元 (useFileOperations.ts) は保存直後に setOriginalBytesCache で
+        // 保存済みバイトを次回保存の基準にリベースするため、この合成値は次回保存では
+        // 「新しい元 /Rotate」として扱われる。
+        //
+        // P1-2: 参照が不一致 (保存中に別編集が入った) でも、savedPage.rotation が baked
+        // されている以上はディスク上の /Rotate には既にその分が反映済み。ここで rotation
+        // を放置すると、次回保存時に「新originalRotation(=旧合成値) + stale rotation」が
+        // 再度合成され /Rotate がドリフトする (#367 と同型のバグが「参照不一致」経路で
+        // 再発する)。よって参照一致・不一致を問わず、savedPage.rotation が baked された
+        // 分だけ bbox/rotation をリベースする。isDirty のクリアだけは参照一致時に限る
+        // (参照不一致は保存後に新しい編集が入っている＝そのページはまだ dirty のまま
+        // 正しく次回保存対象に残す必要がある)。
+        const bakedRotation = savedPage.rotation;
+        if (bakedRotation !== undefined && bakedRotation !== 0) {
+          // リベースは livePage (保存中に編集され得る最新の textBlocks/bbox) に対して行う。
+          // livePage の bbox は依然「捕捉フレーム (baked 前)」のままなので、
+          // remapBboxForRotation を originalRotation=0 / finalRotation=bakedRotation で
+          // 呼べば、PageData.width/height に保持している「捕捉時 viewport 寸法」を
+          // そのまま vw0/vh0 として使える。
+          const rebasedBlocks = livePage.textBlocks.map((block) => ({
+            ...block,
+            bbox: remapBboxForRotation(block.bbox, 0, bakedRotation, livePage.width, livePage.height),
+          }));
+          const swapDims = bakedRotation === 90 || bakedRotation === 270;
+          // 参照不一致で、かつ保存中の編集が rotation 自体にも追加で乗っていた場合
+          // (livePage.rotation !== savedPage.rotation) に備え、baked 分を差し引いた
+          // 残り pending rotation を保持する (通常は参照一致・rotation 未追加なら 0 になり
+          // undefined へ収束し、#367 の従来挙動と完全に一致する)。
+          const liveRotation = livePage.rotation ?? 0;
+          const remainingDelta = normalizeRotation(liveRotation - bakedRotation);
+          newPages.set(idx, {
+            ...livePage,
+            isDirty: isRefMatch ? false : livePage.isDirty,
+            rotation: remainingDelta === 0 ? undefined : (remainingDelta as 90 | 180 | 270),
+            textBlocks: rebasedBlocks,
+            width: swapDims ? livePage.height : livePage.width,
+            height: swapDims ? livePage.width : livePage.height,
+          });
+        } else if (isRefMatch && livePage.isDirty) {
+          newPages.set(idx, { ...livePage, isDirty: false, rotation: undefined });
         }
+        // else: 参照不一致 かつ rotation 未 baked → 何も焼き込まれていないので触らない
+        // (isDirty は既に true のまま維持され、次回保存対象に正しく残る)。
       }
       for (const page of newPages.values()) {
         if (page.isDirty) {

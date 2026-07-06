@@ -16,7 +16,7 @@ async function handleSavePdf(
   fallbackFontBytes: ArrayBuffer[] = [],
   pageOrder?: number[],
   options?: SaveDialogOptions,
-): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[] }> {
+): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[]; bytePreserved: boolean }> {
   // D1: Record<number, SerializedPageData> → Map<number, SerializedPageData> に正規化。
   const pagesMap = new Map<number, SerializedPageData>();
   for (const [key, value] of Object.entries(documentState.pages)) {
@@ -95,8 +95,8 @@ self.onmessage = async (e: MessageEvent<SavePdfWorkerRequest>) => {
       try {
         const { documentState, fallbackFontBytes, fontBytes, pageOrder, options } = msg.data;
         const originalPdfBytes = await resolvePdfBytes(msg.data);
-        const { savedBytes, skippedChars } = await handleSavePdf(originalPdfBytes, documentState, fontBytes, fallbackFontBytes, pageOrder, options);
-        const response: SavePdfWorkerResponse = { type: 'SAVE_PDF_SUCCESS', data: savedBytes, skippedChars };
+        const { savedBytes, skippedChars, bytePreserved } = await handleSavePdf(originalPdfBytes, documentState, fontBytes, fallbackFontBytes, pageOrder, options);
+        const response: SavePdfWorkerResponse = { type: 'SAVE_PDF_SUCCESS', data: savedBytes, skippedChars, bytePreserved };
         self.postMessage(response, [savedBytes.buffer]);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

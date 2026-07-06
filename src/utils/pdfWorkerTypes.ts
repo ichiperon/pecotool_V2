@@ -41,6 +41,6 @@ export type SavePdfWorkerRequest =
 // SAVE_PDF_HEARTBEAT: PCT-194 (#425)。SAVE_PDF 処理中、Worker が生存していることを
 // main 殻へ周期通知する軽量シグナル。ペイロードなし（生存確認のみが目的）。
 export type SavePdfWorkerResponse =
-  | { type: 'SAVE_PDF_SUCCESS'; data: Uint8Array; skippedChars?: SkippedPdfTextChar[] }
+  | { type: 'SAVE_PDF_SUCCESS'; data: Uint8Array; skippedChars?: SkippedPdfTextChar[]; bytePreserved?: boolean }
   | { type: 'SAVE_PDF_HEARTBEAT' }
   | { type: 'ERROR'; message: string };

@@ -69,6 +69,11 @@ export async function buildPdfDocument(
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
   pageOrder?: number[],
   options?: SaveDialogOptions,
+  // P1-1/M-4 (bug-hunt): core の byte-preserve 判定 (undecodable 早期 return) を呼び出し元へ
+  // 伝える。skippedChars と同じ D3 パターン (戻り値でなくコールバック) を踏襲することで、
+  // 既存の savePDF/buildPdfDocument 呼び出し元・テストモック（Uint8Array 戻り値前提）を
+  // 一切変更せずに済む。
+  onBytePreserved?: (bytePreserved: boolean) => void,
 ): Promise<Uint8Array> {
   // D2: main 殻が fetch を担当し、解決済み Uint8Array を core に渡す。
   const originalPdfBytes = await resolveBuildPdfSource(source);
@@ -81,7 +86,7 @@ export async function buildPdfDocument(
   }
 
   // D4: main 殻は saveTimeoutMs を渡さない (race なし)。
-  const { savedBytes, skippedChars } = await buildPdfDocumentCore(
+  const { savedBytes, skippedChars, bytePreserved } = await buildPdfDocumentCore(
     originalPdfBytes,
     { totalPages: documentState.totalPages, pages: serializedPages },
     fontBytes,
@@ -91,6 +96,7 @@ export async function buildPdfDocument(
 
   // D3: main 殻がコールバック変換を担う。
   onSkippedChars?.(skippedChars);
+  onBytePreserved?.(bytePreserved);
   return savedBytes;
 }
 
@@ -153,6 +159,8 @@ export async function savePDF(
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
   pageOrder?: number[],
   options?: SaveDialogOptions,
+  // P1-1/M-4 (bug-hunt): worker殻/main殻 両経路で core の bytePreserved 判定を素通しする。
+  onBytePreserved?: (bytePreserved: boolean) => void,
 ): Promise<Uint8Array> {
   const sourceBytes = extractBytes(source);
   const sourceUrl = extractUrl(source);
@@ -233,7 +241,7 @@ export async function savePDF(
         // 「従来どおりの固定タイムアウト待機」を維持する（レビューHIGH: 未設定だと
         // 前回保存の待機猶予がゼロになり保存が並走しうる）。
         lastSaveActivityAt = Date.now();
-        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options)
+        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options, onBytePreserved)
           .then(settleResolve)
           .catch(settleReject);
         return;
@@ -272,6 +280,7 @@ export async function savePDF(
         } else if (msg.type === 'SAVE_PDF_SUCCESS') {
           cleanup();
           onSkippedChars?.(msg.skippedChars ?? []);
+          onBytePreserved?.(msg.bytePreserved ?? false);
           settleResolve(msg.data);
         } else if (msg.type === 'ERROR') {
           cleanup();
@@ -353,7 +362,7 @@ export async function savePDF(
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
       // fallback 経路にも活動時刻を記録（レビューHIGH: 上の Worker 不在分岐と同旨）。
       lastSaveActivityAt = Date.now();
-      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options)
+      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options, onBytePreserved)
         .then(settleResolve)
         .catch(settleReject);
     }

@@ -1095,7 +1095,7 @@ export async function buildPdfDocumentCore(
   fontBytes: ArrayBuffer | undefined,
   fallbackFontBytes: ArrayBuffer[] = [],
   coreOptions: BuildPdfCoreOptions = {},
-): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[] }> {
+): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[]; bytePreserved: boolean }> {
   const { options, pageOrder, saveTimeoutMs } = coreOptions;
 
   // OCR テキスト層 (renderMode 3・Ctrl+A 選択範囲) の表示オフセット (point)。
@@ -1197,8 +1197,13 @@ export async function buildPdfDocumentCore(
   // のいずれかで未読データを恒久喪失する。よって undecodable のときは meta も content も一切触らず
   // 原本バイトをそのまま返す（完全 byte-preserve・meta/content 矛盾ゼロ）。新規編集は保存に反映
   // されないが、load 時に検出して UI 警告で透明化する（ユーザー合意済みのトレードオフ）。
+  // P1-1 (bug-hunt): bytePreserved=true を呼び出し元へ返す唯一の判定源にする。
+  // 呼び出し側 (pecoStore.resetDirty) はこのフラグを見て、rotation クリア／bbox リベース
+  // （/Rotate 合成が実際に焼き込まれた前提の後処理）を一切行わない。焼き込みが起きていないのに
+  // resetDirty がそれらを実行すると、メモリ上の bbox/rotation だけがファイルと無関係にズレる
+  // （90°汚染）。isDirty も維持する（このページの編集はまだ保存されていない）。
   if (existingBBoxRead.status === 'undecodable') {
-    return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars) };
+    return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars), bytePreserved: true };
   }
   const existingBBoxMeta = remapBBoxMetaForPageOrderCore(rawExistingBBoxMeta, pageOrder, isDefaultOrder);
   const hadExistingBBoxMeta = Object.keys(rawExistingBBoxMeta).length > 0;
@@ -1226,7 +1231,11 @@ export async function buildPdfDocumentCore(
   ) {
     const earlySweep = sweepUnreachableObjects(pdfDoc);
     if (earlySweep.dropped === 0) {
-      return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars) };
+      // bytePreserved=false: この短絡は dirtyPages.length===0 (編集ページなし) が条件のため、
+      // resetDirty に渡す savedPageSnapshots も常に空になる。rotation クリア/bbox リベースの
+      // 対象が無く、P1-1 の byte-preserve (undecodable) 短絡とは意味が異なる（焼き込みを
+      // 諦めたのではなく、そもそも書き込むものが無かった no-op）。
+      return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars), bytePreserved: false };
     }
   }
 
@@ -1765,5 +1774,5 @@ export async function buildPdfDocumentCore(
     }
   }
 
-  return { savedBytes, skippedChars: getSkippedTextChars(skippedChars) };
+  return { savedBytes, skippedChars: getSkippedTextChars(skippedChars), bytePreserved: false };
 }

@@ -310,6 +310,15 @@ interface SaveResult {
    * temp_dir 直書き + 既定ビューア起動を行う。
    */
   previewBytes?: Uint8Array;
+  /**
+   * P1-1/M-4 (bug-hunt): pdfSaverCore.buildPdfDocumentCore の byte-preserve 判定
+   * (undecodable な既存 BBox メタ検出時、原本バイトをそのまま返し編集を一切焼き込まない)
+   * を素通しした実測値。load 時に一度だけ立つ infraStore.bboxMetaUnreadable とは異なり、
+   * 「この保存呼び出しで実際に byte-preserve が発生したか」を表す唯一の判定源。
+   * 呼び出し側は resetDirty(savedPageSnapshots, bytePreserved) に渡し、
+   * かつ警告トースト/ログの表示可否をこのフラグで判定する。
+   */
+  bytePreserved: boolean;
 }
 
 function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
@@ -770,6 +779,10 @@ export function useFileOperations(
     }
     const mergedDoc: PecoDocument = { ...document, pages: renderPages };
     let skippedChars: SkippedPdfTextChar[] = [];
+    // P1-1/M-4 (bug-hunt): core の byte-preserve 実判定を保持する唯一の変数。
+    // useInfraStore の bboxMetaUnreadable (load 時に一度だけ立つグローバルフラグ) とは
+    // 独立して、この保存呼び出しで実際に byte-preserve が発生したかどうかを表す。
+    let bytePreserved = false;
 
     // OCR テキスト層の表示オフセット (mm → point)。OCR 序列設定の値を保存出力にだけ反映する。
     // dx=正で右、dy=正で下。pdfSaverCore は viewport 表示座標系でこの量を平行移動する。
@@ -792,7 +805,16 @@ export function useFileOperations(
     };
 
     const runSavePdf = (primaryFontBytes: ArrayBuffer, fallbackFonts: ArrayBuffer[]) =>
-      savePDF(saveSource, mergedDoc, primaryFontBytes, fallbackFonts, (chars) => { skippedChars = chars; }, savePageOrder, effectiveSaveOptions);
+      savePDF(
+        saveSource,
+        mergedDoc,
+        primaryFontBytes,
+        fallbackFonts,
+        (chars) => { skippedChars = chars; },
+        savePageOrder,
+        effectiveSaveOptions,
+        (bp) => { bytePreserved = bp; },
+      );
     let savedBytes: Uint8Array;
     // issue #164: PDF生成フェーズに遷移
     setSaveStep?.('pdf-gen');
@@ -809,6 +831,7 @@ export function useFileOperations(
       if (!retryFallbackFontBytes) throw err;
 
       skippedChars = [];
+      bytePreserved = false;
       savedBytes = await withStep('savePDFRetry', 150_000, () => runSavePdf(retryFontBytes, retryFallbackFontBytes));
     }
     if (skippedChars.length > 0) {
@@ -828,6 +851,7 @@ export function useFileOperations(
         savedActionIndex,
         hasPostSnapshotChanges: false,
         previewBytes: savedBytes,
+        bytePreserved,
       };
     }
 
@@ -946,6 +970,7 @@ export function useFileOperations(
       savedPageSnapshots,
       savedActionIndex,
       hasPostSnapshotChanges,
+      bytePreserved,
     };
   };
 
@@ -1051,7 +1076,9 @@ export function useFileOperations(
         // issue #115 / #119: 保存スナップショットと同一参照のページだけ dirty を
         // 下ろす。保存中に編集されたページは参照が変わり一致しないため isDirty が
         // 保持され、次回保存の dirty フィルタに正しく載る。
-        resetDirty(result.savedPageSnapshots);
+        // P1-1 (bug-hunt): result.bytePreserved のときは resetDirty 側で rotation
+        // クリア/bbox リベース/isDirty クリアを一切行わない (何も焼き込まれていないため)。
+        resetDirty(result.savedPageSnapshots, result.bytePreserved);
         // issue #413 (PCT-182): 監査ログの diff は「更新前の lastSavedActionIndex」
         // を基準に計算する必要がある。setLastSavedActionIndex を先に実行すると
         // 直後の _writeAuditLog が読む値が既に更新後になり、diff が常に空になる。
@@ -1061,7 +1088,11 @@ export function useFileOperations(
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
         }
-        if (useInfraStore.getState().bboxMetaUnreadable && hadUnsavedEdits) {
+        // M-4 (bug-hunt): 警告表示の判定源を load 時グローバルフラグ (bboxMetaUnreadable)
+        // から、この保存呼び出し自体の実測値 (result.bytePreserved) へ一本化する。
+        // 旧実装は両者が食い違いうる (load 時未検出でも今回 byte-preserve した / 逆に
+        // フラグが立ったまま別ファイルを開き直さずにいる 等) 二重判定だった。
+        if (result.bytePreserved && hadUnsavedEdits) {
           // #392: byte-preserve で原本を返したため編集は反映されていない。明示警告する。
           // 別名保存も同じ byte-preserve で編集を落とすため、別名保存を救済策として案内しない。
           showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
@@ -1184,7 +1215,8 @@ export function useFileOperations(
             setDocumentFilePath(path);
             // issue #115 / #119: 別名保存でも保存スナップショットと同一参照の
             // ページだけ dirty を下ろす。
-            resetDirty(result.savedPageSnapshots);
+            // P1-1 (bug-hunt): bytePreserved のときは rotation/bbox/isDirty を変更しない。
+            resetDirty(result.savedPageSnapshots, result.bytePreserved);
             // issue #413 (PCT-182): setLastSavedActionIndex 更新前の値を diff 計算に使う
             // (通常保存と同じ非対称バグが別名保存にもあった)。
             const preSaveActionIndex = usePecoStore.getState().lastSavedActionIndex;
@@ -1193,7 +1225,8 @@ export function useFileOperations(
             if (result.hasPostSnapshotChanges) {
               usePecoStore.setState({ isDirty: true });
             }
-            if (useInfraStore.getState().bboxMetaUnreadable && hadUnsavedEdits) {
+            // M-4 (bug-hunt): 判定源を result.bytePreserved (この保存呼び出しの実測値) に一本化。
+            if (result.bytePreserved && hadUnsavedEdits) {
               // #392: byte-preserve でターゲットにも編集が反映されていない。成功扱いにしない。
               showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
             } else {
@@ -1271,15 +1304,28 @@ export function useFileOperations(
     commitActiveOcrCardEdit();
     isSavingRef.current = true;
     setIsSaving?.(true);
+    // M-4 (bug-hunt): handleSaveTo はバッチ sidecar 経路（フォルダ OCR 自動保存等）で、
+    // ユーザーが画面を注視している保証が無く、showToast を出しても見落とされうる。
+    // 戻り値の型 (Promise<boolean>) は useBatchJob.ts の savePdfAs コールバック契約
+    // (`(targetPath: string) => Promise<boolean>`) に固定されており、ここを変更すると
+    // バッチジョブ全体に波及するため据え置く。代わりに console.warn で開発者ログに
+    // 可視化する（バッチ実行のログは呼び出し元がまとめて確認できる前提）。
+    const hadUnsavedEdits = usePecoStore.getState().isDirty
+      || Array.from(usePecoStore.getState().document?.pages.values() || []).some((p) => p.isDirty);
     try {
       const result = await _executeSave(targetPath, undefined, {
         normalizePageOrderForCurrentDocument: false,
       });
       if (result !== null) {
-        resetDirty(result.savedPageSnapshots);
+        resetDirty(result.savedPageSnapshots, result.bytePreserved);
         setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
+        }
+        if (result.bytePreserved && hadUnsavedEdits) {
+          console.warn(
+            `[handleSaveTo] byte-preserve: 読み込み不能なOCRメタを検出したため、編集内容は ${targetPath} へ反映されていません。`,
+          );
         }
         return true;
       }
@@ -1378,12 +1424,14 @@ export function useFileOperations(
     try {
       const result = await _executeSave(undefined, undefined, { applyOffsetAllPages: true });
       if (result === null) return false;
-      resetDirty(result.savedPageSnapshots);
+      // P1-1 (bug-hunt): bytePreserved のときは rotation/bbox/isDirty を変更しない。
+      resetDirty(result.savedPageSnapshots, result.bytePreserved);
       setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
       if (result.hasPostSnapshotChanges) {
         usePecoStore.setState({ isDirty: true });
       }
-      if (useInfraStore.getState().bboxMetaUnreadable && hadUnsavedEdits) {
+      // M-4 (bug-hunt): 判定源を result.bytePreserved (この保存呼び出しの実測値) に一本化。
+      if (result.bytePreserved && hadUnsavedEdits) {
         // #392: byte-preserve で編集が反映されていない。成功扱いにしない。
         showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
       } else {
