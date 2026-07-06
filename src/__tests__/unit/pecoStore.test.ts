@@ -3,6 +3,7 @@ import {
   usePecoStore,
   waitForPendingIdbSaves,
   selectCurrentPageTextBlocks,
+  trackPendingIdbWork,
 } from '../../store/pecoStore'
 import {
   useViewerStore,
@@ -119,6 +120,126 @@ describe('pecoStore', () => {
       usePecoStore.getState().pushAction({ type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() })
 
       expect(usePecoStore.getState().redoStack).toHaveLength(0)
+    })
+  })
+
+  // ── F-2 (bug-hunt): undoStack が 100 件上限で先頭トリムされたとき、
+  //    lastSavedActionIndex (保存チェックポイント) も追従してトリム件数だけ繰り下がること。
+  //    追従しないと、100 件到達後は保存 diff プレビュー/監査ログが恒久的に沈黙する
+  //    (undoStack.slice(lastSavedActionIndex) が常に空を返すため)。──
+  describe('F-2 (bug-hunt): undoStack 先頭トリムで lastSavedActionIndex を追従', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
+    })
+
+    it('pushAction: 100件到達→保存→編集→diffが空にならない (shift() 経路)', () => {
+      const filler: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      const fillerStack = Array.from({ length: 100 }, () => filler)
+      usePecoStore.setState({
+        document: makeDoc(),
+        undoStack: fillerStack,
+        redoStack: [],
+        // 100 件すべて保存済みだった想定 (次の保存操作でここまでチェックポイントが進んでいる)
+        lastSavedActionIndex: 100,
+      })
+
+      // 101 件目の新規編集を push する。undoStack は 100 件上限でトリムされ、
+      // 先頭 (最も古い filler) が 1 件捨てられる。
+      const newEdit: Action = {
+        type: 'update_page',
+        pageIndex: 0,
+        before: makePage({ textBlocks: [makeBlock({ id: 'b1', text: 'before' })] }),
+        after: makePage({ textBlocks: [makeBlock({ id: 'b1', text: 'after' })] }),
+      }
+      usePecoStore.getState().pushAction(newEdit)
+
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(undoStack).toHaveLength(100) // トリムされ 100 件のまま
+      // 修正前 (トリム追従なし) は lastSavedActionIndex が 100 のまま残り、
+      // slice(100) が 100 件の配列に対して空を返し、新規編集が diff から消える。
+      expect(lastSavedActionIndex).toBe(99)
+
+      const diff = computeSaveDiff(undoStack, lastSavedActionIndex)
+      expect(diff.entries.length).toBeGreaterThan(0)
+      expect(diff.changedPages).toContain(0)
+    })
+
+    it('movePage: 先頭トリムでも lastSavedActionIndex が追従する (slice(-100) 経路)', async () => {
+      const filler: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      const fillerStack = Array.from({ length: 100 }, () => filler)
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]])),
+        pageOrder: [0, 1],
+        undoStack: fillerStack,
+        redoStack: [],
+        lastSavedActionIndex: 100,
+      })
+
+      await usePecoStore.getState().movePage(0, 1)
+
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(undoStack).toHaveLength(100)
+      expect(lastSavedActionIndex).toBe(99)
+    })
+
+    it('rotatePages: 先頭トリムでも lastSavedActionIndex が追従する (functional set 経路)', async () => {
+      const filler: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      const fillerStack = Array.from({ length: 100 }, () => filler)
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, makePage({ pageIndex: 0 })]])),
+        pageOrder: [0],
+        undoStack: fillerStack,
+        redoStack: [],
+        lastSavedActionIndex: 100,
+      })
+
+      await usePecoStore.getState().rotatePages([0], 90)
+
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(undoStack).toHaveLength(100)
+      expect(lastSavedActionIndex).toBe(99)
+    })
+
+    it('updatePageData: 先頭トリムでも lastSavedActionIndex が追従する (shift + newState 経路)', () => {
+      const filler: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      const fillerStack = Array.from({ length: 100 }, () => filler)
+      const oldPage = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'b1', text: 'before' })] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, oldPage]])),
+        pageOrder: [0],
+        undoStack: fillerStack,
+        redoStack: [],
+        lastSavedActionIndex: 100,
+      })
+
+      usePecoStore.getState().updatePageData(0, { textBlocks: [makeBlock({ id: 'b1', text: 'after' })] }, true)
+
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(undoStack).toHaveLength(100)
+      expect(lastSavedActionIndex).toBe(99)
+    })
+
+    it('replaceText: 先頭トリムでも lastSavedActionIndex が追従する (shift + filePath ガード経路)', async () => {
+      const filler: Action = { type: 'update_page', pageIndex: 0, before: makePage(), after: makePage() }
+      const fillerStack = Array.from({ length: 100 }, () => filler)
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'b1', text: 'foo' })] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page0]])),
+        currentPageIndex: 0,
+        undoStack: fillerStack,
+        redoStack: [],
+        lastSavedActionIndex: 100,
+      })
+
+      await usePecoStore.getState().replaceText({
+        scope: 'current', pattern: 'foo', replacement: 'bar', caseSensitive: false, useRegex: false,
+      })
+
+      const { undoStack, lastSavedActionIndex } = usePecoStore.getState()
+      expect(undoStack).toHaveLength(100)
+      expect(lastSavedActionIndex).toBe(99)
     })
   })
 
@@ -1315,6 +1436,72 @@ describe('pecoStore', () => {
       expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled() // a.pdf への削除同期が発火しない
     })
 
+    // ── F-6 (bug-hunt): deletePages/movePage 冒頭の waitForPendingIdbSaves() 待機中に
+    //    ファイル切替が起きても、待機後の live document (切替後の新ファイル) へ
+    //    旧ファイル向けの displayIndices をそのまま適用してしまわないこと ──
+    it('F-6: deletePages は waitForPendingIdbSaves 待機中のファイル切替を検出し中止する (全ページ in-memory・IDB read 経由しない経路)', async () => {
+      usePecoStore.getState().setDocument({
+        filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]]),
+      })
+      await waitForPendingIdbSaves()
+
+      // deletePages 冒頭の await waitForPendingIdbSaves() を、未解決の Promise を
+      // pendingIdbSaves に登録することで意図的に足止めする。
+      let releasePending!: () => void
+      const pendingGate = new Promise<void>((resolve) => { releasePending = resolve })
+      trackPendingIdbWork(pendingGate)
+
+      const deletePromise = usePecoStore.getState().deletePages([0])
+
+      // 待機中に別ファイルへ切り替える (documentEpoch も +1 される)。
+      // b.pdf も 2 ページにしておく (1 ページだと「全ページ削除は許可しない」ガードが
+      // 別の理由で削除を止めてしまい、F-6 のガードを検証できないため)。
+      usePecoStore.getState().setDocument({
+        filePath: 'b.pdf', fileName: 'b.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]]),
+      })
+
+      releasePending()
+      await deletePromise
+      await waitForPendingIdbSaves()
+
+      const doc = usePecoStore.getState().document
+      // 中止されるため、a.pdf 向け displayIndices=[0] が b.pdf に誤適用されない
+      expect(doc?.filePath).toBe('b.pdf')
+      expect(doc?.totalPages).toBe(2)
+      expect(doc?.pages.has(0)).toBe(true)
+      expect(doc?.pages.has(1)).toBe(true)
+    })
+
+    it('F-6: movePage は waitForPendingIdbSaves 待機中のファイル切替を検出し中止する', async () => {
+      usePecoStore.getState().setDocument({
+        filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]]),
+      })
+      await waitForPendingIdbSaves()
+
+      let releasePending!: () => void
+      const pendingGate = new Promise<void>((resolve) => { releasePending = resolve })
+      trackPendingIdbWork(pendingGate)
+
+      const movePromise = usePecoStore.getState().movePage(0, 1)
+
+      usePecoStore.getState().setDocument({
+        filePath: 'b.pdf', fileName: 'b.pdf', totalPages: 2, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]]),
+      })
+
+      releasePending()
+      await movePromise
+      await waitForPendingIdbSaves()
+
+      const state = usePecoStore.getState()
+      // 中止されるため、a.pdf 向けの並べ替え指示 (0→1) が b.pdf に誤適用されない
+      expect(state.document?.filePath).toBe('b.pdf')
+      expect(state.pageOrder).toEqual([0, 1])
+    })
+
     it('S-02-03: IDB 保存失敗時、ロールバック対象 page が新しい同 idx の更新で上書きされていればロールバックしない', async () => {
       // updatePageData の LRU 退避経路でロールバックロジックが走るかを検証する。
       // setState() 内で newPages.has(idx) チェックがあるため、保存失敗後も新しい同 idx が
@@ -1780,6 +1967,68 @@ describe('pecoStore', () => {
       // Math.min(0, 1) = 0 のまま (安全側を維持、undoStack.length を超えない)
       expect(lastSavedActionIndex).toBe(0)
       expect(lastSavedActionIndex).toBeLessThanOrEqual(undoStack.length)
+    })
+  })
+
+  // ── F-4 (bug-hunt): scheduleStructuralUndoRedoIdbSync の documentEpoch 二重ガード ──
+  // scheduleRotateUndoRedoIdbWrite (#393) は capturedEpoch を受け取り、
+  // waitForPendingIdbSaves() 後の documentEpoch 変化を検知して no-op にするが、
+  // delete_pages の undo/redo が使う scheduleStructuralUndoRedoIdbSync には
+  // このガードが無く非対称だった。capturedEpoch を追加したことで、
+  // 待機中のファイル切替を検知して IDB 同期 (delete + write) を中止できることを確認する。
+  describe('F-4 (bug-hunt): scheduleStructuralUndoRedoIdbSync の documentEpoch 二重ガード', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.deleteTemporaryPageKeys).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
+    })
+
+    it('delete_pages の redo() は waitForPendingIdbSaves 待機中のファイル切替を検出し delete/write 両方を中止する', async () => {
+      const beforePages = new Map([[0, makePage({ pageIndex: 0 })], [1, makePage({ pageIndex: 1 })]])
+      const afterPages = new Map([[0, makePage({ pageIndex: 0 })]])
+      const action: Action = {
+        type: 'delete_pages',
+        beforePages,
+        afterPages,
+        beforeOrder: [0, 1],
+        afterOrder: [0],
+        beforeCurrentPageIndex: 0,
+        afterCurrentPageIndex: 0,
+        beforeTotalPages: 2,
+        afterTotalPages: 1,
+        deletedPageIndices: [1],
+      }
+      usePecoStore.setState({
+        document: { filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 2, metadata: {}, pages: beforePages },
+        pageOrder: [0, 1],
+        undoStack: [],
+        redoStack: [action],
+        lastSavedActionIndex: 0,
+      })
+
+      // scheduleStructuralUndoRedoIdbSync 冒頭の waitForPendingIdbSaves() を、
+      // 未解決の Promise を pendingIdbSaves に登録することで意図的に足止めする。
+      let releasePending!: () => void
+      const pendingGate = new Promise<void>((resolve) => { releasePending = resolve })
+      trackPendingIdbWork(pendingGate)
+
+      usePecoStore.getState().redo()
+
+      // redo() 自体は同期で完了する (store 上は既に a.pdf の削除後状態)。
+      // scheduleStructuralUndoRedoIdbSync の非同期チェーンは pendingGate 解決待ちのため、
+      // この間に別ファイルへ切り替える (documentEpoch が +1 される)。
+      usePecoStore.getState().setDocument({
+        filePath: 'b.pdf', fileName: 'b.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0 })]]),
+      })
+
+      releasePending()
+      await waitForPendingIdbSaves()
+
+      // epoch ガードで中止されるため、a.pdf 向けの delete/write は一切発火しない
+      expect(pdfLoader.deleteTemporaryPageKeys).not.toHaveBeenCalled()
+      expect(pdfLoader.saveTemporaryPageDataBatch).not.toHaveBeenCalled()
     })
   })
 
@@ -2517,6 +2766,54 @@ describe('pecoStore', () => {
 
       expect(vi.mocked(pdfLoader.getAllTemporaryPageData)).not.toHaveBeenCalled()
     })
+
+    // ── F-1 (bug-hunt): scope=all の getAllTemporaryPageData await 中にファイル切替が
+    //    起きると、旧ドキュメント基準で組み立てた entries が新ドキュメントへ誤適用される
+    //    (旧文書のページ内容が新文書の同じ pageIndex を上書きしてしまう) ──
+    it('F-1: replaceText(scope=all) は getAllTemporaryPageData 待機中のファイル切替を検出し stale set() を中止する', async () => {
+      let resolveIdbRead!: (m: Map<string, Partial<PageData>>) => void
+      const idbRead = new Promise<Map<string, Partial<PageData>>>((r) => { resolveIdbRead = r })
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockReturnValueOnce(idbRead)
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo on a' })] })
+      usePecoStore.getState().setDocument({
+        filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, page0]]),
+      })
+      await waitForPendingIdbSaves()
+
+      const replacePromise = usePecoStore.getState().replaceText({
+        scope: 'all',
+        pattern: 'foo',
+        replacement: 'bar',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      // getAllTemporaryPageData の await 中に入るまで進める
+      for (let i = 0; i < 10 && vi.mocked(pdfLoader.getAllTemporaryPageData).mock.calls.length === 0; i++) {
+        await Promise.resolve()
+      }
+      expect(pdfLoader.getAllTemporaryPageData).toHaveBeenCalledTimes(1)
+
+      // await 中に別ファイルへ切替 (documentEpoch が +1 される)
+      const unrelatedBlock = makeBlock({ id: 'q0b', text: 'unrelated' })
+      usePecoStore.getState().setDocument({
+        filePath: 'b.pdf', fileName: 'b.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0, textBlocks: [unrelatedBlock] })]]),
+      })
+
+      resolveIdbRead(new Map())
+      const result = await replacePromise
+      await waitForPendingIdbSaves()
+
+      // 中止されるため hits=0、b.pdf の内容は a.pdf 由来の置換結果で汚染されない
+      expect(result).toEqual({ hits: 0, blocks: 0, pages: 0, skippedBlocks: 0 })
+      const doc = usePecoStore.getState().document
+      expect(doc?.filePath).toBe('b.pdf')
+      expect(doc?.pages.get(0)!.textBlocks[0].text).toBe('unrelated')
+    })
   })
 
   // ── issue #105: useRegex=false で $ replacement が literal ──
@@ -2931,6 +3228,49 @@ describe('pecoStore', () => {
       expect(src1).toBeDefined()
       expect((src0!.data as PageData).textBlocks[0].text).toBe('bar on memory')
       expect((src1!.data as PageData).textBlocks[0].text).toBe('bar on idb')
+    })
+
+    // ── F-1 (bug-hunt): replaceText と同型。scope=all の getAllTemporaryPageData await 中に
+    //    ファイル切替が起きると、旧ドキュメント基準の entries が新ドキュメントへ誤適用される ──
+    it('F-1: replaceTextBatch(scope=all) は getAllTemporaryPageData 待機中のファイル切替を検出し stale set() を中止する', async () => {
+      let resolveIdbRead!: (m: Map<string, Partial<PageData>>) => void
+      const idbRead = new Promise<Map<string, Partial<PageData>>>((r) => { resolveIdbRead = r })
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockReturnValueOnce(idbRead)
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+
+      const page0 = makePage({ pageIndex: 0, textBlocks: [makeBlock({ id: 'p0b', text: 'foo on a' })] })
+      usePecoStore.getState().setDocument({
+        filePath: 'a.pdf', fileName: 'a.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, page0]]),
+      })
+      await waitForPendingIdbSaves()
+
+      const batchPromise = usePecoStore.getState().replaceTextBatch(
+        [{ pattern: 'foo', replacement: 'bar', isRegex: false, caseSensitive: false }],
+        'all',
+      )
+
+      for (let i = 0; i < 10 && vi.mocked(pdfLoader.getAllTemporaryPageData).mock.calls.length === 0; i++) {
+        await Promise.resolve()
+      }
+      expect(pdfLoader.getAllTemporaryPageData).toHaveBeenCalledTimes(1)
+
+      // await 中に別ファイルへ切替 (documentEpoch が +1 される)
+      const unrelatedBlock = makeBlock({ id: 'q0b', text: 'unrelated' })
+      usePecoStore.getState().setDocument({
+        filePath: 'b.pdf', fileName: 'b.pdf', totalPages: 1, metadata: {},
+        pages: new Map([[0, makePage({ pageIndex: 0, textBlocks: [unrelatedBlock] })]]),
+      })
+
+      resolveIdbRead(new Map())
+      const result = await batchPromise
+      await waitForPendingIdbSaves()
+
+      // 中止されるため totalHits=0、b.pdf の内容は a.pdf 由来の置換結果で汚染されない
+      expect(result.totalHits).toBe(0)
+      const doc = usePecoStore.getState().document
+      expect(doc?.filePath).toBe('b.pdf')
+      expect(doc?.pages.get(0)!.textBlocks[0].text).toBe('unrelated')
     })
   })
 
