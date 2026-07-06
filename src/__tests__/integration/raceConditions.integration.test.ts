@@ -135,6 +135,10 @@ describe('I-RC-03: DnD 中テキスト編集で double-write が起きない', (
     expect(state.pageOrder).toHaveLength(3);
     expect(new Set(state.pageOrder).size).toBe(3);
 
+    // movePage(0,2) 後の期待順序そのものを検証 (#429 TW-4: 長さ/重複だけでは
+    // 順序の取り違えを検出できない vacuous アサートだった)
+    expect(state.pageOrder).toEqual([1, 2, 0]);
+
     // isDirty が true: 編集 + 移動の両方が反映されている
     expect(state.isDirty).toBe(true);
 

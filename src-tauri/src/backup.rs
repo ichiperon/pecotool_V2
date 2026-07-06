@@ -77,7 +77,13 @@ fn write_backup_file_atomically(path: &Path, json_str: &str) -> Result<(), Strin
     })();
 
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        // PCT-119: 掃除失敗を握りつぶさず可視化する（動作自体は継続=fail-open のまま）。
+        if let Err(cleanup_err) = std::fs::remove_file(&temp) {
+            eprintln!(
+                "[backup] failed to remove temp file after write error: {} ({cleanup_err})",
+                temp.display()
+            );
+        }
     }
     result
 }
@@ -144,6 +150,110 @@ fn clear_backup_targets(backup_dir: &PathBuf, file_path: &str) -> Vec<PathBuf> {
     ]
 }
 
+/// `check_pending_backups` が復元ダイアログへ表示する originalFilePath の健全性を検証する。
+///
+/// SECURITY (PCT-119): backups/ 配下の JSON はハッシュ命名で書込/読込経路こそ閉じているが、
+/// ファイル自体はディスク上の平文であり、外部から差し替えられる前提を置く必要がある。
+/// 細工された originalFilePath（空文字・相対パス・非 PDF 拡張子・異常に長い文字列）を
+/// 無検証のまま `unwrap_or("")` で通すと、復元ダイアログに任意文字列を表示できてしまい
+/// パス偽装によるユーザー誤誘導の余地になる。無効な場合はエントリごと一覧から除外する
+/// （表示だけを誤魔化す方向ではなく、疑わしいバックアップそのものを見せない）。
+fn is_valid_backup_original_path(file_path: &str) -> bool {
+    const MAX_PATH_LEN: usize = 4096;
+    if file_path.is_empty() || file_path.len() > MAX_PATH_LEN {
+        return false;
+    }
+    let path = Path::new(file_path);
+    if !path.is_absolute() {
+        return false;
+    }
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
+/// 保存直後にバックアップ削除 (`clear_backup`) が失敗した場合の残骸 (#364 / PCT-141 実害①) を
+/// 検出するための猶予幅。
+///
+/// マージンを設ける理由:
+/// - 自動バックアップは quiet period 60秒・既定 interval 5分で動くため、バックアップ取得後に
+///   実際の保存が完了するまで通常は数十秒〜分オーダーの間隔が空く。したがって
+///   「バックアップ直後 (数秒以内) に完了した保存」を stale と誤判定しても実害は乏しい一方、
+///   マージンを設けないと FAT 系ファイルシステムの mtime 粒度 (2秒単位) やディスク書込み
+///   バッファのフラッシュタイミングのわずかなブレで、本物の未保存バックアップを誤って
+///   stale 扱いしてしまう恐れがある。
+/// - 偽陽性 (本物の未保存バックアップを隠す) は不可、偽陰性 (提案しすぎ) は許容という方針
+///   (Issue #364 実害①) のもと安全側に倒すため、上記ノイズを十分吸収できる 5 秒とした。
+const STALE_MTIME_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 指定パスのファイルサイズ（バイト数）を取得する。取得に失敗した場合は `None`。
+///
+/// `save_backup` がバックアップ取得時点の元 PDF サイズを記録するため、および
+/// `is_backup_stale` が現在の元 PDF サイズを取得するために使う。
+fn stat_file_size(path: &str) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
+/// バックアップが「既に保存済みで残骸化した」= stale かどうかを判定する。
+///
+/// 判定方法:
+/// 1. バックアップ JSON ファイル自体の mtime を「バックアップ取得時刻」の代理として使い、
+///    元 PDF の現在の mtime と比較する。JSON 内の `timestamp` (JS 側 `Date.now()` 由来の ISO 文字列)
+///    はパースに追加クレートが要るため使わず、OS のファイルシステムメタデータのみで完結させる
+///    (`write_backup_file_atomically` は atomic replace 直後に mtime が確定するため、
+///    JS 側の timestamp とはほぼ同時刻になる)。
+/// 2. `original_size_at_backup`（バックアップ取得時点の元 PDF サイズ、`save_backup` が
+///    記録する）が渡された場合は、現在の PDF サイズと比較し、サイズが変化していることも
+///    追加で要求する（mtime 新しい かつ size 変化、の二重条件）。
+///
+/// 二重条件にした理由 (らでん監査指摘): 別 PC 間のファイル同期ツールが、内容を変えずに
+/// mtime だけを更新するケースがある。mtime のみの判定だとこれを「保存完走」と誤認し、
+/// 本物の未保存バックアップを stale として隠してしまう (偽陽性 = 不可、Issue #364 実害①の
+/// 方針に抵触)。サイズ変化も要求すれば、内容不変の mtime タッチだけでは stale 判定されない。
+///
+/// `original_size_at_backup` が `None`（旧バックアップに size フィールドが無い場合）は
+/// 従来どおり mtime のみで判定する（後方互換・スキーマ非破壊）。
+///
+/// 判定不能な場合 (PDF が見つからない・メタデータ取得失敗等) は必ず `false` を返し、
+/// 従来どおり復元候補として提案する (安全側優先)。
+fn is_backup_stale(
+    backup_path: &Path,
+    pdf_file_path: &str,
+    original_size_at_backup: Option<u64>,
+) -> bool {
+    let backup_mtime = match std::fs::metadata(backup_path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let pdf_metadata = match std::fs::metadata(pdf_file_path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let pdf_mtime = match pdf_metadata.modified() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+
+    let mtime_stale_candidate = match pdf_mtime.duration_since(backup_mtime) {
+        // PDF mtime がバックアップ mtime よりマージン以上新しい
+        // = バックアップ取得後に保存が完走した可能性が高い → stale 候補
+        Ok(delta) => delta >= STALE_MTIME_MARGIN,
+        // PDF mtime <= backup mtime (クロックスキューで逆転した場合を含む) → stale ではない
+        Err(_) => false,
+    };
+    if !mtime_stale_candidate {
+        return false;
+    }
+
+    match original_size_at_backup {
+        // size 情報がある場合: サイズが変化していなければ (同期ツールの mtime タッチ等)
+        // stale と判定しない。変化していれば stale。
+        Some(original_size) => pdf_metadata.len() != original_size,
+        // 旧バックアップ (size フィールド無し): 従来どおり mtime のみで判定する。
+        None => true,
+    }
+}
+
 fn readable_backup_file_path(backup_dir: &PathBuf, file_path: &str) -> PathBuf {
     // SECURITY #63: direct backup file path 経路は意図的に除外する。
     // Webview から `invoke('load_backup', { filePath: '<backup_dir>/任意.json' })` で
@@ -179,10 +289,16 @@ pub async fn save_backup(
     let pages: serde_json::Value =
         serde_json::from_str(&pages_json).map_err(|e| format!("pages_json解析失敗: {e}"))?;
 
+    // stale 判定強化 (らでん監査指摘): バックアップ取得時点の元 PDF サイズを記録する。
+    // 取得失敗時 (PDF が一時的にロック中等) は null のままとし、is_backup_stale 側で
+    // 従来どおり mtime のみの判定にフォールバックする (後方互換)。
+    let original_size_at_backup = stat_file_size(&file_path);
+
     let data = serde_json::json!({
         "version": 1,
         "timestamp": timestamp,
         "originalFilePath": file_path,
+        "originalSizeAtBackup": original_size_at_backup,
         "pages": pages
     });
 
@@ -192,7 +308,13 @@ pub async fn save_backup(
         write_backup_file_atomically(&bpath, &json_str)?;
         let legacy_bpath = legacy_backup_file_path(&backup_dir, &file_path);
         if legacy_bpath != bpath && legacy_bpath.exists() {
-            let _ = std::fs::remove_file(legacy_bpath);
+            // PCT-119: 掃除失敗を握りつぶさず可視化する（動作自体は継続=fail-open のまま）。
+            if let Err(e) = std::fs::remove_file(&legacy_bpath) {
+                eprintln!(
+                    "[backup] failed to remove legacy backup file: {} ({e})",
+                    legacy_bpath.display()
+                );
+            }
         }
         Ok(())
     })
@@ -223,7 +345,14 @@ pub async fn check_pending_backups(app: AppHandle) -> Result<Vec<BackupInfo>, St
                     let file_path = data["originalFilePath"].as_str().unwrap_or("").to_string();
                     let timestamp = data["timestamp"].as_str().unwrap_or("").to_string();
                     let backup_path = path.to_string_lossy().to_string();
-                    if !file_path.is_empty() {
+                    let original_size_at_backup = data["originalSizeAtBackup"].as_u64();
+                    // #364 / PCT-141 実害①: clear_backup が2回とも失敗した場合の残骸バックアップが
+                    // 「偽の未保存提案」を出すのを防ぐため、PDF の方が新しければ一覧から除外する。
+                    // らでん監査指摘: mtime に加えてサイズ変化も要求し、同期ツールの mtime タッチ
+                    // だけで本物の未保存バックアップを隠さないようにする (is_backup_stale 参照)。
+                    if is_valid_backup_original_path(&file_path)
+                        && !is_backup_stale(&path, &file_path, original_size_at_backup)
+                    {
                         backups.push(BackupInfo {
                             file_path,
                             timestamp,
@@ -279,11 +408,13 @@ pub async fn load_backup(app: AppHandle, file_path: String) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_file_path, clear_backup_targets, legacy_backup_file_path, legacy_path_hash,
-        path_hash, read_backup_file, write_backup_file_atomically,
+        backup_file_path, clear_backup_targets, is_backup_stale, is_valid_backup_original_path,
+        legacy_backup_file_path, legacy_path_hash, path_hash, read_backup_file, stat_file_size,
+        write_backup_file_atomically, STALE_MTIME_MARGIN,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn path_hash_uses_fixed_fnv1a_64() {
@@ -476,5 +607,316 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
+    // ── PCT-119: is_valid_backup_original_path (check_pending_backups の表示前検証) ──
+
+    /// 空文字は拒否される（細工 JSON で originalFilePath が欠落/空の場合）。
+    #[test]
+    fn is_valid_backup_original_path_rejects_empty() {
+        assert!(!is_valid_backup_original_path(""));
+    }
+
+    /// 相対パスは拒否される。
+    #[test]
+    fn is_valid_backup_original_path_rejects_relative_path() {
+        assert!(!is_valid_backup_original_path("docs\\sample.pdf"));
+        assert!(!is_valid_backup_original_path("../../etc/sample.pdf"));
+    }
+
+    /// .pdf 以外の拡張子は拒否される。
+    #[test]
+    fn is_valid_backup_original_path_rejects_non_pdf_extension() {
+        assert!(!is_valid_backup_original_path("C:\\docs\\sample.txt"));
+        assert!(!is_valid_backup_original_path("C:\\docs\\sample"));
+    }
+
+    /// 異常に長い文字列は拒否される（サイズ上限ガード）。
+    #[test]
+    fn is_valid_backup_original_path_rejects_oversized_path() {
+        let huge = format!("C:\\{}\\sample.pdf", "a".repeat(5000));
+        assert!(!is_valid_backup_original_path(&huge));
+    }
+
+    /// 正規の絶対 PDF パス（大文字拡張子含む）は許可される。
+    #[test]
+    fn is_valid_backup_original_path_accepts_normal_absolute_pdf_path() {
+        assert!(is_valid_backup_original_path("C:\\docs\\sample.pdf"));
+        assert!(is_valid_backup_original_path("C:\\docs\\SAMPLE.PDF"));
+    }
+
+    /// check_pending_backups と同じフィルタ条件で、originalFilePath が欠落した
+    /// 細工 JSON がバックアップ一覧から除外されること（unwrap_or("") 経路の回帰）。
+    #[test]
+    fn check_pending_backups_filter_excludes_missing_original_file_path() {
+        let data: serde_json::Value =
+            serde_json::from_str(r#"{"version":1,"timestamp":"T1","pages":[]}"#).unwrap();
+        let file_path = data["originalFilePath"].as_str().unwrap_or("").to_string();
+        assert_eq!(file_path, "", "欠落時は空文字にフォールバックする（従来仕様）");
+        assert!(
+            !is_valid_backup_original_path(&file_path),
+            "空文字は check_pending_backups の一覧に含めてはいけない"
+        );
+    }
+
+    // ── #364 / PCT-141: is_backup_stale (check_pending_backups の残骸バックアップ除外) ──
+
+    /// テスト用の一意なファイルパスを作り、指定 mtime で書き込む。
+    fn write_file_with_mtime(dir: &PathBuf, name: &str, mtime: SystemTime) -> PathBuf {
+        use std::fs::File;
+        let path = dir.join(name);
+        let file = File::create(&path).expect("test file 作成失敗");
+        file.set_modified(mtime).expect("test file mtime 設定失敗");
+        path
+    }
+
+    /// PDF の mtime がバックアップよりマージンを超えて新しい場合、stale として判定される
+    /// (= 保存が完走した後に clear_backup が失敗して残った残骸とみなす)。
+    #[test]
+    fn is_backup_stale_true_when_pdf_newer_than_margin() {
+        let dir = make_backup_dir("stale_excluded");
+        let backup_time = SystemTime::now();
+        let pdf_time = backup_time + STALE_MTIME_MARGIN + Duration::from_secs(1);
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        let pdf_path = write_file_with_mtime(&dir, "original.pdf", pdf_time);
+
+        assert!(
+            is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), None),
+            "PDF がバックアップよりマージン超で新しい場合は stale と判定すべき"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PDF がバックアップより古い（=まだ保存されていない本物の未保存バックアップ）場合、
+    /// stale と判定されず一覧に残る。
+    #[test]
+    fn is_backup_stale_false_when_pdf_older_than_backup() {
+        let dir = make_backup_dir("stale_kept_older_pdf");
+        let backup_time = SystemTime::now();
+        let pdf_time = backup_time - Duration::from_secs(3600);
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        let pdf_path = write_file_with_mtime(&dir, "original.pdf", pdf_time);
+
+        assert!(
+            !is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), None),
+            "PDF がバックアップより古い＝本物の未保存バックアップは残すべき"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 元 PDF が存在しない（削除・移動済み）場合は判定不能として stale 扱いしない
+    /// (安全側優先: 偽陽性＝本物のバックアップを隠すのは不可)。
+    #[test]
+    fn is_backup_stale_false_when_pdf_missing() {
+        let dir = make_backup_dir("stale_pdf_missing");
+        let backup_path = write_file_with_mtime(&dir, "backup.json", SystemTime::now());
+        let missing_pdf = dir.join("does_not_exist.pdf");
+
+        assert!(
+            !is_backup_stale(&backup_path, &missing_pdf.to_string_lossy(), None),
+            "PDF 消失時は判定不能として従来どおり提案すべき"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// バックアップ自体のファイルが読めない（想定外の削除競合等）場合も判定不能として
+    /// stale 扱いしない。
+    #[test]
+    fn is_backup_stale_false_when_backup_file_missing() {
+        let dir = make_backup_dir("stale_backup_missing");
+        let pdf_path = write_file_with_mtime(&dir, "original.pdf", SystemTime::now());
+        let missing_backup = dir.join("does_not_exist.json");
+
+        assert!(
+            !is_backup_stale(&missing_backup, &pdf_path.to_string_lossy(), None),
+            "バックアップ自体が読めない場合も判定不能として従来どおり提案すべき"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 境界値: PDF がバックアップよりマージン未満しか新しくない場合は stale としない
+    /// (クロックスキュー/mtime 粒度ノイズの吸収対象)。
+    #[test]
+    fn is_backup_stale_false_at_margin_boundary_just_under() {
+        let dir = make_backup_dir("stale_margin_under");
+        let backup_time = SystemTime::now();
+        // マージンちょうど未満 (1秒手前)
+        let pdf_time = backup_time + STALE_MTIME_MARGIN - Duration::from_secs(1);
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        let pdf_path = write_file_with_mtime(&dir, "original.pdf", pdf_time);
+
+        assert!(
+            !is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), None),
+            "マージン未満のずれは stale と判定してはいけない"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 境界値: PDF がバックアップよりちょうどマージン分だけ新しい場合は stale
+    /// (`>=` 判定であることの固定)。
+    #[test]
+    fn is_backup_stale_true_at_margin_boundary_exact() {
+        let dir = make_backup_dir("stale_margin_exact");
+        let backup_time = SystemTime::now();
+        let pdf_time = backup_time + STALE_MTIME_MARGIN;
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        let pdf_path = write_file_with_mtime(&dir, "original.pdf", pdf_time);
+
+        assert!(
+            is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), None),
+            "マージンちょうどのずれは stale と判定すべき (>= 境界)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PDF とバックアップの mtime が完全一致する場合は stale としない
+    /// (duration_since(Ok(ZERO)) は margin 未満なので false)。
+    #[test]
+    fn is_backup_stale_false_when_mtimes_equal() {
+        let dir = make_backup_dir("stale_mtimes_equal");
+        let same_time = SystemTime::now();
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", same_time);
+        let pdf_path = write_file_with_mtime(&dir, "original.pdf", same_time);
+
+        assert!(
+            !is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), None),
+            "mtime が完全一致する場合は stale と判定してはいけない"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// サイズ比較テスト用: 指定バイト数の内容を持つファイルを作り、mtime を設定して返す。
+    fn write_file_with_mtime_and_size(
+        dir: &PathBuf,
+        name: &str,
+        mtime: SystemTime,
+        size: usize,
+    ) -> PathBuf {
+        use std::fs::File;
+        use std::io::Write;
+        let path = dir.join(name);
+        let mut file = File::create(&path).expect("test file 作成失敗");
+        file.write_all(&vec![b'x'; size]).expect("test file 書き込み失敗");
+        file.set_modified(mtime).expect("test file mtime 設定失敗");
+        path
+    }
+
+    // ── stat_file_size (らでん監査指摘: stale 判定強化用ヘルパ) ──────────────────
+
+    #[test]
+    fn stat_file_size_returns_size_for_existing_file() {
+        let dir = make_backup_dir("stat_size_ok");
+        let path = write_file_with_mtime_and_size(&dir, "sized.pdf", SystemTime::now(), 42);
+
+        assert_eq!(stat_file_size(&path.to_string_lossy()), Some(42));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stat_file_size_returns_none_for_missing_file() {
+        let dir = make_backup_dir("stat_size_missing");
+        let missing = dir.join("does_not_exist.pdf");
+
+        assert_eq!(stat_file_size(&missing.to_string_lossy()), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── is_backup_stale: サイズ二重条件 (らでん監査指摘・多PC同期ハザード対策) ─────
+    //
+    // 別PC間のファイル同期ツールが内容を変えずに mtime だけ更新するケースがあり、
+    // mtime のみの判定では本物の未保存バックアップを stale と誤判定してしまう
+    // (偽陽性 = 不可)。サイズ変化も要求することでこれを防ぐ。
+
+    /// mtime はマージン超で新しいが、サイズが変化していない場合
+    /// (同期ツールが内容不変のまま mtime だけ更新したケースを模擬) は
+    /// stale と判定しない。
+    #[test]
+    fn is_backup_stale_false_when_mtime_newer_but_size_unchanged() {
+        let dir = make_backup_dir("stale_size_unchanged");
+        let backup_time = SystemTime::now();
+        let pdf_time = backup_time + STALE_MTIME_MARGIN + Duration::from_secs(1);
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        // サイズ 100 バイトで統一 (mtime だけ新しい = 同期ツールのタッチを模擬)
+        let pdf_path = write_file_with_mtime_and_size(&dir, "original.pdf", pdf_time, 100);
+
+        assert!(
+            !is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), Some(100)),
+            "mtime のみ新しくサイズ不変の場合は stale と判定してはいけない (同期ツール誤検知対策)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// mtime がマージン超で新しく、かつサイズも変化している場合は stale と判定する
+    /// (実際に保存が完走したケース)。
+    #[test]
+    fn is_backup_stale_true_when_mtime_newer_and_size_changed() {
+        let dir = make_backup_dir("stale_size_changed");
+        let backup_time = SystemTime::now();
+        let pdf_time = backup_time + STALE_MTIME_MARGIN + Duration::from_secs(1);
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        let pdf_path = write_file_with_mtime_and_size(&dir, "original.pdf", pdf_time, 200);
+
+        assert!(
+            is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), Some(100)),
+            "mtime 新しくサイズも変化した場合は stale と判定すべき"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// サイズ情報が渡されていても、mtime がマージン未満なら (そもそも stale 候補にならない)
+    /// サイズに関わらず stale と判定しない。
+    #[test]
+    fn is_backup_stale_false_when_size_changed_but_mtime_not_new_enough() {
+        let dir = make_backup_dir("stale_size_but_mtime_recent");
+        let backup_time = SystemTime::now();
+        // マージン未満
+        let pdf_time = backup_time + STALE_MTIME_MARGIN - Duration::from_secs(1);
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        let pdf_path = write_file_with_mtime_and_size(&dir, "original.pdf", pdf_time, 200);
+
+        assert!(
+            !is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), Some(100)),
+            "mtime がマージン未満ならサイズが変化していても stale と判定してはいけない"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 後方互換: `original_size_at_backup=None` (旧バックアップ・size フィールド無し) の場合は
+    /// 従来どおり mtime のみで stale 判定する。
+    #[test]
+    fn is_backup_stale_legacy_none_size_uses_mtime_only() {
+        let dir = make_backup_dir("stale_legacy_none_size");
+        let backup_time = SystemTime::now();
+        let pdf_time = backup_time + STALE_MTIME_MARGIN + Duration::from_secs(1);
+
+        let backup_path = write_file_with_mtime(&dir, "backup.json", backup_time);
+        let pdf_path = write_file_with_mtime(&dir, "original.pdf", pdf_time);
+
+        assert!(
+            is_backup_stale(&backup_path, &pdf_path.to_string_lossy(), None),
+            "size フィールドが無い旧バックアップは mtime のみで stale 判定すべき (後方互換)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

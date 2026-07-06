@@ -131,4 +131,44 @@ describe("computeCropRect", () => {
       expect(result.width).toBe(51);   // ceil(61.0)-10 = 61-10 = 51
     });
   });
+
+  describe("境界ケース追加（ブリーフ#3: 完全canvas外・複合負座標・render_scale 2.0/3.0）", () => {
+    it("x,y ともに負で欄全体が左上方向に canvas 外 → x=0,y=0,width=0,height=0", () => {
+      // rawX=-100,rawW=20 → x2=ceil(-80)=-80 → x=0, width=max(0,-80-0)=0（y も同様）
+      const rect = { x: -100, y: -100, width: 20, height: 20 };
+      const result = computeCropRect(rect, 1.0, 800, 600);
+      expect(result).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+    });
+
+    it("renderScale=2.0 で負座標の開始点と右下はみ出しが同時に発生 → canvas いっぱいにクランプされる", () => {
+      const rect = { x: -10, y: -10, width: 500, height: 400 };
+      const result = computeCropRect(rect, 2.0, 800, 600);
+      expect(result).toEqual({ x: 0, y: 0, width: 800, height: 600 });
+    });
+
+    it("renderScale=3.0 で欄が canvas よりはるかに大きい（四方すべてはみ出し）→ canvas ぴったりに収まる", () => {
+      const scale = 3.0;
+      const canvasW = Math.round(595 * scale); // 1785
+      const canvasH = Math.round(842 * scale); // 2526
+      const rect = { x: -1000, y: -1000, width: 5000, height: 5000 };
+      const result = computeCropRect(rect, scale, canvasW, canvasH);
+      expect(result).toEqual({ x: 0, y: 0, width: canvasW, height: canvasH });
+    });
+
+    it("canvasWidth=0 の退化ケース → width は 0 にクランプされる（height は影響を受けない）", () => {
+      const rect = { x: 5, y: 5, width: 50, height: 50 };
+      const result = computeCropRect(rect, 1.0, 0, 600);
+      expect(result.x).toBe(5);
+      expect(result.width).toBe(0);
+      expect(result.height).toBe(50);
+    });
+
+    it("renderScale=2.0 で x のみ負・非整数の欄 → floor/ceil とクランプが両立する", () => {
+      // rawX=-7 → x=max(0,floor(-7))=0, x2=ceil(-7+40.4)=ceil(33.4)=34 → width=34
+      // rawY=20,rawH=30 → y=20, y2=ceil(50)=50 → height=30（負座標ではない側は通常どおり）
+      const rect = { x: -3.5, y: 10, width: 20.2, height: 15 };
+      const result = computeCropRect(rect, 2.0, 800, 600);
+      expect(result).toEqual({ x: 0, y: 20, width: 34, height: 30 });
+    });
+  });
 });

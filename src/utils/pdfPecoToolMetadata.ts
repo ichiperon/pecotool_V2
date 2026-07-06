@@ -63,15 +63,34 @@ function decodePdfStringValue(value: unknown): string | null {
   }
 }
 
+/** PDF の /Filter を単一フィルタ名へ正規化する。
+ * 単一名 (/FlateDecode) と、外部ツールが正規化しがちな配列形式 ([/FlateDecode]) の
+ * 両方を扱う。複数フィルタチェーン ([... /FlateDecode] 等) は inflate 単体で復号
+ * できないため null を返す（呼び出し側で未対応として扱う）。
+ */
+function resolveFilterName(filter: unknown): string | null {
+  if (!filter) return null;
+
+  const asName = (f: unknown): string | null => {
+    const like = f as { asString?: () => string } | undefined;
+    if (typeof like?.asString === 'function') return like.asString();
+    return typeof f === 'string' ? f : null;
+  };
+
+  // 配列形式 [/FlateDecode]（Acrobat 等の最適化で単一 /Filter が配列化される）
+  const arrLike = filter as { asArray?: () => unknown[] } | undefined;
+  if (typeof arrLike?.asArray === 'function') {
+    const elems = arrLike.asArray();
+    return elems.length === 1 ? asName(elems[0]) : null;
+  }
+
+  return asName(filter);
+}
+
 function decodeRawStream(stream: PDFRawStream): Uint8Array | null {
   const filter = stream.dict.lookup(PDFName.of('Filter'));
   const raw = stream.getContents();
-  const filterLike = filter as unknown as { asString?: () => string } | undefined;
-  const filterName = typeof filterLike?.asString === 'function'
-    ? filterLike.asString()
-    : typeof filter === 'string'
-      ? filter
-      : null;
+  const filterName = resolveFilterName(filter);
 
   if (filterName === '/FlateDecode' || filterName === 'FlateDecode') {
     try {
@@ -84,7 +103,8 @@ function decodeRawStream(stream: PDFRawStream): Uint8Array | null {
   return null;
 }
 
-function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | null {
+/** Catalog/PecoTool/BBoxes が指す PDFRawStream を取得する（無ければ null）。 */
+function locatePrivateBBoxStream(pdfDoc: PDFDocument): PDFRawStream | null {
   const catalog = pdfDoc.catalog as unknown as {
     get?: (key: PDFName) => unknown;
   } | undefined;
@@ -98,11 +118,27 @@ function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | nul
   if (!bboxesValue) return null;
 
   const stream = pdfDoc.context.lookup(bboxesValue as never);
-  if (!(stream instanceof PDFRawStream)) return null;
+  return stream instanceof PDFRawStream ? stream : null;
+}
+
+function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | null {
+  const stream = locatePrivateBBoxStream(pdfDoc);
+  if (!stream) return null;
 
   const decoded = decodeRawStream(stream);
   if (!decoded) return null;
   return parseBBoxMetaJson(new TextDecoder().decode(decoded));
+}
+
+/** 既存の private BBox stream が「存在するが decode/parse 不能」かを判定する。
+ * true の場合、その stream は読めないだけで実データ（OCR BBox）を含む可能性があり、
+ * 空メタで上書きすると恒久喪失する（#392 / PCT-161）。 */
+function hasUnreadablePrivateBBoxStream(pdfDoc: PDFDocument): boolean {
+  const stream = locatePrivateBBoxStream(pdfDoc);
+  if (!stream) return false;
+  const decoded = decodeRawStream(stream);
+  if (!decoded) return true;
+  return parseBBoxMetaJson(new TextDecoder().decode(decoded)) === null;
 }
 
 function getInfoDictSafe(pdfDoc: PDFDocument): PDFDict | undefined {
@@ -123,17 +159,57 @@ function readLegacyInfoBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | 
   return decoded ? parseBBoxMetaJson(decoded) : null;
 }
 
-export function readPecoToolBBoxMetaFromPdfDoc(pdfDoc: PDFDocument): Record<string, unknown> {
-  return readPrivateBBoxMeta(pdfDoc) ?? readLegacyInfoBBoxMeta(pdfDoc) ?? {};
+/** BBox メタの読み取り結果の分類。
+ * - 'ok': private/legacy のいずれかから読めた（空オブジェクトを含む正常読取）。
+ * - 'undecodable': private BBox stream は存在するが、本バージョンで decode/parse できない。
+ *   → 読めないだけで実データ（OCR BBox）を含む可能性があり、上書きで恒久喪失しうる（#392）。
+ * - 'empty': private/legacy のどちらも存在しない（メタ自体が無い）。 */
+export type PecoToolBBoxMetaStatus = 'ok' | 'undecodable' | 'empty';
+
+export interface PecoToolBBoxMetaRead {
+  status: PecoToolBBoxMetaStatus;
+  meta: Record<string, unknown>;
 }
 
-export async function readPecoToolBBoxMetaFromBytes(bytes: Uint8Array): Promise<Record<string, unknown>> {
+/** BBox メタを読取ステータス付きで返す（#392 / PCT-161）。
+ * 'undecodable'（既存 stream はあるが読めない）を 'empty'（メタ無し）と区別することで、
+ * 呼び出し側（保存パス）が「読めないだけで実在するデータ」を空・partial メタで破壊的に
+ * 上書きしないよう判断できる。 */
+export function readPecoToolBBoxMetaWithStatus(pdfDoc: PDFDocument): PecoToolBBoxMetaRead {
+  const privateMeta = readPrivateBBoxMeta(pdfDoc);
+  if (privateMeta) return { status: 'ok', meta: privateMeta };
+  // #428 / PCT-197: private BBox stream が「存在するが decode/parse 不能」なら、legacy が読めても
+  // 'undecodable' を優先する。private は新形式で、破損した private にのみ存在した新しい編集データを、
+  // 古い legacy を 'ok' として返すことで黙って上書き喪失させないため（保存パスの byte-preserve と
+  // load 側の警告バナーへ合流させる）。
+  //   ここで「壊れている」と「最初から無い」を区別するのが核心: hasUnreadablePrivateBBoxStream は
+  //   private stream が無い場合は false を返すため、この分岐は素通りして下の legacy フォールバックへ
+  //   進む（= 旧来の正常系）。「昔の legacy のみ PDF」を undecodable と誤判定して開けなくする誤爆は
+  //   起きない（private が最初から無いため）。
+  // #392 時点はこの判定を legacy フォールバックの後段に置いていたが、それだと本 issue の
+  //   「private 破損 + legacy 可読」ケースを legacy が 'ok' で先取りして preserve が不発だった。
+  if (hasUnreadablePrivateBBoxStream(pdfDoc)) return { status: 'undecodable', meta: {} };
+  // private が存在しない場合のみ legacy フォールバックへ（旧 `private ?? legacy ?? {}` を温存）。
+  const legacy = readLegacyInfoBBoxMeta(pdfDoc);
+  if (legacy) return { status: 'ok', meta: legacy };
+  return { status: 'empty', meta: {} };
+}
+
+export function readPecoToolBBoxMetaFromPdfDoc(pdfDoc: PDFDocument): Record<string, unknown> {
+  return readPecoToolBBoxMetaWithStatus(pdfDoc).meta;
+}
+
+export async function readPecoToolBBoxMetaWithStatusFromBytes(bytes: Uint8Array): Promise<PecoToolBBoxMetaRead> {
   const pdfDoc = await PDFDocument.load(new Uint8Array(bytes), {
     ignoreEncryption: true,
     throwOnInvalidObject: false,
     updateMetadata: false,
   });
-  return readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  return readPecoToolBBoxMetaWithStatus(pdfDoc);
+}
+
+export async function readPecoToolBBoxMetaFromBytes(bytes: Uint8Array): Promise<Record<string, unknown>> {
+  return (await readPecoToolBBoxMetaWithStatusFromBytes(bytes)).meta;
 }
 
 export function removeLegacyPecoToolBBoxInfo(pdfDoc: PDFDocument): void {
@@ -168,6 +244,17 @@ export function writePecoToolBBoxMetaToPdfDoc(
     typeof context.obj !== 'function' ||
     typeof catalog?.set !== 'function'
   ) {
+    return;
+  }
+  // #392 / PCT-161: 新メタが空で、かつ既存に decode 不能な PecoTool BBox stream がある場合は
+  // 上書きしない。読めないだけで実データ（OCR BBox）を含む可能性があり、空 {} で潰すと恒久喪失する。
+  // 既存が decode 可能（= アプリも読めていた）状態での空保存は、ユーザーの全削除操作として尊重する。
+  //
+  // 層の役割（消さないこと）: 本体の保存パス（pdfSaverCore）は undecodable を read 境界で検出し
+  // 原本バイトを完全 byte-preserve で返すため、通常はこの write 自体が呼ばれない。このガードは
+  // pdfSaverCore を経由しない直接/別呼び出し元に対する last-line defense であり、partial メタは
+  // 防げない（空のみ対象）。partial を含む完全防御は pdfSaverCore 側の byte-preserve が担う。
+  if (Object.keys(bboxMeta).length === 0 && hasUnreadablePrivateBBoxStream(pdfDoc)) {
     return;
   }
   const json = JSON.stringify(bboxMeta);

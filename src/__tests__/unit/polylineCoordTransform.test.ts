@@ -2,32 +2,18 @@
  * #205: polyline 作成 UI で使う座標変換の代数的性質（往復変換・スケール式）のユニットテスト。
  * canvas 座標 (zoom 適用済み) <-> viewport 座標 (zoom 等倍) の変換を検証。
  *
- * 注意 (#409 / PCT-178): このファイルの canvasToPdf/pdfToCanvas は製品コードを import しない
- * 複製実装であり、実装側の回帰は検出できない（代数的な変換公式そのものの検証に限定）。
- * 実装 (useCurveEditor.ts の canvasToViewport) を直接 import して回帰を検出するテストは
- * useCurveEditor.test.ts の `describe('useCurveEditor — canvasToViewport', ...)` および
- * `describe('useCurveEditor — polyline creation flow', ...)` 内の zoom!=100 ケース
- * （#409 regression guard とコメントしたテスト）を参照すること。
- * canvasToViewport は useCurveEditor フックのクロージャとして定義されており、
- * renderHook を介さずに素の関数として import できないため、このファイル単体を
- * 実装 import 版へ置き換えることはできない。pdfToCanvas 相当の逆変換関数は
- * 現状 PdfCanvas.tsx 側にインライン実装のみで export された関数が存在しないため
- * （#409 は座標変換の共有 util 抽出を提案しているが、PdfCanvas.tsx は別担当が
- * 変更中のため本セッションでは触らない）、同様に複製検証のまま据え置く。
+ * #409 (PCT-178): 従来はこのファイル内に canvasToPdf/pdfToCanvas を複製実装しており、
+ * 製品コード非 import のため PdfCanvas.tsx / useCurveEditor.ts 側の実装回帰を検出できな
+ * かった。座標変換の実体は src/utils/coordTransform.ts (canvasToViewport / viewportToCanvas)
+ * へ抽出済みのため、ここでは複製をやめてその実装を直接 import して検証する。
+ * PdfCanvas.tsx の bbox 描画・hit-test 変換 (旧インライン `zoom / 100` 式) と
+ * useCurveEditor.ts の canvasToViewport は両方とも coordTransform.ts を参照しているため、
+ * この import 経由で両者の回帰を同時に検出できる。
+ * (useCurveEditor フック経由の統合検証は useCurveEditor.test.ts の
+ * `describe('useCurveEditor — canvasToViewport', ...)` を参照。)
  */
 import { describe, it, expect } from 'vitest'
-
-// PdfCanvas 内の canvasToPdf / pdfToCanvas に相当するインライン実装を検証
-// (製品コード非 import。実装回帰の検出は useCurveEditor.test.ts が担う。上記注意参照)
-function canvasToPdf(pos: { x: number; y: number }, zoom: number): { x: number; y: number } {
-  const scale = zoom / 100
-  return { x: pos.x / scale, y: pos.y / scale }
-}
-
-function pdfToCanvas(pos: { x: number; y: number }, zoom: number): { x: number; y: number } {
-  const scale = zoom / 100
-  return { x: pos.x * scale, y: pos.y * scale }
-}
+import { canvasToViewport as canvasToPdf, viewportToCanvas as pdfToCanvas } from '../../utils/coordTransform'
 
 describe('canvasToPdf', () => {
   it('zoom=100 では変換なし', () => {

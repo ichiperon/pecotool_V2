@@ -183,6 +183,13 @@ export function useOcrEngine(
   const [isOcrRunning, setIsOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null);
   const cancelTokenRef = useRef(false);
+  // #355 (PCT-132): フォルダ OCR ループ全体を止めるかどうかの判定専用フラグ。
+  // cancelTokenRef は processAllPages 内の epoch 不一致検知でも立ち、かつフォルダ
+  // ループは各ファイル開始時に cancelTokenRef をリセットするため、「ユーザーが
+  // cancelOcr() を明示的に押した」ことをこれだけでは区別できない。
+  // userCancelRef はユーザー操作 (Esc・進捗 UI のキャンセルボタン) からのみ立て、
+  // フォルダループではファイル単位でリセットしない (=一度立ったらフォルダ全体を止める)。
+  const userCancelRef = useRef(false);
   const isOcrRunningRef = useRef(false);
 
   // 描画タイミングに依存しないよう、非同期処理では getState() で最新状態を取得する。
@@ -255,12 +262,26 @@ export function useOcrEngine(
     doc: PecoDocument,
     progressForPage?: (pageIndex: number, timing: { startedAt: number; avgMsPerPage: number; estimatedRemainingMs: number }) => OcrProgress,
     pageIndices?: number[],
+    capturedEpochParam?: number,
   ) => {
     // #102: 開始時点の epoch を captured epoch として保持。
     // ループ内で getState().documentEpoch と比較し、F5 / Ctrl+O 経由で document が
     // 差し替えられた瞬間に検知して停止する (filePath 一致でも doc 自体は別物のため)。
     // updatePageData による document 差し替えは epoch を増やさないので、書き込みは正常に続く。
-    const capturedEpoch = useInfraStore.getState().documentEpoch;
+    //
+    // #354 (PCT-131): 呼び出し元 (runOcrAllPages/runOcrRange) が ask() 確認ダイアログや
+    // hasExistingOcrBlocks の IDB 走査より前に捕捉した epoch を capturedEpochParam で渡す。
+    // ここで改めて captured すると「確認ダイアログ待機中に document が切り替わった後の
+    // epoch」を捕捉してしまい、以降の一致判定が常に真になって中断ガードが素通しになる。
+    // 引数がない呼び出し元 (runOcrFolder / runOcrAllPagesSilent は doc 取得から呼び出し
+    // までの間に await を挟まない) はここで新規捕捉して従来どおり動作する。
+    const capturedEpoch = capturedEpochParam ?? useInfraStore.getState().documentEpoch;
+    // #354: 呼び出し元の待機中に document が切り替わっていたら、PDF を開く前に中断する。
+    if (!isCurrentDocument(capturedEpoch)) {
+      cancelTokenRef.current = true;
+      showToast('OCRを中止しました（別のPDFが開かれました）。', true);
+      return;
+    }
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
 
     // #199: 対象ページインデックス一覧。指定がなければ全ページ。
@@ -360,11 +381,22 @@ export function useOcrEngine(
   };
 
   const runOcrCurrentPage = async () => {
+    // PCT-076: 多重起動ガード。runOcrAllPages 同様、既に別経路の OCR が走っている
+    // 状態で入口を通すと同一ページ群へ並行 updatePageData して結果が混在するため拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     // 最新状態を取得
     const state = usePecoStore.getState();
     const doc = state.document;
     const pageIdx = state.currentPageIndex;
     if (!doc) return;
+    // #354 (PCT-131): doc を読んだ直後、最初の await (getCachedPageProxy / IDB 走査 /
+    // ask() 確認ダイアログ) の前に epoch を捕捉する。以前は ask() の後で捕捉していたため、
+    // 確認ダイアログ表示中に document が切り替わると「切替後の epoch」を捕捉してしまい、
+    // #102 の中断ガードが全行程で素通しになっていた。
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
     const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIdx);
     let pageData = doc.pages.get(pageIdx);
     if (!pageData) {
@@ -404,12 +436,17 @@ export function useOcrEngine(
       if (!confirmed) return;
     }
 
+    // #354: ここまで (未ロード時の getCachedPageProxy 取得 / IDB 走査 / 上書き確認
+    // ask()) の待機中に document が切り替わっていたら OCR を開始せず中断する。
+    if (!isCurrentDocument(capturedEpoch)) {
+      showToast('OCRを中止しました（別のPDFが開かれました）。', true);
+      return;
+    }
+
     cancelTokenRef.current = false;
+    userCancelRef.current = false;
     setOcrRunning(true);
     perf.mark('ui.ocrRunCurrentPage', { page: pageIdx });
-    // #102: 開始時点の documentEpoch を保持。F5 等で同パスの別 doc に置き換わった際は
-    // epoch がインクリメントされるため、古い結果を書き込む前に検知できる。
-    const capturedEpoch = useInfraStore.getState().documentEpoch;
     const ocrPdf = await openFreshPdfDoc(doc.filePath);
     try {
       if (!isCurrentDocument(capturedEpoch)) return;
@@ -478,6 +515,10 @@ export function useOcrEngine(
     // 最新状態を取得（checkAndPromptOcrZero から呼ばれた場合もstaleにならないよう）
     const doc = usePecoStore.getState().document;
     if (!doc) return;
+    // #354 (PCT-131): ask() 確認ダイアログや hasExistingOcrBlocks の IDB 走査より前に
+    // epoch を捕捉する。processAllPages 側の新規捕捉に任せると、それらの待機中の
+    // document 切替を「切替後の epoch」として捕捉してしまい中断ガードが素通しになる。
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
 
     const confirmed = await ask(
       '全ページOCRを実行します。この操作はUndo できません。続行しますか？',
@@ -498,13 +539,20 @@ export function useOcrEngine(
       if (!overwriteConfirmed) return;
     }
 
+    // #354: 確認ダイアログ・IDB 走査待機中に document が切り替わっていたら開始しない。
+    if (!isCurrentDocument(capturedEpoch)) {
+      showToast('OCRを中止しました（別のPDFが開かれました）。', true);
+      return;
+    }
+
     cancelTokenRef.current = false;
+    userCancelRef.current = false;
     setOcrRunning(true);
     setOcrProgress({ current: 0, total: doc.totalPages, startedAt: performance.now(), avgMsPerPage: 0, estimatedRemainingMs: 0 });
     perf.mark('ui.ocrRunAllPages', { totalPages: doc.totalPages });
 
     try {
-      await processAllPages(doc);
+      await processAllPages(doc, undefined, undefined, capturedEpoch);
     } finally {
       setOcrRunning(false);
       setOcrProgress(null);
@@ -519,6 +567,9 @@ export function useOcrEngine(
 
   const cancelOcr = () => {
     cancelTokenRef.current = true;
+    // #355 (PCT-132): ユーザー明示キャンセルを processAllPages 内部の epoch 検知キャンセル
+    // と区別するためのフラグ。folder OCR ループが savePdf をスキップして即停止する判定に使う。
+    userCancelRef.current = true;
   };
 
   /**
@@ -530,6 +581,7 @@ export function useOcrEngine(
     if (!doc) return false;
 
     cancelTokenRef.current = false;
+    userCancelRef.current = false;
     setOcrRunning(true);
     setOcrProgress({
       current: 0,
@@ -551,8 +603,18 @@ export function useOcrEngine(
 
   // #199: ページ範囲指定 OCR
   const runOcrRange = async (pageRangeString: string) => {
+    // PCT-076: 多重起動ガード。runOcrAllPages 同様、既に別経路の OCR が走っている
+    // 状態で入口を通すと同一ページ群へ並行 updatePageData して結果が混在するため拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     const doc = usePecoStore.getState().document;
     if (!doc) return;
+    // #354 (PCT-131): ask() 確認ダイアログや hasExistingOcrBlocks の IDB 走査より前に
+    // epoch を捕捉する（parsePageRange は同期処理のため実質的な競合窓ではないが、
+    // 捕捉タイミングを他経路と揃えるためここで統一する）。
+    const capturedEpoch = useInfraStore.getState().documentEpoch;
 
     const parsed = parsePageRange(pageRangeString, doc.totalPages);
     if ('error' in parsed) {
@@ -581,13 +643,20 @@ export function useOcrEngine(
       if (!overwriteConfirmed) return;
     }
 
+    // #354: 確認ダイアログ・IDB 走査待機中に document が切り替わっていたら開始しない。
+    if (!isCurrentDocument(capturedEpoch)) {
+      showToast('OCRを中止しました（別のPDFが開かれました）。', true);
+      return;
+    }
+
     cancelTokenRef.current = false;
+    userCancelRef.current = false;
     setOcrRunning(true);
     setOcrProgress({ current: 0, total: pageIndices.length, startedAt: performance.now(), avgMsPerPage: 0, estimatedRemainingMs: 0 });
     perf.mark('ui.ocrRunRange', { pageCount: pageIndices.length });
 
     try {
-      await processAllPages(doc, undefined, pageIndices);
+      await processAllPages(doc, undefined, pageIndices, capturedEpoch);
     } finally {
       setOcrRunning(false);
       setOcrProgress(null);
@@ -601,6 +670,13 @@ export function useOcrEngine(
   };
 
   const runOcrFolder = async () => {
+    // PCT-076: 多重起動ガード。既に別経路の OCR が走っている状態でフォルダ OCR の
+    // ループを開始すると、そのループ内の processAllPages が別経路と同一ページ群へ
+    // 並行 updatePageData して結果が混在するため入口で拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     if (!callbacks.openPdf || !callbacks.savePdf) {
       showToast('フォルダOCRを実行できません。', true);
       return;
@@ -630,6 +706,7 @@ export function useOcrEngine(
     }
 
     cancelTokenRef.current = false;
+    userCancelRef.current = false;
     setOcrRunning(true);
     perf.mark('ui.ocrRunFolder', { totalFiles: pdfFiles.length });
 
@@ -639,8 +716,14 @@ export function useOcrEngine(
     let folderCancelled = false;
     try {
       for (let fileIndex = 0; fileIndex < pdfFiles.length; fileIndex++) {
-        if (folderCancelled) break;
-        // 各ファイル開始時に cancelTokenRef を必ずリセット。
+        // #355 (PCT-132): ユーザーが明示的に cancelOcr() を押していたら、次のファイルを
+        // 開く前にフォルダ全体を止める。userCancelRef はファイル単位でリセットしない
+        // (下の cancelTokenRef リセットと違い、一度立ったらセッション終了までそのまま)。
+        if (folderCancelled || userCancelRef.current) {
+          folderCancelled = true;
+          break;
+        }
+        // 各ファイル開始時に cancelTokenRef のみリセットする。
         // 前ファイルで epoch 検知により内部 cancel が立っていても、新ファイルでは正常に処理する。
         cancelTokenRef.current = false;
         const filePath = pdfFiles[fileIndex];
@@ -664,10 +747,17 @@ export function useOcrEngine(
           avgMsPerPage: timing.avgMsPerPage,
           estimatedRemainingMs: timing.estimatedRemainingMs,
         }));
-        // ユーザが明示的に cancelOcr() を押した場合のみフォルダ全体を停止する。
-        // epoch 検知での内部 cancel はこのファイルだけスキップ扱いにし、次ファイルに進む。
-        // ユーザ cancel と内部 cancel の区別がつかないため、cancelTokenRef は触らず次の
-        // openPdf 直前で必ずリセットして判定を継続する。
+
+        // #355 (PCT-132): ユーザーが明示的に cancelOcr() を押した場合のみフォルダ全体を
+        // 停止する。processAllPages が epoch 検知の内部 cancel で抜けた場合は
+        // userCancelRef が立たないため、このファイルだけスキップ扱いにして次へ進む
+        // (cancelTokenRef は上のリセットで既に処理継続可能)。
+        // ユーザーキャンセルを検知した場合は、途中までしか OCR していないこのファイルを
+        // savePdf せずに即座にループを抜ける。
+        if (userCancelRef.current) {
+          folderCancelled = true;
+          break;
+        }
 
         setOcrProgress({ current: doc.totalPages, total: doc.totalPages, fileCurrent: fileIndex + 1, fileTotal: pdfFiles.length, fileName, startedAt: fileStartedAt, avgMsPerPage: 0, estimatedRemainingMs: 0 });
         // #48: savePdf の戻り値で成功/失敗を明示判定する。
@@ -711,85 +801,101 @@ export function useOcrEngine(
     showToast(`テキスト層を取り込み中... (全 ${total} ページ)`);
     logger.log(`[TextLayer] 取り込み開始: ${total} ページ`);
 
-    // PCT-094 (防御): メタが取得できた場合は loadPage に渡し、fallback 経由での
-    // bbox 高さ劣化（descent 欠落で約 71% に縮む）を防ぐ。
-    // 修正1のスキップにより、メタあり PDF はここへ到達しないはずだが、
-    // 将来の呼び出し経路の混入に備えた安全策として維持する。
-    let importBBoxMeta: Record<string, Array<{
-      bbox: { x: number; y: number; width: number; height: number };
-      writingMode: string;
-      order: number;
-      text: string;
-      confidence?: number;
-    }>> | null = null;
+    // #F-9 (bug-hunt いろは): 従来 isOcrRunningRef を立てておらず、長時間の取り込み中に
+    // 他経路の OCR (runOcrCurrentPage 等) が並走できてしまい、かつ cancelTokenRef も
+    // 見ないためユーザーが中断する手段がなかった。他の OCR エントリと同じ流儀でロックし、
+    // バッチ境界でキャンセルを検知できるようにする。
+    cancelTokenRef.current = false;
+    userCancelRef.current = false;
+    setOcrRunning(true);
     try {
-      const pdf = await getSharedPdfProxy(doc.filePath);
-      importBBoxMeta = await loadPecoToolBBoxMeta(pdf, {
-        loadBytes: async () => {
-          const { readFile } = await import('@tauri-apps/plugin-fs');
-          return readFile(doc.filePath);
-        },
-        filePath: doc.filePath,
-        mtime: doc.mtime,
-      });
-    } catch {
-      // メタロード失敗は無視して従来どおり null (fallback) で続行する
+      // PCT-094 (防御): メタが取得できた場合は loadPage に渡し、fallback 経由での
+      // bbox 高さ劣化（descent 欠落で約 71% に縮む）を防ぐ。
+      // 修正1のスキップにより、メタあり PDF はここへ到達しないはずだが、
+      // 将来の呼び出し経路の混入に備えた安全策として維持する。
+      let importBBoxMeta: Record<string, Array<{
+        bbox: { x: number; y: number; width: number; height: number };
+        writingMode: string;
+        order: number;
+        text: string;
+        confidence?: number;
+      }>> | null = null;
+      try {
+        const pdf = await getSharedPdfProxy(doc.filePath);
+        importBBoxMeta = await loadPecoToolBBoxMeta(pdf, {
+          loadBytes: async () => {
+            const { readFile } = await import('@tauri-apps/plugin-fs');
+            return readFile(doc.filePath);
+          },
+          filePath: doc.filePath,
+          mtime: doc.mtime,
+        });
+      } catch {
+        // メタロード失敗は無視して従来どおり null (fallback) で続行する
+      }
+
+      const BATCH = 10;
+      for (let start = 0; start < total; start += BATCH) {
+        // #F-9: バッチ境界でユーザーキャンセル (Esc / 進捗UIのキャンセルボタン) を検知する。
+        if (cancelTokenRef.current) {
+          showToast('テキスト層の取り込みをキャンセルしました。');
+          return;
+        }
+        if (!isCurrentDocument(capturedEpoch)) {
+          showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
+          return;
+        }
+        const end = Math.min(start + BATCH, total);
+        const pageIndices = Array.from({ length: end - start }, (_, i) => start + i);
+
+        const pageDataList = await Promise.all(
+          pageIndices.map((i) => {
+            const sourcePageIndex = displayToSourcePageIndex(pageOrder, i);
+            return loadPage(
+              // loadPage の第 1 引数 (_pdf) は実際は getCachedPageProxy 内で参照するため
+              // ダミーの null cast で渡す (既存の呼び出し規約に準ずる)。
+              null as unknown as pdfjsLib.PDFDocumentProxy,
+              sourcePageIndex,
+              doc.filePath,
+              // PCT-094: メタあり時はメタを渡してメタ経路で解決させる（null 固定解除）。
+              // メタなし PDF の場合は引き続き null → fallback (pdfjs transform 再構成)。
+              importBBoxMeta,
+              doc.mtime,
+              { displayPageIndex: i },
+            ).catch((e) => {
+              console.warn(`[TextLayer] ページ ${i + 1} 取り込み失敗:`, e);
+              return null;
+            });
+          })
+        );
+
+        if (!isCurrentDocument(capturedEpoch)) {
+          showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
+          return;
+        }
+
+        for (let idx = 0; idx < pageIndices.length; idx++) {
+          const pageIndex = pageIndices[idx];
+          const pageData = pageDataList[idx];
+          if (!pageData) continue;
+          if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== displayToSourcePageIndex(pageOrder, pageIndex)) continue;
+          usePecoStore.getState().updatePageData(pageIndex, {
+            textBlocks: pageData.textBlocks,
+            isDirty: true,
+            isTextExtracted: true,
+            ocrCleared: false,
+          }, false);
+        }
+
+        logger.log(`[TextLayer] 取り込み済み: ${end} / ${total} ページ`);
+        // UI スレッドを解放
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      showToast(`テキスト層の取り込みが完了しました（全 ${total} ページ）`);
+    } finally {
+      setOcrRunning(false);
     }
-
-    const BATCH = 10;
-    for (let start = 0; start < total; start += BATCH) {
-      if (!isCurrentDocument(capturedEpoch)) {
-        showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
-        return;
-      }
-      const end = Math.min(start + BATCH, total);
-      const pageIndices = Array.from({ length: end - start }, (_, i) => start + i);
-
-      const pageDataList = await Promise.all(
-        pageIndices.map((i) => {
-          const sourcePageIndex = displayToSourcePageIndex(pageOrder, i);
-          return loadPage(
-            // loadPage の第 1 引数 (_pdf) は実際は getCachedPageProxy 内で参照するため
-            // ダミーの null cast で渡す (既存の呼び出し規約に準ずる)。
-            null as unknown as pdfjsLib.PDFDocumentProxy,
-            sourcePageIndex,
-            doc.filePath,
-            // PCT-094: メタあり時はメタを渡してメタ経路で解決させる（null 固定解除）。
-            // メタなし PDF の場合は引き続き null → fallback (pdfjs transform 再構成)。
-            importBBoxMeta,
-            doc.mtime,
-            { displayPageIndex: i },
-          ).catch((e) => {
-            console.warn(`[TextLayer] ページ ${i + 1} 取り込み失敗:`, e);
-            return null;
-          });
-        })
-      );
-
-      if (!isCurrentDocument(capturedEpoch)) {
-        showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
-        return;
-      }
-
-      for (let idx = 0; idx < pageIndices.length; idx++) {
-        const pageIndex = pageIndices[idx];
-        const pageData = pageDataList[idx];
-        if (!pageData) continue;
-        if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== displayToSourcePageIndex(pageOrder, pageIndex)) continue;
-        usePecoStore.getState().updatePageData(pageIndex, {
-          textBlocks: pageData.textBlocks,
-          isDirty: true,
-          isTextExtracted: true,
-          ocrCleared: false,
-        }, false);
-      }
-
-      logger.log(`[TextLayer] 取り込み済み: ${end} / ${total} ページ`);
-      // UI スレッドを解放
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    showToast(`テキスト層の取り込みが完了しました（全 ${total} ページ）`);
   };
 
   const checkAndPromptOcrZero = async (doc: PecoDocument) => {
@@ -896,8 +1002,13 @@ export function useOcrEngine(
     if (sw < 2 || sh < 2) return;
 
     cancelTokenRef.current = false;
+    userCancelRef.current = false;
     setOcrRunning(true);
     const capturedEpoch = useInfraStore.getState().documentEpoch;
+    // #F-5 (bug-hunt いろは): processAllPages/runOcrCurrentPage と同様、OCR 実行中に
+    // ページ並べ替え/削除が起きると displayToSourcePageIndex の対応先が変わる。
+    // 開始時点の source page を捕捉し、OCR 完了後に再計算した値と比較して不一致なら破棄する。
+    const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIndex);
     try {
       // #PCT-046 同根バグ対応: pageData.width/height が 0 の場合は getCachedPageProxy 経由で
       // viewport から再取得する。runOcrCurrentPage と同じフォールバック方式。
@@ -905,7 +1016,6 @@ export function useOcrEngine(
       let pageHeight = pageData.height;
       if (pageWidth === 0 || pageHeight === 0) {
         try {
-          const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIndex);
           const page = await getCachedPageProxy(doc.filePath, sourcePageIndex);
           const viewport = page.getViewport({ scale: 1.0 });
           pageWidth = viewport.width;
@@ -972,6 +1082,10 @@ export function useOcrEngine(
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
         return;
       }
+      if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== sourcePageIndex) {
+        showToast('OCR結果は破棄されました（ページ順序が変更されました）。', true);
+        return;
+      }
 
       // クロップ画像での bbox を元ページの viewport 座標に変換する。
       // OCR 結果の bbox はクロップ画像基準 (renderScale=zoom/100 でスケール済み・
@@ -1003,9 +1117,13 @@ export function useOcrEngine(
       const newBlocks = toTextBlocks(adjustedBlocks, settings);
       const currentPage = usePecoStore.getState().document?.pages.get(pageIndex);
       const existingBlocks = currentPage?.textBlocks ?? [];
+      // #365 (PCT-142): existingBlocks.length ベースの採番は、削除後の非連続 order
+      // (例: [0, 5]) 環境で既存ブロックの order と衝突しうる。既存 order の最大値 + 1 を
+      // 起点に採番する (pecoStore.ts pasteClipboard と同じ方針)。
+      const baseOrder = existingBlocks.reduce((max, b) => Math.max(max, b.order), -1) + 1;
       const mergedBlocks = [
         ...existingBlocks,
-        ...newBlocks.map((b, i) => ({ ...b, order: existingBlocks.length + i })),
+        ...newBlocks.map((b, i) => ({ ...b, order: baseOrder + i })),
       ];
 
       usePecoStore.getState().updatePageData(pageIndex, {

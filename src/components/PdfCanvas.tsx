@@ -28,6 +28,7 @@ import { arcHandlePositions } from "../utils/arcFromThreePoints";
 import { renderStaticLayer, drawStaticBlockCurve } from "../utils/pdfCanvasRender";
 import { getSplitRatioSnapped } from "../utils/splitBlock";
 import { applyRotationTransform, rotatedScreenToBbox } from "../utils/canvasRotation";
+import { getZoomScale } from "../utils/coordTransform";
 import type { TextBlock, BoundingBox } from "../types";
 
 // #236: resize/curve handle sizes
@@ -202,6 +203,7 @@ export function PdfCanvas({
     currentTextBlocksById,
     getPageData,
     updatePageData,
+    pushAction,
     overlayCanvasRef,
     renderOverlaysRef,
     overlayRafRef,
@@ -243,7 +245,7 @@ export function PdfCanvas({
     const container = window.document.querySelector(".pdf-viewer-panel");
     if (!container) return;
 
-    const scale = zoom / 100;
+    const scale = getZoomScale(zoom);
     const x = block.bbox.x * scale;
     const y = block.bbox.y * scale;
     const w = block.bbox.width * scale;
@@ -357,7 +359,7 @@ export function PdfCanvas({
       if (isSplitMode) {
         const hoverPos = splitHoverPosRef.current;
         if (hoverPos && currentTextBlocks) {
-          const scale = zoom / 100;
+          const scale = getZoomScale(zoom);
           // Hit-test from topmost block downward (same order as trySplit)
           for (let i = currentTextBlocks.length - 1; i >= 0; i--) {
             const block = currentTextBlocks[i];
@@ -399,7 +401,7 @@ export function PdfCanvas({
 
       const textBlocks = currentTextBlocks;
       if (showOcr && textBlocks && selectedIds.size > 0) {
-        const scale = zoom / 100;
+        const scale = getZoomScale(zoom);
         const baseAlpha = Math.min(1.0, ocrOpacity * 2);
         const fillAlpha = Math.min(0.4, ocrOpacity * 0.625);
 

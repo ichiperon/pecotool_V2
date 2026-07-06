@@ -19,6 +19,7 @@ import {
   selectIsRangeOcrMode,
 } from "./store/viewerStore";
 import { useOcrSettingsStore } from "./store/ocrSettingsStore";
+import { useInfraStore } from "./store/infraStore";
 import { Database, FileCheck2, LockKeyhole, ShieldCheck, Terminal } from "lucide-react";
 import { ask, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
@@ -50,7 +51,9 @@ import { useAppUpdater, UPDATER_ENABLED } from "./hooks/useAppUpdater";
 import { usePageExtraction } from "./hooks/usePageExtraction";
 import { useBatchJob } from "./hooks/useBatchJob";
 import { usePageManagement } from "./hooks/usePageManagement";
+import { useStorageQuotaMonitor } from "./hooks/useStorageQuotaMonitor";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
+import { StorageHealthBanner } from "./components/StorageHealthBanner";
 
 // Components
 import { Ribbon } from "./components/Ribbon/Ribbon";
@@ -378,6 +381,8 @@ function App() {
     }
     destroySharedPdfProxy();
     usePecoStore.getState().setDocument(null);
+    // #392: ファイルを閉じたら undecodable 警告もリセット（無ドキュメント状態で残さない）。
+    useInfraStore.getState().setBboxMetaUnreadable(false);
   }, [isDirty, isSaving, showToast]);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -534,6 +539,13 @@ function App() {
       skipBlockIds,
     });
 
+    // #338: \u6b63\u898f\u8868\u73fe\u306e\u69cb\u6587\u30a8\u30e9\u30fc\u306f\u30b9\u30c8\u30a2\u5c64\u304c throw \u305b\u305a regexError \u3067\u8fd4\u3059
+    // \uff08\u901a\u5e38\u306f ReplaceDialog \u5074\u306e\u4e00\u6b21\u9632\u5fa1\u3067\u5230\u9054\u3057\u306a\u3044\u304c\u3001\u6210\u529f\u30c8\u30fc\u30b9\u30c8\u306e\u8aa4\u8868\u793a\u3092\u9632\u3050\uff09
+    if (result.regexError) {
+      showToast(`\u6b63\u898f\u8868\u73fe\u30a8\u30e9\u30fc: ${result.regexError}`, true);
+      return;
+    }
+
     if (result.skippedBlocks > 0) {
       showToast(
         `${result.hits} \u4ef6\u7f6e\u63db\u3057\u307e\u3057\u305f (\u7de8\u96c6\u4e2d\u306e ${result.skippedBlocks} \u30d6\u30ed\u30c3\u30af\u306f\u30b9\u30ad\u30c3\u30d7)\u3002`,
@@ -650,6 +662,9 @@ function App() {
   // useTauriCloseGuard と F5 ガードに渡す前に宣言する必要がある (TDZ 回避)。
   const isSavingRef = useRef(isSaving);
   isSavingRef.current = isSaving;
+
+  // ストレージ容量逼迫の定期監視（IDB 一時保存の事前警告）
+  useStorageQuotaMonitor();
 
   // --- Effects ---
   // CloseGuard: 保存中 / バックアップ中の close を suppress する (PCT-055: rename race・バックアップ破損回避)。
@@ -911,6 +926,8 @@ function App() {
         onOpenLogFolder={handleOpenLogFolder}
         onCheckUpdate={handleManualCheckUpdate}
       />
+
+      <StorageHealthBanner />
 
       <main className="main-content">
         <ThumbnailPanel

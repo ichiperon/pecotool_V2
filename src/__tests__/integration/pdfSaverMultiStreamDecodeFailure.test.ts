@@ -99,6 +99,39 @@ async function makePdfWithNonRawMixedStreams(): Promise<Uint8Array> {
   return await pdf.save({ useObjectStreams: false, addDefaultPage: false });
 }
 
+/**
+ * PCT-177 (#408) 残余1 再現用: Contents=[A, B, C]。
+ * - A: 'q cm BT ... Tj Q' — BT がこの stream 内では閉じない（ET は C にある）。
+ *   末尾の "Q" は BT より **前** の "q" を閉じるものであり、BT...ET の一部ではない。
+ * - B: LZWDecode (saver の decodeStreamContents が null を返す＝decode 不能) — anyDecodeFailed 経路を誘発。
+ * - C: 'ET' から始まり（A の BT を閉じる、ストリーム跨ぎ）、その後に非テキスト描画が続く。
+ *
+ * 旧実装 (per-stream stripTextBlocks) は A で「BT から stream 終端まで」を丸ごと破棄するため、
+ * BT の外側にあるはずの末尾 "Q" まで巻き添えで失っていた（グラフィックスステートの q/Q 不均衡）。
+ */
+async function makePdfWithCrossStreamTextBlockAndDecodeFailure(): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([595, 842]);
+
+  const aRaw = encodeLatin1('q\n1 0 0 1 0 0 cm\nBT\n/F1 12 Tf\n(Hi) Tj\nQ\n');
+  const aStream = pdf.context.stream(deflate(aRaw), { Filter: PDFName.of('FlateDecode') });
+
+  const bRaw = encodeLatin1('% opaque filler, not real LZW data\n');
+  const bStream = pdf.context.stream(bRaw, { Filter: PDFName.of('LZWDecode') });
+
+  const cRaw = encodeLatin1('ET\n0 0 100 100 re f');
+  const cStream = pdf.context.stream(deflate(cRaw), { Filter: PDFName.of('FlateDecode') });
+
+  const aRef = pdf.context.register(aStream);
+  const bRef = pdf.context.register(bStream);
+  const cRef = pdf.context.register(cStream);
+
+  const contentsArray = pdf.context.obj([aRef, bRef, cRef]);
+  page.node.set(PDFName.of('Contents'), contentsArray);
+
+  return await pdf.save({ useObjectStreams: false, addDefaultPage: false });
+}
+
 async function makePdfWithSingleTextStream(): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([595, 842]);
@@ -243,5 +276,37 @@ describe('pdfSaver issue #78: multi-stream decode failure should still strip oth
 
     expect(savedText).not.toContain('(legacyText)');
     expect(savedText).not.toMatch(/\bTj\b|\bTJ\b/);
+  }, 60_000);
+});
+
+describe('pdfSaver #408 (PCT-177) 残余1: ストリーム跨ぎ BT...ET + decode 失敗併存', () => {
+  it('BT が閉じない stream の strip を安全側でスキップし、BT の外側にある Q を巻き添え破棄しない', async () => {
+    const original = await makePdfWithCrossStreamTextBlockAndDecodeFailure();
+    const originalText = await decodeAllPage0Contents(original);
+    expect(originalText).toContain('q\n1 0 0 1 0 0 cm\nBT');
+    expect(originalText).toContain('(Hi) Tj\nQ');
+    expect(originalText).toContain('re f');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const saved = await buildPdfDocument(original, makeNonDirtyDoc());
+
+    const savedText = await decodeAllPage0Contents(saved);
+
+    // 安全側スキップにより、A は無変更のまま — BT より前の "q" を閉じる "Q" が保持されている。
+    // (旧実装は BT〜stream 終端まで丸ごと破棄するため、この Q が失われグラフィックスステートが
+    //  不均衡になっていた)
+    expect(savedText).toContain('q\n1 0 0 1 0 0 cm\nBT');
+    expect(savedText).toContain('(Hi) Tj\nQ');
+    // C 側の非テキスト描画 (re f) も保持されている
+    expect(savedText).toContain('re f');
+
+    // 安全側スキップの警告が出ている（原因切り分け用）。※mockRestore() は呼び出し履歴を
+    // クリアするため、必ず assert の後に行う。
+    expect(warnSpy).toHaveBeenCalled();
+    const warned = warnSpy.mock.calls.some(
+      (call) => typeof call[0] === 'string' && call[0].includes('unbalanced BT/ET boundary'),
+    );
+    expect(warned).toBe(true);
+    warnSpy.mockRestore();
   }, 60_000);
 });

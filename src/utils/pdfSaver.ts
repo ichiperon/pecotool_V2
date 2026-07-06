@@ -69,6 +69,11 @@ export async function buildPdfDocument(
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
   pageOrder?: number[],
   options?: SaveDialogOptions,
+  // P1-1/M-4 (bug-hunt): core の byte-preserve 判定 (undecodable 早期 return) を呼び出し元へ
+  // 伝える。skippedChars と同じ D3 パターン (戻り値でなくコールバック) を踏襲することで、
+  // 既存の savePDF/buildPdfDocument 呼び出し元・テストモック（Uint8Array 戻り値前提）を
+  // 一切変更せずに済む。
+  onBytePreserved?: (bytePreserved: boolean) => void,
 ): Promise<Uint8Array> {
   // D2: main 殻が fetch を担当し、解決済み Uint8Array を core に渡す。
   const originalPdfBytes = await resolveBuildPdfSource(source);
@@ -81,7 +86,7 @@ export async function buildPdfDocument(
   }
 
   // D4: main 殻は saveTimeoutMs を渡さない (race なし)。
-  const { savedBytes, skippedChars } = await buildPdfDocumentCore(
+  const { savedBytes, skippedChars, bytePreserved } = await buildPdfDocumentCore(
     originalPdfBytes,
     { totalPages: documentState.totalPages, pages: serializedPages },
     fontBytes,
@@ -91,6 +96,7 @@ export async function buildPdfDocument(
 
   // D3: main 殻がコールバック変換を担う。
   onSkippedChars?.(skippedChars);
+  onBytePreserved?.(bytePreserved);
   return savedBytes;
 }
 
@@ -102,7 +108,16 @@ let currentSaveTask: Promise<Uint8Array> | null = null;
 // 先行タスクの Promise を settle させない（onmessage/onerror が発火しないため）。
 // これを保持しておき、terminate と同時に明示 reject して宙吊りを防ぐ（#425）。
 let currentSaveReject: ((err: unknown) => void) | null = null;
+// PCT-194 (#425): 進捗ベースの生存判定用タイムスタンプ。worker タスク開始時、および
+// SAVE_PDF_HEARTBEAT 受信のたびに更新する。「前回タスクが完了したか」ではなく
+// 「前回タスクの worker が最後に何か通知してきたのはいつか」を基準にすることで、
+// 5秒を超える正常な保存中でも heartbeat が続く限り誤 terminate しないようにする。
+// worker が使えない main-thread fallback 経路（Worker API 不在）では heartbeat が
+// 存在しないため、タスク開始時刻のまま固定される（従来どおりの固定タイムアウト挙動）。
+let lastSaveActivityAt = 0;
 
+// 前回保存の生存判定に使う「heartbeat 無応答許容時間」。この時間内に heartbeat
+// （または worker が使えない場合はタスク完了）が無ければ stale とみなして terminate する。
 const PREVIOUS_SAVE_TIMEOUT_MS = 5000;
 // 保存全体のハードタイムアウト。Worker 内で fetch や pdf-lib が想定外に無応答に
 // なった場合でも、ここで強制的に reject して呼び出し側に失敗を返す。
@@ -133,6 +148,7 @@ export function __resetSaveStateForTest(): void {
   activeSaveWorker = null;
   currentSaveTask = null;
   currentSaveReject = null;
+  lastSaveActivityAt = 0;
 }
 
 export async function savePDF(
@@ -143,22 +159,31 @@ export async function savePDF(
   onSkippedChars?: (chars: SkippedPdfTextChar[]) => void,
   pageOrder?: number[],
   options?: SaveDialogOptions,
+  // P1-1/M-4 (bug-hunt): worker殻/main殻 両経路で core の bytePreserved 判定を素通しする。
+  onBytePreserved?: (bytePreserved: boolean) => void,
 ): Promise<Uint8Array> {
   const sourceBytes = extractBytes(source);
   const sourceUrl = extractUrl(source);
-  // 前回の保存が未完了の場合、完了 or タイムアウトまで待ってから新 worker を起動する
-  if (currentSaveTask) {
-    const timeoutSymbol = Symbol('timeout');
-    const timeoutPromise = new Promise<typeof timeoutSymbol>((resolve) => {
-      setTimeout(() => resolve(timeoutSymbol), PREVIOUS_SAVE_TIMEOUT_MS);
-    });
-    try {
-      const raceResult = await Promise.race([
-        currentSaveTask.then(() => 'done' as const, () => 'done' as const),
-        timeoutPromise,
-      ]);
-      if (raceResult === timeoutSymbol) {
-        console.warn('[savePDF] Previous save did not complete within timeout; terminating stale worker.');
+  // 前回の保存が未完了の場合、完了 or 「heartbeat 無応答が一定時間続く」まで待ってから
+  // 新 worker を起動する（PCT-194 / #425: 進捗ベースの生存判定）。
+  // 固定 5 秒待ちではなく、直近の活動（タスク開始 or heartbeat）からの経過時間を
+  // 都度再計算するループにすることで、5 秒を超える正常な保存でも heartbeat が
+  // 続いている限り誤 terminate しない。
+  // M-2 (bug-hunt): 内側 while を「1回分の待機判定」として outer loop で包む。
+  // 複数の savePDF 呼び出し（waiter）が同一 currentSaveTask を待っている場合、その
+  // タスクが解決すると各 waiter の Promise.race がほぼ同時に 'done' を検知し、旧実装は
+  // break 直後に無条件で新規 worker を生成していた（= waiter 数だけ worker が並走し、
+  // モジュール変数 activeSaveWorker/currentSaveReject/lastSaveActivityAt が後勝ちで
+  // 汚染される）。break の直後に「自分が break している間に、先に抜けた別の waiter が
+  // 既に新しい currentSaveTask を積んでいないか」を再チェックし、積まれていればそちらを
+  // 待ち直す（continue）ことで、3 多重呼び出しでも常に高々 1 worker しか走らないよう
+  // 直列化する。
+  for (;;) {
+    while (currentSaveTask) {
+      const elapsedSinceActivity = Date.now() - lastSaveActivityAt;
+      const remainingMs = PREVIOUS_SAVE_TIMEOUT_MS - elapsedSinceActivity;
+      if (remainingMs <= 0) {
+        console.warn('[savePDF] Previous save did not complete within timeout (no heartbeat); terminating stale worker.');
         if (activeSaveWorker) {
           try { activeSaveWorker.terminate(); } catch { /* noop: terminate の二重呼び出しは無害扱い */ }
           activeSaveWorker = null;
@@ -171,10 +196,33 @@ export async function savePDF(
           currentSaveReject = null;
         }
         currentSaveTask = null;
+        break;
       }
-    } catch {
-      // 前回タスクの reject は無視（既に解決済み扱い）
+
+      const timeoutSymbol = Symbol('timeout-check');
+      const timeoutPromise = new Promise<typeof timeoutSymbol>((resolve) => {
+        setTimeout(() => resolve(timeoutSymbol), remainingMs);
+      });
+      try {
+        const raceResult = await Promise.race([
+          currentSaveTask.then(() => 'done' as const, () => 'done' as const),
+          timeoutPromise,
+        ]);
+        if (raceResult === 'done') break;
+        // それ以外は「残り時間だけ待った結果、まだ完了していない」ケース。ループ先頭に
+        // 戻って最新の lastSaveActivityAt から remainingMs を再計算する
+        // （その間に heartbeat が来ていれば延命、来ていなければ次の周でterminateに至る）。
+      } catch {
+        // 前回タスクの reject は無視（既に解決済み扱い）
+        break;
+      }
     }
+
+    // M-2: break した時点で、別の waiter が既に新しい currentSaveTask を積んでいたら、
+    // 自分は新規 worker を作らずそちらを待ち直す。currentSaveTask が null なら
+    // （誰も積んでいなければ）ここで初めて新規タスクを作ってよい。
+    if (currentSaveTask) continue;
+    break;
   }
 
   const task = new Promise<Uint8Array>((resolve, reject) => {
@@ -205,8 +253,12 @@ export async function savePDF(
     try {
       worker = createSaveWorker();
       if (!worker) {
-        // Worker API 不在: main thread で直接実行
-        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options)
+        // Worker API 不在: main thread で直接実行。
+        // heartbeat が無い経路のため、タスク開始時刻を活動時刻として記録し
+        // 「従来どおりの固定タイムアウト待機」を維持する（レビューHIGH: 未設定だと
+        // 前回保存の待機猶予がゼロになり保存が並走しうる）。
+        lastSaveActivityAt = Date.now();
+        buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options, onBytePreserved)
           .then(settleResolve)
           .catch(settleReject);
         return;
@@ -215,6 +267,10 @@ export async function savePDF(
       activeSaveWorker = activeWorker;
       // stale worker として terminate された際に先行 Promise を reject できるよう登録。
       currentSaveReject = myReject;
+      // PCT-194 (#425): このタスクの「生存基準時刻」をタスク開始時点にセットする。
+      // 以降 SAVE_PDF_HEARTBEAT を受信するたびに更新され、次の savePDF 呼び出しが
+      // stale 判定に使う。
+      lastSaveActivityAt = Date.now();
 
       const cleanup = () => {
         if (activeSaveWorker === activeWorker) activeSaveWorker = null;
@@ -234,9 +290,14 @@ export async function savePDF(
       activeWorker.onmessage = (e: MessageEvent<SavePdfWorkerResponse>) => {
         if (settled) return;
         const msg = e.data;
-        if (msg.type === 'SAVE_PDF_SUCCESS') {
+        if (msg.type === 'SAVE_PDF_HEARTBEAT') {
+          // PCT-194 (#425): worker が生きていることの周期通知。生存基準時刻を更新するのみ
+          // で、このタスク自体は settle しない。
+          lastSaveActivityAt = Date.now();
+        } else if (msg.type === 'SAVE_PDF_SUCCESS') {
           cleanup();
           onSkippedChars?.(msg.skippedChars ?? []);
+          onBytePreserved?.(msg.bytePreserved ?? false);
           settleResolve(msg.data);
         } else if (msg.type === 'ERROR') {
           cleanup();
@@ -316,7 +377,9 @@ export async function savePDF(
       }
       if (activeSaveWorker === worker) activeSaveWorker = null;
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
-      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options)
+      // fallback 経路にも活動時刻を記録（レビューHIGH: 上の Worker 不在分岐と同旨）。
+      lastSaveActivityAt = Date.now();
+      buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options, onBytePreserved)
         .then(settleResolve)
         .catch(settleReject);
     }

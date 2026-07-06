@@ -843,3 +843,105 @@ describe('PCT-108: schedulePendingIdbWrite/scheduleStructuralUndoRedoIdbSync が
     expect((fakeIdb.get('/c108b.pdf:src:2') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P2_RESTORED');
   });
 });
+
+// ── M-4 (bug-hunt round1): bytePreserved 伝搬 — 警告判定源を core 実測値に一本化 ──
+//
+// savePDF の 8 番目の引数 (onBytePreserved コールバック) を呼び出し元がそのまま
+// mock 経由で叩けることを利用し、「core が byte-preserve と判定した」状況を
+// savePDF のモック実装だけで再現する (実際の undecodable PDF 生成は
+// bytePreserveRotationResetDirty.test.ts が別途 core レベルで担保する)。
+describe('M-4: bytePreserved 伝搬 (handleSave/handleSaveTo の警告判定源を core 実測値に一本化)', () => {
+  function makeSingleDirtyPageDoc(filePath: string): PecoDocument {
+    return {
+      filePath, fileName: filePath.split('/').pop() ?? filePath, totalPages: 1, metadata: {},
+      pages: new Map([
+        [0, { pageIndex: 0, width: 595, height: 842, textBlocks: [makeBlock({ id: 'p0', text: 'EDIT' })], isDirty: true, thumbnail: null }],
+      ]),
+    };
+  }
+
+  function mockSavePdfBytePreserved(bytePreserved: boolean) {
+    mocks.savePDF.mockImplementationOnce((...args: unknown[]) => {
+      const onBytePreserved = args[7] as ((bp: boolean) => void) | undefined;
+      onBytePreserved?.(bytePreserved);
+      return Promise.resolve(new Uint8Array([4, 5, 6]));
+    });
+  }
+
+  it('handleSave: bytePreserved=true かつ未保存編集ありなら警告トーストを出し、isDirty をクリアしない', async () => {
+    const doc = makeSingleDirtyPageDoc('/undecodable.pdf');
+    usePecoStore.setState({
+      document: doc, originalBytes: new Uint8Array([1, 2, 3]), currentPageIndex: 0, isDirty: true,
+    } as any);
+    mockSavePdfBytePreserved(true);
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const saved = await result.current.handleSave();
+    expect(saved).toBe(true);
+
+    // #392 の案内文言 (編集内容は保存できませんでした) が出る。
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('編集内容は保存できませんでした'), true);
+    // P1-1: bytePreserved=true のため resetDirty は isDirty をクリアしない。
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true);
+    expect(usePecoStore.getState().isDirty).toBe(true);
+  });
+
+  it('handleSave: bytePreserved=false (通常保存) では警告が出ず isDirty がクリアされる', async () => {
+    const doc = makeSingleDirtyPageDoc('/normal.pdf');
+    usePecoStore.setState({
+      document: doc, originalBytes: new Uint8Array([1, 2, 3]), currentPageIndex: 0, isDirty: true,
+    } as any);
+    // beforeEach の既定 mock (onBytePreserved 未呼び出し = false 扱い) をそのまま使う。
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const saved = await result.current.handleSave();
+    expect(saved).toBe(true);
+
+    expect(showToast).not.toHaveBeenCalledWith(expect.stringContaining('編集内容は保存できませんでした'), true);
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+    expect(usePecoStore.getState().isDirty).toBe(false);
+  });
+
+  it('handleSaveTo (バッチ sidecar 経路): bytePreserved=true かつ未保存編集ありなら console.warn で可視化し、戻り値は true のまま', async () => {
+    const doc = makeSingleDirtyPageDoc('/undecodable.pdf');
+    usePecoStore.setState({
+      document: doc, originalBytes: new Uint8Array([1, 2, 3]), currentPageIndex: 0, isDirty: true,
+    } as any);
+    mockSavePdfBytePreserved(true);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const showToast = vi.fn();
+      const { result } = renderHook(() => useFileOperations(showToast));
+
+      const ok = await result.current.handleSaveTo('/sidecar-target.pdf');
+      // #243: バッチ経路は byte-preserve でも処理継続のため成功 (true) を返す設計を維持。
+      expect(ok).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('byte-preserve'));
+      // P1-1: bytePreserved=true のため resetDirty は isDirty をクリアしない。
+      expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('handleSaveTo: bytePreserved=false (通常保存) では console.warn を出さず isDirty がクリアされる', async () => {
+    const doc = makeSingleDirtyPageDoc('/normal-sidecar.pdf');
+    usePecoStore.setState({
+      document: doc, originalBytes: new Uint8Array([1, 2, 3]), currentPageIndex: 0, isDirty: true,
+    } as any);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const showToast = vi.fn();
+      const { result } = renderHook(() => useFileOperations(showToast));
+
+      const ok = await result.current.handleSaveTo('/sidecar-target-2.pdf');
+      expect(ok).toBe(true);
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('byte-preserve'));
+      expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});

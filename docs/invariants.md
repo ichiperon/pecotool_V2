@@ -109,6 +109,30 @@ pageId は `"src:" + initialSourceIndex`（ファイルを開いた時点のソ�
 
 保存中はライブ pageOrder を読まず、保存スナップショット時点の savePageOrder を使うこと（M1）。
 
+同じ規律は保存処理に限らない。undo/redo の各 action 分岐、replaceText/replaceTextBatch の
+IDB read await（`getAllTemporaryPageData`）等、非同期処理を挟んで最後に `schedulePendingIdbWrite`
+系のヘルパを呼ぶすべての箇所で、呼び出し元は処理開始時点（関数 entry または action 適用時点）の
+pageOrder を 1 度キャプチャし、以降の await をまたいでも同じ値を使い続けること。途中で
+`get().pageOrder`（live）を再取得すると、await 中に割り込んだ movePage 等で `resolvePageId` の
+解決結果がずれ、書き込み先 pageId が別ページのものと入れ替わる（PCT-162: undo/redo の rotate_pages
+分岐が schedulePendingIdbWrite 自体を呼んでいなかった欠落／PCT-163: replaceText/replaceTextBatch が
+entries 解決に使った pageOrder と書き込み時に渡す pageOrder が異なっていた不一致）。
+
+LRU 退避（in-memory に無い）ページへの部分更新を書く場合、`saveTemporaryPageDataBatch` は
+`store.put()` でレコード全体を置換する（マージではない）。rotation 等の一部フィールドだけを
+書こうとすると既存の textBlocks 等が消える。退避ページ向けの部分更新は既存 IDB レコードを
+読み戻してから対象フィールドだけ上書きし、フルレコードとして書き戻すこと
+（`scheduleClearOcrAllPagesIdbWrite`・`scheduleRotateUndoRedoIdbWrite` の実装を参照）。
+読み戻した既存レコードに textBlocks が無い（＝巻き戻す実体が無い）場合は、
+`{pageIndex, rotation, isDirty}` のような骨格レコードを新規に書き込んではいけない。
+PageData 型不変条件を破り、保存経路でテキスト層 strip に繋がりうる（forward の rotatePages が
+`if (partial && partial.textBlocks)` で同じケースを除外しているのと対称にすること）。
+
+read-modify-write 型（`waitForPendingIdbSaves()` 等で待機したあと `getAllTemporaryPageData` で
+読み戻してから書く）の遅延ヘルパは、待機後と IDB read 後の 2 箇所で documentEpoch を再確認する
+二重ガードを必須とする（PCT-181 / #412 先例: `scheduleClearOcrAllPagesIdbWrite`）。await を跨ぐ
+たびにファイル切替が割り込める窓があるため、1 箇所のガードだけでは 2 await 目の窓を防げない。
+
 pageId を変える操作（例: ページの新規追加で別ソースインデックスを割り当てる）を設計する場合は、IDB キー衝突の可能性を精査すること。
 
 **ST-09 — IDB 旧キー（filePath:N）は移行期間中フォールバック読込する**

@@ -154,6 +154,56 @@ describe('isWriteAccessError', () => {
     expect(isWriteAccessError('os error 320')).toBe(false);
   });
 
+  // ── issue #363: 日本語 Windows の os error 5 (ERROR_ACCESS_DENIED) 対応 ──
+
+  it('os error 5 (ERROR_ACCESS_DENIED) を英語フレーズなしでも番号照合で検出する', () => {
+    expect(isWriteAccessError('os error 5')).toBe(true);
+  });
+
+  it('日本語 Windows のロケール依存メッセージ「アクセスが拒否されました。 (os error 5)」を検出する', () => {
+    // Rust std::io::Error の Display は日本語 Windows では英語フレーズを含まないため、
+    // 'access is denied' / 'permission denied' 等の文字列照合は全てすり抜ける。
+    // 番号照合 (os error 5) のみが検知経路になる。
+    expect(isWriteAccessError('アクセスが拒否されました。 (os error 5)')).toBe(true);
+  });
+
+  it('日本語 Windows で write_pdf_chunk / replace_pdf_file 相当のラップメッセージでも検出する', () => {
+    expect(
+      isWriteAccessError('ファイルの書き込みに失敗しました: アクセスが拒否されました。 (os error 5)'),
+    ).toBe(true);
+    expect(
+      isWriteAccessError('rename target->backup failed: アクセスが拒否されました。 (os error 5)'),
+    ).toBe(true);
+  });
+
+  it('os error 19 (ERROR_WRITE_PROTECT) を検出する', () => {
+    expect(isWriteAccessError('os error 19')).toBe(true);
+    expect(isWriteAccessError('書き込み禁止になっています。 (os error 19)')).toBe(true);
+  });
+
+  it('os error 1224 (ERROR_USER_MAPPED_FILE) を検出する', () => {
+    expect(isWriteAccessError('os error 1224')).toBe(true);
+  });
+
+  it('os error 5 でも単語境界で正しく検出する (os error 50 / os error 15 は検出しない)', () => {
+    expect(isWriteAccessError('os error 50')).toBe(false);
+    expect(isWriteAccessError('os error 15')).toBe(false);
+    expect(isWriteAccessError('os error 51')).toBe(false);
+  });
+
+  it('os error 19 でも単語境界で正しく検出する (os error 190 は検出しない)', () => {
+    expect(isWriteAccessError('os error 190')).toBe(false);
+  });
+
+  it('os error 1224 でも単語境界で正しく検出する (os error 12245 は検出しない)', () => {
+    expect(isWriteAccessError('os error 12245')).toBe(false);
+  });
+
+  it('無関係な os error 番号は false を返す (os error 2 = ERROR_FILE_NOT_FOUND)', () => {
+    expect(isWriteAccessError('os error 2')).toBe(false);
+    expect(isWriteAccessError('指定されたファイルが見つかりません。 (os error 2)')).toBe(false);
+  });
+
   it('無関係なエラーメッセージは false を返す', () => {
     expect(isWriteAccessError('ENOENT: no such file or directory')).toBe(false);
     expect(isWriteAccessError('network error')).toBe(false);

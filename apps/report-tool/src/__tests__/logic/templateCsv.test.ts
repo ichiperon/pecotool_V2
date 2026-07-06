@@ -176,6 +176,22 @@ describe("csvQuote", () => {
       expect(csvQuote("8%")).toBe("8%");
     });
 
+    // #395 / PCT-164: normalizeNumeric は △8%/▲8.5% を -8%/-8.5% に正規化する
+    // （isNumericLike が末尾 % を許容）。csvQuote の SAFE_NUMERIC が % を許容せず
+    // 先頭 - をトリガ扱いして '-8% に中和すると、Excel にアポストロフィ付きの
+    // 不正値が載り保証#3（CSV値の正しさ）を破る。負のパーセントは正当な経理値。
+    it("-8% は中和しない（正当な負のパーセント・#395）", () => {
+      expect(csvQuote("-8%")).toBe("-8%");
+    });
+
+    it("+12.5% は中和しない（正当な正のパーセント・#395）", () => {
+      expect(csvQuote("+12.5%")).toBe("+12.5%");
+    });
+
+    it('-8% を二重に壊さない: "\'-8%" を生成しない（#395）', () => {
+      expect(csvQuote("-8%")).not.toBe("'-8%");
+    });
+
     // --- ゼロ幅・BiDi 制御文字による回避を防ぐ ---
 
     it("ゼロ幅スペース + =1+1 は中和する（先頭不可視文字を見抜く）", () => {
@@ -210,6 +226,18 @@ describe("buildTemplateCsv - Formula Injection 中和の統合確認", () => {
     const csv = buildTemplateCsv(tmpl, cells, opts, { pageNumbers: [1] });
     const [, dataRow] = csv.split("\r\n");
     expect(dataRow).toBe("-50000");
+  });
+
+  // #395 / PCT-164: △8% → normalizeNumeric → -8% → csvQuote が SAFE_NUMERIC 不一致で
+  // '-8% に中和してしまう不整合（normalize の isNumericLike は % を許容するのに
+  // templateCsv の SAFE_NUMERIC は許容しない）。負のパーセントが正しく出ることを確認。
+  it("normalizeNumbers=ON 時: △8% は -8% で出力され '-8% に腐敗しない（#395）", () => {
+    const tmpl = makeTemplate("変化率");
+    const cells = makeMatrix1([[1, [["f1", "△8%"]]]]);
+    const opts: CsvOptions = { ...DEFAULT_OPTS, normalizeNumbers: true };
+    const csv = buildTemplateCsv(tmpl, cells, opts, { pageNumbers: [1] });
+    const [, dataRow] = csv.split("\r\n");
+    expect(dataRow).toBe("-8%");
   });
 });
 

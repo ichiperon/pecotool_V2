@@ -17,6 +17,40 @@ import { render, cleanup, act, fireEvent } from '@testing-library/react';
 import { DndContext } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { ThumbnailPanel, ThumbnailItemNode, SortableThumbnailWrapper } from '../../components/Sidebar/ThumbnailPanel';
+import type { PecoDocument, PageData } from '../../types';
+
+// ThumbnailPanel は @tauri-apps/plugin-dialog の ask/message を直接呼ぶ (PCT-123)。
+// テストから resolve 値を差し替えられるよう vi.hoisted で spy を保持する。
+const dialogMocks = vi.hoisted(() => ({
+  ask: vi.fn().mockResolvedValue(true),
+  message: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  ask: (...args: unknown[]) => dialogMocks.ask(...args),
+  message: (...args: unknown[]) => dialogMocks.message(...args),
+}));
+
+// react-virtuoso は仮想化のため可視範囲外の要素を DOM に出さない。
+// ThumbnailWindow.test.tsx (#431 回帰テスト) と同じ回避策: 全件を単純にレンダする
+// 軽量モックへ差し替える (仮想化ロジック自体はこのテストの関心外)。
+vi.mock('react-virtuoso', () => {
+  const ReactLib = require('react') as typeof import('react');
+  const Virtuoso = ReactLib.forwardRef(function Virtuoso(
+    { totalCount, itemContent, className }: any,
+    ref: any,
+  ) {
+    ReactLib.useImperativeHandle(ref, () => ({ scrollIntoView: vi.fn() }));
+    return (
+      <div className={className}>
+        {Array.from({ length: totalCount }, (_, i) => (
+          <ReactLib.Fragment key={i}>{itemContent(i)}</ReactLib.Fragment>
+        ))}
+      </div>
+    );
+  });
+  return { Virtuoso };
+});
 
 afterEach(() => cleanup());
 
@@ -537,5 +571,446 @@ describe('PCT-088: 矢印キーページ移動のフォーカス維持', () => {
 
     expect(document.activeElement).toBe(scrollContent);
     expect(fake.onSelectPage).toHaveBeenCalledWith(0);
+  });
+});
+
+// ─── ThumbnailPanel フルレンダーテスト ─────────────────────────────────────
+//
+// 上記のテストは ThumbnailItemNode / SortableThumbnailWrapper を単体でしかレンダしておらず、
+// ThumbnailPanel 本体 (コンテキストメニューのハンドラ群・onGetRotation・sortableItems 構築)
+// は coverage 実測 (Lines 35.53%) の通りほぼ未検証だった。
+// react-virtuoso を ThumbnailWindow.test.tsx と同じ方式でモックし、ThumbnailPanel を
+// フルレンダーして検証する。
+
+function buildDocument(pageRotations: Array<0 | 90 | 180 | 270>): Pick<PecoDocument, 'totalPages' | 'pages'> {
+  const pages = new Map<number, PageData>();
+  pageRotations.forEach((rotation, idx) => {
+    pages.set(idx, {
+      pageIndex: idx,
+      width: 100,
+      height: 100,
+      textBlocks: [],
+      isDirty: false,
+      thumbnail: null,
+      rotation,
+    });
+  });
+  return { totalPages: pageRotations.length, pages };
+}
+
+function makeFullPanelFake() {
+  const activeListeners = new Map<number, Set<() => void>>();
+  const dirtyListeners = new Map<number, Set<() => void>>();
+  const dirtySet = new Set<number>();
+  const thumbnails = new Map<number, string>();
+  let activeIndex = 0;
+
+  return {
+    subscribeThumbnail: (_index: number, _cb: () => void) => () => {},
+    getThumbnail: (index: number) => thumbnails.get(index),
+    setThumbnail(index: number, url: string) {
+      thumbnails.set(index, url);
+    },
+    subscribeActivePage: (index: number, cb: () => void) => {
+      if (!activeListeners.has(index)) activeListeners.set(index, new Set());
+      activeListeners.get(index)!.add(cb);
+      return () => { activeListeners.get(index)?.delete(cb); };
+    },
+    getIsActivePage: (index: number) => activeIndex === index,
+    setActive(next: number) { activeIndex = next; },
+    subscribeDirtyPage: (index: number, cb: () => void) => {
+      if (!dirtyListeners.has(index)) dirtyListeners.set(index, new Set());
+      dirtyListeners.get(index)!.add(cb);
+      return () => { dirtyListeners.get(index)?.delete(cb); };
+    },
+    getIsDirtyPage: (index: number) => dirtySet.has(index),
+    /** pecoStore.rotatePages 相当: 対象ページを isDirty にし、dirty pub/sub の listener へ通知する。 */
+    notifyDirty(index: number, isDirty: boolean) {
+      if (isDirty) dirtySet.add(index); else dirtySet.delete(index);
+      dirtyListeners.get(index)?.forEach(cb => cb());
+    },
+    onSelectPage: vi.fn(),
+    onRequestThumbnail: vi.fn(),
+    onDeletePages: vi.fn(),
+    onMovePage: vi.fn(),
+    onRotatePages: vi.fn(),
+    onExtractPages: vi.fn(),
+  };
+}
+
+function renderPanel(
+  doc: Pick<PecoDocument, 'totalPages' | 'pages'> | null,
+  fake: ReturnType<typeof makeFullPanelFake>,
+  overrides: Partial<React.ComponentProps<typeof ThumbnailPanel>> = {},
+) {
+  return render(
+    <ThumbnailPanel
+      width={200}
+      document={doc}
+      currentPageIndex={0}
+      loadEpoch={0}
+      isOcrRunning={false}
+      onSelectPage={fake.onSelectPage}
+      onRequestThumbnail={fake.onRequestThumbnail}
+      onSubscribeThumbnail={fake.subscribeThumbnail}
+      onGetThumbnail={fake.getThumbnail}
+      onSubscribeActivePage={fake.subscribeActivePage}
+      onGetIsActivePage={fake.getIsActivePage}
+      onSubscribeDirtyPage={fake.subscribeDirtyPage}
+      onGetIsDirtyPage={fake.getIsDirtyPage}
+      onDeletePages={fake.onDeletePages}
+      onMovePage={fake.onMovePage}
+      onRotatePages={fake.onRotatePages}
+      onExtractPages={fake.onExtractPages}
+      {...overrides}
+    />,
+  );
+}
+
+function openContextMenu(container: HTMLElement, displayIndex: number) {
+  const buttons = container.querySelectorAll('button.thumbnail-item');
+  const btn = buttons[displayIndex] as HTMLElement;
+  act(() => { fireEvent.contextMenu(btn, { clientX: 10, clientY: 10 }); });
+}
+
+function findMenuItem(container: HTMLElement, label: string): HTMLElement {
+  const item = Array.from(container.querySelectorAll('button.thumbnail-context-menu-item'))
+    .find(b => b.textContent === label);
+  expect(item, `context menu item "${label}" not found`).toBeDefined();
+  return item as HTMLElement;
+}
+
+describe('#431/PCT-124 系: 回転が実 onGetRotation 経由でサムネ CSS variable に反映される', () => {
+  it('rotation=0/90/180 に応じて thumbnail-box の --thumb-box-w/h がスワップされる (90/270 のみ landscape)', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 90, 180]);
+    const { container } = renderPanel(doc, fake);
+
+    const boxes = container.querySelectorAll('.thumbnail-box');
+    expect(boxes).toHaveLength(3);
+
+    // rotation=0: variable 未設定 (CSS デフォルト縦置きのまま)
+    expect((boxes[0] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('');
+    expect((boxes[0] as HTMLElement).style.getPropertyValue('--thumb-box-h')).toBe('');
+
+    // rotation=90 (landscape): 幅高さがスワップされる
+    expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('160px');
+    expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-h')).toBe('120px');
+
+    // rotation=180: 縦横比不変なので landscape 扱いではなく variable 未設定
+    expect((boxes[2] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('');
+  });
+
+  it('rotation!=0 の img には --thumbnail-rotation variable と thumbnail-img--rotated class が付く', () => {
+    const fake = makeFullPanelFake();
+    fake.setThumbnail(0, 'data:image/jpeg;base64,AAA');
+    fake.setThumbnail(1, 'data:image/jpeg;base64,BBB');
+    const doc = buildDocument([0, 270]);
+    const { container } = renderPanel(doc, fake);
+
+    const imgs = container.querySelectorAll('img.thumbnail-img');
+    expect(imgs).toHaveLength(2);
+
+    expect(imgs[0].className).not.toContain('thumbnail-img--rotated');
+    expect((imgs[0] as HTMLElement).style.getPropertyValue('--thumbnail-rotation')).toBe('');
+
+    expect(imgs[1].className).toContain('thumbnail-img--rotated');
+    expect((imgs[1] as HTMLElement).style.getPropertyValue('--thumbnail-rotation')).toBe('270deg');
+  });
+});
+
+describe('#429/#431/#434 系回帰観点: 回転更新は dirty pub/sub 通知に相乗りして再反映される', () => {
+  // pecoStore.rotatePages は回転対象ページを isDirty: true にし (pecoStore.ts L682/L698)、
+  // useThumbnailPanel の dirty pub/sub がそのページの listener だけへ通知する。
+  // rotation 自体は独立した pub/sub を持たず render 時に onGetRotation で都度読まれるだけなので、
+  // 「dirty 通知が飛ばない限り再描画されず、古い回転のまま表示され続ける」契約になっている。
+  // この契約が壊れる(dirty 通知だけでは更新されなくなる/通知なしでも更新されてしまうと誤認する)と
+  // #429/#431/#434 と同じ「サムネの見た目が更新されない・別ページの回転が混ざる」再発につながる。
+  it('document.pages の rotation を書き換えただけでは反映されず、dirty 通知後にのみ反映される', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container, rerender } = renderPanel(doc, fake);
+
+    let boxes = container.querySelectorAll('.thumbnail-box');
+    expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('');
+
+    // 回転後の document (index=1 のみ rotation=90) を親から渡す。
+    // ThumbnailItemNode(index=1) への props (onGetRotation 等の callback identity) は
+    // 一切変化しないため React.memo によりこの時点では再レンダされない。
+    const rotatedDoc = buildDocument([0, 90, 0]);
+    rerender(
+      <ThumbnailPanel
+        width={200}
+        document={rotatedDoc}
+        currentPageIndex={0}
+        loadEpoch={0}
+        isOcrRunning={false}
+        onSelectPage={fake.onSelectPage}
+        onRequestThumbnail={fake.onRequestThumbnail}
+        onSubscribeThumbnail={fake.subscribeThumbnail}
+        onGetThumbnail={fake.getThumbnail}
+        onSubscribeActivePage={fake.subscribeActivePage}
+        onGetIsActivePage={fake.getIsActivePage}
+        onSubscribeDirtyPage={fake.subscribeDirtyPage}
+        onGetIsDirtyPage={fake.getIsDirtyPage}
+        onDeletePages={fake.onDeletePages}
+        onMovePage={fake.onMovePage}
+        onRotatePages={fake.onRotatePages}
+        onExtractPages={fake.onExtractPages}
+      />,
+    );
+
+    boxes = container.querySelectorAll('.thumbnail-box');
+    expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('');
+
+    // 実アプリの rotatePages 相当: 対象ページを dirty にして listener へ通知する。
+    act(() => { fake.notifyDirty(1, true); });
+
+    boxes = container.querySelectorAll('.thumbnail-box');
+    expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('160px');
+    expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-h')).toBe('120px');
+
+    // 隣接ページ (index=0, index=2) は通知を受けていないので rotation=0 のまま
+    expect((boxes[0] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('');
+    expect((boxes[2] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('');
+  });
+});
+
+describe('#434 系回帰観点: コンテキストメニューの操作が正しい displayIndex にバインドされる', () => {
+  // #434 (B-2) は useThumbnailWindow.getRotations が displayIndex キーの document.pages を
+  // source index で引いてしまい、並べ替え/削除後に別ページの回転を返す事故だった。
+  // ThumbnailPanel では同種の「間違った index が操作対象に紐付く」リスクは
+  // コンテキストメニューの各ハンドラ (handleRotateRight/Left/180, handleExtract) が
+  // contextMenu.targetDisplayIndex を正しく積むかどうかに現れる。ここを直接検証する。
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('末尾ページ(displayIndex=2)を右クリックして右回転すると、onRotatePages が [2], 90 で呼ばれる (0 に誤爆しない)', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 2);
+    const btn = findMenuItem(container, '右に 90° 回転');
+    act(() => { fireEvent.click(btn); });
+
+    expect(fake.onRotatePages).toHaveBeenCalledTimes(1);
+    expect(fake.onRotatePages).toHaveBeenCalledWith([2], 90);
+  });
+
+  it('中間ページ(displayIndex=1)を右クリックして左回転すると、onRotatePages が [1], 270 で呼ばれる', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 1);
+    const btn = findMenuItem(container, '左に 90° 回転');
+    act(() => { fireEvent.click(btn); });
+
+    expect(fake.onRotatePages).toHaveBeenCalledWith([1], 270);
+  });
+
+  it('180度回転メニューは対象 displayIndex と delta=180 で呼ばれる', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 2);
+    const btn = findMenuItem(container, '180° 回転');
+    act(() => { fireEvent.click(btn); });
+
+    expect(fake.onRotatePages).toHaveBeenCalledWith([2], 180);
+  });
+
+  it('抽出メニューは対象 displayIndex で onExtractPages を呼ぶ', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 2);
+    const btn = findMenuItem(container, '選択ページを別 PDF として書き出し');
+    act(() => { fireEvent.click(btn); });
+
+    expect(fake.onExtractPages).toHaveBeenCalledWith([2]);
+  });
+
+  it('右クリックした対象と異なるページを操作しない (displayIndex=0 の隣接ページには波及しない)', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0, 0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 3);
+    const btn = findMenuItem(container, '右に 90° 回転');
+    act(() => { fireEvent.click(btn); });
+
+    expect(fake.onRotatePages).not.toHaveBeenCalledWith([0], 90);
+    expect(fake.onRotatePages).toHaveBeenCalledWith([3], 90);
+  });
+});
+
+describe('PCT-123 系回帰観点: 削除確認ダイアログの分岐と displayIndex の整合', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    dialogMocks.ask.mockReset().mockResolvedValue(true);
+    dialogMocks.message.mockReset().mockResolvedValue(undefined);
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('最終ページ(totalPages<=1)の削除は message() のみで onDeletePages を呼ばない', async () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 0);
+    const btn = findMenuItem(container, 'このページを削除');
+    await act(async () => {
+      fireEvent.click(btn);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(dialogMocks.message).toHaveBeenCalledTimes(1);
+    expect(dialogMocks.ask).not.toHaveBeenCalled();
+    expect(fake.onDeletePages).not.toHaveBeenCalled();
+  });
+
+  it('末尾ページ(displayIndex=2)の削除は ask() の確認後に onDeletePages が [2] で呼ばれる', async () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 2);
+    const btn = findMenuItem(container, 'このページを削除');
+    await act(async () => {
+      fireEvent.click(btn);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(dialogMocks.ask).toHaveBeenCalledTimes(1);
+    expect(dialogMocks.ask.mock.calls[0][0]).toContain('ページ 3');
+    expect(fake.onDeletePages).toHaveBeenCalledWith([2]);
+  });
+
+  it('ask() が false を返す (キャンセル) と onDeletePages を呼ばない', async () => {
+    dialogMocks.ask.mockReset().mockResolvedValue(false);
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake);
+
+    openContextMenu(container, 1);
+    const btn = findMenuItem(container, 'このページを削除');
+    await act(async () => {
+      fireEvent.click(btn);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(fake.onDeletePages).not.toHaveBeenCalled();
+  });
+});
+
+describe('ThumbnailPanel: 矢印キーによるページ選択状態の境界', () => {
+  it('ArrowDown/ArrowRight で currentPageIndex+1 を選択する（末尾では選択しない）', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container, rerender } = renderPanel(doc, fake, { currentPageIndex: 1 });
+
+    const scrollContent = container.querySelector('.scroll-content') as HTMLElement;
+    fireEvent.keyDown(scrollContent, { key: 'ArrowDown' });
+    expect(fake.onSelectPage).toHaveBeenCalledWith(2);
+
+    fake.onSelectPage.mockClear();
+    rerender(
+      <ThumbnailPanel
+        width={200}
+        document={doc}
+        currentPageIndex={2}
+        loadEpoch={0}
+        isOcrRunning={false}
+        onSelectPage={fake.onSelectPage}
+        onRequestThumbnail={fake.onRequestThumbnail}
+        onSubscribeThumbnail={fake.subscribeThumbnail}
+        onGetThumbnail={fake.getThumbnail}
+        onSubscribeActivePage={fake.subscribeActivePage}
+        onGetIsActivePage={fake.getIsActivePage}
+        onSubscribeDirtyPage={fake.subscribeDirtyPage}
+        onGetIsDirtyPage={fake.getIsDirtyPage}
+        onDeletePages={fake.onDeletePages}
+        onMovePage={fake.onMovePage}
+        onRotatePages={fake.onRotatePages}
+        onExtractPages={fake.onExtractPages}
+      />,
+    );
+    // 末尾ページ (totalPages=3, currentPageIndex=2) では ArrowRight は無視される
+    fireEvent.keyDown(scrollContent, { key: 'ArrowRight' });
+    expect(fake.onSelectPage).not.toHaveBeenCalled();
+  });
+
+  it('ArrowUp/ArrowLeft で currentPageIndex-1 を選択する（先頭では選択しない）', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake, { currentPageIndex: 1 });
+
+    const scrollContent = container.querySelector('.scroll-content') as HTMLElement;
+    fireEvent.keyDown(scrollContent, { key: 'ArrowUp' });
+    expect(fake.onSelectPage).toHaveBeenCalledWith(0);
+
+    fake.onSelectPage.mockClear();
+    // 先頭ページ (currentPageIndex=0) では ArrowLeft は無視される
+    const { container: container2 } = renderPanel(doc, fake, { currentPageIndex: 0 });
+    const scrollContent2 = container2.querySelector('.scroll-content') as HTMLElement;
+    fireEvent.keyDown(scrollContent2, { key: 'ArrowLeft' });
+    expect(fake.onSelectPage).not.toHaveBeenCalled();
+  });
+});
+
+describe('component-level dedup 補完: ThumbnailItemNode の再取得リクエスト', () => {
+  // S-07-05 (useThumbnailPanel.test.ts) は hook 側 (requestThumbnail の queue dedup) を
+  // 実 hook 経由で検証済み。ここでは呼び出し元である ThumbnailItemNode 側の効果
+  // (「サムネ未取得のときだけ onRequest を呼ぶ」L139-142) を補完する。層が異なるため重複しない。
+  it('サムネイル未取得なら mount 時に onRequest を1回だけ呼ぶ', () => {
+    const onRequest = vi.fn();
+    render(
+      <ThumbnailItemNode
+        index={4}
+        loadEpoch={0}
+        onSelect={vi.fn()}
+        onRequest={onRequest}
+        onSubscribeThumbnail={() => () => {}}
+        onGetThumbnail={() => undefined}
+        onSubscribeActivePage={() => () => {}}
+        onGetIsActivePage={() => false}
+        onSubscribeDirtyPage={() => () => {}}
+        onGetIsDirtyPage={() => false}
+        onGetRotation={() => 0}
+        onContextMenu={() => {}}
+      />,
+    );
+
+    expect(onRequest).toHaveBeenCalledTimes(1);
+    expect(onRequest).toHaveBeenCalledWith(4);
+  });
+
+  it('サムネイル取得済みなら onRequest を呼ばない', () => {
+    const onRequest = vi.fn();
+    render(
+      <ThumbnailItemNode
+        index={4}
+        loadEpoch={0}
+        onSelect={vi.fn()}
+        onRequest={onRequest}
+        onSubscribeThumbnail={() => () => {}}
+        onGetThumbnail={() => 'data:image/jpeg;base64,AAA'}
+        onSubscribeActivePage={() => () => {}}
+        onGetIsActivePage={() => false}
+        onSubscribeDirtyPage={() => () => {}}
+        onGetIsDirtyPage={() => false}
+        onGetRotation={() => 0}
+        onContextMenu={() => {}}
+      />,
+    );
+
+    expect(onRequest).not.toHaveBeenCalled();
   });
 });

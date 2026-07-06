@@ -5,6 +5,7 @@ import type { OverlayGeom } from "../types/overlay";
 import { effectiveRectForPage } from "../logic/pageOffset";
 import { pageRectToDevice, clientPointToPage } from "../lib/coordinates";
 import { ZERO_OFFSET } from "../types/report";
+import { isEditingTarget } from "../lib/isEditingTarget";
 
 interface Props {
   geom: OverlayGeom | null;
@@ -247,16 +248,11 @@ const OffsetAdjustOverlay: FC<Props> = ({ geom }) => {
     if (!isAdjusting) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // MA-4: 入力要素にフォーカス中は矢印キーをテキスト編集用として扱い、
-      // nudgePageOffset には流さない（フォーム操作中の意図しないオフセット変更を防止）。
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.isContentEditable)
-      ) {
+      // MA-4 (#434 F1): 入力要素・CSVテーブルの gridcell・ConfirmLayout のスプリッタに
+      // フォーカス中は矢印キーをその場の操作用として扱い、nudgePageOffset には流さない
+      // （フォーム操作/CSVセルナビ/スプリッタ幅調整との二重発火防止）。
+      // 判定は usePdfShortcuts/usePdfPanZoom と同じ isEditingTarget に統一。
+      if (isEditingTarget(e.target)) {
         return;
       }
 

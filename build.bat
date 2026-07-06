@@ -14,9 +14,9 @@ if exist "dist-bin" (
 
 :: 2. Install dependencies
 echo [2/5] Installing dependencies...
-call npm install --silent
+call npm ci --silent
 if %errorlevel% neq 0 (
-    echo [ERROR] npm install failed.
+    echo [ERROR] npm ci failed.
     exit /b %errorlevel%
 )
 

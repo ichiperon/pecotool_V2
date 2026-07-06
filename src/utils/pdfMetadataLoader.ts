@@ -1,6 +1,6 @@
 import type * as pdfjsLib from 'pdfjs-dist';
 import { BoundingBox } from '../types';
-import { readPecoToolBBoxMetaFromBytes } from './pdfPecoToolMetadata';
+import { readPecoToolBBoxMetaWithStatusFromBytes } from './pdfPecoToolMetadata';
 
 export interface PecoToolBBoxMetaEntry {
   bbox: BoundingBox;
@@ -104,6 +104,12 @@ export interface PecoToolBBoxMetaSource {
    */
   filePath?: string;
   mtime?: number;
+  /**
+   * #392 / PCT-161: private BBox stream は存在するが本バージョンで decode/parse できない
+   * （undecodable）と判定されたときに呼ばれる。呼び出し側は「このファイルの編集は保存に
+   * 反映されない」旨を UI 警告で透明化するために使う。
+   */
+  onUndecodable?: () => void;
 }
 
 // PCT-103: 直近1ファイル分のメモ化エントリ。ファイル切替で自然に追い出される。
@@ -111,6 +117,10 @@ interface BBoxMetaCacheEntry {
   filePath: string;
   mtime: number;
   result: Record<string, PecoToolBBoxMetaEntry[]> | null;
+  /** #392: private BBox stream が undecodable だったか。cache-hit でも onUndecodable を
+   * 再通知するため保持する（onUndecodable 無しの先行ロードがキャッシュを充填しても、
+   * 後続の onUndecodable 付き呼び出しで警告が確実に立つようにする）。 */
+  undecodable: boolean;
 }
 let _bboxMetaCache: BBoxMetaCacheEntry | null = null;
 
@@ -168,21 +178,32 @@ export async function loadPecoToolBBoxMeta(
       _bboxMetaCache.filePath === cacheFilePath &&
       _bboxMetaCache.mtime === cacheMtime
     ) {
+      // #392: cache-hit でも undecodable は再通知する（先行の onUndecodable 無しロードが
+      // キャッシュを充填しても、警告経路が確実に発火する）。
+      if (_bboxMetaCache.undecodable) source?.onUndecodable?.();
       return _bboxMetaCache.result;
     }
   }
 
   let result: Record<string, PecoToolBBoxMetaEntry[]> | null = null;
+  let undecodable = false;
 
   try {
     const bytes = await loadSourceBytes(source);
     if (bytes) {
-      const parsed = await readPecoToolBBoxMetaFromBytes(bytes);
+      const read = await readPecoToolBBoxMetaWithStatusFromBytes(bytes);
+      // #392: private stream はあるが decode 不能なら、保存パスは byte-preserve で編集を
+      // 反映しない。ここで検出して呼び出し側に通知し、cache にも残して UI 警告で透明化する。
+      if (read.status === 'undecodable') {
+        undecodable = true;
+        source?.onUndecodable?.();
+      }
+      const parsed = read.meta;
       if (Object.keys(parsed).length > 0) {
         result = validateParsedBBoxMeta(parsed);
         // PCT-103: キャッシュ更新
         if (cacheFilePath !== undefined && cacheMtime !== undefined) {
-          _bboxMetaCache = { filePath: cacheFilePath, mtime: cacheMtime, result };
+          _bboxMetaCache = { filePath: cacheFilePath, mtime: cacheMtime, result, undecodable };
         }
         return result;
       }
@@ -212,7 +233,7 @@ export async function loadPecoToolBBoxMeta(
       result = validateParsedBBoxMeta(parsed);
       // PCT-103: キャッシュ更新
       if (cacheFilePath !== undefined && cacheMtime !== undefined) {
-        _bboxMetaCache = { filePath: cacheFilePath, mtime: cacheMtime, result };
+        _bboxMetaCache = { filePath: cacheFilePath, mtime: cacheMtime, result, undecodable };
       }
       return result;
     }
@@ -221,7 +242,7 @@ export async function loadPecoToolBBoxMeta(
   }
   // PCT-103: null 結果もキャッシュする（メタなし PDF の繰り返し readFile を避ける）
   if (cacheFilePath !== undefined && cacheMtime !== undefined) {
-    _bboxMetaCache = { filePath: cacheFilePath, mtime: cacheMtime, result: null };
+    _bboxMetaCache = { filePath: cacheFilePath, mtime: cacheMtime, result: null, undecodable };
   }
   return null;
 }

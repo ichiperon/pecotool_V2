@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { usePdfStore } from "../store/pdfStore";
+import { useReportStore } from "../store/reportStore";
 import { isEditingTarget } from "../lib/isEditingTarget";
 
 /**
@@ -52,6 +53,19 @@ export function usePdfShortcuts(): void {
 
       // 編集中はページ移動を無効化
       if (isEditing) return;
+
+      // オフセット調整モード中は矢印キーを OffsetAdjustOverlay の nudge に譲る。
+      // 両者が同じ window keydown を購読しており、ここで矢印を処理すると欄を
+      // 微調整するたびにページ移動が二重発火する（PCT-160 / #390）。
+      // Page系/Home/End は nudge と競合しないので従来どおり通す。
+      const isArrowKey =
+        e.key === "ArrowDown" ||
+        e.key === "ArrowUp" ||
+        e.key === "ArrowLeft" ||
+        e.key === "ArrowRight";
+      if (isArrowKey && useReportStore.getState().mode === "adjustOffset") {
+        return;
+      }
 
       switch (e.key) {
         case "PageDown":

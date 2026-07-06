@@ -115,6 +115,15 @@ export function usePageNavigation({
             },
             filePath: doc.filePath,
             mtime: doc.mtime,
+            // #392: ファイルを開いて最初に meta を読むのはこの経路（ページ表示）。ここで
+            // undecodable を検出して警告フラグを立てる（cache-hit でも再通知される）。
+            // epoch ガード: A(undecodable) 読込中に B(decodable) へ切替えると A の後着検出が
+            // B のバナーを誤点灯するため、開始時 epoch と現在 epoch が一致する時だけ立てる。
+            onUndecodable: () => {
+              if (useInfraStore.getState().documentEpoch === capturedDocumentEpoch) {
+                useInfraStore.getState().setBboxMetaUnreadable(true);
+              }
+            },
           });
         } catch {
           nextBBoxMeta = null;

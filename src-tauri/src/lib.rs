@@ -214,7 +214,15 @@ fn list_pdf_files(dir: &std::path::Path) -> Result<Vec<String>, String> {
     for entry in fs::read_dir(dir).map_err(|e| format!("read_dir failed: {e}"))? {
         let entry = entry.map_err(|e| format!("read_dir entry failed: {e}"))?;
         let path = entry.path();
-        if !path.is_file() {
+        // PCT-119: `Path::is_file` はシンボリックリンクをリンク先まで追従して判定するため、
+        // フォルダ外の実ファイルへ張られた symlink をバッチ OCR 対象へ引き込める。
+        // `symlink_metadata` はリンク自体のメタデータを返す（追従しない）ので、symlink は
+        // ここで is_file() が false になり除外される。
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !metadata.is_file() {
             continue;
         }
         if path
@@ -478,7 +486,13 @@ async fn run_ocr(request: tauri::ipc::Request<'_>) -> Result<String, String> {
         let image = temp_path.to_string_lossy().to_string();
         let tag = language_tag.unwrap_or_else(|| "ja".to_string());
         let ocr_result = do_windows_ocr(&image, render_scale, &tag);
-        let _ = std::fs::remove_file(&temp_path);
+        // PCT-119: 掃除失敗を握りつぶさず可視化する（動作自体は継続=fail-open のまま）。
+        if let Err(e) = std::fs::remove_file(&temp_path) {
+            eprintln!(
+                "[ocr] failed to remove OCR temp file: {} ({e})",
+                temp_path.display()
+            );
+        }
         ocr_result
     })
     .await
@@ -559,7 +573,14 @@ fn cleanup_stale_ocr_temp_files() {
                     continue;
                 }
             }
-            let _ = std::fs::remove_file(entry.path());
+            let entry_path = entry.path();
+            // PCT-119: 掃除失敗を握りつぶさず可視化する（動作自体は継続=fail-open のまま）。
+            if let Err(e) = std::fs::remove_file(&entry_path) {
+                eprintln!(
+                    "[startup-cleanup] failed to remove stale OCR temp file: {} ({e})",
+                    entry_path.display()
+                );
+            }
         }
     }
 }
@@ -1776,6 +1797,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// PCT-119: フォルダ外の実ファイルへ張られた symlink はバッチ OCR 対象に含めない
+    /// (symlink_metadata ベースの判定へのハードニング回帰)。
+    ///
+    /// Windows で symlink の作成には開発者モード有効化または管理者権限が要る環境があるため、
+    /// 作成に失敗する場合はテスト環境の制約として exit early する（判定ロジック自体は
+    /// symlink_metadata が非追従であるという標準ライブラリの契約に依拠しており、
+    /// ここでは「symlink 経由の実ファイルが一覧に混入しないこと」を実環境で確認する）。
+    #[cfg(windows)]
+    #[test]
+    fn list_pdf_files_excludes_symlinks() {
+        use std::os::windows::fs::symlink_file;
+
+        let outside_dir = make_replace_test_dir("list_symlink_outside");
+        let watched_dir = make_replace_test_dir("list_symlink_watched");
+
+        let real_pdf = outside_dir.join("outside.pdf");
+        std::fs::write(&real_pdf, b"%PDF-1.4").unwrap();
+
+        let link_path = watched_dir.join("linked.pdf");
+        if symlink_file(&real_pdf, &link_path).is_err() {
+            eprintln!(
+                "[test] symlink_file failed (developer mode / privilege not available) - skipping list_pdf_files_excludes_symlinks"
+            );
+            let _ = std::fs::remove_dir_all(&outside_dir);
+            let _ = std::fs::remove_dir_all(&watched_dir);
+            return;
+        }
+
+        // 通常ファイルは引き続き一覧に含まれることも確認する。
+        std::fs::write(watched_dir.join("real.pdf"), b"%PDF-1.4").unwrap();
+
+        let result = list_pdf_files(&watched_dir).unwrap();
+        let names: Vec<&str> = result
+            .iter()
+            .map(|p| std::path::Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(""))
+            .collect();
+
+        assert!(
+            !names.contains(&"linked.pdf"),
+            "symlink 経由の PDF は一覧から除外されなければならない: {:?}",
+            names
+        );
+        assert!(names.contains(&"real.pdf"), "通常ファイルは引き続き含まれる");
+
+        let _ = std::fs::remove_dir_all(&outside_dir);
+        let _ = std::fs::remove_dir_all(&watched_dir);
+    }
+
     /// (d) rename 失敗時のエラーメッセージに temp パスが含まれ、
     /// 手動復旧（残存 temp からのデータ救済）に必要な情報が欠落しないこと (PCT-077)。
     #[test]
@@ -2009,8 +2078,17 @@ mod tests {
     // (extract_pid_from_temp_filename / is_process_alive) をそれぞれ独立に検証する
     // 上記テストで代替する。
 
+    /// cleanup_stale_ocr_temp_files 系のテストは実プロセス共通の std::env::temp_dir() を
+    /// prefix (peco_ocr_) 走査で共有するため、cargo test の並列実行では「あるテストが
+    /// 書いた直後のファイルを別テストの cleanup 呼び出しが削除する」レースが起きる
+    /// (CI 実測: NotFound panic)。static Mutex で当該テスト群のみ直列化する。
+    static CLEANUP_TEMP_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn cleanup_stale_ocr_temp_files_removes_own_pid_and_dead_pid_files() {
+        let _guard = CLEANUP_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // AQ-4 の主旨: 自プロセスの残骸、および既に終了しているプロセスの残骸は削除してよい。
         // 実在しない PID (99999999 は 32bit PID 上限を超えるため確実に非生存) を dead PID として使う。
         let temp_dir = std::env::temp_dir();
@@ -2031,6 +2109,9 @@ mod tests {
 
     #[test]
     fn cleanup_stale_ocr_temp_files_keeps_files_of_alive_other_process() {
+        let _guard = CLEANUP_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // AQ-4 の本題: 別の稼働中インスタンスが使用中の一時ファイルは削除しない。
         // テストプロセス自身は必ず生存しているので、"自分ではない別 PID" を模擬する術がない
         // ため、ここでは現在のテストバイナリ自身の PID を「他プロセス」として偽装する
@@ -2050,6 +2131,63 @@ mod tests {
             "files without peco_ocr prefix must not be touched"
         );
         std::fs::remove_file(&unrelated_file).ok();
+    }
+
+    /// PCT-119: remove_file 失敗（掃除失敗）が発生してもパニックせず、他エントリの
+    /// 処理を継続すること（`let _ =` の握りつぶしを eprintln! 可視化に変えた際の回帰）。
+    ///
+    /// Windows の既定共有モードでは、ハンドルを開いたままのファイルは削除に失敗する
+    /// ことを利用して意図的に remove_file を失敗させる。
+    #[test]
+    #[cfg(windows)]
+    fn cleanup_stale_ocr_temp_files_continues_when_one_remove_fails() {
+        let _guard = CLEANUP_TEMP_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // レビュー指摘 (マリン, MEDIUM): std::fs::File::open は Windows で既定
+        // FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE を指定するため、ハンドル保持中
+        // でも remove_file (DeleteFile) は「delete-pending」として成功してしまい、失敗経路を
+        // 検証できていなかった (vacuous pass)。FILE_SHARE_DELETE を明示的に除外して開くことで、
+        // remove_file が実際に失敗する状態を作る。
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+        let temp_dir = std::env::temp_dir();
+        let self_pid = std::process::id();
+        let marker = "cleanuptest_lockfail";
+
+        let locked_file = temp_dir.join(format!("peco_ocr_{self_pid}_{marker}_0.png"));
+        let removable_file = temp_dir.join(format!("peco_ocr_{self_pid}_{marker}_1.png"));
+        std::fs::write(&locked_file, b"locked").expect("write locked_file");
+        std::fs::write(&removable_file, b"removable").expect("write removable_file");
+
+        // FILE_SHARE_DELETE を含めずに開く。他ハンドルからの delete-on-close 共有を許可しない
+        // ため、cleanup_stale_ocr_temp_files 内の remove_file は実際に失敗する。
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&locked_file)
+            .expect("open locked_file with delete-exclusive share mode");
+
+        // パニックしないこと (fail-open の継続) がこのテストの主眼。
+        cleanup_stale_ocr_temp_files();
+
+        // remove_file が実際に失敗し、ファイルが残っていることを検証する
+        // (失敗経路を通っていることの直接証拠)。
+        assert!(
+            locked_file.exists(),
+            "共有削除を禁止したハンドル保持中のファイルは remove_file が失敗し、削除されずに残るはず"
+        );
+        assert!(
+            !removable_file.exists(),
+            "ロックされていないファイルは削除が継続されるべき"
+        );
+
+        drop(handle);
+        // ハンドル解放後は後片付けとして削除しておく。
+        let _ = std::fs::remove_file(&locked_file);
     }
 }
 

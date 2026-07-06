@@ -37,6 +37,7 @@ import {
   stripEmptyGraphicsStateBlocksOnly,
   hasTextOperatorsOutsideTextObjects,
   stripStrayTextOperatorsOutsideTextObjects,
+  hasUnbalancedTextBlockBoundary,
 } from './pdfContentStream';
 import {
   PECO_FONT_KEY_TAG,
@@ -56,7 +57,7 @@ import { ensureDenseClassicXref } from './pdfClassicXref';
 import { compactIndirectObjectNumbers, sweepUnreachableObjects } from './pdfReachabilityGc';
 import {
   hasLegacyPecoToolBBoxInfo,
-  readPecoToolBBoxMetaFromPdfDoc,
+  readPecoToolBBoxMetaWithStatus,
   writePecoToolBBoxMetaToPdfDoc,
 } from './pdfPecoToolMetadata';
 import { extractTrailerId, overwriteTrailerId } from './pdfTrailerId';
@@ -368,6 +369,20 @@ export function replacePageTextContentStreams(
   // 代わりに decode 成功 stream を個別に strip して in-place 書き戻す。
   if (anyDecodeFailed) {
     for (const entry of resolvedEntries) {
+      // PCT-177 (#408) 残余1: BT...ET がストリーム境界を跨ぐ合法構成 (§7.8.2) では、
+      // この stream 単体では BT/ET が閉じない（先頭に継続の ET が来る、または BT が
+      // 閉じないまま終端に達する）。stripTextBlocks は「BT から見つからない ET まで
+      // （＝終端まで）」を丸ごと破棄するため、この状態で per-stream strip を行うと、
+      // 本来 BT の外側にある q/Q/cm 等の非テキスト演算子まで巻き添えで失いうる。
+      // decode 失敗 stream が混在するこの経路は元々 merge（連結 strip）の恩恵を
+      // 受けられないため、安全側でこの stream への strip をスキップし原本を温存する。
+      if (hasUnbalancedTextBlockBoundary(entry.decoded)) {
+        console.warn(
+          `${logPrefix} Skipping text strip: content stream has an unbalanced BT/ET boundary ` +
+          '(likely split across streams while another stream failed to decode)',
+        );
+        continue;
+      }
       const cleaned = stripTextBlocks(entry.decoded);
       if (bytesEqual(cleaned, entry.decoded)) continue;
       entry.stream.updateContents(deflate(cleaned));
@@ -546,6 +561,19 @@ export function sweepNonDirtyPage(
     if (!(stream instanceof PDFRawStream)) continue;
     const decoded = decodeStreamContents(stream);
     if (decoded === null) continue;
+    // PCT-177 (#408) 残余2: BT...ET がストリーム境界を跨ぐ合法構成 (§7.8.2) では、
+    // この stream 単体では BT/ET が閉じない。stripStrayTextOperatorsOutsideTextObjects は
+    // per-stream 適用のため、後続 stream 先頭の「継続の ET」を孤児 ET と誤認して破棄しうる
+    // （前段 stream の BT は温存されたままになり、結果として BT が閉じない出力になる）。
+    // 安全側でこの stream への修復をスキップし、原本を温存する。
+    // 単一 stream ページでは跨ぐ相手がいない（不均衡 = 真の損傷）ため、従来どおり修復に進む
+    // （レビュー指摘: 無条件ガードだと単一 stream の損傷ページ修復が退行する）。
+    if (streams.length > 1 && hasUnbalancedTextBlockBoundary(decoded)) {
+      console.warn(
+        `${_logPrefix} #408: BT/ET がストリーム境界を跨ぐ可能性があるため、この stream の非破壊修復をスキップします (原本温存)`,
+      );
+      continue;
+    }
     // 非破壊修復: BT...ET（テキスト層）を温存し、BT 外の漏れテキスト演算子＋空 q-Q のみ除去。
     const cleaned = stripStrayTextOperatorsOutsideTextObjects(decoded);
     if (bytesEqual(cleaned, decoded)) continue;
@@ -596,6 +624,68 @@ export function normalizeRotation(angle: number): number {
 export function getViewportSize(rotation: number, pageW: number, pageH: number): { vw: number; vh: number } {
   if (rotation === 90 || rotation === 270) return { vw: pageH, vh: pageW };
   return { vw: pageW, vh: pageH };
+}
+
+// ---------------------------------------------------------------------------
+// remapBboxForRotation
+// ---------------------------------------------------------------------------
+
+/**
+ * #352: bboxMeta に書き込む前に、bbox 座標を「originalRotation フレーム」から
+ * 「finalRotation フレーム」へリマップする。
+ *
+ * 背景:
+ *   bboxMeta の bbox は「その PDF をロードしたときの pdfjs viewport 座標」として解釈される。
+ *   userRotation を適用して /Rotate を合成すると、次回ロード時の pdfjs viewport は
+ *   finalRotation (= originalRotation + userRotation) になる。
+ *   したがって bboxMeta には finalRotation フレームの座標を書かなければならない。
+ *
+ * 変換式 (viewport1 → user-space → viewport2):
+ *   delta = normalizeRotation(finalRotation - originalRotation)
+ *   vw0 = getViewportSize(originalRotation, pageW, pageH).vw
+ *   vh0 = getViewportSize(originalRotation, pageW, pageH).vh
+ *
+ *   delta=0:   恒等 (no-op)
+ *   delta=90:  {x: vh0-y-h,  y: x,       w: h, h: w}
+ *   delta=180: {x: vw0-x-w,  y: vh0-y-h, w: w, h: h}
+ *   delta=270: {x: y,        y: vw0-x-w, w: h, h: w}
+ *
+ * 式の導出は pdfjs viewport↔user-space 変換
+ *   R=0:   user(u_x, u_y) = (x_v, pageH - y_v)
+ *   R=90:  user(u_x, u_y) = (y_v, x_v)
+ *   R=180: user(u_x, u_y) = (pageW - x_v, y_v)
+ *   R=270: user(u_x, u_y) = (pageW - y_v, pageH - x_v)
+ * を使い、(originalRotation→user→finalRotation) を全 (Ro, delta) 組み合わせで一般化したもの。
+ *
+ * @param bbox   originalRotation フレームの bbox
+ * @param originalRotation  保存前の /Rotate (0..270)
+ * @param finalRotation     保存後の /Rotate (0..270)
+ * @param pageW  PDF user-space width (page.getSize().width)
+ * @param pageH  PDF user-space height (page.getSize().height)
+ */
+export function remapBboxForRotation(
+  bbox: { x: number; y: number; width: number; height: number },
+  originalRotation: number,
+  finalRotation: number,
+  pageW: number,
+  pageH: number,
+): { x: number; y: number; width: number; height: number } {
+  const delta = normalizeRotation(finalRotation - originalRotation);
+  if (delta === 0) return bbox;
+
+  const { vw: vw0, vh: vh0 } = getViewportSize(originalRotation, pageW, pageH);
+  const { x, y, width: w, height: h } = bbox;
+
+  switch (delta) {
+    case 90:
+      return { x: vh0 - y - h, y: x, width: h, height: w };
+    case 180:
+      return { x: vw0 - x - w, y: vh0 - y - h, width: w, height: h };
+    case 270:
+      return { x: y, y: vw0 - x - w, width: h, height: w };
+    default:
+      return bbox;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -847,11 +937,15 @@ export interface CoreSaveDocument {
 /**
  * buildPdfDocumentCore のオプション。
  * D4: saveTimeoutMs?: number — 未指定なら pdfDoc.save() に race をかけない。worker 殻が 90_000 を渡す。
+ * M-1 (bug-hunt): onProgress?: () => void — ページ処理ループの粒度で呼ばれる同期コールバック。
+ * worker 殻はこれを使って heartbeat を明示送信できる（詳細は呼び出し箇所のコメント参照）。
+ * 未指定なら何もしない（main 殻の buildPdfDocument は渡さない・既存挙動に影響なし）。
  */
 export interface BuildPdfCoreOptions {
   options?: SaveDialogOptions;
   pageOrder?: number[];
   saveTimeoutMs?: number;
+  onProgress?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,8 +1099,8 @@ export async function buildPdfDocumentCore(
   fontBytes: ArrayBuffer | undefined,
   fallbackFontBytes: ArrayBuffer[] = [],
   coreOptions: BuildPdfCoreOptions = {},
-): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[] }> {
-  const { options, pageOrder, saveTimeoutMs } = coreOptions;
+): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[]; bytePreserved: boolean }> {
+  const { options, pageOrder, saveTimeoutMs, onProgress } = coreOptions;
 
   // OCR テキスト層 (renderMode 3・Ctrl+A 選択範囲) の表示オフセット (point)。
   // viewport 表示座標系で平行移動する: dx>0 で右、dy>0 で下。
@@ -1014,6 +1108,11 @@ export async function buildPdfDocumentCore(
   // 未指定なら無シフト ({0,0})。直接 core を叩く既存テストの座標は不変に保たれる。
   const textOffsetDx = options?.textLayerOffsetPt?.dx ?? 0;
   const textOffsetDy = options?.textLayerOffsetPt?.dy ?? 0;
+
+  // PCT-165: OCR 位置補正の「全ページ適用」モード。true のとき、isDirty に依存せず
+  // textBlocks を持つ全ページを再描画対象に含める。保存後（全ページ isDirty=false）でも
+  // dirtyPages フィルタが空になって描画ループがゼロ周になる no-op を防ぐ。
+  const applyOffsetToAllPages = options?.applyOffsetToAllPages === true;
 
   // 緊急対応 (escape hatch): true のとき、下記 Acrobat dirty-flag 回避 short-circuit を
   // 無効化して、編集が無く PecoTool メタも無いファイルでも通常パス（sweepNonDirtyPage に
@@ -1049,6 +1148,22 @@ export async function buildPdfDocumentCore(
     (pageOrder.length === originalPdfPageCount &&
       pageOrder.every((v, i) => v === i));
   if (!isDefaultOrder && pageOrder) {
+    // #437 (PCT-204) 一次防御: pageOrder が originalPdfPageCount の範囲外
+    // インデックスを含む場合、@cantoo/pdf-lib の copyPages は素の配列アクセス
+    // (assertRange を通らない) で undefined を返し、その `.node` 参照で
+    // 「Cannot read properties of undefined (reading 'node')」という原因不明の
+    // 例外に落ちる。呼び出し元 (originalBytesCache と pageOrder の番号空間の
+    // 不整合など) を診断できるよう、ここで明示的に範囲チェックして早期に
+    // 原因の分かるエラーを投げる。
+    const outOfRangeIndex = pageOrder.find((sourceIndex) => sourceIndex < 0 || sourceIndex >= originalPdfPageCount);
+    if (outOfRangeIndex !== undefined) {
+      throw new Error(
+        `[pdfSaverCore] pageOrder に元PDFのページ数 (${originalPdfPageCount}) の範囲外の` +
+        `インデックス (${outOfRangeIndex}) が含まれています。pageOrder=[${pageOrder.join(',')}]。` +
+        '保存前のドキュメント状態と originalBytes キャッシュの番号体系が食い違っている可能性があります。',
+      );
+    }
+
     // pageOrder は「新しい表示順に対応する元 pdfDoc ページインデックス」の配列。
     // 例: pageOrder=[2,0,1] → 新ページ0=旧ページ2, 新ページ1=旧ページ0, 新ページ2=旧ページ1
     // pdf-lib では直接 movePage API がないため、copyPages + removePage で並べ替える。
@@ -1078,7 +1193,22 @@ export async function buildPdfDocumentCore(
   const skippedChars = createSkippedTextCollector();
 
   const hadLegacyBBoxMeta = hasLegacyPecoToolBBoxInfo(pdfDoc);
-  const rawExistingBBoxMeta = readPecoToolBBoxMetaFromPdfDoc(pdfDoc);
+  const existingBBoxRead = readPecoToolBBoxMetaWithStatus(pdfDoc);
+  const rawExistingBBoxMeta = existingBBoxRead.meta;
+  // #392 / PCT-161: 既存 private BBox stream が本バージョンで decode 不能なら、その実データを
+  // 読めない＝安全にマージできない。ここで編集を保存すると (a) 空/partial/準空メタで既存 BBox
+  // stream を潰す、(b) dirty ページの content 再描画で旧 OCR レンダ層を strip し meta と乖離する、
+  // のいずれかで未読データを恒久喪失する。よって undecodable のときは meta も content も一切触らず
+  // 原本バイトをそのまま返す（完全 byte-preserve・meta/content 矛盾ゼロ）。新規編集は保存に反映
+  // されないが、load 時に検出して UI 警告で透明化する（ユーザー合意済みのトレードオフ）。
+  // P1-1 (bug-hunt): bytePreserved=true を呼び出し元へ返す唯一の判定源にする。
+  // 呼び出し側 (pecoStore.resetDirty) はこのフラグを見て、rotation クリア／bbox リベース
+  // （/Rotate 合成が実際に焼き込まれた前提の後処理）を一切行わない。焼き込みが起きていないのに
+  // resetDirty がそれらを実行すると、メモリ上の bbox/rotation だけがファイルと無関係にズレる
+  // （90°汚染）。isDirty も維持する（このページの編集はまだ保存されていない）。
+  if (existingBBoxRead.status === 'undecodable') {
+    return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars), bytePreserved: true };
+  }
   const existingBBoxMeta = remapBBoxMetaForPageOrderCore(rawExistingBBoxMeta, pageOrder, isDefaultOrder);
   const hadExistingBBoxMeta = Object.keys(rawExistingBBoxMeta).length > 0;
 
@@ -1097,6 +1227,7 @@ export async function buildPdfDocumentCore(
   // この core では main 版 (earlySweep あり・invariants A-06 準拠) を採用する。
   if (
     !forceFullRewrite &&
+    !applyOffsetToAllPages &&
     isDefaultOrder &&
     dirtyPages.length === 0 &&
     !hadLegacyBBoxMeta &&
@@ -1104,7 +1235,11 @@ export async function buildPdfDocumentCore(
   ) {
     const earlySweep = sweepUnreachableObjects(pdfDoc);
     if (earlySweep.dropped === 0) {
-      return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars) };
+      // bytePreserved=false: この短絡は dirtyPages.length===0 (編集ページなし) が条件のため、
+      // resetDirty に渡す savedPageSnapshots も常に空になる。rotation クリア/bbox リベースの
+      // 対象が無く、P1-1 の byte-preserve (undecodable) 短絡とは意味が異なる（焼き込みを
+      // 諦めたのではなく、そもそも書き込むものが無かった no-op）。
+      return { savedBytes: originalPdfBytes, skippedChars: getSkippedTextChars(skippedChars), bytePreserved: false };
     }
   }
 
@@ -1125,6 +1260,22 @@ export async function buildPdfDocumentCore(
     const pageIndex = asPageIndex(pageIndexValue);
     if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfPageCount) continue;
     pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
+  }
+
+  // PCT-165: 全ページオフセット適用モードでは、保存後（全ページ isDirty=false）でも
+  // オフセットを焼き込むため、textBlocks を持つ非 dirty ページも再描画対象に追加する。
+  // dirty ページは上のループで登録済み（ユーザー編集＝空 textBlocks による意図的削除も尊重）。
+  // 安全策: 「実 textBlocks を持つページのみ」を追加し、テキストの無いページの content stream を
+  // 誤って strip しない（原本テキスト層の温存: 呼び出し側 loadAllPagesWithTextBlocks の PCT-106 と同義）。
+  // 描画元 textBlocks は meta-first でロード済みのため bbox/writingMode/curve/confidence が faithful。
+  if (applyOffsetToAllPages) {
+    for (const [pageIndexValue, pageData] of documentState.pages.entries()) {
+      const pageIndex = asPageIndex(pageIndexValue);
+      if (pageIndex === null || pageIndex < 0 || pageIndex >= pdfPageCount) continue;
+      if (pagesToWrite.has(pageIndex)) continue;
+      if (!pageData.textBlocks || pageData.textBlocks.length === 0) continue;
+      pagesToWrite.set(pageIndex, { textBlocks: pageData.textBlocks });
+    }
   }
 
   // issue #96 要件2 (Option B): 「未編集だが明らかに bloated」なページを自動検知して
@@ -1235,6 +1386,9 @@ export async function buildPdfDocumentCore(
   // loca/glyf を正しく出力できず、OTS 検証で「フォント抽出不能」になる。
   // ベンチで実 PDF roundtrip 検証済み: TTF + subset:true → warning ゼロ、
   // output size は原本と同じ (subset ~200KB のみ追加)。
+  // M-1 (bug-hunt): フォント embed/subset（fontkit）は同期 CPU バウンドの重い処理になりうる。
+  // 開始直前に一度 onProgress を呼び、worker 殻の生存判定時計をここでリフレッシュする。
+  onProgress?.();
   const customFont = needsFont
     ? (fontBytes
         ? await pdfDoc.embedFont(fontBytes, { subset: true })
@@ -1255,14 +1409,51 @@ export async function buildPdfDocumentCore(
   const sharedVisitedFormRefs = new Set<string>();
 
   for (const [pageIndex, pageData] of pageEntriesToWrite) {
+    // M-1 (bug-hunt): ページ処理粒度で生存通知する。ページ単位の同期処理（content
+    // stream 書き換え・pako 圧縮等）が積み重なった総時間ではなく「1ページ分の処理時間」
+    // だけを worker 殻の heartbeat 猶予（PREVIOUS_SAVE_TIMEOUT_MS）と比較させたい。
+    // setInterval ベースの heartbeat は同期区間中は発火できない（同一スレッドの
+    // イベントループが塞がるため）が、この呼び出しは worker 殻側で self.postMessage を
+    // 直接呼ぶ実装にすることで、メインスレッド側のイベントループ（別スレッド）が
+    // 即座に受信できる。これにより「ページ数分の合計処理時間 < 5秒」ではなく
+    // 「1ページの処理時間 < 5秒」まで安全マージンを縮小できる。
+    onProgress?.();
 
     const sortedBlocks = [...pageData.textBlocks]
       .map((block) => ({ ...block, text: sanitizeTextForPdfCopy(block.text, skippedChars, pageIndex) }))
       .sort((a, b) => a.order - b.order);
     const hasDrawableBlocks = sortedBlocks.some((block) => stripUnsafePdfCopyChars(block.text).trim() !== '');
+
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageW, height: pageH } = page.getSize();
+
+    // #352 (1/3): bbox の捕捉フレーム (元 /Rotate) を setRotation より先に取得する。
+    // setRotation 後に getRotation() を読むと合成後フレームになり、cm 構築と
+    // bboxMeta リマップの両方で誤ったフレームを参照してしまう。
+    const originalRotation = normalizeRotation(page.getRotation?.().angle ?? 0);
+
+    // issue #207 / #352 (2/3): userRotation は「差分」意味論。元 /Rotate に加算して
+    // 合成値を setRotation する。旧実装は userRotation を絶対値で上書きしていたため、
+    // 元 /Rotate≠0 のページ（スキャナ由来）でプレビューと食い違い、かつ元の向き情報が
+    // 保存結果から無音で消えていた (#352 / #367)。
+    // documentState.pages には dirty ページが含まれるが、pageOrder 並べ替え後の新インデックスで
+    // 引けるように dirtyPages の元エントリ (pageData) を参照する。
+    const userRotation = documentState.pages.get(pageIndex)?.rotation;
+    if (userRotation !== undefined) {
+      const finalRotation = normalizeRotation(originalRotation + userRotation);
+      page.setRotation(degrees(finalRotation));
+    }
+
+    // #352 (3/3): bboxMeta の bbox は「originalRotation フレームの座標」として捕捉されている
+    // (OCR レンダは store rotation 不関与のため)。保存後の再オープン時に pdfjs が合成後 /Rotate
+    // の viewport で解釈するよう、remapBboxForRotation で座標をそのフレームへ変換してから書き込む。
+    // userRotation が undefined のページは finalRotation===originalRotation となり
+    // remapBboxForRotation(delta=0) が恒等 (bbox そのまま) を返す。
+    const finalRotationForMeta = normalizeRotation(page.getRotation?.().angle ?? 0);
     bboxMeta[String(pageIndex)] = sortedBlocks.map(b => {
+      const remappedBbox = remapBboxForRotation(b.bbox, originalRotation, finalRotationForMeta, pageW, pageH);
       const entry: Record<string, unknown> = {
-        bbox: b.bbox,
+        bbox: remappedBbox,
         writingMode: b.writingMode,
         order: b.order,
         text: b.text,
@@ -1276,23 +1467,15 @@ export async function buildPdfDocumentCore(
     });
     metaChanged = true;
 
-    const page = pdfDoc.getPage(pageIndex);
-    const { width: pageW, height: pageH } = page.getSize();
-
-    // issue #207: ユーザー指定の rotation があれば PDF ページの /Rotate を上書きする。
-    // documentState.pages には dirty ページが含まれるが、pageOrder 並べ替え後の新インデックスで
-    // 引けるように dirtyPages の元エントリ (pageData) を参照する。
-    const userRotation = documentState.pages.get(pageIndex)?.rotation;
-    if (userRotation !== undefined) {
-      page.setRotation(degrees(userRotation));
-    }
-
     // #71: bbox は OCR / 既存テキスト経由いずれも viewport 空間 (rotated screen, y-down)。
     // pdfSaver は元々 R=0 を仮定して translate(bbox.x, pageH - bbox.y) していたため、
     // R=90/180/270 では位置がページ外へ飛んでいた (#50 regression)。
     // 修正方針: viewport 寸法 (vw/vh) を使い、rotation に応じた cm を per-block push する。
-    // rotation は setRotation 後の値を取得する (user rotation 適用済み)。
-    const rotation = normalizeRotation(page.getRotation?.().angle ?? 0);
+    // #352: cm 構築は bbox の捕捉フレーム (originalRotation) を使う。setRotation 後の合成値
+    // (finalRotation) を使うと、userRotation 分だけ余計に回った位置へ描画されてしまう
+    // (合成後 /Rotate は「viewer 側の追加回転」であり、content stream 自体は捕捉時の
+    // フレームのまま描くべき — /Rotate は既存コンテンツにも自動的に効くため)。
+    const rotation = originalRotation;
     const { vh } = getViewportSize(rotation, pageW, pageH);
     const rotationCm = getRotationCm(rotation, pageW, pageH);
 
@@ -1342,6 +1525,14 @@ export async function buildPdfDocumentCore(
           );
           if (ops.length > 0) {
             page.pushOperators(...ops);
+          } else {
+            // PCT-193: 退化した curve（例: 全点同一の polyline）は layoutTextOnCurve が
+            // 空配列を返し、buildCurveBlockOperators も [] を返す。このブロックの文字は
+            // 無警告で保存 PDF から消えていた。ロジックは変更せず（curve 経路の再描画や
+            // axis-aligned フォールバックは別 issue）、可観測性のみ最小追加する。
+            console.warn(
+              `[buildPdfDocumentCore] Page ${pageIndex}: skipped curve block (degenerate curve, 0 layout ops) text="${block.text.slice(0, 20)}"`,
+            );
           }
           continue;
         }
@@ -1399,8 +1590,13 @@ export async function buildPdfDocumentCore(
               translate(baselineX_run + textOffsetDx, baselineY_run - textOffsetDy),
               scale(sx_outer, sy_outer),
             );
-            page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
-            page.pushOperators(popGraphicsState());
+            try {
+              page.drawText(run.text, { x: 0, y: 0, size: fontSize, rotate: degrees(-90), renderMode: 3 });
+            } finally {
+              // #397 / PCT-166: 描画例外時も必ず Q を発行し graphics-state スタックを均衡させる
+              // （q コミット後に drawText が throw すると per-block catch が握り潰し Q 欠落 → q/Q 不均衡）。
+              page.pushOperators(popGraphicsState());
+            }
             // #75: per-run advance は runTextWidth * sy_outer (共通スケール)。
             // Σ advance = textWidth * sy_outer = bbox.height で完全に bbox を埋める。
             offsetInPage += runTextWidth * sy_outer;
@@ -1458,30 +1654,35 @@ export async function buildPdfDocumentCore(
           );
           let offset = 0;
           let lastRunFont: PDFFont | null = null;
-          for (const run of runs) {
-            setPageFontWithStableKey(page, run.font, pageFontKeys);
-            page.drawText(run.text, { x: offset, y: 0, size: fontSize, renderMode: 3 });
-            offset += run.font.widthOfTextAtSize(run.text, fontSize);
-            lastRunFont = run.font;
-          }
-          // issue #100 / 案A: Acrobat の text extraction は座標と文字幅の heuristic で
-          // 隣接 BB を連結する (BT...ET 境界を無視)。各 BB の末尾に invisible スペース
-          // (U+0020) を 1 文字描画して word-break heuristic を成立させ、隣接 BB の連結を
-          // 回避する。renderMode 3 (invisible) なので画面・印刷への影響なし。
-          // 案A: setWordSpacing (Tw) で末尾スペースの advance を拡大し「語境界」と Acrobat
-          // に認識させる。buildBlockSeparatorOperators は BT...ET を自己完結した単位で組む
-          // ため Tw が外部に漏れない (ET 直前に 0 リセット済み)。
-          if (lastRunFont) {
-            const fontKey = pageFontKeys.get(lastRunFont);
-            if (fontKey) {
-              page.pushOperators(
-                ...buildBlockSeparatorOperators(lastRunFont, fontKey, fontSize, offset, 0),
-              );
-            } else {
-              console.warn('[pdfSaver] separator skipped: fontKey unresolved', { pageIndex, font: lastRunFont });
+          try {
+            for (const run of runs) {
+              setPageFontWithStableKey(page, run.font, pageFontKeys);
+              page.drawText(run.text, { x: offset, y: 0, size: fontSize, renderMode: 3 });
+              offset += run.font.widthOfTextAtSize(run.text, fontSize);
+              lastRunFont = run.font;
             }
+            // issue #100 / 案A: Acrobat の text extraction は座標と文字幅の heuristic で
+            // 隣接 BB を連結する (BT...ET 境界を無視)。各 BB の末尾に invisible スペース
+            // (U+0020) を 1 文字描画して word-break heuristic を成立させ、隣接 BB の連結を
+            // 回避する。renderMode 3 (invisible) なので画面・印刷への影響なし。
+            // 案A: setWordSpacing (Tw) で末尾スペースの advance を拡大し「語境界」と Acrobat
+            // に認識させる。buildBlockSeparatorOperators は BT...ET を自己完結した単位で組む
+            // ため Tw が外部に漏れない (ET 直前に 0 リセット済み)。
+            if (lastRunFont) {
+              const fontKey = pageFontKeys.get(lastRunFont);
+              if (fontKey) {
+                page.pushOperators(
+                  ...buildBlockSeparatorOperators(lastRunFont, fontKey, fontSize, offset, 0),
+                );
+              } else {
+                console.warn('[pdfSaver] separator skipped: fontKey unresolved', { pageIndex, font: lastRunFont });
+              }
+            }
+          } finally {
+            // #397 / PCT-166: 描画例外時も必ず Q を発行し graphics-state スタックを均衡させる
+            // （q コミット後に drawText 等が throw すると per-block catch が握り潰し Q 欠落 → q/Q 不均衡）。
+            page.pushOperators(popGraphicsState());
           }
-          page.pushOperators(popGraphicsState());
         }
       } catch(e) {
         console.warn(`[buildPdfDocumentCore] Page ${pageIndex} block error:`, e);
@@ -1556,6 +1757,10 @@ export async function buildPdfDocumentCore(
     compactIndirectObjectNumbers(pdfDoc);
   }
 
+  // M-1 (bug-hunt): pdfDoc.save()（内部で pako 圧縮等の同期重処理を伴いうる）の開始直前に
+  // もう一度生存通知しておく。ページループ後この1回きりの重い呼び出しなので、開始時点の
+  // 時計リフレッシュが唯一できること（内部を分割できないため、残存リスクとして報告する）。
+  onProgress?.();
   // D4: saveTimeoutMs が指定されている場合のみ race をかける (worker 殻は 90_000 を渡す)。
   // 未指定の場合は race なしで直接 await する (main 殻)。
   let savedBytes: Uint8Array;
@@ -1589,5 +1794,5 @@ export async function buildPdfDocumentCore(
     }
   }
 
-  return { savedBytes, skippedChars: getSkippedTextChars(skippedChars) };
+  return { savedBytes, skippedChars: getSkippedTextChars(skippedChars), bytePreserved: false };
 }

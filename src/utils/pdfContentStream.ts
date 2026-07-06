@@ -137,18 +137,90 @@ function matchesToken(data: Uint8Array, i: number, t0: number, t1: number): bool
   return isDelimiterOrEnd(prev) && isDelimiterOrEnd(next);
 }
 
+/**
+ * `data[i]` が BI 辞書内の name key (`/L` または `/Length`) の先頭 `/` を指す前提で、
+ * その値（非負整数）を読み取る。key が /L / /Length のいずれでもない、または値が
+ * 数字として読み取れない（間接参照・欠落等）場合は null を返す。
+ */
+function tryParseInlineImageLengthKey(data: Uint8Array, i: number): number | null {
+  let j = i + 1;
+  const nameStart = j;
+  while (j < data.length && !isDelimiterOrEnd(data[j])) j += 1;
+  const nameLen = j - nameStart;
+  const isL = nameLen === 1 && data[nameStart] === 0x4c; // 'L'
+  const isLength =
+    nameLen === 6 &&
+    data[nameStart] === 0x4c && // L
+    data[nameStart + 1] === 0x65 && // e
+    data[nameStart + 2] === 0x6e && // n
+    data[nameStart + 3] === 0x67 && // g
+    data[nameStart + 4] === 0x74 && // t
+    data[nameStart + 5] === 0x68; // h
+  if (!isL && !isLength) return null;
+
+  let k = j;
+  while (k < data.length && data[k] <= 0x20) k += 1; // 値前の空白
+  const numStart = k;
+  while (k < data.length && data[k] >= 0x30 && data[k] <= 0x39) k += 1; // 数字のみ（間接参照は非対応）
+  if (k === numStart) return null; // 数字が続かない（欠落・間接参照等の不正値）
+  if (!isDelimiterOrEnd(data[k])) return null; // 数字直後が delimiter でない不正値
+
+  let value = 0;
+  for (let m = numStart; m < k; m += 1) value = value * 10 + (data[m] - 0x30);
+  return value;
+}
+
+/**
+ * `ID` 直後の位置 `dataFieldStart` から、宣言された `length` バイトのバイナリデータを
+ * スキップした先に delimiter 境界付き `EI` トークンが実在するかを検証する。
+ *
+ * `ID` と画像データの間の区切りバイトは PDF 仕様上 1 byte が正だが、実装差を考慮して
+ * 「区切り 1 byte あり」「区切りなし」の両方を試す。EI 直前の空白/改行（Length に
+ * 含まれない慣行）も許容する。整合しない場合は null を返し、呼び出し元は素朴な
+ * EI 探索へフォールバックする。
+ */
+function tryFastForwardInlineImageData(data: Uint8Array, dataFieldStart: number, length: number): number | null {
+  for (const sep of [1, 0]) {
+    const dataStart = dataFieldStart + sep;
+    const dataEnd = dataStart + length;
+    if (dataEnd > data.length) continue;
+    let end = dataEnd;
+    while (end < data.length && data[end] <= 0x20) end += 1; // EI 直前の空白/改行を許容
+    if (matchesToken(data, end, 0x45, 0x49 /* EI */)) return end;
+  }
+  return null;
+}
+
 function copyInlineImage(data: Uint8Array, start: number, result: Uint8Array, resultIdx: number): {
   inputIdx: number;
   resultIdx: number;
 } {
   let i = start;
   let inImageData = false;
+  // BI 辞書の /L (または /Length) から読み取ったバイナリデータ長（未検出/不正時は null）
+  let declaredLength: number | null = null;
   while (i < data.length) {
     result[resultIdx++] = data[i];
+    if (!inImageData && declaredLength === null && data[i] === 0x2f /* / */) {
+      declaredLength = tryParseInlineImageLengthKey(data, i);
+    }
     if (!inImageData && matchesToken(data, i, 0x49, 0x44 /* ID */)) {
       if (i + 1 < data.length) result[resultIdx++] = data[i + 1];
       i += 2;
       inImageData = true;
+
+      // issue #431 点6 (F-ORC-4): /L が確認できればバイナリ長が確定するため、素朴な
+      // EI 探索（バイナリ内の偶発的な delimiter 境界付き "EI" バイト列に脆弱）を
+      // スキップし、直接終端を特定する。宣言値が実データと整合しない場合（不正値・
+      // 破損データ）のみ、下の素朴探索にフォールバックする。
+      if (declaredLength !== null) {
+        const eiStart = tryFastForwardInlineImageData(data, i, declaredLength);
+        if (eiStart !== null) {
+          const copyEnd = Math.min(eiStart + 2, data.length);
+          for (let k = i; k < copyEnd; k += 1) result[resultIdx++] = data[k];
+          return { inputIdx: copyEnd, resultIdx };
+        }
+      }
       continue;
     }
     if (inImageData && matchesToken(data, i, 0x45, 0x49 /* EI */)) {
@@ -535,6 +607,78 @@ export function hasTextOperatorsOutsideTextObjects(decoded: Uint8Array): boolean
   return textDepth !== 0;
 }
 
+/**
+ * PCT-177 (#408) 残余分: この stream 単体で見て BT/ET の対応が閉じているかを判定する。
+ *
+ * PDF 32000-1 §7.8.2 はトークン境界での content stream 分割を許すため、BT が stream A・
+ * ET が stream B に分かれる合法な構成がありうる。この場合、stream A だけを見ると
+ * 「BT が閉じないまま終端に達する」（textDepth !== 0 で終了）状態になり、stream B だけを
+ * 見ると「先頭付近に textDepth===0 の状態で ET が来る」（＝継続の ET を孤児 ET と誤認しうる）
+ * 状態になる。per-stream の非破壊修復（stripStrayTextOperatorsOutsideTextObjects）や
+ * per-stream の strip（stripTextBlocks, decode 失敗併存時の経路）は、この stream 単体の
+ * 構造だけを見て「外側の孤児 ET」「BT〜終端」を判定するため、上記のような跨ぎ構成では
+ * 誤って本来保持すべきテキスト/演算子を破棄しうる。
+ *
+ * 呼び出し側は、この関数が true を返す stream に対しては安全側で修復/strip をスキップし、
+ * 原本を温存する（テキスト層・非テキスト演算子の欠落より、Acrobat エラーが残る方がまし）。
+ *
+ * hasTextOperatorsOutsideTextObjects と異なり、Tj/TJ/text-state 演算子の有無は見ない
+ * （BT/ET の対応関係のみを追跡する）。
+ */
+export function hasUnbalancedTextBlockBoundary(decoded: Uint8Array): boolean {
+  const len = decoded.length;
+  let state: State = 'NORMAL';
+  let stringDepth = 0;
+  let textDepth = 0;
+  let i = 0;
+
+  while (i < len) {
+    if (state === 'NORMAL') {
+      if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+        i = copyInlineImage(decoded, i, new Uint8Array(0), 0).inputIdx;
+        continue;
+      }
+      if (matchesToken(decoded, i, 0x42, 0x54 /* BT */)) {
+        textDepth += 1;
+        i += 2;
+        continue;
+      }
+      if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
+        if (textDepth === 0) return true;
+        textDepth -= 1;
+        i += 2;
+        continue;
+      }
+
+      const entry = enterNonNormalState(decoded, i);
+      if (entry) {
+        state = entry.state;
+        stringDepth = entry.stringDepth;
+        i += entry.advance;
+        continue;
+      }
+      i += 1;
+    } else if (state === 'STRING') {
+      const r = scanString(decoded, i, stringDepth);
+      state = r.state;
+      stringDepth = r.stringDepth;
+      i += r.advance;
+    } else if (state === 'HEX') {
+      const r = scanHex(decoded, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    } else {
+      const r = scanComment(decoded, i);
+      state = r.state;
+      stringDepth = 0;
+      i += r.advance;
+    }
+  }
+
+  return textDepth !== 0;
+}
+
 function stripEmptyGraphicsStateBlocks(decoded: Uint8Array): Uint8Array {
   const len = decoded.length;
   const result = new Uint8Array(len);
@@ -669,6 +813,16 @@ export function stripTextBlocks(decoded: Uint8Array): Uint8Array {
         let innerDepth = 0;
         while (i < len) {
           if (innerState === 'NORMAL') {
+            // M-3 (bug-hunt): BT 内のインラインイメージ（本来は非合法だが壊れた/他ツール
+            // 生成 PDF に紛れうる）を BI...EI ごとスキップする。これを怠ると、バイナリ
+            // データ中に偶然出現した delimiter 境界付き "ET" バイト列を本物の BT 終端と
+            // 誤認識し、ET 以降の実バイナリ・実 ET を通常トークンとして誤って処理し、
+            // stream が破損する。外側ループ・guard (hasUnbalancedTextBlockBoundary) は
+            // 既に BI を先読みしており、ここも同じ視界に揃える。
+            if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+              i = copyInlineImage(decoded, i, new Uint8Array(0), 0).inputIdx;
+              continue;
+            }
             if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
               i += 2;
               break;
@@ -812,6 +966,17 @@ export function stripStrayTextOperatorsOutsideTextObjects(decoded: Uint8Array): 
         let innerDepth = 0;
         while (i < len) {
           if (innerState === 'NORMAL') {
+            // M-3 (bug-hunt): BT 内のインラインイメージを BI...EI ごとバイト等価でコピーする
+            // （この関数は BT...ET をバイト等価温存する契約のため、discard ではなく copy）。
+            // スキップせずに素朴なトークン走査へ委ねると、バイナリ中の偶然の delimiter 境界付き
+            // "ET" を本物の終端と誤認識し、実バイナリを通常トークンとして処理してしまい
+            // stream が破損する（stripTextBlocks の同種修正と視界を揃える）。
+            if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+              const copied = copyInlineImage(decoded, i, result, resultIdx);
+              i = copied.inputIdx;
+              resultIdx = copied.resultIdx;
+              continue;
+            }
             if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
               result[resultIdx++] = decoded[i];
               result[resultIdx++] = decoded[i + 1];

@@ -507,10 +507,49 @@ export async function remapTemporaryPageEntries(
   await waitForTransaction(tx, '[remapTemporaryPageEntries] tx timeout');
 }
 
+/**
+ * PCT-117: getCachedPage のヒット時 LRU タッチ（updatedAt 更新）を、
+ * 読み取り本体とは別の readwrite トランザクションで行う。
+ *
+ * 呼び出し元 (getCachedPage) の応答は待たない fire-and-forget。
+ * touch はキャッシュの退避順を最適化するためのベストエフォート処理であり、
+ * 失敗・遅延してもキャッシュデータそのもの（temporary_changes ストア）には
+ * 影響しない。最悪でも「次回 pruneCachedPages の LRU 退避順が実際の
+ * アクセス順よりわずかに不正確になる」だけで、データ喪失にはならない
+ * （retry可能なキャッシュミスが増えるだけ）。
+ *
+ * evict 済みキー復活防止: GET からこの touch 実行までの間に
+ * pruneCachedPages 等で該当キーが削除されている可能性があるため、
+ * 無条件に put せず、まず存在確認してから存在する場合のみ put する。
+ */
+function touchCachedPage(db: IDBDatabase, key: string): void {
+  void (async () => {
+    try {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.get(key);
+      request.onsuccess = () => {
+        const record = request.result as CachedPageRecord | undefined;
+        // 既に evict 済み: put で復活させない（幽霊レコード化を防ぐ）
+        if (!record) return;
+        try {
+          record.__pecotoolCacheUpdatedAt = Date.now();
+          store.put(record, key);
+        } catch { /* ignore LRU touch errors */ }
+      };
+      await waitForTransaction(tx, '[touchCachedPage] tx timeout');
+    } catch { /* ignore LRU touch errors - best effort */ }
+  })();
+}
+
 export async function getCachedPage(key: string): Promise<PageData | null> {
   try {
     const db = await openDB();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
+    // PCT-117: 読み取りは readonly トランザクションにする。
+    // readwrite は同一ストアへの全トランザクションを排他化するため、
+    // 従来の実装（GET を readwrite で行い同一 tx 内で LRU touch）は
+    // 大規模PDF初回ロード時の並列ページ読込を全件直列化させていた。
+    const tx = db.transaction(STORE_NAME, 'readonly');
     const store = tx.objectStore(STORE_NAME);
     const request = store.get(key);
     return new Promise((resolve) => {
@@ -521,9 +560,8 @@ export async function getCachedPage(key: string): Promise<PageData | null> {
           return;
         }
         const pageData = stripCacheMetadata(record);
-        try {
-          store.put(withCacheMetadata(pageData, Date.now()), key);
-        } catch { /* ignore LRU touch errors */ }
+        // LRU touch は別トランザクションへ分離（読み取りをブロックしない）
+        touchCachedPage(db, key);
         resolve(pageData);
       };
       request.onerror = () => resolve(null);

@@ -247,6 +247,25 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       rowIndex: number,
       fieldIndex: number
     ) => {
+      // 編集中の input/textarea からバブリングしてきたキー操作は、専用ハンドラ
+      // （handleInputKeyDown/handleTextareaKeyDown）で完結させる。ここで
+      // Enter/F2/Delete/Backspace 等を再処理すると、コミット直前の古い cells
+      // クロージャで startEdit や handleDelete が二重発火し、確定値の巻き戻りや
+      // セル全体の誤消去につながる（BLOCKER）。OffsetAdjustOverlay の MA-4 と
+      // 同じガードパターン。
+      // #434 F8: セル内の×削除ボタン（tabIndex=-1 だがフォーカス可能）にフォーカス中の
+      // Enter も同様にバブリングし、td の startEdit（Enter/F2 分岐）を誤発火させていた
+      // （ed85c92 のガードは INPUT/TEXTAREA のみで BUTTON が漏れていた）。
+      const eventTarget = e.target as HTMLElement | null;
+      if (
+        eventTarget &&
+        (eventTarget.tagName === "INPUT" ||
+          eventTarget.tagName === "TEXTAREA" ||
+          eventTarget.tagName === "BUTTON")
+      ) {
+        return;
+      }
+
       const fieldId = fields[fieldIndex]?.id;
       const fieldName = fields[fieldIndex]?.name ?? "";
       const isLineItem = fields[fieldIndex]?.isLineItem === true;
@@ -390,6 +409,11 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   const handleInputKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>, pageNum: number, rowIndex: number, fieldIndex: number) => {
       if (e.key === "Enter") {
+        // IME 変換確定の Enter はセル編集の commit に渡さない（変換確定しただけで
+        // 編集が閉じてしまうのを防ぐ）。ブラウザの変換確定処理に委ねる。
+        // keyCode 229 は isComposing が false で届く IME 確定キーの互換フォールバック
+        // （Modal.tsx Issue #65 と同じ二重ガード）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         commitEdit();
         const nextFieldIdx = fieldIndex + 1;
@@ -399,6 +423,9 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
         return;
       }
       if (e.key === "Escape") {
+        // IME 変換中の Escape は変換候補のキャンセル用なので cancelEdit へ渡さない
+        // （Modal.tsx Issue #65 と同じ方針・keyCode 229 は互換フォールバック）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         cancelEdit();
         return;
@@ -430,6 +457,9 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       fieldId: string
     ) => {
       if (e.key === "Escape") {
+        // IME 変換中の Escape は変換候補のキャンセル用なので cancelEdit へ渡さない
+        // （Modal.tsx Issue #65 と同じ方針・keyCode 229 は互換フォールバック）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         cancelEdit();
         return;
@@ -448,6 +478,9 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
 
       // Ctrl+Enter: 段分割
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        // IME 変換確定と Ctrl+Enter が競合するケースへの防御的ガード
+        // （keyCode 229 は互換フォールバック）。
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         e.preventDefault();
         const textarea = e.currentTarget;
         const cursorPos = textarea.selectionStart ?? 0;

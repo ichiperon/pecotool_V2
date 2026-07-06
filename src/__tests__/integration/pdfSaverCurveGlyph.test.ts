@@ -26,6 +26,8 @@ import { inflate } from 'pako';
 import { buildPdfDocument } from '../../utils/pdfSaver';
 import { readPecoToolBBoxMetaFromBytes } from '../../utils/pdfPecoToolMetadata';
 import type { CurveDefinition, PageData, PecoDocument, TextBlock } from '../../types';
+// #357: renderMode 3 不可視性の厳密検証ヘルパー
+import { assertAllTextSegmentsHaveRenderMode3 } from './helpers/renderModeHelpers';
 
 async function makeMinimalPdfWithId(width: number, height: number): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -127,9 +129,16 @@ describe('buildPdfDocument curve per-glyph Tm/Tj (#187)', () => {
     expect(tmMatches.length).toBeGreaterThanOrEqual(text.length);
 
     // 2) BT...ET の中に invisible rendering mode (3 Tr) が現れる
+    // #357: 単発マッチではなく「各 BT...ET セグメントで Tj より前に 3 Tr が存在する」を検証
     expect(stream).toMatch(/\bBT\b/);
     expect(stream).toMatch(/\bET\b/);
-    expect(stream).toMatch(/\b3\s+Tr\b/);
+    const curveRenderMode3Check = assertAllTextSegmentsHaveRenderMode3(stream);
+    expect(
+      curveRenderMode3Check.pass,
+      `#357: renderMode 3 check failed for ${curveRenderMode3Check.failingSegmentCount}/${curveRenderMode3Check.totalTextSegments} BT...ET segments`,
+    ).toBe(true);
+    // セグメント抽出自体の退行で vacuous pass しないためのガード
+    expect(curveRenderMode3Check.totalTextSegments).toBeGreaterThan(0);
 
     // 3) Tm 各引数が rotation 行列パターンを満たす:
     //    "<a> <b> <c> <d> <x> <y> Tm" で a == d かつ b == -c (回転 only、scale なし)

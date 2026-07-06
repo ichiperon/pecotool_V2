@@ -31,6 +31,27 @@ export default defineConfig(async ({ command }) => ({
     alias: {
       '@tauri-apps/plugin-updater': new URL('./src/__tests__/__stubs__/tauri-plugin-updater.ts', import.meta.url).pathname,
     },
+    // カバレッジ設定: 保存/OCR コアの 5 ファイルに限定して計測する。
+    // 閾値は warn 運用（フェーズ②で per-file gate 化予定）。
+    // floor 候補（2026-06-25 実測・npm run test:coverage）:
+    //   pdfSaverCore.ts  Stmts=91.66% Branch=84.29% Funcs=96.15% Lines=95.20%
+    //   pecoStore.ts     Stmts=90.98% Branch=76.05% Funcs=90.98% Lines=96.53%
+    //   pdfSaver.ts      Stmts=82.43% Branch=67.94% Funcs=76.19% Lines=89.34%
+    //   useFileOps.ts    Stmts=78.47% Branch=74.32% Funcs=76.92% Lines=79.72%
+    //   pdfLoader.ts     Stmts=59.85% Branch=38.70% Funcs=52.63% Lines=61.94%  ← 優先改善対象
+    coverage: {
+      provider: 'v8',
+      // 計測対象: コア 5 ファイルのみ（全体を計測してノイズを出さない）
+      include: [
+        'src/utils/pdfSaver.ts',
+        'src/utils/pdfSaverCore.ts',
+        'src/utils/pdfLoader.ts',
+        'src/store/pecoStore.ts',
+        'src/hooks/useFileOperations.ts',
+      ],
+      reporter: ['text', 'json-summary', 'html'],
+      // thresholds は設定しない（warn 運用: 計測・可視化のみ、CI をブロックしない）
+    },
   },
 
   build: {

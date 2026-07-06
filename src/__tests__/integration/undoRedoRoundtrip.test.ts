@@ -142,19 +142,22 @@ describe.skipIf(!hasRealPdf)('Undo/Redo × save roundtrip (実 PDF)', () => {
     expect(usePecoStore.getState().undoStack).toHaveLength(0);
     expect(usePecoStore.getState().redoStack).toHaveLength(1);
 
-    // 【実挙動の観察】
-    //   - page は action.before に置換 → 初期 page の isDirty=false が復元される
-    //   - store (top-level) の isDirty は true に設定される (line 379)
-    //   - つまり「保存ボタンは押せる状態だが、ページレベルで dirty=false なので save 対象から外れる」
+    // #350 (PCT-127) 修正後の挙動:
+    //   - page は action.before に置換されるが、isDirty は常に true に強制される
+    //     (before.isDirty をそのまま復元すると保存フィルタ (p.isDirty) から漏れて
+    //     disk 上の内容と乖離するため)
+    //   - store (top-level) の isDirty も true
+    //   - つまり「undo で巻き戻した内容がそのまま次の保存対象になる」(安全側)
     const afterUndo = usePecoStore.getState().document!.pages.get(0)!;
     expect(afterUndo.textBlocks.map(b => b.text)).toEqual(['AAA', 'BBB']);
-    expect(afterUndo.isDirty).toBe(false);          // page は before 状態 = isDirty:false
-    expect(usePecoStore.getState().isDirty).toBe(true); // store は dirty フラグ立ちっぱなし
+    expect(afterUndo.isDirty).toBe(true);            // #350: undo 復元後も dirty 強制
+    expect(usePecoStore.getState().isDirty).toBe(true);
 
-    // save → page.isDirty=false のため dirtyOnly で落ちる
-    //   output PDF には PecoTool メタが書かれない (新規編集なし)
+    // save → page.isDirty=true のため dirtyOnly フィルタを通過し、
+    //   undo で巻き戻った「編集前」の内容 (AAA/BBB) が meta に書き出される
     const { meta } = await saveAndReadMeta(usePecoStore.getState().document!, realBytes);
-    expect(meta).toBeNull(); // undo 後の save は meta を一切書き出さない
+    expect(meta).not.toBeNull();
+    expect(meta!['0'].map((b) => b.text)).toEqual(['AAA', 'BBB']);
   }, 120_000);
 
   it('edit → undo → redo → save: redo 後の「編集後」状態が保存される', async () => {
@@ -242,8 +245,11 @@ describe.skipIf(!hasRealPdf)('Undo/Redo × save roundtrip (実 PDF)', () => {
     expect(st2.pages.get(0)!.textBlocks[0].text).toBe('P0');
     expect(st2.pages.get(1)!.textBlocks[0].text).toBe('P1');
 
-    // このまま save → 両ページとも page.isDirty=false (before 状態) 復元につき meta に出力されない
+    // #350 (PCT-127) 修正後: 両ページとも undo 復元後は isDirty: true が強制されるため、
+    // このまま save すると両ページとも巻き戻り後の内容 (P0/P1) が meta に書き出される。
     const { meta } = await saveAndReadMeta(usePecoStore.getState().document!, realBytes);
-    expect(meta).toBeNull(); // 両ページとも undo で dirty フラグが落ちているため
+    expect(meta).not.toBeNull();
+    expect(meta!['0'][0].text).toBe('P0');
+    expect(meta!['1'][0].text).toBe('P1');
   }, 120_000);
 });

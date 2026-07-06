@@ -296,3 +296,50 @@ describe('pageHasTextOperatorDamage — ストリーム跨ぎ判定 (PCT-177)', 
     expect(damageOfPage0(doc)).toBe(false);
   }, 30_000);
 });
+
+// ── 4. sweepNonDirtyPage — ストリーム跨ぎ BT...ET は安全側スキップ (PCT-177 残余2 / #408) ──
+
+describe('sweepNonDirtyPage — ストリーム跨ぎ BT...ET の安全側スキップ (PCT-177 残余2)', () => {
+  it('BT が stream A・ET が stream B に分かれる合法構成: 継続の ET を孤児 ET と誤認せず、両 stream を無変更で温存する', async () => {
+    // per-stream の stripStrayTextOperatorsOutsideTextObjects は stream 単体で状態をリセットする
+    // ため、stream B の先頭に来る「継続の ET」を孤児 ET と誤認して破棄しうる。破棄されると
+    // stream A の BT が閉じないまま出力される（未編集の合法 PDF が壊れる）。
+    const contentA = 'q 1 0 0 1 0 0 cm\nBT\n/F1 12 Tf\n(Hi) Tj\n';
+    const contentB = 'ET\nQ\n';
+    const source = await buildPdf([
+      { content: contentA, filter: 'flate' },
+      { content: contentB, filter: 'flate' },
+    ]);
+    const doc = await loadDoc(source);
+    runSweep(doc);
+    const snap = await snapshotPage0Streams(doc);
+    expect(snap).toHaveLength(2);
+    // 安全側スキップにより両 stream とも無変更で温存される
+    expect(snap[0].decoded).toBe(contentA);
+    expect(snap[1].decoded).toBe(contentB);
+    // 連結すると BT...ET の数が一致する（孤児 ET 破棄によるデータ欠落が無いことの裏取り）
+    const joined = snap.map((s) => s.decoded).join('\n');
+    expect((joined.match(/\bBT\b/g) ?? []).length).toBe((joined.match(/\bET\b/g) ?? []).length);
+  }, 30_000);
+
+  it('跨ぎ構成の2本 + 独立した損傷ページを3本目に追加: 跨ぎ2本はスキップ、独立した3本目は通常どおり修復される', async () => {
+    const contentA = 'BT\n(Hi) Tj\n';
+    const contentB = 'ET\nQ\n';
+    const source = await buildPdf([
+      { content: contentA, filter: 'flate' },
+      { content: contentB, filter: 'flate' },
+      { content: CONTENT_DAMAGED, filter: 'flate' },
+    ]);
+    const doc = await loadDoc(source);
+    runSweep(doc);
+    const snap = await snapshotPage0Streams(doc);
+    expect(snap).toHaveLength(3);
+    // 跨ぎ構成の 2 本は無変更
+    expect(snap[0].decoded).toBe(contentA);
+    expect(snap[1].decoded).toBe(contentB);
+    // 単体で閉じている 3 本目 (CONTENT_DAMAGED) は従来どおり修復される
+    expect(snap[2].decoded).toContain('(inside) Tj');
+    expect(snap[2].decoded).not.toContain('(orphan)');
+    expect(hasTextOperatorsOutsideTextObjects(encodeLatin1(snap[2].decoded))).toBe(false);
+  }, 30_000);
+});

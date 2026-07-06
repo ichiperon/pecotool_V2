@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { PecoDocument, PageData, TextBlock, WritingMode } from '../../types'
 
 // ── hoisted mocks ──────────────────────────────────────────────
@@ -341,6 +341,51 @@ describe('pdfSaver / savePDF', () => {
     })
   })
 
+  describe('U-S-EXC: ブロック描画中の例外でも q/Q が均衡する (#397 / PCT-166)', () => {
+    // 根拠: per-block try-catch (pdfSaverCore.ts L1312-1479) は描画例外を console.warn で
+    // 握り潰す。横書きは L1444 で pushGraphicsState (q) をコミットしてから L1454 drawText、
+    // 最後に L1475 popGraphicsState (Q)。縦書きは run ごとに L1387 push → L1393 drawText →
+    // L1394 pop。q コミット後〜pop 発行前に drawText が throw すると catch が飲み込み Q が
+    // 発行されず、content stream の graphics-state スタックが不均衡（未対応 q 残存＝保証#3 の
+    // 構造破損）になる。pushGraphicsState/popGraphicsState は {type:'pushGs'}/{type:'popGs'}
+    // として page.pushOperators(=m.pushOperators) 経由で積まれるので、その数で均衡を検査する。
+    afterEach(() => {
+      m.drawText.mockReset()
+    })
+
+    function countGs(): { push: number; pop: number } {
+      const ops = m.pushOperators.mock.calls.flat() as Array<{ type?: string }>
+      return {
+        push: ops.filter((o) => o && o.type === 'pushGs').length,
+        pop: ops.filter((o) => o && o.type === 'popGs').length,
+      }
+    }
+
+    it('横書き: drawText が throw しても popGraphicsState が必ず発行され pushGs===popGs', async () => {
+      m.drawText.mockImplementation(() => {
+        throw new Error('simulated font encode failure')
+      })
+      const doc = makeDoc([{ writingMode: 'horizontal', bbox: { x: 10, y: 100, width: 200, height: 20 } }])
+      await savePDF(new Uint8Array(), doc)
+
+      const { push, pop } = countGs()
+      expect(push).toBeGreaterThan(0) // 実際に q を発行した（描画経路を通った）
+      expect(pop).toBe(push) // 現状 RED: pop=0 < push。try/finally 修正で GREEN
+    })
+
+    it('縦書き: drawText が throw しても run ごとの popGraphicsState が必ず発行される', async () => {
+      m.drawText.mockImplementation(() => {
+        throw new Error('simulated font encode failure')
+      })
+      const doc = makeDoc([{ writingMode: 'vertical', bbox: { x: 10, y: 100, width: 15, height: 200 } }])
+      await savePDF(new Uint8Array(), doc)
+
+      const { push, pop } = countGs()
+      expect(push).toBeGreaterThan(0)
+      expect(pop).toBe(push)
+    })
+  })
+
   describe('U-S-03: 縦書きブロックの回転', () => {
     it('rotate = degrees(-90)', async () => {
       const doc = makeDoc([{
@@ -582,6 +627,69 @@ describe('pdfSaver / savePDF', () => {
       expect(m.drawText).not.toHaveBeenCalled()
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('non-finite scale'),
+      )
+      warnSpy.mockRestore()
+    })
+  })
+
+  describe('U-SV-22b: Non-finite scale warning (vertical writing mode)', () => {
+    it('NaN font metrics causing non-finite sx_outer/sy_outer in vertical blocks → console.warn, block skipped', async () => {
+      // widthOfTextAtSize が NaN を返すと textWidth=NaN（0 ではないので手前の
+      // "zero font metrics" チェックはすり抜ける）。縦書き経路の
+      // sy_outer = bbox.height / textWidth が非有限になり、id154 (line 1379) の
+      // ガードで block を安全にスキップすることを確認する回帰テスト。
+      m.embedFont.mockResolvedValue({
+        widthOfTextAtSize: vi.fn().mockReturnValue(NaN),
+        heightAtSize: vi.fn().mockReturnValue(1.448),
+      })
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'vertical',
+        bbox: { x: 10, y: 20, width: 15, height: 200 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(m.drawText).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('non-finite scale'),
+      )
+      warnSpy.mockRestore()
+    })
+  })
+
+  describe('U-SV-22c: avgPerPage bloat 警告 (issue #96 regression detector)', () => {
+    it('平均ページサイズが 2MB を超えると console.warn で警告する', async () => {
+      withPageCount(1)
+      const bloatedBytes = new Uint8Array(3 * 1024 * 1024) // 3MB > 2MB threshold, pageCount=1
+      m.save.mockResolvedValue(bloatedBytes)
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Avg page size'),
+      )
+      warnSpy.mockRestore()
+    })
+
+    it('平均ページサイズが 2MB 以下なら警告しない (回帰確認)', async () => {
+      withPageCount(1)
+      m.save.mockResolvedValue(new Uint8Array([1, 2, 3]))
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const doc = makeDoc([{
+        text: 'テスト', writingMode: 'horizontal',
+        bbox: { x: 10, y: 20, width: 100, height: 30 },
+      }])
+      await savePDF(new Uint8Array(), doc)
+
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('Avg page size'),
       )
       warnSpy.mockRestore()
     })
@@ -1309,6 +1417,13 @@ class ControllableMockWorker {
     }
   }
 
+  /** テストから heartbeat 応答を発火（PCT-194 / #425: 進捗ベース生存判定の検証用） */
+  emitHeartbeat() {
+    if (this.onmessage) {
+      this.onmessage({ data: { type: 'SAVE_PDF_HEARTBEAT' } } as MessageEvent<any>)
+    }
+  }
+
   /** テストからエラー応答を発火 */
   emitError(message: string) {
     if (this.onmessage) {
@@ -1448,6 +1563,84 @@ describe('pdfSaver / Worker 経路', () => {
 
         warnSpy.mockRestore()
       } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  describe('U-W-02b: heartbeat 経路 — 進捗ベース生存判定 (PCT-194 / #425残余)', () => {
+    it('PREVIOUS_SAVE_TIMEOUT_MS(5秒)より短い周期で heartbeat が届き続ける限り、5秒を超えても前回 worker は terminate されない', async () => {
+      vi.useFakeTimers()
+      try {
+        const doc = makeSimpleDoc()
+
+        // 1 回目: 応答を発火せず hung 状態のまま置くが、heartbeat だけは送り続ける想定
+        const p1 = savePDF(new Uint8Array(), doc)
+        const w1 = ControllableMockWorker.instances[0]
+
+        const p2 = savePDF(new Uint8Array(), doc)
+
+        // 4秒間隔で heartbeat を送りながら合計 12 秒経過させる。
+        // 固定 5 秒タイムアウトなら 2 周目 (t=8s) の時点で terminate されているはずだが、
+        // 進捗ベース判定では heartbeat のたびに猶予がリセットされるため terminate されない。
+        for (let i = 0; i < 3; i++) {
+          await vi.advanceTimersByTimeAsync(4000)
+          w1.emitHeartbeat()
+        }
+
+        expect(w1.terminateCount).toBe(0)
+        expect(ControllableMockWorker.instances.length).toBe(1) // w2 はまだ作られていない (p2 は待機中)
+
+        // p1 を正常完了させる
+        w1.emitSuccess(new Uint8Array([1, 2, 3]))
+        await p1
+
+        // p2 は p1 完了を受けて新 worker を作成し、正常に進む
+        await vi.advanceTimersByTimeAsync(0)
+        expect(ControllableMockWorker.instances.length).toBe(2)
+        const w2 = ControllableMockWorker.instances[1]
+        w2.emitSuccess(new Uint8Array([9]))
+        await p2
+
+        // heartbeat が続いた前回 worker は誤 terminate されていない（成功 cleanup の 1 回のみ）
+        expect(w1.terminateCount).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('heartbeat が途絶えると、直近 heartbeat から5秒経過した時点で従来どおり stale terminate される', async () => {
+      vi.useFakeTimers()
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const doc = makeSimpleDoc()
+
+        const p1 = savePDF(new Uint8Array(), doc)
+        const p1Rejection = expect(p1).rejects.toThrow('後続の保存操作により、前回の保存が中断されました。')
+        const w1 = ControllableMockWorker.instances[0]
+
+        const p2 = savePDF(new Uint8Array(), doc)
+
+        // 3秒後に heartbeat を1回だけ送る（生存確認の延命）
+        await vi.advanceTimersByTimeAsync(3000)
+        w1.emitHeartbeat()
+        expect(w1.terminateCount).toBe(0)
+
+        // その後 heartbeat が途絶える。直近 heartbeat (t=3s) から5秒 = t=8s で terminate される
+        // はず。ここでは合計 5001ms 進める（t=3s起点+5001ms=t=8.001s）。
+        await vi.advanceTimersByTimeAsync(5001)
+
+        expect(w1.terminateCount).toBe(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Previous save did not complete within timeout'),
+        )
+        await p1Rejection
+
+        const w2 = ControllableMockWorker.instances[1]
+        w2.emitSuccess(new Uint8Array([9, 9]))
+        await p2
+      } finally {
+        warnSpy.mockRestore()
         vi.useRealTimers()
       }
     })
@@ -1608,6 +1801,128 @@ describe('pdfSaver / Worker 経路', () => {
     })
   })
 
+  // ── M-2 (bug-hunt): 3 多重呼び出しの直列化 ──────────────────────
+  // 複数の savePDF 呼び出し（waiter）が同一 currentSaveTask を待っている場合、そのタスクが
+  // 解決すると各 waiter の Promise.race がほぼ同時に 'done' を検知する。旧実装は break
+  // 直後に無条件で新規 worker を生成していたため、waiter 数だけ worker が並走しうる
+  // バグがあった（モジュール変数 activeSaveWorker/currentSaveReject/lastSaveActivityAt の
+  // 後勝ち汚染）。この回帰テストは「前回タスク完了直後に、waiter の数だけ worker が
+  // 同時生成されない」ことを検証する（常に高々 1 worker のみ新規生成→直列化）。
+  describe('M-2: 3 多重 savePDF 呼び出しの直列化（前回タスク解決直後の race 検証）', () => {
+    it('p1 が in-flight の間に p2・p3 を追加発行しても、p1 解決直後に worker が一斉に複数生成されない', async () => {
+      const doc = makeSimpleDoc()
+
+      // p1: 1 つめの worker を作り、まだ応答しない（in-flight を維持）
+      const p1 = savePDF(new Uint8Array(), doc)
+      expect(ControllableMockWorker.instances.length).toBe(1)
+      const w1 = ControllableMockWorker.instances[0]
+
+      // p1 が pending のうちに p2・p3 を積む。両方とも currentSaveTask(=p1のtask) を
+      // 待つだけで、この時点では新しい worker を作らない。
+      const p2 = savePDF(new Uint8Array(), doc)
+      const p3 = savePDF(new Uint8Array(), doc)
+      for (let k = 0; k < 5; k++) await Promise.resolve()
+      expect(ControllableMockWorker.instances.length).toBe(1)
+
+      // p1 を完了させる。この直後、旧実装では p2・p3 が同時に 'done' を検知して
+      // 無条件でそれぞれ新規 worker を作ってしまい、instances が一気に 3 まで増えていた
+      // （worker 並走 + モジュール変数の後勝ち汚染）。
+      w1.emitSuccess(new Uint8Array([1]))
+      await p1
+      for (let k = 0; k < 10; k++) await Promise.resolve()
+
+      // 修正後: p1 解決直後に新規生成されるのは高々 1 worker のみ（直列化）。
+      expect(ControllableMockWorker.instances.length).toBe(2)
+      const w2 = ControllableMockWorker.instances[1]
+
+      // まだ p3 の実 worker は作られていない（p2 の worker 完了を待っているはず）。
+      w2.emitSuccess(new Uint8Array([2]))
+      await p2
+      for (let k = 0; k < 10; k++) await Promise.resolve()
+
+      // p2 完了後、ようやく p3 用の 3 つめの worker が作られる。
+      expect(ControllableMockWorker.instances.length).toBe(3)
+      const w3 = ControllableMockWorker.instances[2]
+      w3.emitSuccess(new Uint8Array([3]))
+      const r3 = await p3
+
+      // 3 回の savePDF いずれも自身の worker が返した結果で正しく resolve している
+      // （waiter が他人の結果に相乗りしていない）ことも確認。
+      expect(Array.from(r3)).toEqual([3])
+    })
+  })
+
+  // ── M-1 (bug-hunt): onProgress コールバック配線 ───────────────────
+  // handleSavePdf (worker 殻) は onProgress をオプションの最終引数として受け取り、
+  // buildPdfDocumentCore に素通しする。実 worker 実行時 (self.onmessage) のみ
+  // self.postMessage による heartbeat 送信を注入し、__handleSavePdfForTest を直接叩く
+  // 既存テスト（jsdom 環境）では onProgress 未指定 = no-op のままにして後方互換を保つ。
+  describe('M-1: onProgress コールバックがページ処理ループ粒度で呼ばれる（heartbeat 用フック）', () => {
+    it('dirty page がある保存では onProgress が最低 1 回呼ばれる', async () => {
+      const pages = [{
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }]
+      const mockContext = makeSweepableContext() as any
+      const mockPdfDoc = {
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        addPage:         m.addPage,
+        copyPages:       m.copyPages,
+        getPage:         vi.fn((index: number) => pages[index]),
+        getPages:        vi.fn().mockReturnValue(pages),
+        getPageCount:    vi.fn().mockReturnValue(1),
+        save:            m.save,
+        context:         mockContext,
+        catalog:         makeCatalogMock(),
+        getInfoDict:     vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }),
+      }
+      m.pdfLoad.mockResolvedValue(mockPdfDoc)
+
+      const serializedPage = {
+        pageIndex: 0,
+        width: 595,
+        height: 842,
+        isDirty: true,
+        textBlocks: [{
+          id: 'b0',
+          text: 'Hello',
+          originalText: 'Hello',
+          writingMode: 'horizontal' as WritingMode,
+          order: 0,
+          isNew: false,
+          isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+
+      const onProgress = vi.fn()
+      await __handleSavePdfForTest(
+        new Uint8Array([1, 2, 3]),
+        { pages: { 0: serializedPage } },
+        undefined,
+        [],
+        undefined,
+        undefined,
+        onProgress,
+      )
+
+      expect(onProgress).toHaveBeenCalled()
+    })
+  })
+
   // ── U-W-05: URL 経路 ─────────────────────────────────────────
   // source として {url} を渡した場合、bytes を transfer せず url を Worker に転送する。
   // 受け取った Worker 側は worker 内で fetch する責務を持つ（本テストは postMessage の payload のみを検証）。
@@ -1673,6 +1988,28 @@ describe('pdfSaver / Worker 経路', () => {
 
       expect(fetchMock).toHaveBeenCalledWith('blob:main-thread-url')
       expect(result).toBeInstanceOf(Uint8Array)
+    })
+
+    it('main thread fallback で fetch が !ok を返すと明示的なエラーで reject する（resolveBuildPdfSource）', async () => {
+      __setSaveWorkerFactoryForTest(() => null)
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const doc = makeSimpleDoc()
+      let caught: Error | undefined
+      try {
+        await savePDF({ url: 'blob:missing-url' }, doc)
+      } catch (e) {
+        caught = e as Error
+      }
+      expect(fetchMock).toHaveBeenCalledWith('blob:missing-url')
+      expect(caught?.message).toContain('fetch failed')
+      expect(caught?.message).toContain('404')
     })
   })
 
@@ -1828,6 +2165,227 @@ describe('pdfSaver / Worker 経路', () => {
         { copiedPageIndex: 1 },
       ])
       expect(m.save).toHaveBeenCalled()
+    })
+  })
+
+  // ── U-W-07: onmessageerror 経路 ───────────────────────────────
+  // メッセージのデシリアライズ失敗（onmessageerror）は SUCCESS/ERROR とは別イベントであり、
+  // 未処理のままだと SAVE_HARD_TIMEOUT_MS(120秒) まで宙吊りになる。reject + cleanup を確認する。
+  describe('U-W-07: onmessageerror 経路', () => {
+    it('onmessageerror で savePDF が reject し worker が cleanup(terminate) される', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0] as unknown as {
+        onmessageerror?: (e: unknown) => void
+      }
+      expect(typeof w.onmessageerror).toBe('function')
+      w.onmessageerror!({ data: null })
+
+      let caught: Error | undefined
+      try {
+        await p
+      } catch (e) {
+        caught = e as Error
+      }
+      expect(caught?.message).toContain('PDF保存ワーカーとの通信に失敗しました')
+      expect(ControllableMockWorker.instances[0].terminateCount).toBe(1)
+    })
+  })
+
+  // ── U-W-08: onerror の詳細フォーマット ─────────────────────────
+  // ErrorEvent の filename/lineno/colno と err.error.stack を結合したメッセージを組み立てる
+  // 分岐（実ブラウザで worker crash 時に原因特定できるかどうかを左右する）。
+  describe('U-W-08: onerror の詳細フォーマット', () => {
+    it('ErrorEvent の filename/lineno/colno と error.stack を結合したメッセージで reject する', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0]
+      const innerError = new Error('boom')
+      innerError.stack = 'Error: boom\n    at fake (stack.ts:1:1)'
+      const evt = new ErrorEvent('error', {
+        message: 'worker crashed hard',
+        filename: 'pdf.worker.ts',
+        lineno: 42,
+        colno: 7,
+        error: innerError,
+      })
+      w.emitOnError(evt)
+
+      let caught: Error | undefined
+      try {
+        await p
+      } catch (e) {
+        caught = e as Error
+      }
+      expect(caught?.message).toContain('worker crashed hard')
+      expect(caught?.message).toContain('pdf.worker.ts:42:7')
+      expect(caught?.message).toContain('fake (stack.ts:1:1)')
+    })
+
+    it('details が空文字になる (非 ErrorEvent かつ String(err) が空) 場合は既定メッセージで reject する', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0]
+      // 非 ErrorEvent の onerror ペイロード。String('') === '' となり details が
+      // 空文字になるため `details || '既定メッセージ'` のフォールバックを踏む。
+      w.emitOnError('')
+
+      let caught: Error | undefined
+      try {
+        await p
+      } catch (e) {
+        caught = e as Error
+      }
+      expect(caught?.message).toBe('PDF保存ワーカーでエラーが発生しました。')
+    })
+  })
+
+  // ── U-W-17: fontBytes の ArrayBuffer が Worker postMessage に transfer される ──
+  describe('U-W-17: fontBytes の Worker transfer', () => {
+    it('fontBytes (ArrayBuffer) と fallbackFontBytes を postMessage payload に含める', async () => {
+      const doc = makeSimpleDoc()
+      const fontBytes = new ArrayBuffer(8)
+      const fallback1 = new ArrayBuffer(4)
+      const p = savePDF(new Uint8Array(), doc, fontBytes, [fallback1])
+      const w = ControllableMockWorker.instances[0]
+      const req = w.postedMessages[0]
+      expect(req.data.fontBytes).toBeInstanceOf(ArrayBuffer)
+      expect(req.data.fontBytes.byteLength).toBe(8)
+      expect(req.data.fallbackFontBytes).toHaveLength(1)
+      expect(req.data.fallbackFontBytes[0]).toBeInstanceOf(ArrayBuffer)
+
+      w.emitSuccess(new Uint8Array([1]))
+      await p
+    })
+  })
+
+  // ── U-W-09: 未知の msg.type は無視される ───────────────────────
+  describe('U-W-09: 未知の msg.type は無視される', () => {
+    it('SAVE_PDF_SUCCESS でも ERROR でもない type は無視され、後続の正しい SUCCESS で解決する', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0]
+      let settled = false
+      p.then(() => { settled = true }, () => { settled = true })
+
+      expect(w.onmessage).toBeTruthy()
+      w.onmessage!({ data: { type: 'PROGRESS', pct: 50 } } as MessageEvent<any>)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      w.emitSuccess(new Uint8Array([9]))
+      const result = await p
+      expect(result).toBeInstanceOf(Uint8Array)
+    })
+  })
+
+  // ── U-W-10: onSkippedChars コールバック伝播 ────────────────────
+  describe('U-W-10: onSkippedChars コールバック伝播', () => {
+    it('SUCCESS message の skippedChars をそのまま onSkippedChars に渡す', async () => {
+      const doc = makeSimpleDoc()
+      const onSkippedChars = vi.fn()
+      const p = savePDF(new Uint8Array(), doc, undefined, [], onSkippedChars)
+      const w = ControllableMockWorker.instances[0]
+      const skipped = [{ char: '?', reason: 'unsupported-font' }]
+      w.onmessage!({
+        data: { type: 'SAVE_PDF_SUCCESS', data: new Uint8Array([1]), skippedChars: skipped },
+      } as MessageEvent<any>)
+      await p
+      expect(onSkippedChars).toHaveBeenCalledWith(skipped)
+    })
+
+    it('SUCCESS message に skippedChars が無いときは空配列で呼ぶ (?? [] フォールバック)', async () => {
+      const doc = makeSimpleDoc()
+      const onSkippedChars = vi.fn()
+      const p = savePDF(new Uint8Array(), doc, undefined, [], onSkippedChars)
+      const w = ControllableMockWorker.instances[0]
+      w.emitSuccess(new Uint8Array([1])) // emitSuccess は skippedChars を含めない → undefined
+      await p
+      expect(onSkippedChars).toHaveBeenCalledWith([])
+    })
+  })
+
+  // ── U-W-11: source に bytes も url も無い場合の防御的失敗 ──────
+  describe('U-W-11: source に bytes も url も無い場合の防御的失敗', () => {
+    it('Worker 経路で空 source を渡すと同期的に throw → catch で worker を terminate しつつ main thread fallback に倒れる', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF({} as never, doc)
+      // activeSaveWorker 代入までは進むため worker インスタンス自体は作られる
+      expect(ControllableMockWorker.instances.length).toBe(1)
+      const w = ControllableMockWorker.instances[0]
+
+      await expect(p).rejects.toBeDefined()
+      // 外側 catch の `if (worker) worker.terminate()` を通る
+      expect(w.terminateCount).toBeGreaterThanOrEqual(1)
+    })
+  })
+
+  // ── U-W-12: __resetSaveStateForTest はアクティブ worker を terminate する ──
+  describe('U-W-12: __resetSaveStateForTest はアクティブ worker を terminate する', () => {
+    it('保存進行中に __resetSaveStateForTest を呼ぶと worker が terminate され状態がクリアされる', async () => {
+      const doc = makeSimpleDoc()
+      const p = savePDF(new Uint8Array(), doc)
+      const w = ControllableMockWorker.instances[0]
+      expect(w.terminateCount).toBe(0)
+
+      __resetSaveStateForTest()
+
+      expect(w.terminateCount).toBe(1)
+
+      // pending Promise はまだ生存しているため、後始末として success を発火させ回収する
+      // （テスト側の unhandled rejection / 宙吊り回避。本番挙動の検証対象外）。
+      w.emitSuccess(new Uint8Array([1]))
+      await p
+    })
+  })
+
+  // ── U-W-14: myReject は Error でない reject 値を Error にラップする ──
+  describe('U-W-14: myReject は Error でない reject 値を Error にラップする', () => {
+    it('main thread fallback で fetch が非 Error 値を reject すると Error にラップされる', async () => {
+      __setSaveWorkerFactoryForTest(() => null) // main thread fallback を強制
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue('network down (not an Error instance)'))
+
+      const doc = makeSimpleDoc()
+      let caught: Error | undefined
+      try {
+        await savePDF({ url: 'blob:non-error-reject' }, doc)
+      } catch (e) {
+        caught = e as Error
+      }
+      expect(caught).toBeInstanceOf(Error)
+      expect(caught?.message).toContain('network down (not an Error instance)')
+    })
+  })
+
+  // ── U-W-15: ハードタイムアウト(120秒) ───────────────────────────
+  // worker が無応答のまま SAVE_HARD_TIMEOUT_MS(120秒) を超えると強制 reject する
+  // 最終安全網。onmessage/onerror/onmessageerror がいずれも届かない worker ハング
+  // シナリオを模する。
+  describe('U-W-15: ハードタイムアウト(120秒)', () => {
+    it('120秒経過で reject し worker が terminate される', async () => {
+      vi.useFakeTimers()
+      try {
+        const doc = makeSimpleDoc()
+        const p = savePDF(new Uint8Array(), doc)
+        const pSettled = p.then(
+          () => ({ status: 'resolved' as const }),
+          (err: unknown) => ({ status: 'rejected' as const, err }),
+        )
+        const w = ControllableMockWorker.instances[0]
+        expect(w.terminateCount).toBe(0)
+
+        await vi.advanceTimersByTimeAsync(120_000)
+
+        expect(w.terminateCount).toBe(1)
+        const result = await pSettled
+        expect(result.status).toBe('rejected')
+        if (result.status === 'rejected') {
+          expect((result.err as Error).message).toContain('保存がタイムアウトしました')
+        }
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 })

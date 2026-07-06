@@ -194,6 +194,14 @@ export function useAutoBackup(
     const lastEdit = lastEditTimeRef.current;
     if (lastEdit === 0 || Date.now() - lastEdit < quietPeriodMs) return;
 
+    // いろは指摘 F-3: document と pageOrder は同じタイミング (下記 await より前) で
+    // 捕捉する。document.pages Map のキー (displayIndex) は捕捉時点の pageOrder を
+    // 前提に sourceIndex へ変換するため、後段で live pageOrder を読み直すと
+    // (movePage/deletePages が await 中に完了した場合) 「捕捉時の document.pages」
+    // × 「live pageOrder」という非整合な組み合わせで変換され、別ページキーへ
+    // 誤ってバックアップされてしまう。
+    const capturedPageOrder = state.pageOrder;
+
     isSavingRef.current = true;
     // PCT-055 (R04U-2): バックアップ中フラグを立てて close guard に通知する
     isBackingUpRef.current = true;
@@ -201,6 +209,19 @@ export function useAutoBackup(
       // LRU 退避の IDB 書き込みが完了してから読み込む
       await waitForPendingIdbSaves();
       const idbDirtyPages = await getAllTemporaryPageData(document.filePath);
+
+      // いろは指摘 F-3: 上記 await 中に movePage/deletePages が完了して pageOrder が
+      // 差し替わっていないか検証する（movePage/deletePages は pageOrder を新しい配列
+      // 参照に置き換えるため、参照不一致で検知できる）。差し替わっていれば
+      // captured document.pages との整合が崩れているため、今回のバックアップは
+      // スキップして次周期 (最新の document + pageOrder ペア) に委ねる（安全側）。
+      const livePageOrderAfterAwait = usePecoStore.getState().pageOrder;
+      if (livePageOrderAfterAwait !== capturedPageOrder) {
+        logger.log(
+          '[AutoBackup] pageOrder changed during await (move/delete race), skipping this cycle',
+        );
+        return;
+      }
 
       // メモリ上のダーティページを収集（サムネイルは除外）
       const dirtyPages: Record<string, Omit<PageData, 'thumbnail'>> = {};
@@ -211,7 +232,8 @@ export function useAutoBackup(
       // pageId = "src:" + key（= sourceIndex）として解釈する。
       // 書く側で displayIndex キーのまま保存すると、pageOrder≠identity の状態でクラッシュ→復元時に
       // 編集が別ページへ注入される（保証ライン①抵触）。ここで sourceIndex へ正規化して契約を成立させる。
-      const pageOrder = usePecoStore.getState().pageOrder;
+      // F-3: document と同時に捕捉した pageOrder (上で整合確認済み) を使う。
+      const pageOrder = capturedPageOrder;
 
       for (const [displayIdx, page] of document.pages.entries()) {
         if (page.isDirty) {
