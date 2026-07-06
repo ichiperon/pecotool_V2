@@ -381,6 +381,12 @@ export function useOcrEngine(
   };
 
   const runOcrCurrentPage = async () => {
+    // PCT-076: 多重起動ガード。runOcrAllPages 同様、既に別経路の OCR が走っている
+    // 状態で入口を通すと同一ページ群へ並行 updatePageData して結果が混在するため拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     // 最新状態を取得
     const state = usePecoStore.getState();
     const doc = state.document;
@@ -597,6 +603,12 @@ export function useOcrEngine(
 
   // #199: ページ範囲指定 OCR
   const runOcrRange = async (pageRangeString: string) => {
+    // PCT-076: 多重起動ガード。runOcrAllPages 同様、既に別経路の OCR が走っている
+    // 状態で入口を通すと同一ページ群へ並行 updatePageData して結果が混在するため拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     const doc = usePecoStore.getState().document;
     if (!doc) return;
     // #354 (PCT-131): ask() 確認ダイアログや hasExistingOcrBlocks の IDB 走査より前に
@@ -658,6 +670,13 @@ export function useOcrEngine(
   };
 
   const runOcrFolder = async () => {
+    // PCT-076: 多重起動ガード。既に別経路の OCR が走っている状態でフォルダ OCR の
+    // ループを開始すると、そのループ内の processAllPages が別経路と同一ページ群へ
+    // 並行 updatePageData して結果が混在するため入口で拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     if (!callbacks.openPdf || !callbacks.savePdf) {
       showToast('フォルダOCRを実行できません。', true);
       return;
@@ -782,85 +801,101 @@ export function useOcrEngine(
     showToast(`テキスト層を取り込み中... (全 ${total} ページ)`);
     logger.log(`[TextLayer] 取り込み開始: ${total} ページ`);
 
-    // PCT-094 (防御): メタが取得できた場合は loadPage に渡し、fallback 経由での
-    // bbox 高さ劣化（descent 欠落で約 71% に縮む）を防ぐ。
-    // 修正1のスキップにより、メタあり PDF はここへ到達しないはずだが、
-    // 将来の呼び出し経路の混入に備えた安全策として維持する。
-    let importBBoxMeta: Record<string, Array<{
-      bbox: { x: number; y: number; width: number; height: number };
-      writingMode: string;
-      order: number;
-      text: string;
-      confidence?: number;
-    }>> | null = null;
+    // #F-9 (bug-hunt いろは): 従来 isOcrRunningRef を立てておらず、長時間の取り込み中に
+    // 他経路の OCR (runOcrCurrentPage 等) が並走できてしまい、かつ cancelTokenRef も
+    // 見ないためユーザーが中断する手段がなかった。他の OCR エントリと同じ流儀でロックし、
+    // バッチ境界でキャンセルを検知できるようにする。
+    cancelTokenRef.current = false;
+    userCancelRef.current = false;
+    setOcrRunning(true);
     try {
-      const pdf = await getSharedPdfProxy(doc.filePath);
-      importBBoxMeta = await loadPecoToolBBoxMeta(pdf, {
-        loadBytes: async () => {
-          const { readFile } = await import('@tauri-apps/plugin-fs');
-          return readFile(doc.filePath);
-        },
-        filePath: doc.filePath,
-        mtime: doc.mtime,
-      });
-    } catch {
-      // メタロード失敗は無視して従来どおり null (fallback) で続行する
+      // PCT-094 (防御): メタが取得できた場合は loadPage に渡し、fallback 経由での
+      // bbox 高さ劣化（descent 欠落で約 71% に縮む）を防ぐ。
+      // 修正1のスキップにより、メタあり PDF はここへ到達しないはずだが、
+      // 将来の呼び出し経路の混入に備えた安全策として維持する。
+      let importBBoxMeta: Record<string, Array<{
+        bbox: { x: number; y: number; width: number; height: number };
+        writingMode: string;
+        order: number;
+        text: string;
+        confidence?: number;
+      }>> | null = null;
+      try {
+        const pdf = await getSharedPdfProxy(doc.filePath);
+        importBBoxMeta = await loadPecoToolBBoxMeta(pdf, {
+          loadBytes: async () => {
+            const { readFile } = await import('@tauri-apps/plugin-fs');
+            return readFile(doc.filePath);
+          },
+          filePath: doc.filePath,
+          mtime: doc.mtime,
+        });
+      } catch {
+        // メタロード失敗は無視して従来どおり null (fallback) で続行する
+      }
+
+      const BATCH = 10;
+      for (let start = 0; start < total; start += BATCH) {
+        // #F-9: バッチ境界でユーザーキャンセル (Esc / 進捗UIのキャンセルボタン) を検知する。
+        if (cancelTokenRef.current) {
+          showToast('テキスト層の取り込みをキャンセルしました。');
+          return;
+        }
+        if (!isCurrentDocument(capturedEpoch)) {
+          showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
+          return;
+        }
+        const end = Math.min(start + BATCH, total);
+        const pageIndices = Array.from({ length: end - start }, (_, i) => start + i);
+
+        const pageDataList = await Promise.all(
+          pageIndices.map((i) => {
+            const sourcePageIndex = displayToSourcePageIndex(pageOrder, i);
+            return loadPage(
+              // loadPage の第 1 引数 (_pdf) は実際は getCachedPageProxy 内で参照するため
+              // ダミーの null cast で渡す (既存の呼び出し規約に準ずる)。
+              null as unknown as pdfjsLib.PDFDocumentProxy,
+              sourcePageIndex,
+              doc.filePath,
+              // PCT-094: メタあり時はメタを渡してメタ経路で解決させる（null 固定解除）。
+              // メタなし PDF の場合は引き続き null → fallback (pdfjs transform 再構成)。
+              importBBoxMeta,
+              doc.mtime,
+              { displayPageIndex: i },
+            ).catch((e) => {
+              console.warn(`[TextLayer] ページ ${i + 1} 取り込み失敗:`, e);
+              return null;
+            });
+          })
+        );
+
+        if (!isCurrentDocument(capturedEpoch)) {
+          showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
+          return;
+        }
+
+        for (let idx = 0; idx < pageIndices.length; idx++) {
+          const pageIndex = pageIndices[idx];
+          const pageData = pageDataList[idx];
+          if (!pageData) continue;
+          if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== displayToSourcePageIndex(pageOrder, pageIndex)) continue;
+          usePecoStore.getState().updatePageData(pageIndex, {
+            textBlocks: pageData.textBlocks,
+            isDirty: true,
+            isTextExtracted: true,
+            ocrCleared: false,
+          }, false);
+        }
+
+        logger.log(`[TextLayer] 取り込み済み: ${end} / ${total} ページ`);
+        // UI スレッドを解放
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      showToast(`テキスト層の取り込みが完了しました（全 ${total} ページ）`);
+    } finally {
+      setOcrRunning(false);
     }
-
-    const BATCH = 10;
-    for (let start = 0; start < total; start += BATCH) {
-      if (!isCurrentDocument(capturedEpoch)) {
-        showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
-        return;
-      }
-      const end = Math.min(start + BATCH, total);
-      const pageIndices = Array.from({ length: end - start }, (_, i) => start + i);
-
-      const pageDataList = await Promise.all(
-        pageIndices.map((i) => {
-          const sourcePageIndex = displayToSourcePageIndex(pageOrder, i);
-          return loadPage(
-            // loadPage の第 1 引数 (_pdf) は実際は getCachedPageProxy 内で参照するため
-            // ダミーの null cast で渡す (既存の呼び出し規約に準ずる)。
-            null as unknown as pdfjsLib.PDFDocumentProxy,
-            sourcePageIndex,
-            doc.filePath,
-            // PCT-094: メタあり時はメタを渡してメタ経路で解決させる（null 固定解除）。
-            // メタなし PDF の場合は引き続き null → fallback (pdfjs transform 再構成)。
-            importBBoxMeta,
-            doc.mtime,
-            { displayPageIndex: i },
-          ).catch((e) => {
-            console.warn(`[TextLayer] ページ ${i + 1} 取り込み失敗:`, e);
-            return null;
-          });
-        })
-      );
-
-      if (!isCurrentDocument(capturedEpoch)) {
-        showToast('テキスト層の取り込みを中止しました（別のPDFが開かれました）。', true);
-        return;
-      }
-
-      for (let idx = 0; idx < pageIndices.length; idx++) {
-        const pageIndex = pageIndices[idx];
-        const pageData = pageDataList[idx];
-        if (!pageData) continue;
-        if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== displayToSourcePageIndex(pageOrder, pageIndex)) continue;
-        usePecoStore.getState().updatePageData(pageIndex, {
-          textBlocks: pageData.textBlocks,
-          isDirty: true,
-          isTextExtracted: true,
-          ocrCleared: false,
-        }, false);
-      }
-
-      logger.log(`[TextLayer] 取り込み済み: ${end} / ${total} ページ`);
-      // UI スレッドを解放
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    showToast(`テキスト層の取り込みが完了しました（全 ${total} ページ）`);
   };
 
   const checkAndPromptOcrZero = async (doc: PecoDocument) => {
@@ -970,6 +1005,10 @@ export function useOcrEngine(
     userCancelRef.current = false;
     setOcrRunning(true);
     const capturedEpoch = useInfraStore.getState().documentEpoch;
+    // #F-5 (bug-hunt いろは): processAllPages/runOcrCurrentPage と同様、OCR 実行中に
+    // ページ並べ替え/削除が起きると displayToSourcePageIndex の対応先が変わる。
+    // 開始時点の source page を捕捉し、OCR 完了後に再計算した値と比較して不一致なら破棄する。
+    const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIndex);
     try {
       // #PCT-046 同根バグ対応: pageData.width/height が 0 の場合は getCachedPageProxy 経由で
       // viewport から再取得する。runOcrCurrentPage と同じフォールバック方式。
@@ -977,7 +1016,6 @@ export function useOcrEngine(
       let pageHeight = pageData.height;
       if (pageWidth === 0 || pageHeight === 0) {
         try {
-          const sourcePageIndex = displayToSourcePageIndex(state.pageOrder, pageIndex);
           const page = await getCachedPageProxy(doc.filePath, sourcePageIndex);
           const viewport = page.getViewport({ scale: 1.0 });
           pageWidth = viewport.width;
@@ -1042,6 +1080,10 @@ export function useOcrEngine(
       if (cancelTokenRef.current) return;
       if (!isCurrentDocument(capturedEpoch)) {
         showToast('OCR結果は破棄されました（別のPDFが開かれました）。', true);
+        return;
+      }
+      if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== sourcePageIndex) {
+        showToast('OCR結果は破棄されました（ページ順序が変更されました）。', true);
         return;
       }
 

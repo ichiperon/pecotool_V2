@@ -565,6 +565,29 @@ describe('runOcrCurrentPage: 未カバー分岐', () => {
     expect(p0.textBlocks).toHaveLength(0);
     expect(p0.isDirty).toBe(true);
   });
+
+  it('#F-8 (PCT-076 系統): 別経路の OCR 実行中は多重起動ガードで即拒否する', async () => {
+    usePecoStore.getState().setDocument(makeDoc(1));
+    let releaseOpen!: (pdf: unknown) => void;
+    h.openFreshPdfDocMock.mockImplementationOnce(() => new Promise((resolve) => { releaseOpen = resolve; }));
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    let silentDone!: Promise<boolean>;
+    act(() => { silentDone = result.current.runOcrAllPagesSilent(); });
+    await new Promise((r) => setTimeout(r, 0));
+
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+
+    expect(toasts.some((t) => t.err === true && t.msg.includes('OCR実行中のため、新しいOCRを開始できません'))).toBe(true);
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+
+    await act(async () => {
+      releaseOpen(makeMockPdf(1));
+      await silentDone;
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -746,6 +769,29 @@ describe('runOcrRange: ガードから完走までの分岐', () => {
     expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
     expect(toasts.some((t) => t.err === true && t.msg.includes('別のPDF'))).toBe(true);
   });
+
+  it('#F-8 (PCT-076 系統): 別経路の OCR 実行中は多重起動ガードで即拒否する', async () => {
+    usePecoStore.getState().setDocument(makeDoc(3));
+    let releaseOpen!: (pdf: unknown) => void;
+    h.openFreshPdfDocMock.mockImplementationOnce(() => new Promise((resolve) => { releaseOpen = resolve; }));
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    let silentDone!: Promise<boolean>;
+    act(() => { silentDone = result.current.runOcrAllPagesSilent(); });
+    await new Promise((r) => setTimeout(r, 0));
+
+    await act(async () => { await result.current.runOcrRange('1'); });
+
+    expect(toasts.some((t) => t.err === true && t.msg.includes('OCR実行中のため、新しいOCRを開始できません'))).toBe(true);
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+
+    await act(async () => {
+      releaseOpen(makeMockPdf(3));
+      await silentDone;
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -923,6 +969,31 @@ describe('runOcrFolder: ガードと例外経路', () => {
     // 途中までしか OCR していない 1 ファイル目は savePdf されない
     expect(savePdf).not.toHaveBeenCalled();
     expect(toasts.some((t) => t.msg.includes('フォルダOCRをキャンセルしました'))).toBe(true);
+  });
+
+  it('#F-8 (PCT-076 系統): 別経路の OCR 実行中は多重起動ガードで即拒否する（フォルダ選択ダイアログ前）', async () => {
+    usePecoStore.getState().setDocument(makeDoc(1));
+    let releaseOpen!: (pdf: unknown) => void;
+    h.openFreshPdfDocMock.mockImplementationOnce(() => new Promise((resolve) => { releaseOpen = resolve; }));
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() =>
+      useOcrEngine((m, e) => toasts.push({ msg: m, err: e }), { openPdf: vi.fn(), savePdf: vi.fn() }),
+    );
+
+    let silentDone!: Promise<boolean>;
+    act(() => { silentDone = result.current.runOcrAllPagesSilent(); });
+    await new Promise((r) => setTimeout(r, 0));
+
+    await act(async () => { await result.current.runOcrFolder(); });
+
+    expect(toasts.some((t) => t.err === true && t.msg.includes('OCR実行中のため、新しいOCRを開始できません'))).toBe(true);
+    expect(h.openDialogMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseOpen(makeMockPdf(1));
+      await silentDone;
+    });
   });
 });
 
@@ -1171,6 +1242,62 @@ describe('importTextLayerAllPages: 実書き込み系（loadPage 経由）', () 
     }
     expect(doc.pages.get(10)!.textBlocks).toHaveLength(0);
     expect(toasts.some((m) => m.includes('取り込みを中止しました'))).toBe(true);
+  });
+
+  it('#F-9: 取り込み中は isOcrRunningRef が立ち、他経路の OCR 開始を拒否する', async () => {
+    setupHasTextDoc(1);
+    let releaseLoadPage!: (v: unknown) => void;
+    h.loadPageMock.mockImplementationOnce(() => new Promise((resolve) => { releaseLoadPage = resolve; }));
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    let done!: Promise<void>;
+    act(() => { done = result.current.checkAndPromptOcrZero(usePecoStore.getState().document!); });
+    // meta チェック・テキスト層判定・importTextLayerAllPages 内の Promise.all(loadPage)
+    // 待機まで、すべて解決済み mock 経由の microtask チェーンのため 1 tick で到達する。
+    await new Promise((r) => setTimeout(r, 0));
+
+    await act(async () => { await result.current.runOcrCurrentPage(); });
+    expect(toasts.some((t) => t.err === true && t.msg.includes('OCR実行中のため、新しいOCRを開始できません'))).toBe(true);
+
+    await act(async () => {
+      releaseLoadPage({ pageIndex: 0, width: 595, height: 842, textBlocks: [], isDirty: false, thumbnail: null });
+      await done;
+    });
+  });
+
+  it('#F-9: バッチ境界で cancelOcr するとキャンセルトーストが出て以降のバッチは処理されない', async () => {
+    // BATCH=10 なので 11 ページ用意して 2 バッチ目の開始判定を踏ませる。
+    setupHasTextDoc(11);
+    const toasts: string[] = [];
+    const { result } = renderHook(() => useOcrEngine((m) => toasts.push(m)));
+
+    h.loadPageMock.mockImplementation(async (_pdf: unknown, pageIndex: number) => {
+      if (pageIndex === 9) {
+        // 1 バッチ目最後のページ解決時に「次バッチ開始前」の yield ポイントで
+        // cancelOcr() を仕込む。epoch 版の中止テスト (直前) と同じレース手法。
+        setTimeout(() => { result.current.cancelOcr(); }, 0);
+      }
+      return {
+        pageIndex, width: 595, height: 842, textBlocks: [
+          { id: `p${pageIndex}`, text: `T${pageIndex}`, originalText: `T${pageIndex}`,
+            bbox: { x: 0, y: 0, width: 1, height: 1 }, writingMode: 'horizontal' as const,
+            order: 0, isNew: false, isDirty: false },
+        ], isDirty: false, thumbnail: null,
+      };
+    });
+
+    await act(async () => {
+      await result.current.checkAndPromptOcrZero(usePecoStore.getState().document!);
+    });
+
+    const doc = usePecoStore.getState().document!;
+    for (let i = 0; i < 10; i++) {
+      expect(doc.pages.get(i)!.textBlocks).toHaveLength(1);
+    }
+    expect(doc.pages.get(10)!.textBlocks).toHaveLength(0);
+    expect(toasts.some((m) => m.includes('テキスト層の取り込みをキャンセルしました'))).toBe(true);
   });
 });
 
@@ -1432,6 +1559,32 @@ describe('runOcrOnRegion: 未カバー分岐', () => {
     expect(newBlock.order).toBe(3);
     const orders = blocks.map((b) => b.order);
     expect(new Set(orders).size).toBe(orders.length);
+  });
+
+  it('#F-5: OCR 実行中にページ順序が変わると結果は破棄される（processAllPages/runOcrCurrentPage と同型ガード）', async () => {
+    usePecoStore.getState().setDocument(makeDoc(1));
+    usePecoStore.setState({ pageOrder: [0] } as any);
+    h.invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd !== 'run_ocr') return '';
+      await new Promise((r) => setTimeout(r, 0));
+      // OCR (invoke) の完了直後にページ並べ替え/削除が起きた状況を模倣する。
+      usePecoStore.setState({ pageOrder: [5] } as any);
+      return JSON.stringify({
+        status: 'ok',
+        blocks: [{ text: 'STALE_REGION_ORDER', bbox: { x: 0, y: 0, width: 5, height: 5 }, writingMode: 'horizontal', confidence: 1 }],
+      });
+    });
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const canvas = makeOffscreenCanvas(400, 600);
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+    await act(async () => {
+      await result.current.runOcrOnRegion(canvas, { x: 0, y: 0, width: 40, height: 20 }, 0, 100);
+    });
+
+    const liveDoc = usePecoStore.getState().document!;
+    expect(liveDoc.pages.get(0)!.textBlocks).toHaveLength(0);
+    expect(toasts.some((t) => t.err === true && t.msg.includes('ページ順序が変更されました'))).toBe(true);
   });
 });
 
