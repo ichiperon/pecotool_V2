@@ -319,6 +319,15 @@ interface SaveResult {
    * かつ警告トースト/ログの表示可否をこのフラグで判定する。
    */
   bytePreserved: boolean;
+  /**
+   * HIGH/MEDIUM (bug-hunt round1 最終ゲート・マリン指摘): #437 の pageOrderMatchesSnapshot
+   * をそのまま素通しした値。false は「保存中に pageOrder が savedPageSnapshots 取得時点と
+   * 食い違った」ことを意味し、savedPageSnapshots の idx と live document.pages の idx が
+   * 同じ物理ページを指す保証が失われる (movePage 等で無関係な別ページが同じ index に
+   * 来ている場合がある)。previewMode 時は resetDirty を呼ばないため常に true でよい。
+   * 呼び出し側は resetDirty(savedPageSnapshots, bytePreserved, orderMatched) に渡す。
+   */
+  orderMatched: boolean;
 }
 
 function formatSkippedCharWarning(skippedChars: SkippedPdfTextChar[]): string {
@@ -852,6 +861,8 @@ export function useFileOperations(
         hasPostSnapshotChanges: false,
         previewBytes: savedBytes,
         bytePreserved,
+        // previewMode は resetDirty を呼ばない経路なので orderMatched は不使用 (true 固定)。
+        orderMatched: true,
       };
     }
 
@@ -971,6 +982,9 @@ export function useFileOperations(
       savedActionIndex,
       hasPostSnapshotChanges,
       bytePreserved,
+      // HIGH/MEDIUM (bug-hunt round1 最終ゲート): #437 で計算済みの pageOrderMatchesSnapshot
+      // をそのまま resetDirty へ渡し、order 不一致時の rotation/bbox 誤リベースを防ぐ。
+      orderMatched: pageOrderMatchesSnapshot,
     };
   };
 
@@ -1078,7 +1092,7 @@ export function useFileOperations(
         // 保持され、次回保存の dirty フィルタに正しく載る。
         // P1-1 (bug-hunt): result.bytePreserved のときは resetDirty 側で rotation
         // クリア/bbox リベース/isDirty クリアを一切行わない (何も焼き込まれていないため)。
-        resetDirty(result.savedPageSnapshots, result.bytePreserved);
+        resetDirty(result.savedPageSnapshots, result.bytePreserved, result.orderMatched);
         // issue #413 (PCT-182): 監査ログの diff は「更新前の lastSavedActionIndex」
         // を基準に計算する必要がある。setLastSavedActionIndex を先に実行すると
         // 直後の _writeAuditLog が読む値が既に更新後になり、diff が常に空になる。
@@ -1216,7 +1230,7 @@ export function useFileOperations(
             // issue #115 / #119: 別名保存でも保存スナップショットと同一参照の
             // ページだけ dirty を下ろす。
             // P1-1 (bug-hunt): bytePreserved のときは rotation/bbox/isDirty を変更しない。
-            resetDirty(result.savedPageSnapshots, result.bytePreserved);
+            resetDirty(result.savedPageSnapshots, result.bytePreserved, result.orderMatched);
             // issue #413 (PCT-182): setLastSavedActionIndex 更新前の値を diff 計算に使う
             // (通常保存と同じ非対称バグが別名保存にもあった)。
             const preSaveActionIndex = usePecoStore.getState().lastSavedActionIndex;
@@ -1317,7 +1331,7 @@ export function useFileOperations(
         normalizePageOrderForCurrentDocument: false,
       });
       if (result !== null) {
-        resetDirty(result.savedPageSnapshots, result.bytePreserved);
+        resetDirty(result.savedPageSnapshots, result.bytePreserved, result.orderMatched);
         setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
@@ -1425,7 +1439,7 @@ export function useFileOperations(
       const result = await _executeSave(undefined, undefined, { applyOffsetAllPages: true });
       if (result === null) return false;
       // P1-1 (bug-hunt): bytePreserved のときは rotation/bbox/isDirty を変更しない。
-      resetDirty(result.savedPageSnapshots, result.bytePreserved);
+      resetDirty(result.savedPageSnapshots, result.bytePreserved, result.orderMatched);
       setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
       if (result.hasPostSnapshotChanges) {
         usePecoStore.setState({ isDirty: true });

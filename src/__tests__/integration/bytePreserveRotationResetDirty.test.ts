@@ -216,8 +216,9 @@ describe('P1-2: 保存スナップショット参照不一致でも baked rotati
     } as any);
 
     // savedPageSnapshots は「保存時点の旧オブジェクト参照」のまま (実運用と同型)。
+    // pageOrder 自体は保存中に変化していない (order 一致) シナリオなので orderMatched=true。
     const savedPageSnapshots = new Map<number, PageData>([[0, savedPage]]);
-    usePecoStore.getState().resetDirty(savedPageSnapshots, false);
+    usePecoStore.getState().resetDirty(savedPageSnapshots, false, true);
 
     const rebased = usePecoStore.getState().document!.pages.get(0)!;
     // P1-2 の核心: 参照不一致でも rotation は baked 分 (90) だけ差し引かれ、
@@ -242,4 +243,92 @@ describe('P1-2: 保存スナップショット参照不一致でも baked rotati
     const saved2 = await buildPdfDocument(saved1, doc2, fontBytes);
     expect(await readRotateDegrees(saved2)).toBe(90);
   }, 60_000);
+});
+
+describe('HIGH/MEDIUM (bug-hunt round1 最終ゲート・マリン指摘): orderMatched===false のとき rotation/bbox クリア・リベースを丸ごとスキップする', () => {
+  it('idx0 の pageA(rotation=90) 保存中に movePage で無回転 pageB が idx0 へ来ても、pageB の rotation/bbox は汚染されない (HIGH の実測再現)', () => {
+    const blockA = makeBlock({ id: 'a0', text: 'A', bbox: { x: 10, y: 10, width: 50, height: 20 } });
+    const pageA: PageData = {
+      pageIndex: 0, width: PAGE_W, height: PAGE_H, textBlocks: [blockA],
+      isDirty: true, thumbnail: null, rotation: 90,
+    };
+    // savedPageSnapshots は保存開始時点 (movePage 前) の idx0 = pageA を指す。
+    const savedPageSnapshots = new Map<number, PageData>([[0, pageA]]);
+
+    // 保存中に movePage が走り、無回転の別ページ (pageB, pageA とは無関係) が idx0 に
+    // 来た、という体 (pageA は idx1 へ移動)。
+    const blockB = makeBlock({ id: 'b0', text: 'B', bbox: { x: 200, y: 300, width: 80, height: 30 } });
+    const pageB: PageData = {
+      pageIndex: 0, width: PAGE_W, height: PAGE_H, textBlocks: [blockB],
+      isDirty: true, thumbnail: null, rotation: undefined,
+    };
+    expect(pageB).not.toBe(pageA);
+
+    usePecoStore.setState({
+      document: {
+        filePath: 'reorder-high.pdf', fileName: 'reorder-high.pdf', totalPages: 2, metadata: {},
+        pages: new Map<number, PageData>([[0, pageB], [1, { ...pageA, pageIndex: 1 }]]),
+      },
+      // snapshot 取得時点は [0,1] だったが、保存中の movePage で [1,0] に変わった
+      // (= pageOrderMatchesSnapshot=false)。
+      pageOrder: [1, 0],
+      currentPageIndex: 0,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+      isDirty: true,
+    } as any);
+
+    // #437: useFileOperations は pageOrderMatchesSnapshot=false をそのまま orderMatched
+    // として resetDirty に渡す。
+    usePecoStore.getState().resetDirty(savedPageSnapshots, false, false);
+
+    const afterB = usePecoStore.getState().document!.pages.get(0)!;
+    // HIGH の核心: 無関係ページ (pageB) の rotation/bbox/width/height は一切汚染されない
+    // (旧ロジックでは normalizeRotation(0 - 90) = 270 が誤注入されていた)。
+    expect(afterB.rotation).toBeUndefined();
+    expect(afterB.textBlocks[0].bbox).toEqual(blockB.bbox);
+    expect(afterB.width).toBe(PAGE_W);
+    expect(afterB.height).toBe(PAGE_H);
+    // 参照不一致 (pageB !== pageA) なので isDirty は維持される。
+    expect(afterB.isDirty).toBe(true);
+  });
+
+  it('order不一致時は参照一致ページでも rotation/bbox はクリア・リベースされない (MEDIUM: 次回保存でのpending rotation喪失を防ぐ)', () => {
+    const block = makeBlock({ id: 'p0', bbox: { x: 30, y: 40, width: 60, height: 25 } });
+    const page: PageData = {
+      pageIndex: 0, width: PAGE_W, height: PAGE_H, textBlocks: [block],
+      isDirty: true, thumbnail: null, rotation: 90,
+    };
+    const savedPageSnapshots = new Map<number, PageData>([[0, page]]);
+
+    usePecoStore.setState({
+      document: {
+        filePath: 'reorder-medium.pdf', fileName: 'reorder-medium.pdf', totalPages: 1, metadata: {},
+        pages: new Map<number, PageData>([[0, page]]), // 参照一致 (このページ自体は動いていない)
+      },
+      pageOrder: [0],
+      currentPageIndex: 0,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+      isDirty: true,
+    } as any);
+
+    // 他のページの並べ替えにより pageOrder 全体としては snapshot と食い違った
+    // (=このページの idx は動いていなくても orderMatched は false)、というシナリオ。
+    usePecoStore.getState().resetDirty(savedPageSnapshots, false, false);
+
+    const after = usePecoStore.getState().document!.pages.get(0)!;
+    // MEDIUM: #437 は order 不一致時に originalBytesCache を保存前バイトのまま温存し、
+    // 次回保存の基準を composite 前の旧 /Rotate に据え置く。ここで rotation/bbox を
+    // クリア・リベースすると、次回保存でユーザーの pending rotation を永久に失うため
+    // 据え置く。
+    expect(after.rotation).toBe(90);
+    expect(after.textBlocks[0].bbox).toEqual(block.bbox);
+    expect(after.width).toBe(PAGE_W);
+    expect(after.height).toBe(PAGE_H);
+    // このページの内容自体は保存済みバイトに正しく書かれているため isDirty は下ろせる。
+    expect(after.isDirty).toBe(false);
+  });
 });
