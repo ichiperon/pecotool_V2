@@ -813,6 +813,16 @@ export function stripTextBlocks(decoded: Uint8Array): Uint8Array {
         let innerDepth = 0;
         while (i < len) {
           if (innerState === 'NORMAL') {
+            // M-3 (bug-hunt): BT 内のインラインイメージ（本来は非合法だが壊れた/他ツール
+            // 生成 PDF に紛れうる）を BI...EI ごとスキップする。これを怠ると、バイナリ
+            // データ中に偶然出現した delimiter 境界付き "ET" バイト列を本物の BT 終端と
+            // 誤認識し、ET 以降の実バイナリ・実 ET を通常トークンとして誤って処理し、
+            // stream が破損する。外側ループ・guard (hasUnbalancedTextBlockBoundary) は
+            // 既に BI を先読みしており、ここも同じ視界に揃える。
+            if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+              i = copyInlineImage(decoded, i, new Uint8Array(0), 0).inputIdx;
+              continue;
+            }
             if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
               i += 2;
               break;
@@ -956,6 +966,17 @@ export function stripStrayTextOperatorsOutsideTextObjects(decoded: Uint8Array): 
         let innerDepth = 0;
         while (i < len) {
           if (innerState === 'NORMAL') {
+            // M-3 (bug-hunt): BT 内のインラインイメージを BI...EI ごとバイト等価でコピーする
+            // （この関数は BT...ET をバイト等価温存する契約のため、discard ではなく copy）。
+            // スキップせずに素朴なトークン走査へ委ねると、バイナリ中の偶然の delimiter 境界付き
+            // "ET" を本物の終端と誤認識し、実バイナリを通常トークンとして処理してしまい
+            // stream が破損する（stripTextBlocks の同種修正と視界を揃える）。
+            if (matchesToken(decoded, i, 0x42, 0x49 /* BI */)) {
+              const copied = copyInlineImage(decoded, i, result, resultIdx);
+              i = copied.inputIdx;
+              resultIdx = copied.resultIdx;
+              continue;
+            }
             if (matchesToken(decoded, i, 0x45, 0x54 /* ET */)) {
               result[resultIdx++] = decoded[i];
               result[resultIdx++] = decoded[i + 1];

@@ -11,6 +11,7 @@ import {
   hasTextOperatorsOutsideTextObjects,
   hasUnbalancedTextBlockBoundary,
   stripTextBlocks,
+  stripStrayTextOperatorsOutsideTextObjects,
 } from '../../utils/pdfContentStream';
 
 const enc = (s: string): Uint8Array => {
@@ -220,5 +221,60 @@ describe('copyInlineImage: /L (Length) 参照による偶発 EI 誤検出の回�
     const input = enc(buildStream(`/L ${trapLength} /W 1 /H 1 /BPC 8 /CS /G`));
     const out = stripTextBlocks(input);
     expect(dec(out)).toBe(dec(input));
+  });
+});
+
+/**
+ * M-3 (bug-hunt): stripTextBlocks / stripStrayTextOperatorsOutsideTextObjects の
+ * 「BT 内モード」走査（対応する ET を探す内側ループ）には、BI...EI 検出が抜けていた。
+ * guard (hasUnbalancedTextBlockBoundary) や各関数の「BT 外」走査は既に BI を認識して
+ * スキップしているため、視界が食い違っていた。
+ *
+ * BT ブロックの中に、宣言長 (/L) の範囲内に delimiter 境界付きの偽 "ET" バイト列を
+ * 仕込んだ inline image を置く。修正前は BT 内モードのループがこの偽 ET で早期終了し、
+ * 本来の ET より手前で BT スキャンを終わらせてしまう。これにより:
+ *  - stripTextBlocks: BT ブロック全体を discard するはずが、早期終了により残りの
+ *    バイナリ・本物の EI/ET が「BT 外」の通常トークンとして誤処理され、ET 直後に
+ *    続くはずのマーカーの手前にゴミバイトが混入する。
+ *  - stripStrayTextOperatorsOutsideTextObjects: BT...ET をバイト等価で温存するはずが、
+ *    早期終了後に本物の ET が「BT 外の孤児 ET」として誤って drop され、出力が
+ *    入力とバイト不一致になる。
+ */
+describe('M-3 (bug-hunt): BT 内のインラインイメージに埋め込まれた偽 ET を誤認識しない', () => {
+  // 宣言長ちょうど 12 byte のバイナリに、偽 EI と偽 ET を両方仕込む
+  // （copyInlineImage の /L fast-forward がバイパスすべき罠であることを明示する）。
+  const trapBinary = '\x01\x02 EI \x03 ET \x04';
+  const trapLength = trapBinary.length; // 12
+  const biDict = `/L ${trapLength} /W 1 /H 1 /BPC 8 /CS /G`;
+  // BT 外の非テキスト演算子。両関数の対象外（drop されない）マーカーとして使う。
+  const marker = '1 0 0 RG\n';
+
+  const buildBtStream = (): string =>
+    `BT\nBI ${biDict} ID ${trapBinary}\nEI\nET\n${marker}`;
+
+  it('前提: trapBinary は 12 byte ちょうど（テストの自己検証）', () => {
+    expect(trapLength).toBe(12);
+  });
+
+  it('stripTextBlocks: BT ブロック全体が discard され、直後の marker のみが残る', () => {
+    const input = enc(buildBtStream());
+    const out = dec(stripTextBlocks(input));
+    // BT...ET の直後にある改行 1 文字は BT ブロックの外側なので、marker と共にそのまま残る
+    // （drop 対象はあくまで BT...ET の中身のみ）。
+    // 修正前: 偽 ET で早期終了し、以降の実バイナリ/実 EI がトップレベルの通常バイトとして
+    // 誤って出力に混入し、この改行+marker の手前にゴミが残る（out !== '\n' + marker）。
+    // 修正後: 本物の EI (/L で確定スキップ) → 本物の ET まで正しく BT 内として認識し、
+    // ブロック全体が drop されて改行+marker だけが残る。
+    expect(out).toBe(`\n${marker}`);
+  });
+
+  it('stripStrayTextOperatorsOutsideTextObjects: BT...ET はバイト等価で温存され、marker も無傷', () => {
+    const input = enc(buildBtStream());
+    const out = dec(stripStrayTextOperatorsOutsideTextObjects(input));
+    // 修正前: 偽 ET で BT 内コピーが早期終了し、本物の ET が「BT 外の孤児 ET」として
+    // 誤って drop されるため、出力が入力とバイト不一致になる。
+    // 修正後: BI...EI を copyInlineImage でバイト等価コピーし、本物の ET まで正しく
+    // BT 内として保持するため、入力全体がバイト等価で温存される。
+    expect(out).toBe(dec(input));
   });
 });

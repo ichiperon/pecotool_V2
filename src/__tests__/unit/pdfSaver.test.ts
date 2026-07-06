@@ -1801,6 +1801,128 @@ describe('pdfSaver / Worker 経路', () => {
     })
   })
 
+  // ── M-2 (bug-hunt): 3 多重呼び出しの直列化 ──────────────────────
+  // 複数の savePDF 呼び出し（waiter）が同一 currentSaveTask を待っている場合、そのタスクが
+  // 解決すると各 waiter の Promise.race がほぼ同時に 'done' を検知する。旧実装は break
+  // 直後に無条件で新規 worker を生成していたため、waiter 数だけ worker が並走しうる
+  // バグがあった（モジュール変数 activeSaveWorker/currentSaveReject/lastSaveActivityAt の
+  // 後勝ち汚染）。この回帰テストは「前回タスク完了直後に、waiter の数だけ worker が
+  // 同時生成されない」ことを検証する（常に高々 1 worker のみ新規生成→直列化）。
+  describe('M-2: 3 多重 savePDF 呼び出しの直列化（前回タスク解決直後の race 検証）', () => {
+    it('p1 が in-flight の間に p2・p3 を追加発行しても、p1 解決直後に worker が一斉に複数生成されない', async () => {
+      const doc = makeSimpleDoc()
+
+      // p1: 1 つめの worker を作り、まだ応答しない（in-flight を維持）
+      const p1 = savePDF(new Uint8Array(), doc)
+      expect(ControllableMockWorker.instances.length).toBe(1)
+      const w1 = ControllableMockWorker.instances[0]
+
+      // p1 が pending のうちに p2・p3 を積む。両方とも currentSaveTask(=p1のtask) を
+      // 待つだけで、この時点では新しい worker を作らない。
+      const p2 = savePDF(new Uint8Array(), doc)
+      const p3 = savePDF(new Uint8Array(), doc)
+      for (let k = 0; k < 5; k++) await Promise.resolve()
+      expect(ControllableMockWorker.instances.length).toBe(1)
+
+      // p1 を完了させる。この直後、旧実装では p2・p3 が同時に 'done' を検知して
+      // 無条件でそれぞれ新規 worker を作ってしまい、instances が一気に 3 まで増えていた
+      // （worker 並走 + モジュール変数の後勝ち汚染）。
+      w1.emitSuccess(new Uint8Array([1]))
+      await p1
+      for (let k = 0; k < 10; k++) await Promise.resolve()
+
+      // 修正後: p1 解決直後に新規生成されるのは高々 1 worker のみ（直列化）。
+      expect(ControllableMockWorker.instances.length).toBe(2)
+      const w2 = ControllableMockWorker.instances[1]
+
+      // まだ p3 の実 worker は作られていない（p2 の worker 完了を待っているはず）。
+      w2.emitSuccess(new Uint8Array([2]))
+      await p2
+      for (let k = 0; k < 10; k++) await Promise.resolve()
+
+      // p2 完了後、ようやく p3 用の 3 つめの worker が作られる。
+      expect(ControllableMockWorker.instances.length).toBe(3)
+      const w3 = ControllableMockWorker.instances[2]
+      w3.emitSuccess(new Uint8Array([3]))
+      const r3 = await p3
+
+      // 3 回の savePDF いずれも自身の worker が返した結果で正しく resolve している
+      // （waiter が他人の結果に相乗りしていない）ことも確認。
+      expect(Array.from(r3)).toEqual([3])
+    })
+  })
+
+  // ── M-1 (bug-hunt): onProgress コールバック配線 ───────────────────
+  // handleSavePdf (worker 殻) は onProgress をオプションの最終引数として受け取り、
+  // buildPdfDocumentCore に素通しする。実 worker 実行時 (self.onmessage) のみ
+  // self.postMessage による heartbeat 送信を注入し、__handleSavePdfForTest を直接叩く
+  // 既存テスト（jsdom 環境）では onProgress 未指定 = no-op のままにして後方互換を保つ。
+  describe('M-1: onProgress コールバックがページ処理ループ粒度で呼ばれる（heartbeat 用フック）', () => {
+    it('dirty page がある保存では onProgress が最低 1 回呼ばれる', async () => {
+      const pages = [{
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }]
+      const mockContext = makeSweepableContext() as any
+      const mockPdfDoc = {
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        addPage:         m.addPage,
+        copyPages:       m.copyPages,
+        getPage:         vi.fn((index: number) => pages[index]),
+        getPages:        vi.fn().mockReturnValue(pages),
+        getPageCount:    vi.fn().mockReturnValue(1),
+        save:            m.save,
+        context:         mockContext,
+        catalog:         makeCatalogMock(),
+        getInfoDict:     vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }),
+      }
+      m.pdfLoad.mockResolvedValue(mockPdfDoc)
+
+      const serializedPage = {
+        pageIndex: 0,
+        width: 595,
+        height: 842,
+        isDirty: true,
+        textBlocks: [{
+          id: 'b0',
+          text: 'Hello',
+          originalText: 'Hello',
+          writingMode: 'horizontal' as WritingMode,
+          order: 0,
+          isNew: false,
+          isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+
+      const onProgress = vi.fn()
+      await __handleSavePdfForTest(
+        new Uint8Array([1, 2, 3]),
+        { pages: { 0: serializedPage } },
+        undefined,
+        [],
+        undefined,
+        undefined,
+        onProgress,
+      )
+
+      expect(onProgress).toHaveBeenCalled()
+    })
+  })
+
   // ── U-W-05: URL 経路 ─────────────────────────────────────────
   // source として {url} を渡した場合、bytes を transfer せず url を Worker に転送する。
   // 受け取った Worker 側は worker 内で fetch する責務を持つ（本テストは postMessage の payload のみを検証）。

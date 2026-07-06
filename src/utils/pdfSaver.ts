@@ -169,43 +169,60 @@ export async function savePDF(
   // 固定 5 秒待ちではなく、直近の活動（タスク開始 or heartbeat）からの経過時間を
   // 都度再計算するループにすることで、5 秒を超える正常な保存でも heartbeat が
   // 続いている限り誤 terminate しない。
-  while (currentSaveTask) {
-    const elapsedSinceActivity = Date.now() - lastSaveActivityAt;
-    const remainingMs = PREVIOUS_SAVE_TIMEOUT_MS - elapsedSinceActivity;
-    if (remainingMs <= 0) {
-      console.warn('[savePDF] Previous save did not complete within timeout (no heartbeat); terminating stale worker.');
-      if (activeSaveWorker) {
-        try { activeSaveWorker.terminate(); } catch { /* noop: terminate の二重呼び出しは無害扱い */ }
-        activeSaveWorker = null;
+  // M-2 (bug-hunt): 内側 while を「1回分の待機判定」として outer loop で包む。
+  // 複数の savePDF 呼び出し（waiter）が同一 currentSaveTask を待っている場合、その
+  // タスクが解決すると各 waiter の Promise.race がほぼ同時に 'done' を検知し、旧実装は
+  // break 直後に無条件で新規 worker を生成していた（= waiter 数だけ worker が並走し、
+  // モジュール変数 activeSaveWorker/currentSaveReject/lastSaveActivityAt が後勝ちで
+  // 汚染される）。break の直後に「自分が break している間に、先に抜けた別の waiter が
+  // 既に新しい currentSaveTask を積んでいないか」を再チェックし、積まれていればそちらを
+  // 待ち直す（continue）ことで、3 多重呼び出しでも常に高々 1 worker しか走らないよう
+  // 直列化する。
+  for (;;) {
+    while (currentSaveTask) {
+      const elapsedSinceActivity = Date.now() - lastSaveActivityAt;
+      const remainingMs = PREVIOUS_SAVE_TIMEOUT_MS - elapsedSinceActivity;
+      if (remainingMs <= 0) {
+        console.warn('[savePDF] Previous save did not complete within timeout (no heartbeat); terminating stale worker.');
+        if (activeSaveWorker) {
+          try { activeSaveWorker.terminate(); } catch { /* noop: terminate の二重呼び出しは無害扱い */ }
+          activeSaveWorker = null;
+        }
+        // terminate は先行タスクの Promise を settle させない（onmessage/onerror が
+        // 発火しないため）。放置すると SAVE_HARD_TIMEOUT_MS(120秒) まで宙吊りになる
+        // （#425）。ここで明示的に reject し、呼び出し側へ速やかに失敗を伝える。
+        if (currentSaveReject) {
+          currentSaveReject(new Error('後続の保存操作により、前回の保存が中断されました。もう一度保存してください。'));
+          currentSaveReject = null;
+        }
+        currentSaveTask = null;
+        break;
       }
-      // terminate は先行タスクの Promise を settle させない（onmessage/onerror が
-      // 発火しないため）。放置すると SAVE_HARD_TIMEOUT_MS(120秒) まで宙吊りになる
-      // （#425）。ここで明示的に reject し、呼び出し側へ速やかに失敗を伝える。
-      if (currentSaveReject) {
-        currentSaveReject(new Error('後続の保存操作により、前回の保存が中断されました。もう一度保存してください。'));
-        currentSaveReject = null;
+
+      const timeoutSymbol = Symbol('timeout-check');
+      const timeoutPromise = new Promise<typeof timeoutSymbol>((resolve) => {
+        setTimeout(() => resolve(timeoutSymbol), remainingMs);
+      });
+      try {
+        const raceResult = await Promise.race([
+          currentSaveTask.then(() => 'done' as const, () => 'done' as const),
+          timeoutPromise,
+        ]);
+        if (raceResult === 'done') break;
+        // それ以外は「残り時間だけ待った結果、まだ完了していない」ケース。ループ先頭に
+        // 戻って最新の lastSaveActivityAt から remainingMs を再計算する
+        // （その間に heartbeat が来ていれば延命、来ていなければ次の周でterminateに至る）。
+      } catch {
+        // 前回タスクの reject は無視（既に解決済み扱い）
+        break;
       }
-      currentSaveTask = null;
-      break;
     }
 
-    const timeoutSymbol = Symbol('timeout-check');
-    const timeoutPromise = new Promise<typeof timeoutSymbol>((resolve) => {
-      setTimeout(() => resolve(timeoutSymbol), remainingMs);
-    });
-    try {
-      const raceResult = await Promise.race([
-        currentSaveTask.then(() => 'done' as const, () => 'done' as const),
-        timeoutPromise,
-      ]);
-      if (raceResult === 'done') break;
-      // それ以外は「残り時間だけ待った結果、まだ完了していない」ケース。ループ先頭に
-      // 戻って最新の lastSaveActivityAt から remainingMs を再計算する
-      // （その間に heartbeat が来ていれば延命、来ていなければ次の周でterminateに至る）。
-    } catch {
-      // 前回タスクの reject は無視（既に解決済み扱い）
-      break;
-    }
+    // M-2: break した時点で、別の waiter が既に新しい currentSaveTask を積んでいたら、
+    // 自分は新規 worker を作らずそちらを待ち直す。currentSaveTask が null なら
+    // （誰も積んでいなければ）ここで初めて新規タスクを作ってよい。
+    if (currentSaveTask) continue;
+    break;
   }
 
   const task = new Promise<Uint8Array>((resolve, reject) => {

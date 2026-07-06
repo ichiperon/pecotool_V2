@@ -937,11 +937,15 @@ export interface CoreSaveDocument {
 /**
  * buildPdfDocumentCore のオプション。
  * D4: saveTimeoutMs?: number — 未指定なら pdfDoc.save() に race をかけない。worker 殻が 90_000 を渡す。
+ * M-1 (bug-hunt): onProgress?: () => void — ページ処理ループの粒度で呼ばれる同期コールバック。
+ * worker 殻はこれを使って heartbeat を明示送信できる（詳細は呼び出し箇所のコメント参照）。
+ * 未指定なら何もしない（main 殻の buildPdfDocument は渡さない・既存挙動に影響なし）。
  */
 export interface BuildPdfCoreOptions {
   options?: SaveDialogOptions;
   pageOrder?: number[];
   saveTimeoutMs?: number;
+  onProgress?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,7 +1100,7 @@ export async function buildPdfDocumentCore(
   fallbackFontBytes: ArrayBuffer[] = [],
   coreOptions: BuildPdfCoreOptions = {},
 ): Promise<{ savedBytes: Uint8Array; skippedChars: SkippedPdfTextChar[]; bytePreserved: boolean }> {
-  const { options, pageOrder, saveTimeoutMs } = coreOptions;
+  const { options, pageOrder, saveTimeoutMs, onProgress } = coreOptions;
 
   // OCR テキスト層 (renderMode 3・Ctrl+A 選択範囲) の表示オフセット (point)。
   // viewport 表示座標系で平行移動する: dx>0 で右、dy>0 で下。
@@ -1382,6 +1386,9 @@ export async function buildPdfDocumentCore(
   // loca/glyf を正しく出力できず、OTS 検証で「フォント抽出不能」になる。
   // ベンチで実 PDF roundtrip 検証済み: TTF + subset:true → warning ゼロ、
   // output size は原本と同じ (subset ~200KB のみ追加)。
+  // M-1 (bug-hunt): フォント embed/subset（fontkit）は同期 CPU バウンドの重い処理になりうる。
+  // 開始直前に一度 onProgress を呼び、worker 殻の生存判定時計をここでリフレッシュする。
+  onProgress?.();
   const customFont = needsFont
     ? (fontBytes
         ? await pdfDoc.embedFont(fontBytes, { subset: true })
@@ -1402,6 +1409,15 @@ export async function buildPdfDocumentCore(
   const sharedVisitedFormRefs = new Set<string>();
 
   for (const [pageIndex, pageData] of pageEntriesToWrite) {
+    // M-1 (bug-hunt): ページ処理粒度で生存通知する。ページ単位の同期処理（content
+    // stream 書き換え・pako 圧縮等）が積み重なった総時間ではなく「1ページ分の処理時間」
+    // だけを worker 殻の heartbeat 猶予（PREVIOUS_SAVE_TIMEOUT_MS）と比較させたい。
+    // setInterval ベースの heartbeat は同期区間中は発火できない（同一スレッドの
+    // イベントループが塞がるため）が、この呼び出しは worker 殻側で self.postMessage を
+    // 直接呼ぶ実装にすることで、メインスレッド側のイベントループ（別スレッド）が
+    // 即座に受信できる。これにより「ページ数分の合計処理時間 < 5秒」ではなく
+    // 「1ページの処理時間 < 5秒」まで安全マージンを縮小できる。
+    onProgress?.();
 
     const sortedBlocks = [...pageData.textBlocks]
       .map((block) => ({ ...block, text: sanitizeTextForPdfCopy(block.text, skippedChars, pageIndex) }))
@@ -1741,6 +1757,10 @@ export async function buildPdfDocumentCore(
     compactIndirectObjectNumbers(pdfDoc);
   }
 
+  // M-1 (bug-hunt): pdfDoc.save()（内部で pako 圧縮等の同期重処理を伴いうる）の開始直前に
+  // もう一度生存通知しておく。ページループ後この1回きりの重い呼び出しなので、開始時点の
+  // 時計リフレッシュが唯一できること（内部を分割できないため、残存リスクとして報告する）。
+  onProgress?.();
   // D4: saveTimeoutMs が指定されている場合のみ race をかける (worker 殻は 90_000 を渡す)。
   // 未指定の場合は race なしで直接 await する (main 殻)。
   let savedBytes: Uint8Array;
