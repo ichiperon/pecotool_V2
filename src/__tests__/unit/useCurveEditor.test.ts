@@ -390,6 +390,97 @@ describe('useCurveEditor — polyline creation flow', () => {
     expect(result.current.polylineDraftPoints).toHaveLength(0);
     expect(updatePageData).not.toHaveBeenCalled();
   });
+
+  // #434 F3: window レベルの Enter/Escape リスナーは元々入力要素ガードが無く、
+  // OcrCard の textarea 編集中に Enter を押すと改行のはずが draft が確定してしまっていた。
+  it('Enter key while a textarea is focused does not confirm the draft (text input takes priority)', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => {
+      result.current.handleDoubleClickCurve({ x: 10, y: 10 });
+    });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 50, y: 50 });
+    });
+    expect(result.current.polylineDraftActive).toBe(true);
+
+    const textarea = document.createElement('textarea');
+    document.body.appendChild(textarea);
+    textarea.focus();
+
+    act(() => {
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+
+    expect(result.current.polylineDraftActive).toBe(true);
+    expect(updatePageData).not.toHaveBeenCalled();
+
+    document.body.removeChild(textarea);
+  });
+
+  // Escape も同様に textarea 編集中は draft のキャンセルに奪われないことを確認する。
+  it('Escape key while a textarea is focused does not cancel the draft', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => {
+      result.current.handleDoubleClickCurve({ x: 10, y: 10 });
+    });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 50, y: 50 });
+    });
+    expect(result.current.polylineDraftActive).toBe(true);
+
+    const textarea = document.createElement('textarea');
+    document.body.appendChild(textarea);
+    textarea.focus();
+
+    act(() => {
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+
+    expect(result.current.polylineDraftActive).toBe(true);
+    expect(result.current.polylineDraftPoints.length).toBeGreaterThan(0);
+
+    document.body.removeChild(textarea);
+  });
+
+  // IME 変換確定の Enter (isComposing=true) も draft を確定させないことを確認する。
+  it('Enter key during IME composition does not confirm the draft', () => {
+    const block = makeTextBlock('block1');
+    const page = makePageData([block]);
+    const getPageData = vi.fn(() => page);
+    const updatePageData = vi.fn();
+    const params = makeParams({ getPageData, updatePageData });
+    const { result } = renderHook(() => useCurveEditor(params));
+
+    act(() => {
+      result.current.handleDoubleClickCurve({ x: 10, y: 10 });
+    });
+    act(() => {
+      result.current.lastDoubleClickTimeRef.current = 0;
+      result.current.handleMouseDownCurve({ x: 50, y: 50 });
+    });
+    expect(result.current.polylineDraftActive).toBe(true);
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true }));
+    });
+
+    expect(result.current.polylineDraftActive).toBe(true);
+    expect(updatePageData).not.toHaveBeenCalled();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

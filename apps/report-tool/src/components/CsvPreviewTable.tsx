@@ -253,10 +253,15 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
       // クロージャで startEdit や handleDelete が二重発火し、確定値の巻き戻りや
       // セル全体の誤消去につながる（BLOCKER）。OffsetAdjustOverlay の MA-4 と
       // 同じガードパターン。
+      // #434 F8: セル内の×削除ボタン（tabIndex=-1 だがフォーカス可能）にフォーカス中の
+      // Enter も同様にバブリングし、td の startEdit（Enter/F2 分岐）を誤発火させていた
+      // （ed85c92 のガードは INPUT/TEXTAREA のみで BUTTON が漏れていた）。
       const eventTarget = e.target as HTMLElement | null;
       if (
         eventTarget &&
-        (eventTarget.tagName === "INPUT" || eventTarget.tagName === "TEXTAREA")
+        (eventTarget.tagName === "INPUT" ||
+          eventTarget.tagName === "TEXTAREA" ||
+          eventTarget.tagName === "BUTTON")
       ) {
         return;
       }

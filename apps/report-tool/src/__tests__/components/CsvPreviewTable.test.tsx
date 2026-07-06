@@ -700,6 +700,27 @@ describe("CsvPreviewTable: 固定欄 input 編集 — handleInputKeyDown", () =>
     }
   );
 
+  // 回帰テスト（#434 F8）: セル内の×削除ボタン（tabIndex=-1 だがフォーカス可能）に
+  // フォーカスした状態で Enter を押すと、キーイベントが td の onKeyDown へバブリングする。
+  // ed85c92 のガードは INPUT/TEXTAREA のみ判定しており BUTTON が漏れていたため、
+  // td 側の Enter/F2 分岐（startEdit）が誤発火し編集モードへ入ってしまっていた。
+  it("×削除ボタンにフォーカス中の Enter は td の startEdit を誤発火させない", async () => {
+    setFields(["金額"]);
+    const fields = useReportStore.getState().template.fields;
+    setCells([[1, [[fields[0].id, "100"]]]]);
+    render(<CsvPreviewTable />);
+
+    const clearBtn = screen.getByRole("button", { name: /1ページ目 段1 金額 を削除/ });
+    act(() => {
+      clearBtn.focus();
+      fireEvent.keyDown(clearBtn, { key: "Enter" });
+    });
+
+    // startEdit が誤発火していれば textbox (input) が現れる。
+    // ガードが効いていれば編集モードに入らない。
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
   it(
     "Enter で確定後に blur しても確定値が保持される",
     async () => {

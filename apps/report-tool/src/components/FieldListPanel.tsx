@@ -33,6 +33,10 @@ const FieldRow: FC<FieldRowProps> = ({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    // IME 変換中/変換確定の Enter・Escape はリネームの commit/cancel に渡さない
+    // （CsvPreviewTable と同パターン・#65 / c4d01d0 参照。keyCode 229 は isComposing
+    // が false で届く IME 確定キーの互換フォールバック）。
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "Enter") commitRename();
     if (e.key === "Escape") {
       setDraft(field.name);

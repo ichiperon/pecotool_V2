@@ -166,9 +166,23 @@ export function useCurveEditor(params: UseCurveEditorParams): UseCurveEditorResu
   }, [polylineDraftActive, polylineDraftPoints, selectedIds, getPageData, updatePageData, pageIndex]);
 
   // #205: キーボードで Enter 確定 / Esc キャンセル
+  // #434 F3: window レベルのリスナーのため、OcrCard の textarea 編集中に Enter/Escape を
+  // 押しても素通しでこの draft 確定/キャンセルに奪われていた（改行のはずが curve が確定する等）。
+  // useKeyboardShortcuts.ts の isFormEditing/isContentEditing 判定と同じパターンでガードする。
   useEffect(() => {
     if (!polylineDraftActive) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      // IME 変換確定の Enter/Escape はテキスト編集側の処理に委ね、draft の確定/破棄には使わない
+      // （keyCode 229 は isComposing が false で届く IME 確定キーの互換フォールバック）。
+      if (e.isComposing || e.keyCode === 229) return;
+
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const tag = target?.tagName;
+      const isFormEditing = tag === "INPUT" || tag === "TEXTAREA";
+      const isContentEditing =
+        !!target?.isContentEditable || !!target?.closest('[contenteditable="true"]');
+      if (isFormEditing || isContentEditing) return;
+
       if (e.key === "Enter") {
         e.preventDefault();
         confirmPolylineDraft();

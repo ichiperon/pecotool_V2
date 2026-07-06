@@ -102,6 +102,56 @@ describe("OffsetAdjustOverlay – MA-4 keydown 入力要素ガード", () => {
     expect(useReportStore.getState().pageOffsets.size).toBe(0);
     document.body.removeChild(div);
   });
+
+  // #434 F1: CsvPreviewTable の gridcell（role="gridcell"）は元のインライン許可リスト
+  // （INPUT/TEXTAREA/SELECT/contentEditable）だと素通しされ、adjustOffset 中に
+  // CSV テーブルの矢印ナビが nudgePageOffset を二重発火させていた（ページオフセット破壊）。
+  it("role=gridcell 要素（CSVテーブルのセル）にフォーカス中の矢印キーは pageOffsets を変更しない", () => {
+    render(<OffsetAdjustOverlay geom={null} />);
+
+    const td = document.createElement("td");
+    td.setAttribute("role", "gridcell");
+    td.setAttribute("tabindex", "0");
+    document.body.appendChild(td);
+
+    fireEvent.keyDown(td, { key: "ArrowDown" });
+
+    expect(useReportStore.getState().pageOffsets.size).toBe(0);
+    document.body.removeChild(td);
+  });
+
+  // gridcell の子要素（例: セル内のボタン）からバブリングしてきたケースも
+  // closest 判定で捕捉されることを確認する。
+  it("role=gridcell の子要素からバブリングした矢印キーも pageOffsets を変更しない", () => {
+    render(<OffsetAdjustOverlay geom={null} />);
+
+    const td = document.createElement("td");
+    td.setAttribute("role", "gridcell");
+    const span = document.createElement("span");
+    td.appendChild(span);
+    document.body.appendChild(td);
+
+    fireEvent.keyDown(span, { key: "ArrowRight" });
+
+    expect(useReportStore.getState().pageOffsets.size).toBe(0);
+    document.body.removeChild(td);
+  });
+
+  // #434 F1: ConfirmLayout のスプリッタ（role="separator" tabIndex=0）も同様に
+  // 素通しされ、スプリッタ幅調整の矢印キーが nudgePageOffset を二重発火させていた。
+  it("role=separator[tabindex]（ConfirmLayout のスプリッタ）にフォーカス中の矢印キーは pageOffsets を変更しない", () => {
+    render(<OffsetAdjustOverlay geom={null} />);
+
+    const splitter = document.createElement("div");
+    splitter.setAttribute("role", "separator");
+    splitter.setAttribute("tabindex", "0");
+    document.body.appendChild(splitter);
+
+    fireEvent.keyDown(splitter, { key: "ArrowLeft" });
+
+    expect(useReportStore.getState().pageOffsets.size).toBe(0);
+    document.body.removeChild(splitter);
+  });
 });
 
 describe("OffsetAdjustOverlay – nudge 方向・モードガード", () => {

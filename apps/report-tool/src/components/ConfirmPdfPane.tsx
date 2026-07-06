@@ -256,6 +256,10 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
   };
 
   const handlePageInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    // IME 変換中/変換確定の Enter・Escape はページ移動の commit/reset に渡さない
+    // （CsvPreviewTable と同パターン・#65 / c4d01d0 参照。keyCode 229 は isComposing
+    // が false で届く IME 確定キーの互換フォールバック）。
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "Enter") {
       handlePageInputCommit();
     } else if (e.key === "Escape") {
