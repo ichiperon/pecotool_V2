@@ -196,21 +196,28 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
       cancelledRef.current = false;
 
       // issue #267: only persist on finalize / cancellation, not on every per-file update.
+      //
+      // #442 (R23狩り Wave4): 最終job状態はsetState updaterの副作用として読み出すのでは
+      // なく、このローカル変数(jobState)で同期的に追跡する。React 18のdispatchSetStateは
+      // 「フラットに連続した2回目以降のdispatch」ではeager評価のfast pathを取らず、渡した
+      // updater関数を即時実行する保証がない（実行がrenderまで遅延しうる）。ループ最終
+      // ファイルのper-file update()の直後にawaitを挟まずfinalizeのupdateAndPersist()を
+      // 呼ぶ本コードはまさにこのパターンに該当し、旧実装（updater内でfinalJobを捕まえる
+      // 方式）では finalJob が null のままになり summary CSV / 完了トーストが飛ぶことが
+      // あった。state計算(純粋)とReactへの反映(setCurrentJob呼び出し)を分離することで
+      // このタイミング依存を排除する。
+      let jobState: BatchJob = job;
+
       // State-only update (no localStorage write on every iteration).
       const update = (updater: (j: BatchJob) => BatchJob) => {
-        setCurrentJob((prev) => {
-          if (!prev) return prev;
-          return updater(prev);
-        });
+        jobState = updater(jobState);
+        setCurrentJob(jobState);
       };
       // Persist-aware update: used only at finalize or when capturing mid-run state for resume.
       const updateAndPersist = (updater: (j: BatchJob) => BatchJob) => {
-        setCurrentJob((prev) => {
-          if (!prev) return prev;
-          const next = updater(prev);
-          persistJob(next);
-          return next;
-        });
+        jobState = updater(jobState);
+        persistJob(jobState);
+        setCurrentJob(jobState);
       };
 
       try {
@@ -363,24 +370,20 @@ export function useBatchJob(callbacks: UseBatchJobCallbacks) {
 
         // Finalize: persist here (issue #267: only finalize and cancellation trigger localStorage)
         const wasCancelled = cancelledRef.current;
-        let finalJob: BatchJob | null = null;
-        updateAndPersist((j) => {
-          const next: BatchJob = { ...j, finishedAt: Date.now(), cancelled: wasCancelled };
-          finalJob = next;
-          return next;
-        });
+        updateAndPersist((j) => ({ ...j, finishedAt: Date.now(), cancelled: wasCancelled }));
+        // #442: jobState is updated synchronously by updateAndPersist above (no setState
+        // round-trip needed to read it back), so finalJob is always the freshly-finalized job.
+        const finalJob = jobState;
 
         // Write summary CSV
-        if (finalJob) {
-          const { outputDir, files } = finalJob as BatchJob;
-          try {
-            const csvPath = await join(outputDir, '_summary.csv');
-            await writeTextFile(csvPath, buildSummaryCsv(files));
-            callbacks.showToast(`バッチ処理完了。サマリ: ${csvPath}`);
-          } catch (e) {
-            console.warn('[BatchJob] summary CSV write failed:', e);
-            callbacks.showToast(wasCancelled ? 'バッチ処理をキャンセルしました' : 'バッチ処理が完了しました');
-          }
+        const { outputDir, files } = finalJob;
+        try {
+          const csvPath = await join(outputDir, '_summary.csv');
+          await writeTextFile(csvPath, buildSummaryCsv(files));
+          callbacks.showToast(`バッチ処理完了。サマリ: ${csvPath}`);
+        } catch (e) {
+          console.warn('[BatchJob] summary CSV write failed:', e);
+          callbacks.showToast(wasCancelled ? 'バッチ処理をキャンセルしました' : 'バッチ処理が完了しました');
         }
       } finally {
         isRunningRef.current = false;

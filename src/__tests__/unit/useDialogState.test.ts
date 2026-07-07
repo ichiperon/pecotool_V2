@@ -3,6 +3,8 @@
  *
  * #53: action 付きトーストは自動消滅させない (「別名で保存」フォールバック等)
  * #72: 直前のトーストが張った 3 秒 timer が、後続の action 付きトーストを消さない
+ * Wave4: action 付きトーストは action 無しの後続トーストでは上書きされない
+ *        (action 付き同士は後勝ちで置き換わる)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -111,7 +113,7 @@ describe('useDialogState.showToast', () => {
     expect(result.current.notification).toBeNull();
   });
 
-  it('action 付き toast の後に通常 toast を出すと、通常 toast は 3 秒で消える', () => {
+  it('action 付き toast 表示中に action 無しの toast を出しても上書きされない (優先度ルール)', () => {
     const { result } = renderHook(() => useDialogState());
 
     act(() => {
@@ -120,17 +122,39 @@ describe('useDialogState.showToast', () => {
         onClick: () => {},
       });
     });
-    // 後続の通常 toast (新しい timer がセットされる)
+    // action 無しの後続 toast (自動バックアップ通知等を想定) は抑止され、
+    // action 付き toast が残り続けること。
     act(() => {
       result.current.showToast('second');
     });
-    expect(result.current.notification?.message).toBe('second');
-    expect(result.current.notification?.action).toBeUndefined();
+    expect(result.current.notification?.message).toBe('first');
+    expect(result.current.notification?.action?.label).toBe('別名で保存');
+
+    // action 無しなのでタイマーは張られていない = 経過しても消えない
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(result.current.notification?.message).toBe('first');
+    expect(result.current.notification?.action?.label).toBe('別名で保存');
+  });
+
+  it('action 付き toast 表示中に別の action 付き toast を出すと置き換わる (後勝ち)', () => {
+    const { result } = renderHook(() => useDialogState());
 
     act(() => {
-      vi.advanceTimersByTime(3000);
+      result.current.showToast('first', true, {
+        label: '別名で保存',
+        onClick: () => {},
+      });
     });
-    expect(result.current.notification).toBeNull();
+    act(() => {
+      result.current.showToast('second', true, {
+        label: '更新する',
+        onClick: () => {},
+      });
+    });
+    expect(result.current.notification?.message).toBe('second');
+    expect(result.current.notification?.action?.label).toBe('更新する');
   });
 
   it('showSaveDialog: 初期値 false、setShowSaveDialog で切り替え可能 (issue #197)', () => {

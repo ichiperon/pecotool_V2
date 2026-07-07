@@ -730,4 +730,46 @@ describe('useBatchJob', () => {
       await firstJobPromise!;
     });
   });
+
+  // ── R23狩り Wave4: finalize summary CSV / completion toast regression ──────
+
+  it('finalize always writes _summary.csv exactly once and shows a completion toast', async () => {
+    const pdfFiles = ['/folder/a.pdf', '/folder/b.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+    });
+
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+
+    await waitFor(() => expect(result.current.currentJob?.finishedAt).toBeDefined());
+
+    // The last per-file "mark done" state update and the finalize state update
+    // are dispatched back-to-back with no `await` between them. If finalize
+    // reads its result from a setState-updater side effect (rather than
+    // computing it synchronously up front), it can silently observe a stale
+    // (null) value depending on React's internal update-queue timing, and
+    // skip writing the summary CSV / showing the completion toast.
+    const summaryCalls = vi
+      .mocked(writeTextFile)
+      .mock.calls.filter(([path]) => String(path).endsWith('_summary.csv'));
+    expect(summaryCalls).toHaveLength(1);
+    expect(summaryCalls[0][1]).toContain('filename,pageCount,ocrDurationMs,ocrErrorCount,exportPath');
+
+    expect(callbacks.showToast).toHaveBeenCalledWith(expect.stringContaining('サマリ'));
+  });
 });

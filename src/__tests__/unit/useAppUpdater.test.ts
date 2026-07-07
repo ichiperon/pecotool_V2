@@ -155,4 +155,50 @@ describe('useAppUpdater', () => {
     expect(result.current.state.isDownloading).toBe(false);
     expect(result.current.state.error).toBe('install failed');
   });
+
+  it("downloadAndInstall: エラー時の戻り値は 'error'、成功時は 'success'", async () => {
+    const mockInstall = vi.fn().mockRejectedValue(new Error('install failed'));
+    mockAdapter.mockResolvedValue(makeFakeUpdate({ downloadAndInstall: mockInstall }));
+
+    const { result } = renderHook(() => useAppUpdater(mockAdapter));
+    await act(async () => {
+      await result.current.checkForUpdate();
+    });
+
+    let downloadResult: string | undefined;
+    await act(async () => {
+      downloadResult = await result.current.downloadAndInstall();
+    });
+    expect(downloadResult).toBe('error');
+  });
+
+  it("downloadAndInstall: 二重呼び出しは拒否され ('busy')、実際のプラグイン呼び出しは1回だけ (Wave4 多重起動ガード)", async () => {
+    // 1つ目の呼び出しがまだ pending の間に2つ目を呼んでも、
+    // 実際のダウンロード処理 (update.downloadAndInstall) は1回しか実行されないこと。
+    let resolveInstall: (() => void) | undefined;
+    const mockInstall = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { resolveInstall = resolve; }),
+    );
+    mockAdapter.mockResolvedValue(makeFakeUpdate({ downloadAndInstall: mockInstall }));
+
+    const { result } = renderHook(() => useAppUpdater(mockAdapter));
+    await act(async () => {
+      await result.current.checkForUpdate();
+    });
+
+    let firstResult: string | undefined;
+    let secondResult: string | undefined;
+    await act(async () => {
+      const p1 = result.current.downloadAndInstall().then(r => { firstResult = r; });
+      // 1つ目がまだ pending (resolveInstall 未呼び出し) の間に2つ目を呼ぶ。
+      secondResult = await result.current.downloadAndInstall();
+      resolveInstall?.();
+      await p1;
+    });
+
+    expect(mockInstall).toHaveBeenCalledTimes(1);
+    expect(secondResult).toBe('busy');
+    expect(firstResult).toBe('success');
+    expect(result.current.state.isDownloading).toBe(false);
+  });
 });

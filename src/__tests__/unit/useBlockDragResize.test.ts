@@ -1110,6 +1110,176 @@ describe('useBlockDragResize: resize 4 方向の bbox 計算', () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────
+// bug-hunt round3 Wave4 (HIGH): Space 押下 (disableDrawing) 中のドラッグ迷子化。
+//
+// 背景: PdfCanvas.tsx の handleMouseMove/Up は disableDrawing=true (Space 押下中の
+//       パン操作) のとき早期 return するため、ドラッグ中に Space を押すと
+//       finishDragResize が呼ばれず dragMode/draggedId が残留する。Space 解放後は
+//       disableDrawing=false に戻る一方でドラッグ状態は残ったままなので、
+//       ボタンを押していない mousemove でも BB がマウスに追従し続ける
+//       「迷子ドラッグ」になる。
+//
+// 対策: (1) cancelDragResize でドラッグを開始前の状態へ巻き戻す (PdfCanvas 側で
+//       disableDrawing の false→true 遷移時に呼ぶ)。(2) updateDragResize 冒頭で
+//       event.buttons===0 を検知したら自動キャンセルする多層防御 (Space 以外の
+//       取りこぼし、例: canvas 外での mouseup にも効く)。
+// ─────────────────────────────────────────────────────────────
+describe('useBlockDragResize: bug-hunt round3 Wave4 (Space 押下中のドラッグ迷子化対策)', () => {
+  beforeEach(() => {
+    installRafMock();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rafQueue = [];
+  });
+
+  it('cancelDragResize: ドラッグ中に呼ぶと commit せず preview をクリアし dragMode/draggedId を初期化する', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const pushAction = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction,
+        setDragPreviewBboxes,
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    expect(result.current.dragMode).toBe('move');
+
+    // ドラッグ中 (プレビューが 1 度書き込まれた状態)
+    act(() => {
+      result.current.updateDragResize({ x: 150, y: 130 });
+    });
+    act(() => { flushRaf(); });
+    expect(setDragPreviewBboxes).toHaveBeenCalled();
+    expect(setDragPreviewBboxes.mock.calls[setDragPreviewBboxes.mock.calls.length - 1][0]).not.toBeNull();
+
+    // Space 押下相当: キャンセル
+    act(() => {
+      result.current.cancelDragResize();
+    });
+
+    // commit されない (updatePageData/pushAction は呼ばれない)
+    expect(updatePageData).not.toHaveBeenCalled();
+    expect(pushAction).not.toHaveBeenCalled();
+    // プレビューはクリアされる
+    expect(setDragPreviewBboxes.mock.calls[setDragPreviewBboxes.mock.calls.length - 1][0]).toBeNull();
+    // ドラッグ状態は初期化される
+    expect(result.current.dragMode).toBe('none');
+    expect(result.current.draggedId).toBeNull();
+    // 保留中の RAF もキャンセルされている
+    expect(rafQueue.length).toBe(0);
+
+    // キャンセル後に RAF を無理やり flush しても何も起きない (保留 pos が残っていないこと)
+    act(() => { flushRaf(); });
+    expect(updatePageData).not.toHaveBeenCalled();
+  });
+
+  it('updateDragResize: buttons===0 で呼ばれると自動的にキャンセルされ false を返す (多層防御)', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const updatePageData = vi.fn();
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData,
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes,
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+    expect(result.current.dragMode).toBe('move');
+
+    // 正常なドラッグ (buttons=1) で一度プレビューを書き込む
+    act(() => {
+      result.current.updateDragResize({ x: 130, y: 120 }, 1);
+    });
+    act(() => { flushRaf(); });
+    expect(setDragPreviewBboxes.mock.calls[setDragPreviewBboxes.mock.calls.length - 1][0]).not.toBeNull();
+
+    // ボタンが離れている (buttons=0) 状態で mousemove が来た場合、
+    // ドラッグを継続せず即座にキャンセルする。戻り値は false (未処理扱い)。
+    let handled = true;
+    act(() => {
+      handled = result.current.updateDragResize({ x: 300, y: 300 }, 0);
+    });
+
+    expect(handled).toBe(false);
+    expect(result.current.dragMode).toBe('none');
+    expect(result.current.draggedId).toBeNull();
+    expect(setDragPreviewBboxes.mock.calls[setDragPreviewBboxes.mock.calls.length - 1][0]).toBeNull();
+    // buttons===0 の分岐は RAF をスケジュールしない
+    expect(rafQueue.length).toBe(0);
+    // commit もされない
+    expect(updatePageData).not.toHaveBeenCalled();
+  });
+
+  it('updateDragResize: buttons 引数を渡さない (undefined) 場合は従来どおり動作する (呼び出し互換)', () => {
+    const block = makeBlock();
+    const pageData = makePage([block]);
+    const setDragPreviewBboxes = vi.fn();
+
+    const { result } = renderHook(() =>
+      useBlockDragResize({
+        pageIndex: 0,
+        zoom: 100,
+        selectedIds: new Set([block.id]),
+        getPageData: () => pageData,
+        updatePageData: vi.fn(),
+        toggleSelection: vi.fn(),
+        pushAction: vi.fn(),
+        setDragPreviewBboxes,
+      })
+    );
+
+    act(() => {
+      result.current.tryStartDragOrResize(
+        { x: 110, y: 110 },
+        { ctrlKey: false, metaKey: false, shiftKey: false }
+      );
+    });
+
+    let handled = false;
+    act(() => {
+      handled = result.current.updateDragResize({ x: 130, y: 120 });
+    });
+    act(() => { flushRaf(); });
+
+    expect(handled).toBe(true);
+    expect(result.current.dragMode).toBe('move'); // buttons 未指定ではキャンセルされない
+    expect(setDragPreviewBboxes.mock.calls[setDragPreviewBboxes.mock.calls.length - 1][0]).not.toBeNull();
+  });
+});
+
 describe('useBlockDragResize: 厳格化 - 複数選択と全リサイズハンドル', () => {
   beforeEach(() => {
     installRafMock();

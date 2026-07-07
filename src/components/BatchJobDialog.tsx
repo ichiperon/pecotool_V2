@@ -110,9 +110,18 @@ export const BatchJobDialog: React.FC<BatchJobDialogProps> = ({
             フォルダ一括バッチ処理
           </h2>
           <button
-            onClick={onClose}
-            style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', padding: 4 }}
-            title="閉じる"
+            // PCT-056 の backdrop クリックガードと対称にする: 実行中はヘッダの✕からも閉じさせない
+            onClick={() => { if (!isRunning) onClose(); }}
+            disabled={isRunning}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#9ca3af',
+              cursor: isRunning ? 'not-allowed' : 'pointer',
+              padding: 4,
+              opacity: isRunning ? 0.5 : 1,
+            }}
+            title={isRunning ? '実行中は閉じられません' : '閉じる'}
           >
             <X size={18} />
           </button>

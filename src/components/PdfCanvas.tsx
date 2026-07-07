@@ -216,6 +216,37 @@ export function PdfCanvas({
     polylineMousePosRef,
   } = curveEditor;
 
+  // bug-hunt round3 Wave4 (HIGH): disableDrawing (Space 押下中のパン操作) は
+  // handleMouseDown/Move/Up を丸ごと遮断するため、ドラッグ中に Space を押すと
+  // finishDragResize / handleMouseUpCurve が呼ばれないまま dragMode/draggedId
+  // (または curve handle drag) が残留する。Space 解放後は disableDrawing が
+  // false に戻る一方でドラッグ状態は残ったままなので、ボタンを押していない
+  // mousemove でも BB がマウスに追従し続ける「迷子ドラッグ」になる。
+  // disableDrawing が false→true に遷移した瞬間、進行中のドラッグを後始末する:
+  //   - BB move/resize (useBlockDragResize): 未コミットの preview のみなので
+  //     開始前の状態へキャンセルする (commit しない方が安全)。
+  //   - curve handle drag (useCurveEditor): mousemove のたびに store へ直接
+  //     書き込む設計 (未コミット状態が無い) のため、キャンセルではなく
+  //     mouseup 相当の確定処理 (handleMouseUpCurve) で undo Action を積んで
+  //     後始末する。
+  const prevDisableDrawingRef = useRef(disableDrawing);
+  useEffect(() => {
+    if (disableDrawing && !prevDisableDrawingRef.current) {
+      if (drag.dragMode !== "none") {
+        drag.cancelDragResize();
+      }
+      if (curveEditor.curveHandleDragRef.current) {
+        curveEditor.handleMouseUpCurve();
+      }
+    }
+    prevDisableDrawingRef.current = disableDrawing;
+    // drag / curveEditor はレンダーのたびに新しいオブジェクト参照になるフック戻り値
+    // なので依存配列には含めない。トリガーは disableDrawing の変化のみで十分であり、
+    // effect 自体はレンダーごとに再生成されるため発火時点の最新クロージャを使う
+    // (このファイルの他の RAF effect と同じ既存の流儀)。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disableDrawing]);
+
   const getMousePos = (e: React.MouseEvent) => {
     const canvas = overlayCanvasRef.current;
     const rect = canvas?.getBoundingClientRect();
@@ -874,7 +905,7 @@ export function PdfCanvas({
     // curve mode: useCurveEditor に委譲
     if (curveEditor.handleMouseMoveCurve(pos)) return;
 
-    if (drag.updateDragResize(pos)) {
+    if (drag.updateDragResize(pos, e.buttons)) {
       return;
     }
 

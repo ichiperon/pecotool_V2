@@ -640,6 +640,28 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Wave4: 「更新する」実行 + 結果に応じたフィードバック。
+  // 従来は downloadAndInstall の失敗が state.error に入るだけで、App 側は
+  // updateState.available しか参照していなかったため、回線断・署名検証失敗時に
+  // ユーザーへのフィードバックが一切なかった (完全サイレント)。
+  // ダウンロード開始を告知し、失敗時は再試行できるよう action 付きで再通知する。
+  const handleDownloadAndInstall = useCallback(async () => {
+    showToast('アップデートをダウンロードしています...');
+    const result = await downloadAndInstall();
+    if (result === 'error') {
+      showToast(
+        'アップデートのダウンロードに失敗しました。ネットワーク接続をご確認のうえ、もう一度お試しください。',
+        true,
+        {
+          label: '更新する',
+          onClick: () => { void handleDownloadAndInstall(); },
+        },
+      );
+    }
+    // 'busy' (多重起動ガードで弾かれたケース) は既に別の呼び出しが進行中のため、
+    // ここでは何もしない (二重にトーストを出さない)。
+  }, [downloadAndInstall, showToast]);
+
   // Feature #202: アップデート利用可能になったら toast で通知
   useEffect(() => {
     if (!updateState.available) return;
@@ -649,10 +671,10 @@ function App() {
       false,
       {
         label: '更新する',
-        onClick: () => { void downloadAndInstall(); },
+        onClick: () => { void handleDownloadAndInstall(); },
       },
     );
-  }, [updateState.available, downloadAndInstall, showToast]);
+  }, [updateState.available, handleDownloadAndInstall, showToast]);
 
   // PCT-093: 手動の「アップデート確認」は結果を必ずフィードバックする。
   // 旧実装は成功 (最新版) でも失敗でも無反応で、updater capability 欠如による

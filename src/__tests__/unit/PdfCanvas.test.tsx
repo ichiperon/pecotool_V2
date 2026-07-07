@@ -488,6 +488,95 @@ describe('PdfCanvas', () => {
     })
   })
 
+  // ── bug-hunt round3 Wave4 (HIGH): Space 押下中のドラッグ迷子化対策 ──────
+  //
+  // 背景: handleMouseMove/Up は disableDrawing=true (Space 押下によるパン操作中)
+  //       のとき早期 return する。ドラッグ中に Space を押すと finishDragResize が
+  //       呼ばれないまま dragMode/draggedId が残留し、Space 解放後はボタンを
+  //       押していない mousemove でも BB がマウスに追従し続ける「迷子ドラッグ」に
+  //       なる (App.tsx は isSpacePressed を PdfCanvas の disableDrawing prop に
+  //       そのまま渡している)。
+  //
+  // 対策: disableDrawing の false→true 遷移を検知し、進行中のドラッグを
+  //       cancelDragResize でキャンセルする。
+  describe('bug-hunt round3 Wave4: disableDrawing 中のドラッグキャンセル', () => {
+    let rafQueue: Array<{ id: number; cb: FrameRequestCallback }> = [];
+    let rafId = 0;
+
+    beforeEach(() => {
+      rafQueue = [];
+      rafId = 0;
+      vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation(
+        (cb: FrameRequestCallback) => {
+          const id = ++rafId;
+          rafQueue.push({ id, cb });
+          return id;
+        }
+      );
+      vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id: number) => {
+        rafQueue = rafQueue.filter((e) => e.id !== id);
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      rafQueue = [];
+    });
+
+    function flushRaf() {
+      const queued = rafQueue;
+      rafQueue = [];
+      for (const { cb } of queued) cb(performance.now());
+    }
+
+    it('ドラッグ中に disableDrawing が true になると dragPreviewBboxes がクリアされ、bbox は開始前のまま', () => {
+      const { container, rerender } = render(<PdfCanvas pageIndex={0} disableDrawing={false} />);
+      const overlay = container.querySelectorAll('canvas')[OVERLAY_INTERACTIVE_INDEX];
+
+      // b1 (10,10,100,50) 内をクリック → move ドラッグ開始
+      fireEvent.mouseDown(overlay, { clientX: 50, clientY: 30, buttons: 1 });
+      fireEvent.mouseMove(overlay, { clientX: 70, clientY: 50, buttons: 1 });
+      act(() => { flushRaf(); });
+
+      // ドラッグ中: プレビューが書き込まれている
+      expect(useViewerStore.getState().dragPreviewBboxes).not.toBeNull();
+
+      // Space 押下相当: disableDrawing が false→true に遷移
+      rerender(<PdfCanvas pageIndex={0} disableDrawing={true} />);
+
+      // ドラッグはキャンセルされ、プレビューはクリアされる
+      expect(useViewerStore.getState().dragPreviewBboxes).toBeNull();
+      // store の bbox は開始前のまま (commit されていない = finishDragResize は呼ばれていない)
+      const block = usePecoStore.getState().document!.pages.get(0)!.textBlocks[0];
+      expect(block.bbox).toEqual({ x: 10, y: 10, width: 100, height: 50 });
+    });
+
+    it('Space 解放後、ボタンを押していない mousemove では BB が追従しない (迷子ドラッグ防止)', () => {
+      const { container, rerender } = render(<PdfCanvas pageIndex={0} disableDrawing={false} />);
+      const overlay = container.querySelectorAll('canvas')[OVERLAY_INTERACTIVE_INDEX];
+
+      fireEvent.mouseDown(overlay, { clientX: 50, clientY: 30, buttons: 1 });
+      fireEvent.mouseMove(overlay, { clientX: 70, clientY: 50, buttons: 1 });
+      act(() => { flushRaf(); });
+      expect(useViewerStore.getState().dragPreviewBboxes).not.toBeNull();
+
+      // Space 押下 → キャンセル
+      rerender(<PdfCanvas pageIndex={0} disableDrawing={true} />);
+      expect(useViewerStore.getState().dragPreviewBboxes).toBeNull();
+
+      // Space 解放
+      rerender(<PdfCanvas pageIndex={0} disableDrawing={false} />);
+
+      // ボタンを押していない mousemove では drag は再開しない
+      fireEvent.mouseMove(overlay, { clientX: 200, clientY: 200, buttons: 0 });
+      act(() => { flushRaf(); });
+
+      expect(useViewerStore.getState().dragPreviewBboxes).toBeNull();
+      const block = usePecoStore.getState().document!.pages.get(0)!.textBlocks[0];
+      expect(block.bbox).toEqual({ x: 10, y: 10, width: 100, height: 50 });
+    });
+  });
+
   // ── H-5: render 失敗時のエラーオーバーレイ・再試行導線 ──────────────
   //
   // 旧実装: エラーオーバーレイの表示条件は `loadError && !pdfPage` だった。

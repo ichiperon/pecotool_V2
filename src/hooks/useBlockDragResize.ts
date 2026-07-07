@@ -39,7 +39,12 @@ interface UseBlockDragResizeResult {
     pos: { x: number; y: number },
     mods: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }
   ) => boolean;
-  updateDragResize: (pos: { x: number; y: number }) => boolean;
+  updateDragResize: (pos: { x: number; y: number }, buttons?: number) => boolean;
+  /**
+   * bug-hunt round3 Wave4: ドラッグを「開始前の状態」へ巻き戻すキャンセル処理。
+   * finishDragResize と異なり textBlocks への commit も pushAction も行わない。
+   */
+  cancelDragResize: () => void;
   finishDragResize: () => void;
   getHoverCursor: (
     pos: { x: number; y: number },
@@ -267,8 +272,34 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     }
   };
 
-  const updateDragResize = (pos: { x: number; y: number }): boolean => {
+  // bug-hunt round3 Wave4 (HIGH): 進行中のドラッグを開始前の状態へ巻き戻すキャンセル処理。
+  // Space 押下 (disableDrawing) 中に mouseup が遮断されて dragMode/draggedId が残留すると、
+  // Space 解放後にボタンを押していなくても BB がマウスに追従し続ける「迷子ドラッグ」になる。
+  // finishDragResize と違い textBlocks への commit も pushAction も行わない (安全側)。
+  const cancelDragResize = () => {
+    if (!draggedId && dragMode === "none") return;
+    if (dragRafRef.current !== null) {
+      cancelAnimationFrame(dragRafRef.current);
+      dragRafRef.current = null;
+    }
+    pendingDragPosRef.current = null;
+    lastAppliedDragPosRef.current = null;
+    setDragPreviewBboxes(null);
+    preDragPageRef.current = null;
+    setDraggedId(null);
+    setDragMode("none");
+  };
+
+  const updateDragResize = (pos: { x: number; y: number }, buttons?: number): boolean => {
     if (!draggedId || dragMode === "none") return false;
+    // bug-hunt round3 Wave4: 多層防御。Space 解放直後の取りこぼしや canvas 外での
+    // mouseup 未着火など、何らかの理由でボタンが離されているのに drag 状態が
+    // 残ってしまった場合、ここで検知してキャンセルする。呼び出し元が buttons を
+    // 渡さない (undefined) 場合は判定をスキップし、既存呼び出しとの互換を保つ。
+    if (buttons === 0) {
+      cancelDragResize();
+      return false;
+    }
     // 同一フレーム内の複数 mousemove を coalesce: 最新 pos のみを採用し、
     // RAF コールバックで 1 度だけ実体処理を走らせる。
     pendingDragPosRef.current = pos;
@@ -457,6 +488,7 @@ export function useBlockDragResize(params: UseBlockDragResizeParams): UseBlockDr
     finishAltDrag,
     tryStartDragOrResize,
     updateDragResize,
+    cancelDragResize,
     finishDragResize,
     getHoverCursor,
   };
