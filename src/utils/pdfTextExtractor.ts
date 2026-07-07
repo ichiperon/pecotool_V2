@@ -4,6 +4,7 @@ import { PageData, TextBlock, BoundingBox } from '../types';
 import { getCachedPageProxy } from './pdfLoader';
 import { getCachedPage, setCachedPage, getTemporaryPageData } from './pdfTemporaryStorage';
 import { perf } from './perfLogger';
+import { isCurveDefinition } from './curveDefinition';
 
 type PecoToolBBoxMetaEntry = {
   bbox: BoundingBox;
@@ -12,6 +13,11 @@ type PecoToolBBoxMetaEntry = {
   text: string;
   /** OCR 信頼度 (0..1)。PCT-047: 永続化・復元のために追加。後方互換のため optional。 */
   confidence?: number;
+  /**
+   * 湾曲ベースライン定義 (issue #186)。TextBlock へ取り込む前に isCurveDefinition で
+   * 構造検証する。後方互換のため optional。
+   */
+  curve?: unknown;
 };
 
 type LoadPageOptions = {
@@ -40,6 +46,8 @@ export async function loadPage(
     text: string;
     /** OCR 信頼度 (0..1)。PCT-047: 後方互換のため optional。 */
     confidence?: number;
+    /** 湾曲ベースライン定義 (issue #186)。後方互換のため optional。 */
+    curve?: unknown;
   }>> | null,
   mtime?: number,
   options?: LoadPageOptions,
@@ -89,19 +97,34 @@ export async function loadPage(
     // ブロックに 1 つズレる既知バグの原因となるため採用しない。
     const savedMeta = bboxMeta?.[String(pageIndex)];
     if (shouldUseSavedMeta(savedMeta, textItems)) {
-      textBlocks = savedMeta.map((meta) => ({
-        id: crypto.randomUUID(),
-        text: meta.text,
-        originalText: meta.text,
-        bbox: meta.bbox,
-        writingMode: meta.writingMode as 'horizontal' | 'vertical',
-        order: meta.order,
-        isNew: false,
-        isDirty: false,
-        // PCT-047: 永続化された confidence を復元する。
-        // 欠如時 (既存 PDF) は undefined のままにして legacy 扱い（色付けしない）とする。
-        ...(meta.confidence !== undefined ? { confidence: meta.confidence } : {}),
-      }));
+      textBlocks = savedMeta.map((meta) => {
+        // issue #186 / H-1 (bug-hunt round3): 永続化された curve を復元する。
+        // meta.curve は JSON から読んだ unknown 値のため、TextBlock に取り込む前に
+        // isCurveDefinition で構造検証する。検証失敗時は curve なし (axis-aligned BB)
+        // として扱い、原因追跡のため console.warn で 1 行だけ記録する。
+        let curve: TextBlock['curve'];
+        if (meta.curve !== undefined) {
+          if (isCurveDefinition(meta.curve)) {
+            curve = meta.curve;
+          } else {
+            console.warn('[loadPage] Invalid curve definition in saved meta; dropping curve for this block', { pageIndex, order: meta.order });
+          }
+        }
+        return {
+          id: crypto.randomUUID(),
+          text: meta.text,
+          originalText: meta.text,
+          bbox: meta.bbox,
+          writingMode: meta.writingMode as 'horizontal' | 'vertical',
+          order: meta.order,
+          isNew: false,
+          isDirty: false,
+          // PCT-047: 永続化された confidence を復元する。
+          // 欠如時 (既存 PDF) は undefined のままにして legacy 扱い（色付けしない）とする。
+          ...(meta.confidence !== undefined ? { confidence: meta.confidence } : {}),
+          ...(curve !== undefined ? { curve } : {}),
+        };
+      });
     } else {
       // Fallback: compute bboxes from pdfjs transform (original OCR text)
       // Use viewport.convertToViewportPoint to correctly handle page rotation (/Rotate)

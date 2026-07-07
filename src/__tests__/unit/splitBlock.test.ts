@@ -99,10 +99,13 @@ describe("getSplitRatioSnapped", () => {
 
   it("surrogate-pair grapheme is treated as a single unit", () => {
     // "A😀B" → 3 graphemes, weights [1,2,1], totalW=4. ratio=0.5 → targetW=2.
-    // j=0:cur=1<2, j=1:cur=3>=2 → cur-targetW=1, weight/2=1 → 1<1 is false → return j=1 → 1/3
+    // j=0:cur=1<2, j=1:cur=3>=2 → cur-targetW=1, weight/2=1 → 1<1 is false → return j=1 (safeIdx=1).
+    // 返り値は「文字数比」(1/3) ではなく「累積 weight 比」: weightSum(0..0)/totalW = 1/4。
+    // 文字数比を返すと、この値を getSplitIndex に再度通したときに idx=1 に戻らない
+    // (ダブルスナップで境界がズレる、#423 の再発防止)。
     const block = makeHorizontalBlock("A😀B");
     const result = getSplitRatioSnapped(block, 0.5);
-    expect(result).toBeCloseTo(1 / 3, 10);
+    expect(result).toBeCloseTo(1 / 4, 10);
   });
 
   it("ratio outside [0,1] is clamped before snapping", () => {
@@ -115,26 +118,31 @@ describe("getSplitRatioSnapped", () => {
     expect(under).toBeCloseTo(1 / 5, 10);
   });
 
-  it("#423 regression: preview snap ratio always lands on the same grapheme boundary as the actual split", () => {
-    // 全角半角混在テキストで、あらゆる raw ratio について、プレビュー用の
-    // getSplitRatioSnapped(block, rawRatio) が指す境界と、その rawRatio をそのまま
-    // splitBlockAtRatio に渡した実分割の境界が完全一致することを確認する
-    // （#423: プレビュー線=文字数等分 / 実分割=weight加重 の食い違い防止の直接回帰）。
-    const mixedTexts = ["漢AAAA", "あいうA", "A漢A漢A", "漢字混在テキストABC123"];
+  it("#423 regression: snapped ratio fed back into the actual split lands on the identical grapheme boundary (idempotent snap, real call path)", () => {
+    // 実運用の経路 (useCanvasDrawing.trySplit) は
+    //   const ratio = getSplitRatioSnapped(block, rawRatio);
+    //   const split = splitBlockAtRatio(block, ratio);
+    // という「snap してから、その結果を再度分割ロジックに渡す」流れになっている。
+    // snap の戻り値が文字数比だと、この2回目の weight 加重マッピングで
+    // 最初に snap した idx とは別の idx に化けてしまう(ダブルスナップ)。
+    // ここでは snapped ratio を実際に splitBlockAtRatio へ渡した結果が、
+    // rawRatio を直接渡した結果と同じ境界になる(=ダブルスナップで idx がズレない)
+    // ことを、全角/半角混在テキストで確認する。
+    const mixedTexts = ["漢AAAA", "あいうA", "A漢A漢A", "漢字混在テキストABC123", "あああaaa"];
     for (const text of mixedTexts) {
       const block = makeHorizontalBlock(text);
       for (const rawRatio of [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9]) {
-        // プレビューが「ここで割れる」と示す境界（グラフェム数換算）
+        // 直接 rawRatio を渡した場合の分割境界（真の期待値）
+        const direct = splitBlockAtRatio(block, rawRatio);
+        expect(direct).not.toBeNull();
+
+        // 実経路: snap してからその値を分割ロジックへ渡す
         const snapped = getSplitRatioSnapped(block, rawRatio);
-        const graphemes = Array.from(text);
-        const previewSplitIdx = Math.round(snapped * graphemes.length);
+        const viaSnap = splitBlockAtRatio(block, snapped);
+        expect(viaSnap).not.toBeNull();
 
-        // 実分割は同じ rawRatio を直接 weight 加重ロジックに渡す
-        const result = splitBlockAtRatio(block, rawRatio);
-        expect(result).not.toBeNull();
-        const actualSplitIdx = Array.from(result!.b1.text).length;
-
-        expect(previewSplitIdx).toBe(actualSplitIdx);
+        expect(viaSnap!.b1.text).toBe(direct!.b1.text);
+        expect(viaSnap!.b2.text).toBe(direct!.b2.text);
       }
     }
   });
@@ -277,5 +285,22 @@ describe("splitBlockAtRatio", () => {
     // split で text を確定したら originalText も同じ値に揃える
     expect(result.b1.originalText).toBe(result.b1.text);
     expect(result.b2.originalText).toBe(result.b2.text);
+  });
+
+  it("#423 regression: カーブ付きブロックを分割すると、両子ブロックとも curve が解除される (二重レイアウト保存の防止)", () => {
+    const block = makeBlock({
+      text: "abcdef",
+      curve: {
+        type: "arc",
+        center: { x: 0, y: 0 },
+        radius: 100,
+        startAngle: 0,
+        endAngle: Math.PI,
+      },
+    });
+    const result = splitBlockAtRatio(block, 0.5)!;
+    expect(result).not.toBeNull();
+    expect(result.b1.curve).toBeUndefined();
+    expect(result.b2.curve).toBeUndefined();
   });
 });

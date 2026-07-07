@@ -31,10 +31,10 @@ import { resolve } from 'node:path';
 import { PDFDocument, PDFArray, PDFRawStream, PDFName, PDFNumber, degrees } from '@cantoo/pdf-lib';
 import { inflate } from 'pako';
 import { buildPdfDocument } from '../../utils/pdfSaver';
-import { remapBboxForRotation } from '../../utils/pdfSaverCore';
+import { remapBboxForRotation, remapCurveForRotation } from '../../utils/pdfSaverCore';
 import { readPecoToolBBoxMetaFromPdfDoc } from '../../utils/pdfPecoToolMetadata';
 import { usePecoStore } from '../../store/pecoStore';
-import type { PageData, PecoDocument, TextBlock } from '../../types';
+import type { CurveDefinition, PageData, PecoDocument, TextBlock } from '../../types';
 
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
 // pecoStore.ts は utils/pdfLoader.ts を静的 import する。pdfLoader.ts はモジュール先頭で
@@ -187,9 +187,53 @@ function makeDoc(
   };
 }
 
+/** H-2 (bug-hunt round3 Wave2): curve 付き block を持つ PecoDocument を作る。makeDoc の curve 版。 */
+function makeDocWithCurve(
+  bboxV: { x: number; y: number; width: number; height: number },
+  curve: CurveDefinition,
+  pageW: number,
+  pageH: number,
+  userRotation: 0 | 90 | 180 | 270,
+): PecoDocument {
+  const block: TextBlock = {
+    id: 'b0',
+    text: 'Hello',
+    originalText: 'Hello',
+    bbox: bboxV,
+    writingMode: 'horizontal',
+    order: 0,
+    isNew: false,
+    isDirty: true,
+    curve,
+  };
+  const page: PageData = {
+    pageIndex: 0,
+    width: pageW,
+    height: pageH,
+    textBlocks: [block],
+    isDirty: true,
+    thumbnail: null,
+    rotation: userRotation,
+  };
+  return {
+    filePath: 'rotated-composite-curve.pdf',
+    fileName: 'rotated-composite-curve.pdf',
+    totalPages: 1,
+    metadata: {},
+    pages: new Map([[0, page]]),
+  };
+}
+
 const PAGE_W = 595;
 const PAGE_H = 842;
 const BBOX_V = { x: 100, y: 100, width: 200, height: 20 };
+const ARC_V: CurveDefinition = {
+  type: 'arc',
+  center: { x: 200, y: 150 },
+  radius: 80,
+  startAngle: 0,
+  endAngle: Math.PI,
+};
 
 describe('#352/#367 (PCT-129/PCT-144): 元 /Rotate を持つページへの userRotation 合成', () => {
   it('元 /Rotate=90 のページに userRotation=90 を適用すると /Rotate=180 (合成値) になる', async () => {
@@ -263,6 +307,45 @@ describe('#352/#367 (PCT-129/PCT-144): 元 /Rotate を持つページへの user
 
     // 恒等 (delta=0) ではないことも確認 (リマップが実際に効いていることの直接証拠)。
     expect(blocks[0].bbox.x).not.toBeCloseTo(BBOX_V.x, 5);
+  }, 60_000);
+
+  // ── H-2 (bug-hunt round3 Wave2): curve の回転リマップ ──────────────────
+  //
+  // 修正前: pageMetaEntries 構築で `if (b.curve) entry.curve = b.curve;` が
+  // verbatim コピーしていたため、bbox は合成後フレームへリマップされる一方、
+  // curve.center は捕捉フレーム (元 /Rotate=90) のまま残り、bbox と curve の
+  // フレームが食い違う (再オープン後に curve テキストが誤位置に焼かれる)。
+  it('H-2: bboxMeta の curve.center も合成後フレーム (180) へリマップされ、bbox と同じフレームに揃う', async () => {
+    const original = await makeRotatedPdf(PAGE_W, PAGE_H, 90);
+    const doc = makeDocWithCurve(BBOX_V, ARC_V, PAGE_W, PAGE_H, 90);
+    const fontBytes = arrayBufferFromFile(resolve(process.cwd(), 'public/fonts/IPAexGothic.ttf'));
+    const saved = await buildPdfDocument(original, doc, fontBytes);
+
+    const savedDoc = await PDFDocument.load(saved, { throwOnInvalidObject: false });
+    const meta = readPecoToolBBoxMetaFromPdfDoc(savedDoc);
+    const blocks = meta['0'] as Array<{
+      bbox: { x: number; y: number; width: number; height: number };
+      curve?: { type: string; center: { x: number; y: number }; radius: number; startAngle: number; endAngle: number };
+    }>;
+    expect(blocks).toBeDefined();
+    expect(blocks[0].curve).toBeDefined();
+
+    // 期待値は remapCurveForRotation(originalRotation=90, finalRotation=180) の直接計算と一致する。
+    const expectedCurve = remapCurveForRotation(ARC_V, 90, 180, PAGE_W, PAGE_H) as Extract<CurveDefinition, { type: 'arc' }>;
+    expect(blocks[0].curve!.center.x).toBeCloseTo(expectedCurve.center.x, 5);
+    expect(blocks[0].curve!.center.y).toBeCloseTo(expectedCurve.center.y, 5);
+    expect(blocks[0].curve!.radius).toBeCloseTo(expectedCurve.radius, 5);
+    expect(blocks[0].curve!.startAngle).toBeCloseTo(expectedCurve.startAngle, 5);
+    expect(blocks[0].curve!.endAngle).toBeCloseTo(expectedCurve.endAngle, 5);
+
+    // 恒等 (捕捉フレームのまま verbatim) ではないことを直接反証する。
+    // 修正前バグはここで center が ARC_V.center と一致してしまう。
+    expect(blocks[0].curve!.center.x).not.toBeCloseTo(ARC_V.center.x, 5);
+
+    // curve.center は bbox と同じフレームに揃っている必要がある: bbox のリマップと
+    // 独立に curve.center だけを計算しても同じ delta=90 の座標変換結果になるはず。
+    const expectedBbox = remapBboxForRotation(BBOX_V, 90, 180, PAGE_W, PAGE_H);
+    expect(blocks[0].bbox.x).toBeCloseTo(expectedBbox.x, 5);
   }, 60_000);
 
   // ── #367 (PCT-144) 本体: 多段保存の冪等性 ──────────────────────────
@@ -340,6 +423,59 @@ describe('#352/#367 (PCT-129/PCT-144): 元 /Rotate を持つページへの user
     expect(blocks2[0].bbox.width).toBeCloseTo(expectedRebasedBbox.width, 5);
     expect(blocks2[0].bbox.height).toBeCloseTo(expectedRebasedBbox.height, 5);
   }, 60_000);
+
+  // ── H-2 (bug-hunt round3 Wave2): resetDirty の curve リベース ─────────
+  //
+  // #367 のリベース (rebasedBlocks) は bbox のみを remapBboxForRotation でリベースし、
+  // curve はそのまま spread されるため旧フレームに残留する。同一セッション内で
+  // rotation=90 を保存 → resetDirty でリベース → 再編集 → 再保存すると、
+  // curve.center が bbox とフレーム不整合を起こし誤位置に焼かれる回帰があった。
+  it('H-2: resetDirty 後、curve も bbox と同じフレームへリベースされる (bbox とのフレーム整合)', async () => {
+    const fontBytes = arrayBufferFromFile(resolve(process.cwd(), 'public/fonts/IPAexGothic.ttf'));
+
+    const original = await makeRotatedPdf(PAGE_W, PAGE_H, 0);
+    const doc = makeDocWithCurve(BBOX_V, ARC_V, PAGE_W, PAGE_H, 90);
+    const livePage = doc.pages.get(0)!;
+    const saved1 = await buildPdfDocument(original, doc, fontBytes);
+    expect(await readRotateDegrees(saved1)).toBe(90);
+
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0],
+      currentPageIndex: 0,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    const savedPageSnapshots = new Map<number, PageData>([[0, livePage]]);
+    usePecoStore.getState().resetDirty(savedPageSnapshots);
+
+    const rebasedPage = usePecoStore.getState().document!.pages.get(0)!;
+    const expectedRebasedBbox = remapBboxForRotation(BBOX_V, 0, 90, PAGE_W, PAGE_H);
+    const expectedRebasedCurve = remapCurveForRotation(ARC_V, 0, 90, PAGE_W, PAGE_H) as Extract<CurveDefinition, { type: 'arc' }>;
+
+    expect(rebasedPage.textBlocks[0].bbox).toEqual(expectedRebasedBbox);
+    // 修正前: curve は spread されるだけで旧フレーム (delta=0 相当) のまま残留し、
+    // ARC_V と一致してしまう (赤)。修正後は bbox と同じ delta=90 のリベースが効く。
+    const rebasedCurve = rebasedPage.textBlocks[0].curve as Extract<CurveDefinition, { type: 'arc' }>;
+    expect(rebasedCurve).toBeDefined();
+    expect(rebasedCurve.center.x).toBeCloseTo(expectedRebasedCurve.center.x, 5);
+    expect(rebasedCurve.center.y).toBeCloseTo(expectedRebasedCurve.center.y, 5);
+    expect(rebasedCurve.startAngle).toBeCloseTo(expectedRebasedCurve.startAngle, 5);
+    expect(rebasedCurve.endAngle).toBeCloseTo(expectedRebasedCurve.endAngle, 5);
+    // 恒等 (verbatim 残留) ではないことを直接反証する。
+    expect(rebasedCurve.center.x).not.toBeCloseTo(ARC_V.center.x, 5);
+
+    // 再編集 → 再保存でも curve が二重リマップされない (delta=0 で恒等) ことを確認。
+    const reditedPage: PageData = { ...rebasedPage, isDirty: true };
+    const doc2: PecoDocument = { ...doc, pages: new Map([[0, reditedPage]]) };
+    const saved2 = await buildPdfDocument(saved1, doc2, fontBytes);
+    const saved2Doc = await PDFDocument.load(saved2, { throwOnInvalidObject: false });
+    const meta2 = readPecoToolBBoxMetaFromPdfDoc(saved2Doc);
+    const blocks2 = meta2['0'] as Array<{ curve?: { center: { x: number; y: number } } }>;
+    expect(blocks2[0].curve!.center.x).toBeCloseTo(expectedRebasedCurve.center.x, 5);
+    expect(blocks2[0].curve!.center.y).toBeCloseTo(expectedRebasedCurve.center.y, 5);
+  }, 60_000);
 });
 
 describe('remapBboxForRotation: 単体不変条件', () => {
@@ -365,6 +501,86 @@ describe('remapBboxForRotation: 単体不変条件', () => {
   });
 
   function normalizeAngle(angle: number): number {
+    return ((angle % 360) + 360) % 360;
+  }
+});
+
+describe('remapCurveForRotation: 単体不変条件 (H-2)', () => {
+  const arc: CurveDefinition = {
+    type: 'arc',
+    center: { x: 100, y: 100 },
+    radius: 80,
+    startAngle: 0.3,
+    endAngle: 2.1,
+  };
+  const polyline: CurveDefinition = {
+    type: 'polyline',
+    points: [
+      { x: 20, y: 80 },
+      { x: 100, y: 60 },
+      { x: 180, y: 80 },
+    ],
+  };
+
+  it('delta=0 (originalRotation===finalRotation) は恒等 (arc)', () => {
+    expect(remapCurveForRotation(arc, 90, 90, PAGE_W, PAGE_H)).toEqual(arc);
+    expect(remapCurveForRotation(arc, 0, 0, PAGE_W, PAGE_H)).toEqual(arc);
+  });
+
+  it('delta=0 (originalRotation===finalRotation) は恒等 (polyline)', () => {
+    expect(remapCurveForRotation(polyline, 90, 90, PAGE_W, PAGE_H)).toEqual(polyline);
+  });
+
+  it.each([0, 90, 180, 270] as const)('originalRotation=%i から単発 delta 変換した bbox 相当点は remapBboxForRotation の点変換と整合する', (rotation) => {
+    // curve の center を bbox の (x, y) 相当の点とみなし、同じ (rotation, rotation+90) 変換で
+    // remapBboxForRotation の角変換と比較する (bbox の x/y は左上点の変換則を含むため直接比較は
+    // できないが、幅0高さ0の縮退 bbox なら点変換そのものと一致するはず)。
+    const final = normalizeAngle90(rotation);
+    const point = { x: 150, y: 120 };
+    const degenerateBbox = { x: point.x, y: point.y, width: 0, height: 0 };
+    const remappedBbox = remapBboxForRotation(degenerateBbox, rotation, final, PAGE_W, PAGE_H);
+    const arcAtPoint: CurveDefinition = { type: 'arc', center: point, radius: 10, startAngle: 0, endAngle: 1 };
+    const remappedArc = remapCurveForRotation(arcAtPoint, rotation, final, PAGE_W, PAGE_H) as Extract<CurveDefinition, { type: 'arc' }>;
+    expect(remappedArc.center.x).toBeCloseTo(remappedBbox.x, 5);
+    expect(remappedArc.center.y).toBeCloseTo(remappedBbox.y, 5);
+    expect(remappedArc.radius).toBe(10); // radius は回転で不変
+  });
+
+  it('90/180/270/360 を1周させると元の arc に戻る (ラウンドトリップ不変条件)', () => {
+    let cur: CurveDefinition = arc;
+    let rot = 0;
+    for (const step of [90, 90, 90, 90] as const) {
+      const next = normalizeAngle90(rot + step);
+      cur = remapCurveForRotation(cur, rot, next, PAGE_W, PAGE_H);
+      rot = next;
+    }
+    const result = cur as Extract<CurveDefinition, { type: 'arc' }>;
+    expect(result.center.x).toBeCloseTo(arc.center.x, 5);
+    expect(result.center.y).toBeCloseTo(arc.center.y, 5);
+    expect(result.radius).toBeCloseTo(arc.radius, 5);
+    // 4回転 (360°) で角度も元に戻る (2π の整数倍差を許容)
+    const normalizeAngleRad = (a: number) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    expect(normalizeAngleRad(result.startAngle)).toBeCloseTo(normalizeAngleRad(arc.startAngle), 5);
+    expect(normalizeAngleRad(result.endAngle)).toBeCloseTo(normalizeAngleRad(arc.endAngle), 5);
+  });
+
+  it('90/180/270/360 を1周させると元の polyline に戻る (ラウンドトリップ不変条件)', () => {
+    let cur: CurveDefinition = polyline;
+    let rot = 0;
+    for (const step of [90, 90, 90, 90] as const) {
+      const next = normalizeAngle90(rot + step);
+      cur = remapCurveForRotation(cur, rot, next, PAGE_W, PAGE_H);
+      rot = next;
+    }
+    const result = cur as Extract<CurveDefinition, { type: 'polyline' }>;
+    const original = polyline as Extract<CurveDefinition, { type: 'polyline' }>;
+    for (let i = 0; i < original.points.length; i++) {
+      expect(result.points[i].x).toBeCloseTo(original.points[i].x, 5);
+      expect(result.points[i].y).toBeCloseTo(original.points[i].y, 5);
+    }
+  });
+
+  function normalizeAngle90(angle: number): number {
     return ((angle % 360) + 360) % 360;
   }
 });

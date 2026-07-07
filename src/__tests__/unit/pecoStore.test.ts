@@ -3043,6 +3043,121 @@ describe('pecoStore', () => {
     })
   })
 
+  // ── bug-hunt round3: lookbehind/lookaround で置換が不発なのに hits が加算される ──
+  describe('bug-hunt round3: lookbehind/lookahead を含む正規表現の置換', () => {
+    beforeEach(() => {
+      vi.mocked(pdfLoader.saveTemporaryPageDataBatch).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.clearTemporaryChanges).mockReset().mockResolvedValue(undefined)
+      vi.mocked(pdfLoader.getAllTemporaryPageData).mockReset().mockResolvedValue(new Map())
+    })
+
+    it('R3-LA-01: lookbehind (?<=第)3 で hits=1 かつ実テキストも置換される', async () => {
+      const b = makeBlock({ id: 'b', text: '第3章' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '(?<=第)3',
+        replacement: 'X',
+        caseSensitive: false,
+        useRegex: true,
+      })
+
+      expect(result.hits).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      // 元バグ: hits は 1 に加算されるが matchStr='3' 単体では lookbehind が
+      // 不成立になり置換されない (テキストは '第3章' のまま)
+      expect(blocks[0].text).toBe('第X章')
+    })
+
+    it('R3-LA-02: lookahead 3(?=章) で hits=1 かつ実テキストも置換される', async () => {
+      const b = makeBlock({ id: 'b', text: '第3章' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '3(?=章)',
+        replacement: 'X',
+        caseSensitive: false,
+        useRegex: true,
+      })
+
+      expect(result.hits).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('第X章')
+    })
+
+    it('R3-LA-03: 後方参照 (\\d)章 → $1節 の既存挙動は変わらない', async () => {
+      const b = makeBlock({ id: 'b', text: '第3章' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '(\\d)章',
+        replacement: '$1節',
+        caseSensitive: false,
+        useRegex: true,
+      })
+
+      expect(result.hits).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('第3節')
+    })
+
+    it('R3-LA-04: 非 regex 経路 (useRegex=false) は影響を受けない', async () => {
+      const b = makeBlock({ id: 'b', text: '第3章' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+      })
+
+      const result = await usePecoStore.getState().replaceText({
+        scope: 'current',
+        pattern: '3',
+        replacement: 'X',
+        caseSensitive: false,
+        useRegex: false,
+      })
+
+      expect(result.hits).toBe(1)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('第X章')
+    })
+
+    it('R3-LA-05: replaceTextBatch でも lookbehind 込みルールが実テキストへ反映される', async () => {
+      const b = makeBlock({ id: 'b', text: '第3章 第5章' })
+      const page = makePage({ pageIndex: 0, textBlocks: [b] })
+      usePecoStore.setState({
+        document: makeDoc(new Map([[0, page]])),
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      const result = await usePecoStore.getState().replaceTextBatch(
+        [{ pattern: '(?<=第)\\d', replacement: 'X', isRegex: true, caseSensitive: false }],
+        'all',
+      )
+
+      expect(result.totalHits).toBe(2)
+      const blocks = usePecoStore.getState().document!.pages.get(0)!.textBlocks
+      expect(blocks[0].text).toBe('第X章 第X章')
+    })
+  })
+
   // ── issue #213: replaceTextBatch (1-pass batch replace) ──────
   describe('issue #213: replaceTextBatch', () => {
     beforeEach(() => {

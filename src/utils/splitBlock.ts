@@ -47,12 +47,40 @@ function getSplitIndex(graphemes: string[], ratio: number): number {
 }
 
 /**
+ * Sum of full-width(2)/half-width(1) weights for graphemes[0..idx-1].
+ * Used to express a grapheme boundary as a weighted ratio (not a plain
+ * character-count ratio) so that feeding the result back into
+ * getSplitIndex reproduces the same idx (see getSplitRatioSnapped).
+ */
+function cumulativeWeightRatio(graphemes: string[], idx: number): number {
+  let totalW = 0;
+  let cumW = 0;
+  for (let j = 0; j < graphemes.length; j++) {
+    const w = graphemeWeight(graphemes[j]);
+    totalW += w;
+    if (j < idx) cumW += w;
+  }
+  return totalW > 0 ? cumW / totalW : 0;
+}
+
+/**
  * Converts a geometric ratio (0-1) to the nearest character boundary ratio.
  * Snaps to the closest grapheme boundary within 1..length-1 so the caller
  * can preview and perform splits that land exactly on a character edge.
  * Uses the same full-width(2)/half-width(1) weighted boundary calculation as
  * splitBlockAtRatio (via getSplitIndex) so the preview line always lands on
  * the exact position where the actual split will occur (#423 / PCT-192).
+ *
+ * The returned ratio is expressed as a *weighted* cumulative ratio (sum of
+ * weights up to the snapped index / total weight), not a plain character-count
+ * ratio. This matters because callers (useCanvasDrawing.trySplit) feed the
+ * returned ratio back into splitBlockAtRatio, which re-derives the split index
+ * via the same weighted getSplitIndex mapping. Returning a character-count
+ * ratio here would make that second mapping land on a different index for
+ * mixed full-width/half-width text (double-snap drift), splitting the text at
+ * a different boundary than the bbox division line. The weighted ratio makes
+ * the round trip idempotent: getSplitIndex(graphemes, cumulativeWeightRatio(idx)) === idx.
+ *
  * Returns the original ratio unchanged when the block has 0 or 1 graphemes
  * (splitting is not meaningful; splitBlockAtRatio will return null for those).
  */
@@ -61,7 +89,7 @@ export function getSplitRatioSnapped(block: TextBlock, ratio: number): number {
   if (graphemes.length <= 1) return ratio;
   const clamped = Math.max(0, Math.min(1, ratio));
   const safeIdx = getSplitIndex(graphemes, clamped);
-  return safeIdx / graphemes.length;
+  return cumulativeWeightRatio(graphemes, safeIdx);
 }
 
 export function splitBlockAtRatio(block: TextBlock, ratio: number): SplitResult | null {
@@ -79,12 +107,18 @@ export function splitBlockAtRatio(block: TextBlock, ratio: number): SplitResult 
     return null;
   }
 
+  // #423 / PCT-192: 分割元が curve 付きの場合、素朴な spread だと両子ブロックへ
+  // 同一の curve（円弧/折れ線の全長）がそのまま複製され、分割後の2テキストが
+  // それぞれ元の全長カーブに沿って再配置され二重レイアウトで保存される。
+  // カーブは分割前提で定義された座標列のため、分割後は curve を解除し
+  // 通常の axis-aligned bbox 配置にフォールバックする（安全側）。
   const b1: TextBlock = {
     ...block,
     id: crypto.randomUUID(),
     text: text1,
     originalText: text1,
     bbox: { ...block.bbox },
+    curve: undefined,
     isDirty: true,
   };
   const b2: TextBlock = {
@@ -93,6 +127,7 @@ export function splitBlockAtRatio(block: TextBlock, ratio: number): SplitResult 
     text: text2,
     originalText: text2,
     bbox: { ...block.bbox },
+    curve: undefined,
     isDirty: true,
   };
 

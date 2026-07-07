@@ -6,6 +6,10 @@ import type { CurveDefinition } from '../types';
  * 外部由来 (バックアップ等) のデータを TextBlock に取り込む前に通す。
  *
  * 不正値は静かに drop される (curve なしの axis-aligned BB として扱われる)。
+ *
+ * 数値フィールドは Number.isFinite で検証する (typeof number だけでは Infinity/NaN が
+ * 通過してしまい、外部データ取込の検証ゲートとして bbox 側 (isValidBBox は isFinite 必須)
+ * と非対称になるため揃える)。
  */
 export function isCurveDefinition(value: unknown): value is CurveDefinition {
   if (!value || typeof value !== 'object') return false;
@@ -14,11 +18,11 @@ export function isCurveDefinition(value: unknown): value is CurveDefinition {
     const center = v.center as Record<string, unknown> | null | undefined;
     if (!center || typeof center !== 'object') return false;
     return (
-      typeof center.x === 'number' &&
-      typeof center.y === 'number' &&
-      typeof v.radius === 'number' &&
-      typeof v.startAngle === 'number' &&
-      typeof v.endAngle === 'number'
+      Number.isFinite(center.x) &&
+      Number.isFinite(center.y) &&
+      Number.isFinite(v.radius) &&
+      Number.isFinite(v.startAngle) &&
+      Number.isFinite(v.endAngle)
     );
   }
   if (v.type === 'polyline') {
@@ -28,8 +32,8 @@ export function isCurveDefinition(value: unknown): value is CurveDefinition {
       (p) =>
         !!p &&
         typeof p === 'object' &&
-        typeof (p as Record<string, unknown>).x === 'number' &&
-        typeof (p as Record<string, unknown>).y === 'number',
+        Number.isFinite((p as Record<string, unknown>).x) &&
+        Number.isFinite((p as Record<string, unknown>).y),
     );
   }
   return false;

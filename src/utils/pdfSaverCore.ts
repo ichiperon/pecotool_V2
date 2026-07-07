@@ -689,6 +689,88 @@ export function remapBboxForRotation(
 }
 
 // ---------------------------------------------------------------------------
+// remapCurveForRotation
+// ---------------------------------------------------------------------------
+
+/**
+ * H-2 (bug-hunt round3 Wave2): remapBboxForRotation と同じ座標変換規約で
+ * CurveDefinition (arc / polyline) を「originalRotation フレーム」から
+ * 「finalRotation フレーム」へリマップする。
+ *
+ * 背景:
+ *   remapBboxForRotation は bbox をリマップするが、curve は捕捉フレームのまま
+ *   verbatim でメタに書かれていた (#186 の描画は curve が axis-aligned bbox とは
+ *   独立した viewport 座標を持つため、bbox だけリマップしても curve は取り残される)。
+ *   その結果、回転を合成した保存では curve テキストが誤位置に焼かれる。
+ *
+ * 変換規約 (remapBboxForRotation と同一の point-level 変換):
+ *   delta = normalizeRotation(finalRotation - originalRotation)
+ *   vw0/vh0 = getViewportSize(originalRotation, pageW, pageH)
+ *
+ *   delta=0:   恒等
+ *   delta=90:  (px, py) -> (vh0 - py, px)
+ *   delta=180: (px, py) -> (vw0 - px, vh0 - py)
+ *   delta=270: (px, py) -> (py, vw0 - px)
+ *
+ *   上式は remapBboxForRotation の 4 隅変換から逆算した点変換 (bbox の
+ *   x/y/width/height 式は、この点変換を bbox の 4 隅へ適用して min/max を
+ *   取ったものと数学的に同値)。
+ *
+ *   arc の角度 (startAngle/endAngle) は、上記点変換の回転成分に対応する
+ *   delta 相当の弧度 (deltaRad = delta * π/180) を単純加算するだけで正しく
+ *   変換される (回転変換は距離・角度差を保存するため、center を移してから
+ *   角度をオフセットすれば十分)。radius は不変。
+ *
+ * @param curve  originalRotation フレームの CurveDefinition
+ * @param originalRotation  保存前の /Rotate (0..270)
+ * @param finalRotation     保存後の /Rotate (0..270)
+ * @param pageW  PDF user-space width (page.getSize().width)
+ * @param pageH  PDF user-space height (page.getSize().height)
+ */
+export function remapCurveForRotation(
+  curve: CurveDefinition,
+  originalRotation: number,
+  finalRotation: number,
+  pageW: number,
+  pageH: number,
+): CurveDefinition {
+  const delta = normalizeRotation(finalRotation - originalRotation);
+  if (delta === 0) return curve;
+
+  const { vw: vw0, vh: vh0 } = getViewportSize(originalRotation, pageW, pageH);
+
+  const remapPoint = (px: number, py: number): { x: number; y: number } => {
+    switch (delta) {
+      case 90:
+        return { x: vh0 - py, y: px };
+      case 180:
+        return { x: vw0 - px, y: vh0 - py };
+      case 270:
+        return { x: py, y: vw0 - px };
+      default:
+        return { x: px, y: py };
+    }
+  };
+
+  if (curve.type === 'arc') {
+    const deltaRad = (delta * Math.PI) / 180;
+    const center = remapPoint(curve.center.x, curve.center.y);
+    return {
+      type: 'arc',
+      center,
+      radius: curve.radius,
+      startAngle: curve.startAngle + deltaRad,
+      endAngle: curve.endAngle + deltaRad,
+    };
+  }
+
+  return {
+    type: 'polyline',
+    points: curve.points.map((p) => remapPoint(p.x, p.y)),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // asPageIndex
 // ---------------------------------------------------------------------------
 
@@ -1462,8 +1544,11 @@ export async function buildPdfDocumentCore(
         order: b.order,
         text: b.text,
       };
-      // issue #186: 湾曲ベースラインが定義されていれば JSON に同梱
-      if (b.curve) entry.curve = b.curve;
+      // issue #186: 湾曲ベースラインが定義されていれば JSON に同梱。
+      // H-2 (bug-hunt round3 Wave2): bbox と同じ originalRotation→finalRotation の
+      // フレーム変換を curve にも適用する。verbatim で書くと回転合成時に curve だけ
+      // 捕捉フレームに取り残され、再オープン後に curve テキストが誤位置に焼かれる。
+      if (b.curve) entry.curve = remapCurveForRotation(b.curve, originalRotation, finalRotationForMeta, pageW, pageH);
       // #192 / PCT-047: confidence を永続化する。再オープン後も低信頼ハイライトが機能するよう、
       // undefined でない場合のみキーを書き込む（後方互換: 欠如時は undefined 扱いのまま）。
       if (b.confidence !== undefined) entry.confidence = b.confidence;

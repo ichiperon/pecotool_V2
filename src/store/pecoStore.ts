@@ -10,7 +10,8 @@ import {
 } from '../utils/pdfLoader';
 import { resolvePageId, resolveDisplayIndex, pageOrderEquals } from '../utils/pageOrder';
 import { perf } from '../utils/perfLogger';
-import { remapBboxForRotation, normalizeRotation } from '../utils/pdfSaverCore';
+import { remapBboxForRotation, remapCurveForRotation, normalizeRotation } from '../utils/pdfSaverCore';
+import { expandReplacementPattern, replacerArgsToMatch } from '../utils/regexReplacePattern';
 
 // 進行中のLRU退避IDB書き込みPromiseを追跡する。
 // 保存処理はこれらが完了してからIDBを読み込む必要がある。
@@ -1212,9 +1213,17 @@ export const usePecoStore = create<PecoState>((set, get) => ({
             // remapBboxForRotation を originalRotation=0 / finalRotation=bakedRotation で
             // 呼べば、PageData.width/height に保持している「捕捉時 viewport 寸法」を
             // そのまま vw0/vh0 として使える。
+            // H-2 (bug-hunt round3 Wave2): bbox と同じ引数 (originalRotation=0 /
+            // finalRotation=bakedRotation / 捕捉時 viewport 寸法) で curve もリベースする。
+            // これを怠ると、同一セッション内の再保存で curve だけ旧フレームに残留し、
+            // remapBboxForRotation(delta=0 相当) の恒等前提が崩れて curve テキストが
+            // 誤位置に焼かれる。
             const rebasedBlocks = livePage.textBlocks.map((block) => ({
               ...block,
               bbox: remapBboxForRotation(block.bbox, 0, bakedRotation, livePage.width, livePage.height),
+              ...(block.curve !== undefined
+                ? { curve: remapCurveForRotation(block.curve, 0, bakedRotation, livePage.width, livePage.height) }
+                : {}),
             }));
             const swapDims = bakedRotation === 90 || bakedRotation === 270;
             // 参照不一致で、かつ保存中の編集が rotation 自体にも追加で乗っていた場合
@@ -1819,12 +1828,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const selectedIds = state.selectedIds;
     const skip = skipBlockIds ?? new Set<string>();
 
-    // perf(#223): useRegex=true の後方参照解決用の non-global 版 RegExp を outer scope で
-    // 1 度だけ生成する。旧実装は replacer callback 内で毎マッチ new RegExp していた。
-    const oneShotRe = useRegex
-      ? new RegExp(re.source, re.flags.replace('g', ''))
-      : null;
-
     let totalHits = 0;
     let totalBlocks = 0;
     let skippedBlocks = 0;
@@ -1861,18 +1864,19 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         // をブロックしていた。replacer に関数を渡せば match ごとに hit++ できる。
         // safeReplacement (useRegex=false) の '$$' エスケープは replacer の戻り値では
         // 不要 (文字列が返り値としてそのまま使われる) のため、生の replacement を返す。
+        //
+        // bug-hunt round3: useRegex=true の $ 展開は、切り出した matchStr 単体に同じ
+        // 正規表現を再適用する旧方式だと lookbehind/lookahead (`(?<=第)3` 等) が
+        // マッチ範囲外の文脈に依存するため再マッチに失敗し、matchStr がそのまま
+        // 返って置換されない (hits だけ加算される虚偽の成功報告になっていた)。
+        // replacer callback の引数には元テキスト全体に対する走査で確定済みの
+        // capture group がそのまま渡ってくるので、再マッチせず直接 $ 展開する。
         let hits = 0;
         const literalReplacement = replacement;
         const replaced = b.text.replace(re, useRegex
-          ? (...args) => {
+          ? (...args: unknown[]) => {
               hits++;
-              // useRegex=true: 後方参照を反映させるため $-string で再 replace する。
-              // ただし replacer 内で動的に行うので、match 全体を素材に同じ正規表現
-              // ではなく安全に safeReplacement を適用する手段が必要。ここでは
-              // String.prototype.replace の "1回限り" 呼び出しで $-参照を解決する。
-              // perf(#223): oneShotRe は outer scope で 1 度だけ生成済み (毎マッチ new RegExp しない)
-              const matchStr = args[0] as string;
-              return matchStr.replace(oneShotRe!, safeReplacement);
+              return expandReplacementPattern(safeReplacement, replacerArgsToMatch(args));
             }
           : () => {
               hits++;
@@ -1974,9 +1978,8 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const capturedEpoch = useInfraStore.getState().documentEpoch;
 
     // 各ルールの RegExp と置換文字列を事前にコンパイルする (1 度だけ生成して使い回す)
-    // perf(#223): isRegex=true の後方参照解決用 non-global 版も outer scope で 1 度だけ生成する
     //
-    // 不正な正規表現 (isRegex=true でコンパイル失敗) は throw させず null にして
+    // 不正な正規表現 (isRegex=true でコンパイル失敗) は throw せず null にして
     // invalidRuleIndices に記録する。UI 層で検証済みの想定だが、ここでも防御する
     // ことで 1 ルールの不正が同一バッチ内の他ルールを巻き添えにしないようにする。
     type CompiledRule = {
@@ -1984,7 +1987,6 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       safeReplacement: string;
       isRegex: boolean;
       literalReplacement: string;
-      oneShotRe: RegExp | null;
     };
     const invalidRuleIndices: number[] = [];
     const compiledRules: Array<CompiledRule | null> = rules.map((rule, i) => {
@@ -2002,11 +2004,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       const safeReplacement = rule.isRegex
         ? rule.replacement
         : rule.replacement.replace(/\$/g, '$$$$');
-      // isRegex=true のみ非 global 版を生成。false なら null で replacer 内では使わない
-      const oneShotRe = rule.isRegex
-        ? new RegExp(re.source, re.flags.replace('g', ''))
-        : null;
-      return { re, safeReplacement, isRegex: rule.isRegex, literalReplacement: rule.replacement, oneShotRe };
+      return { re, safeReplacement, isRegex: rule.isRegex, literalReplacement: rule.replacement };
     });
 
     const filePath = document.filePath;
@@ -2076,16 +2074,18 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         for (let ri = 0; ri < compiledRules.length; ri++) {
           const compiled = compiledRules[ri];
           if (!compiled) continue; // 不正な正規表現ルールはスキップ (invalidRuleIndices で通知済み)
-          const { re, safeReplacement, isRegex, literalReplacement, oneShotRe } = compiled;
+          const { re, safeReplacement, isRegex, literalReplacement } = compiled;
           re.lastIndex = 0;
 
+          // bug-hunt round3: replaceText と同型の修正。matchStr 単体への再マッチだと
+          // lookbehind/lookahead が不成立になり置換が反映されない (ruleHits だけ加算
+          // される虚偽の成功報告)。replacer callback の引数から確定済み capture を
+          // 使って直接 $ 展開する (再マッチ不要)。
           let ruleHits = 0;
           const replaced = currentText.replace(re, isRegex
-            ? (...args) => {
+            ? (...args: unknown[]) => {
                 ruleHits++;
-                // perf(#223): oneShotRe は compiledRules 生成時に 1 度だけ作成済み (毎マッチ new RegExp しない)
-                const matchStr = args[0] as string;
-                return matchStr.replace(oneShotRe!, safeReplacement);
+                return expandReplacementPattern(safeReplacement, replacerArgsToMatch(args));
               }
             : () => {
                 ruleHits++;

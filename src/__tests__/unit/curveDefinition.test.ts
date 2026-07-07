@@ -158,7 +158,7 @@ describe('isCurveDefinition / arc boundary values', () => {
     ).toBe(true);
   });
 
-  it('AB-arc-04: radius が Infinity — accept (型バリデーションのみ)', () => {
+  it('AB-arc-04: radius が Infinity — reject (Number.isFinite 検証、bbox 側と対称)', () => {
     expect(
       isCurveDefinition({
         type: 'arc',
@@ -167,10 +167,10 @@ describe('isCurveDefinition / arc boundary values', () => {
         startAngle: 0,
         endAngle: Math.PI,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it('AB-arc-05: radius が NaN — accept (NaN は typeof number)', () => {
+  it('AB-arc-05: radius が NaN — reject (Number.isFinite は NaN を false と判定)', () => {
     expect(
       isCurveDefinition({
         type: 'arc',
@@ -179,7 +179,7 @@ describe('isCurveDefinition / arc boundary values', () => {
         startAngle: 0,
         endAngle: Math.PI,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('AB-arc-06: center.y が undefined — reject', () => {
@@ -253,5 +253,49 @@ describe('isCurveDefinition / polyline boundary values', () => {
         points: [{ x: 5, y: 5 }, { x: 5, y: 5 }],
       }),
     ).toBe(true);
+  });
+
+  it('AB-poly-06: 点の x が Infinity — reject (Number.isFinite 検証)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'polyline',
+        points: [{ x: 0, y: 0 }, { x: Infinity, y: 50 }],
+      }),
+    ).toBe(false);
+  });
+
+  it('AB-poly-07: 点の y が NaN — reject (Number.isFinite 検証)', () => {
+    expect(
+      isCurveDefinition({
+        type: 'polyline',
+        points: [{ x: 0, y: 0 }, { x: 100, y: NaN }],
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('isCurveDefinition / center 座標の非有限値', () => {
+  it('AB-arc-09: center.x が Infinity — reject', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: Infinity, y: 0 },
+        radius: 10,
+        startAngle: 0,
+        endAngle: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('AB-arc-10: startAngle が NaN — reject', () => {
+    expect(
+      isCurveDefinition({
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: 10,
+        startAngle: NaN,
+        endAngle: 1,
+      }),
+    ).toBe(false);
   });
 });

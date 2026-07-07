@@ -46,6 +46,24 @@ export interface ModalProps {
 const FOCUSABLE_SELECTOR =
   'a[href], area[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/**
+ * マウント中の Modal 枚数。
+ *
+ * モーダルは Esc/Tab しか自前で捕捉しないため、それ以外のキー (Delete /
+ * Ctrl+C/V / Ctrl+B/X のモード切替等) は何もしないと背後のドキュメントへ
+ * 素通りしてしまう (例: 保存ダイアログ表示中に背後の選択ブロックが Delete で
+ * 消える)。useKeyboardShortcuts はこのカウンタを唯一の情報源として
+ * 「モーダルが1枚でも開いているか」を判定し、開いている間はグローバル
+ * ショートカットの発火を止める。個別ダイアログごとに boolean を増やさず、
+ * ここに一本化する。
+ */
+let openModalCount = 0;
+
+/** 現在マウント中の Modal が1つ以上あるか。 */
+export function isAnyModalOpen(): boolean {
+  return openModalCount > 0;
+}
+
 export function Modal({
   onClose,
   titleId,
@@ -68,6 +86,15 @@ export function Modal({
     onCloseSuppressedRef.current = onCloseSuppressed;
     disableCloseRef.current = disableClose;
   }, [onClose, onCloseSuppressed, disableClose]);
+
+  // マウント中は openModalCount をインクリメントし、useKeyboardShortcuts 側の
+  // グローバルショートカットガードに「モーダルが開いている」ことを伝える。
+  useEffect(() => {
+    openModalCount += 1;
+    return () => {
+      openModalCount -= 1;
+    };
+  }, []);
 
   // Esc リスナー + Tab トラップ
   useEffect(() => {

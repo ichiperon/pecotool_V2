@@ -25,6 +25,7 @@ import { ask, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { exportTextFromDocument, buildLruAwarePageDataGetter, type TextExportFormat } from './utils/textExport';
 import { destroySharedPdfProxy, getAllTemporaryPageData } from "./utils/pdfLoader";
+import { commitActiveOcrCardEdit } from "./utils/ocrCardCommit";
 import { readReorderThreshold, writeReorderThreshold } from "./utils/reorderThreshold";
 import { PdfCanvas } from "./components/PdfCanvas";
 import { OcrEditor } from "./components/OcrEditor";
@@ -429,7 +430,16 @@ function App() {
   const handleGroup = () => {
     if (selectedIds.size < 2 || !currentPage) return;
     perf.mark('ui.blockGroup', { count: selectedIds.size });
-    const selectedBlocks = currentPage.textBlocks.filter(b => selectedIds.has(b.id));
+    // R22狩り(交差汚染 HIGH): グループ化前に編集中カードの未確定テキストを確定させる。
+    // handleReplaceConfirm の blur+skipBlockIds と同じ防御意図。ここで flush せずに
+    // 下の currentPage.textBlocks (render 時に購読したクロージャ) をそのまま使うと、
+    // フォーカス中カードの最新テキストが結合対象に反映されないまま失われる。
+    // commit 後は store 側が最新化されるので、対象ブロックは getState() から読み直す。
+    commitActiveOcrCardEdit();
+    const freshTextBlocks =
+      usePecoStore.getState().document?.pages.get(currentPageIndex)?.textBlocks
+      ?? currentPage.textBlocks;
+    const selectedBlocks = freshTextBlocks.filter(b => selectedIds.has(b.id));
 
     const minX = Math.min(...selectedBlocks.map(b => b.bbox.x));
     const minY = Math.min(...selectedBlocks.map(b => b.bbox.y));
@@ -447,7 +457,7 @@ function App() {
       isDirty: true
     };
 
-    const remainingBlocks = currentPage.textBlocks.filter(b => !selectedIds.has(b.id));
+    const remainingBlocks = freshTextBlocks.filter(b => !selectedIds.has(b.id));
     const updatedBlocks = [...remainingBlocks, newBlock].sort((a, b) => a.order - b.order).map((b, i) => ({ ...b, order: i }));
 
     updatePageData(currentPageIndex, { textBlocks: updatedBlocks, isDirty: true });

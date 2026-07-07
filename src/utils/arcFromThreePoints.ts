@@ -29,7 +29,30 @@ export function arcFromThreePoints(
   if (radius < EPS) return null;
 
   const startAngle = Math.atan2(ay - uy, ax - ux);
-  const endAngle   = Math.atan2(cy - uy, cx - ux);
+  const rawEndAngle = Math.atan2(cy - uy, cx - ux);
+  const midAngle = Math.atan2(by - uy, bx - ux);
+
+  // 円周上の p2 (中点クリック) が start→end のどちら側の弧に乗るかを判定し、
+  // endAngle を「startAngle から p2 を通って end へ向かう符号付き sweep」に
+  // 正規化する。素朴に `atan2(p3) - atan2(p1)` を使うと、p1/p3 の角度が
+  // atan2 の ±π 分岐 (継ぎ目) を跨ぐ配置 (例: p1=170°, p2=180°, p3=190°) の
+  // とき p2 を無視した反対側の長弧 (この例だと ~340°) が選ばれてしまう。
+  //
+  // dStart2Mid / dStart2End は startAngle から反時計回り (CCW) に進んだときの
+  // 弧長を [0, 2π) で測った値。p2 が「start→end の CCW 経路」上にあるか
+  // (dStart2Mid <= dStart2End) で sweep の向き・大きさを決める。
+  const TWO_PI = 2 * Math.PI;
+  const normalizePositive = (angle: number): number => {
+    let a = angle % TWO_PI;
+    if (a < 0) a += TWO_PI;
+    return a;
+  };
+  const dStart2Mid = normalizePositive(midAngle - startAngle);
+  const dStart2End = normalizePositive(rawEndAngle - startAngle);
+  // p2 が CCW 経路 (sweep = dStart2End, [0, 2π)) 上にあればそのまま採用、
+  // そうでなければ CW 経路 (sweep = dStart2End - 2π, (-2π, 0)) を採用する。
+  const sweep = dStart2Mid <= dStart2End ? dStart2End : dStart2End - TWO_PI;
+  const endAngle = startAngle + sweep;
 
   return {
     type: 'arc',
@@ -43,7 +66,8 @@ export function arcFromThreePoints(
 /**
  * arc の 3 ハンドル位置を viewport 座標で返す。
  * - handles[0]: 始点 (startAngle)
- * - handles[1]: 中点 (sweep 方向を考慮した短弧側)
+ * - handles[1]: 中点 (endAngle - startAngle の sweep をそのまま二等分した角度。
+ *   arcFromThreePoints が返す curve では p2 を通る側の sweep になっている)
  * - handles[2]: 終点 (endAngle)
  */
 export function arcHandlePositions(
@@ -52,10 +76,14 @@ export function arcHandlePositions(
   startAngle: number,
   endAngle: number,
 ): [{ x: number; y: number }, { x: number; y: number }, { x: number; y: number }] {
-  // delta を [-π, π] に正規化して sweep 方向を保持した短弧側の中点を求める
-  let delta = endAngle - startAngle;
-  while (delta > Math.PI) delta -= 2 * Math.PI;
-  while (delta < -Math.PI) delta += 2 * Math.PI;
+  // sweep (endAngle - startAngle) をそのまま使い、その中間角を中点とする。
+  // arcFromThreePoints は endAngle を「startAngle から p2 を通って end へ
+  // 向かう符号付き sweep」になるよう正規化して返す (常に短弧とは限らず、
+  // p2 が反対側にあれば 180° を超える sweep もあり得る)。ここで delta を
+  // [-π, π] に丸めてしまうと sweep が π を超えるケースで中点が p2 と反対側に
+  // ずれ、curveGlyphLayout (layoutOnArc) が使う生の sweep と食い違って
+  // ハンドル位置とグリフ配置が分離するバグの原因になっていたため、丸めない。
+  const delta = endAngle - startAngle;
   const midAngle = startAngle + delta / 2;
 
   const polar = (a: number) => ({

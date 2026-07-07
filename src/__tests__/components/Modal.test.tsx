@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, fireEvent, cleanup, screen } from '@testing-library/react';
-import { Modal, useModalTitleId } from '../../components/ui/Modal';
+import { Modal, useModalTitleId, isAnyModalOpen } from '../../components/ui/Modal';
 
 afterEach(() => cleanup());
 
@@ -332,5 +332,30 @@ describe('Modal (Issue #42): disableClose=true で close を抑止する', () =>
     fireEvent.keyDown(window, { key: 'Escape' });
     // 増えない
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Modal: isAnyModalOpen (モーダル裏ショートカット対策の単一情報源)', () => {
+  it('マウント前は false を返す', () => {
+    expect(isAnyModalOpen()).toBe(false);
+  });
+
+  it('マウント中は true、unmount 後は false になる', () => {
+    const { unmount } = render(<Harness onClose={() => {}} />);
+    expect(isAnyModalOpen()).toBe(true);
+    unmount();
+    expect(isAnyModalOpen()).toBe(false);
+  });
+
+  it('多重マウント: 2枚開いている状態で1枚 close してもまだ true、両方 close で false になる', () => {
+    const a = render(<Harness onClose={() => {}} />);
+    const b = render(<Harness onClose={() => {}} />);
+    expect(isAnyModalOpen()).toBe(true);
+
+    a.unmount();
+    expect(isAnyModalOpen()).toBe(true);
+
+    b.unmount();
+    expect(isAnyModalOpen()).toBe(false);
   });
 });

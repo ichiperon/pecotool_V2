@@ -400,6 +400,49 @@ describe('buildMatchPreview (issue #98)', () => {
     expect(r.items[0].after).toBe('123-abc');
   });
 
+  // ── bug-hunt round3: lookbehind/lookahead で after プレビューが before のまま (=置換なし) に見える ──
+  it('R3-LA-06: lookbehind (?<=第)\\d を含むプレビューで after が正しく展開される', () => {
+    const p0 = makePage(0, [makeBlock({ id: 'b1', text: '第3章' })]);
+    const re = /(?<=第)\d/g;
+    const r = buildMatchPreview({
+      re,
+      replacement: 'X',
+      useRegex: true,
+      scope: 'current',
+      pagesMap: buildPagesMap([p0]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+    });
+    // 元バグ: matchStr='3' 単体への再マッチが失敗し after が 'X' に展開されず before と
+    // 同じ '第3章' のまま (=置換されていないように見える) になっていた
+    expect(r.items[0].after).toBe('第X章');
+    expect(r.items[0].afterRanges).toEqual([{ start: 1, end: 2 }]);
+  });
+
+  it('R3-LA-07: lookahead \\d(?=章) を含むプレビューで after が正しく展開される、件数も一致する', () => {
+    const p0 = makePage(0, [makeBlock({ id: 'b1', text: '第3章 第5章' })]);
+    const re = /\d(?=章)/g;
+    const r = buildMatchPreview({
+      re,
+      replacement: 'X',
+      useRegex: true,
+      scope: 'current',
+      pagesMap: buildPagesMap([p0]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+    });
+    expect(r.items[0].after).toBe('第X章 第X章');
+    // countMatches (実行系の hits と対応) と一致することも確認
+    const counts = countMatches({
+      re: /\d(?=章)/g,
+      scope: 'current',
+      pagesMap: buildPagesMap([p0]),
+      currentPageIndex: 0,
+      selectedIds: new Set(),
+    });
+    expect(counts.hits).toBe(r.items[0].beforeRanges.length);
+  });
+
   it('useRegex=false で $ は literal 扱い (replacement の $1 が文字列のまま入る)', () => {
     const p0 = makePage(0, [makeBlock({ id: 'b1', text: 'abc' })]);
     const re = /abc/g;

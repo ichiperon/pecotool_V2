@@ -1,6 +1,7 @@
-import { renderHook, cleanup } from '@testing-library/react';
+import { renderHook, render, cleanup } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
+import { Modal, useModalTitleId } from '../../components/ui/Modal';
 
 function makeActions(
   overrides: Partial<{
@@ -474,5 +475,83 @@ describe('useKeyboardShortcuts: Esc split mode 解除 (issue #292)', () => {
     pressEsc(content);
 
     expect(actions.toggleSplitMode).not.toHaveBeenCalled();
+  });
+});
+
+describe('useKeyboardShortcuts: モーダル裏へのショートカット素通り対策', () => {
+  // 再現手順 (バグ狩り報告): ブロック選択 → 別名保存ダイアログ表示 → Delete →
+  // 背後の選択ブロックが黙って削除される。Modal は Esc/Tab しか自前で捕捉しない
+  // ため、それ以外のキーは何もしなければ背後のドキュメントへ素通りしてしまう。
+  function ModalHarness({ onClose }: { onClose: () => void }) {
+    const titleId = useModalTitleId();
+    return (
+      <Modal
+        onClose={onClose}
+        titleId={titleId}
+        backdropClassName="test-backdrop"
+        dialogClassName="test-dialog"
+      >
+        <h2 id={titleId}>テストモーダル</h2>
+      </Modal>
+    );
+  }
+
+  it('Modal マウント中は Delete / Ctrl+V / Ctrl+B が発火しない', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+    const { unmount } = render(<ModalHarness onClose={() => {}} />);
+
+    press(window, 'Delete', { ctrlKey: false });
+    press(window, 'v');
+    press(window, 'b');
+
+    expect(actions.handleDelete).not.toHaveBeenCalled();
+    expect(actions.pasteClipboard).not.toHaveBeenCalled();
+    expect(actions.toggleDrawingMode).not.toHaveBeenCalled();
+
+    unmount();
+  });
+
+  it('Modal アンマウント後は Delete / Ctrl+V / Ctrl+B が再び発火する', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+    const { unmount } = render(<ModalHarness onClose={() => {}} />);
+    unmount();
+
+    press(window, 'Delete', { ctrlKey: false });
+    press(window, 'v');
+    press(window, 'b');
+
+    expect(actions.handleDelete).toHaveBeenCalledTimes(1);
+    expect(actions.pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(actions.toggleDrawingMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('多重モーダル: 2枚開いている状態で1枚 close してもまだガードされ、両方 close で解除される', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+    const first = render(<ModalHarness onClose={() => {}} />);
+    const second = render(<ModalHarness onClose={() => {}} />);
+
+    first.unmount();
+    press(window, 'Delete', { ctrlKey: false });
+    expect(actions.handleDelete).not.toHaveBeenCalled();
+
+    second.unmount();
+    press(window, 'Delete', { ctrlKey: false });
+    expect(actions.handleDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('モーダル表示中の Ctrl+S は無効化される (diffPreviewRequest のゾンビ対策との整合)', () => {
+    const actions = makeActions();
+    renderHook(() => useKeyboardShortcuts(actions));
+    const { unmount } = render(<ModalHarness onClose={() => {}} />);
+
+    press(window, 's');
+
+    expect(actions.handleSave).not.toHaveBeenCalled();
+    expect(actions.handleSaveAs).not.toHaveBeenCalled();
+
+    unmount();
   });
 });

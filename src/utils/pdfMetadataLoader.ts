@@ -12,6 +12,12 @@ export interface PecoToolBBoxMetaEntry {
    * 既存 PDF (confidence 欠如) との後方互換のため optional にする。
    */
   confidence?: number;
+  /**
+   * 湾曲ベースライン定義 (issue #186)。構造は curveDefinition.ts の isCurveDefinition で
+   * 検証してから TextBlock.curve へ取り込む。ここでは unknown のまま素通しし、
+   * 妥当性検証は消費側 (pdfTextExtractor.ts の loadPage) に委ねる。
+   */
+  curve?: unknown;
 }
 
 // プロトタイプ汚染攻撃を防ぐためのキー拒否リスト

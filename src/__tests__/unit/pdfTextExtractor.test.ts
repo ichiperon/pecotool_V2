@@ -223,6 +223,134 @@ describe('loadPage bboxMeta vs pdfjs fallback (#99 主因リグレッション)'
   });
 });
 
+// ── H-1 (bug-hunt round3 Wave2): 保存した curve が再オープン時に TextBlock へ
+// 復元されない ────────────────────────────────────────────────────────────
+//
+// meta-first の TextBlock 構築 (id/text/bbox/writingMode/order/confidence のみコピー) は
+// curve を写していなかった。保存側は b.curve をメタに書いているため、
+// 保存→再オープン→再保存の1往復で curve が恒久消失する回帰があった。
+describe('loadPage curve 復元 (H-1 / issue #186)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __mockCache.clear();
+    vi.mocked(getTemporaryPageData).mockResolvedValue(null);
+  });
+
+  function makeViewportAndPage() {
+    const viewport: ViewportLike = {
+      width: 200,
+      height: 200,
+      convertToViewportPoint: (x: number, y: number) => [x, 200 - y],
+    };
+    const pageProxy = makeMockPageProxy({
+      viewport,
+      textItems: [
+        { str: 'PecoTool', transform: [12, 0, 0, 12, 20, 80], width: 160, height: 40 },
+      ],
+    });
+    return { viewport, pageProxy };
+  }
+
+  it('arc curve を含む savedMeta から loadPage すると block.curve に arc が復元される', async () => {
+    const { pageProxy } = makeViewportAndPage();
+    vi.mocked(getCachedPageProxy).mockResolvedValue(pageProxy);
+
+    const arc = {
+      type: 'arc' as const,
+      center: { x: 100, y: 100 },
+      radius: 80,
+      startAngle: Math.PI,
+      endAngle: 2 * Math.PI,
+    };
+    const savedMeta = {
+      '0': [
+        {
+          bbox: { x: 20, y: 80, width: 160, height: 40 },
+          writingMode: 'horizontal',
+          order: 0,
+          text: 'PecoTool',
+          curve: arc,
+        },
+      ],
+    };
+
+    const result = await loadPage(null as any, 0, '/tmp/curve-restore-arc.pdf', savedMeta);
+    expect(result.textBlocks).toHaveLength(1);
+    // 修正前: block.curve は undefined (meta-first 構築が curve を写さないため赤)
+    expect(result.textBlocks[0].curve).toEqual(arc);
+  });
+
+  it('polyline curve を含む savedMeta から loadPage すると block.curve に polyline が復元される', async () => {
+    const { pageProxy } = makeViewportAndPage();
+    vi.mocked(getCachedPageProxy).mockResolvedValue(pageProxy);
+
+    const polyline = {
+      type: 'polyline' as const,
+      points: [
+        { x: 20, y: 80 },
+        { x: 100, y: 60 },
+        { x: 180, y: 80 },
+      ],
+    };
+    const savedMeta = {
+      '0': [
+        {
+          bbox: { x: 20, y: 80, width: 160, height: 40 },
+          writingMode: 'horizontal',
+          order: 0,
+          text: 'PecoTool',
+          curve: polyline,
+        },
+      ],
+    };
+
+    const result = await loadPage(null as any, 0, '/tmp/curve-restore-polyline.pdf', savedMeta);
+    expect(result.textBlocks[0].curve).toEqual(polyline);
+  });
+
+  it('curve フィールドが無い savedMeta では block.curve は undefined のまま (後方互換)', async () => {
+    const { pageProxy } = makeViewportAndPage();
+    vi.mocked(getCachedPageProxy).mockResolvedValue(pageProxy);
+
+    const savedMeta = {
+      '0': [
+        {
+          bbox: { x: 20, y: 80, width: 160, height: 40 },
+          writingMode: 'horizontal',
+          order: 0,
+          text: 'PecoTool',
+        },
+      ],
+    };
+
+    const result = await loadPage(null as any, 0, '/tmp/curve-restore-none.pdf', savedMeta);
+    expect(result.textBlocks[0].curve).toBeUndefined();
+  });
+
+  it('構造が不正な curve は drop され console.warn が1回呼ばれる (黙って落とさない)', async () => {
+    const { pageProxy } = makeViewportAndPage();
+    vi.mocked(getCachedPageProxy).mockResolvedValue(pageProxy);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const savedMeta = {
+      '0': [
+        {
+          bbox: { x: 20, y: 80, width: 160, height: 40 },
+          writingMode: 'horizontal',
+          order: 0,
+          text: 'PecoTool',
+          curve: { type: 'arc', center: { x: 'bad' }, radius: 1 },
+        },
+      ],
+    };
+
+    const result = await loadPage(null as any, 0, '/tmp/curve-restore-invalid.pdf', savedMeta);
+    expect(result.textBlocks[0].curve).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+  });
+});
+
 describe('loadPage writing mode detection (#39)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
