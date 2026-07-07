@@ -9,9 +9,9 @@
 |---|---|
 | 241097b | backlog 潰し第1波: B-1 保存 fallback 経路の直列化（並走保存の後勝ち上書き防止）／B-3 ブロック描画失敗の skippedChars 計上＋bboxMeta 除去（meta/content 乖離解消）／B-8 diff プレビュー待機明けの filePath 再検証／B-9 監査ログの undoStack スナップショット化（構造変更保存で常に空になる問題） |
 | 5644b56 | R3 修正本体（編集の正しさ群）: **Virtuoso computeItemKey**（編集テキストが別ブロックへ書かれる交差汚染の根本封じ）／handleGroup・OCR/テキスト層取込4経路の適用前 commit／**curve のロード復元欠落**（保存1往復で消失）／**remapCurveForRotation**（回転×curve の座標取り残し・メタ書込と resetDirty の2箇所）／isCurveDefinition の Number.isFinite 強化／分割ダブルスナップ（累積重み比化）／分割時の curve 解除（二重レイアウト防止）／円弧 ±π 継ぎ目の sweep 正規化（p2 を通る側に固定）／useRegex 置換の lookaround 虚報（String.replace コールバック展開へ・regexReplacePattern.ts 新設）／モーダル表示中のグローバルショートカット封鎖（openModalCount 単一情報源） |
-| Wave4（回収中） | ドラッグ中 Space の座標乖離キャンセル／自動更新失敗の可視化＋再入ガード／アクション付きトーストの上書き保護／バッチ summary CSV の決定論的欠落（React updater 副作用依存を除去・**red 実証で毎回発生と確定**）／実行中バッチの ✕ ガード |
+| ce4b0bc | Wave4: ドラッグ中 Space の座標乖離（BB=キャンセル/curve=確定の設計整合な後始末＋buttons===0 多層防御）／自動更新失敗の可視化＋再入ガード／アクション付きトーストの上書き保護（優先度ルール）／バッチ summary CSV の決定論的欠落（React updater 副作用依存を除去・**red 実証で毎回発生と確定**）／実行中バッチの ✕ ガード |
 
-検証: 各修正 red→green 実証・広域 npm test 2,788 緑・critical 363 緑・tsc/eslint 新規指摘なし。
+検証: 各修正 red→green 実証・広域 npm test 2,798 緑（157ファイル）・critical 366 緑・cargo 91 緑・tsc/eslint 新規指摘なし。
 
 ## 特記事項（狩りの学び）
 
@@ -33,6 +33,7 @@
 | R3-B7 | composition 中断時の data-composing 残留で flush 恒久停止の疑い（推定） | IME 変換中の blur/unmount 反復を実機観察 |
 
 ### LOW（機会があれば）
+- alt-drag（バルク並べ替え）・新規描画に buttons===0 ガード未適用（Wave4 の Space ドラッグ修正と同型の穴の可能性・BB move/resize 側は対処済み）
 - arc の縮退ガード（polyline #424 の横展開・最小半径/弦長）／buildPageRotationCm の重複実装 drift／curve handle クリックのみで dirty 化＋no-op undo／ドラッグ中 Ctrl+wheel ズームの座標空間混在／分割後の selectedIds が dead id 残留／canvas 1px 逸脱での即確定（onMouseLeave）
 - 更新チェックの isPdfEncrypted 末尾2KBスキャン／usePageExtraction の範囲外 undefined 素通り／formatFileSize の1TB超・実装重複／useFontLoader の disable×in-flight レース／saveDiffSummary の並べ替え後ページ番号表示／TextPreviewWindow clipboard reject 未処理／useLayoutPanels のウィンドウ外 mouseup／handleExport の filePath 欠如時黙殺
 - モーダル関連: diffPreviewRequest.ts のコメントが R3 修正で古くなった（/doc-sync 対象）
