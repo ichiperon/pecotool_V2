@@ -1696,6 +1696,12 @@ export async function buildPdfDocumentCore(
   const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
   for (let pi = 0; pi < pdfPageCount; pi++) {
     if (dirtyPageIndexSet.has(pi)) continue;
+    // R2-2 (bug-hunt round2): dirty ページ処理ループ (1420行付近) と同様、非dirtyページ
+    // 1件あたりの sweep (inflate + 状態機械走査 + deflate) 処理時間を worker 殻の
+    // heartbeat 猶予 (PREVIOUS_SAVE_TIMEOUT_MS) と比較させたい。1000ページ級では
+    // このループ全体が5秒を超えうるため、ページ粒度で生存通知しないと round1 M-1 と
+    // 同種の heartbeat 空白が残る（健全な worker が stale 判定で誤 terminate されうる）。
+    onProgress?.();
     const page = pdfDoc.getPage(pi);
     sweepNonDirtyPage(
       page.node as unknown as {
@@ -1745,6 +1751,10 @@ export async function buildPdfDocumentCore(
   // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
   // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
   // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
+  // R2-2 (bug-hunt round2): BFS 走査は同期処理で、indirect object 数の多い（=ページ数の
+  // 多い）PDF では所要時間が伸びる。開始直前に生存通知しておく（ページループ後の
+  // heartbeat 空白を埋める。sweep 内部は分割できないため区間の開始時点のみ）。
+  onProgress?.();
   const sweepResult = sweepUnreachableObjects(pdfDoc);
   if (sweepResult.dropped > 0) {
     console.log(
@@ -1754,6 +1764,9 @@ export async function buildPdfDocumentCore(
   // sweep が 1 件も dropped を出していなければ indirect 番号に gap は発生しないので
   // compact (全 indirect object の再走査+再 assign) を丸ごとスキップできる。
   if (sweepResult.dropped > 0) {
+    // R2-2 (bug-hunt round2): compact も全 indirect object を再走査する同期処理。
+    // 実行される場合のみ、開始直前にもう一度生存通知する。
+    onProgress?.();
     compactIndirectObjectNumbers(pdfDoc);
   }
 

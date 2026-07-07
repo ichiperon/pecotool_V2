@@ -15,7 +15,9 @@ const m = vi.hoisted(() => {
   const emit = vi.fn().mockResolvedValue(undefined)
   const hide = vi.fn().mockResolvedValue(undefined)
   const onCloseRequested = vi.fn().mockResolvedValue(() => {})
-  return { listeners, listen, emit, hide, onCloseRequested }
+  // Virtuoso モックの item key に混ぜて、テストから任意のタイミングで
+  // ThumbnailItem の remount (react-virtuoso の実際のリサイクル相当) を発生させるためのトークン。
+  return { listeners, listen, emit, hide, onCloseRequested, remountToken: 0 }
 })
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -42,7 +44,7 @@ vi.mock('react-virtuoso', () => {
     return (
       <div style={style}>
         {Array.from({ length: totalCount }, (_, i) => (
-          <div key={i}>{itemContent(i)}</div>
+          <div key={`${i}-${m.remountToken}`}>{itemContent(i)}</div>
         ))}
       </div>
     )
@@ -123,6 +125,7 @@ describe('ThumbnailWindow', () => {
     cleanup()
     vi.clearAllMocks()
     m.listeners.clear()
+    m.remountToken = 0
     MockThumbnailWorker.instances = []
     MockThumbnailWorker.autoLoadComplete = true
     MockThumbnailWorker.autoThumbnailDone = false
@@ -644,5 +647,64 @@ describe('ThumbnailWindow', () => {
       // page1 は回転なしのまま
       expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('')
     })
+  })
+
+  it('#R22狩りWave2-M-2 (スバル隊C-1): in-flight 中に別窓アイテムが再マウントされても重複要求を出さず正しい応答が採用される', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    URL.createObjectURL = vi.fn(() => 'blob:remount-test')
+    URL.revokeObjectURL = vi.fn()
+    // 応答はテストから deliverThumbnail で手動制御し、in-flight 状態を作り出す。
+    MockThumbnailWorker.autoThumbnailDone = false
+
+    render(<ThumbnailWindow />)
+
+    await waitFor(() => expect(m.listeners.get('thumbnail:file-opened')?.[0]).toBeDefined())
+
+    act(() => {
+      m.listeners.get('thumbnail:file-opened')![0]({
+        payload: {
+          filePath: 'test.pdf',
+          currentPageIndex: 0,
+          totalPages: 1,
+          dirtyPages: [],
+          pageOrder: [0],
+        },
+      })
+    })
+
+    // 1本目の GENERATE_THUMBNAIL がページ0に対して発行され、in-flight のまま待機する。
+    await waitFor(() => {
+      expect(workerMessages('GENERATE_THUMBNAIL').filter((r) => r.pageIndex === 0)).toHaveLength(1)
+    })
+    const firstReq = workerMessages('GENERATE_THUMBNAIL').find((r) => r.pageIndex === 0)!
+    const worker = MockThumbnailWorker.instances.find((w) => w.messages.includes(firstReq))!
+
+    // react-virtuoso の実際のリサイクルを模して、1本目が in-flight のまま
+    // ThumbnailItem(0) を remount させる（rotation-update は pendingRequestIdByPageRef /
+    // pageGenerationRef を一切触らない、純粋な再レンダリング契機として使う）。
+    m.remountToken = 1
+    act(() => {
+      m.listeners.get('thumbnail:rotation-update')![0]({ payload: { rotations: [0] } })
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // 1本目 (唯一の in-flight リクエスト) の応答を返す。
+    act(() => {
+      deliverThumbnail(worker, firstReq)
+    })
+
+    // 世代がずれて「古い応答」と誤判定・破棄されず、正しくサムネイルが採用される。
+    await waitFor(() => {
+      expect(document.querySelector('img[alt="Page 1"]')).not.toBeNull()
+    })
+
+    // in-flight 中の remount による再要求ぶんが、1本目解決後に「別の新規リクエスト」
+    // として後追いで発行されていないことを確認する（重複ガードが効いていれば 1 件のまま）。
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(workerMessages('GENERATE_THUMBNAIL').filter((r) => r.pageIndex === 0)).toHaveLength(1)
+
+    URL.createObjectURL = originalCreateObjectURL
+    URL.revokeObjectURL = originalRevokeObjectURL
   })
 })

@@ -2,7 +2,7 @@ import { useRef } from 'react';
 import { ask, open, save } from '@tauri-apps/plugin-dialog';
 import { readFile, stat } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
-import { writeFileAtomically, isWriteAccessError } from '../utils/tauriFileIO';
+import { writeFileAtomically, isWriteAccessError, cleanupStalePdfTempFiles } from '../utils/tauriFileIO';
 
 export { isWriteAccessError };
 
@@ -560,6 +560,11 @@ export function useFileOperations(
           perf.mark('open.loadPdfStart');
           const doc = await loadPDF(selected);
           perf.mark('open.loadPdfDone', { totalPages: doc.totalPages });
+          // AZKi C-1 (bug-hunt round2): 過去セッションの保存失敗/電源断で残った
+          // `.pecotool-*.tmp` の残骸をオープン時にも掃除する (保存成功時の掃除は
+          // writeFileAtomically 側。開いたきり保存しないファイルはここでしか拾えない)。
+          // fire-and-forget でオープンの成否には影響させない。
+          void cleanupStalePdfTempFiles(selected);
           // PCT-074: loadPDF の await 中 (大型 PDF では数秒〜数十秒) に保存が開始
           // されていたら読み込みを中止する。このまま続行すると、直後の
           // clearTemporaryChanges / setDocument が保存処理の IDB 回収 (readIdbDirty)

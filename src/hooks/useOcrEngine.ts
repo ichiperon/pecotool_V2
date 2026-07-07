@@ -974,6 +974,13 @@ export function useOcrEngine(
     pageIndex: number,
     zoom: number,
   ) => {
+    // PCT-076 横展開: 他の OCR 入口 (runOcrCurrentPage/runOcrAllPages/runOcrRange/
+    // runOcrFolder) と同様の多重起動ガード。既に別経路の OCR が走っている状態で
+    // ここを通すと同一ページへ並行 updatePageData して結果が混在するため拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     const state = usePecoStore.getState();
     const doc = state.document;
     if (!doc) return;

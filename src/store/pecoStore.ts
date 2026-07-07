@@ -780,6 +780,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     const capturedFilePath = state.document.filePath;
     const capturedEpoch = useInfraStore.getState().documentEpoch;
+    // R2-3 (bug-hunt round2): movePage は documentEpoch を動かさないため、
+    // epoch/filePath だけでは「await 中に並べ替えが割り込んだ」ことを検出できない。
+    // pageIndices はこの時点の pageOrder (display index 体系) で解釈されているので、
+    // await 後に pageOrder が変わっていたら同じ pageIndex が別の物理ページを指す。
+    const capturedPageOrder = state.pageOrder;
     const basePages = new Map(state.document.pages);
     const missingPageIndices = pageIndices.filter((pi) => !basePages.has(pi));
 
@@ -787,14 +792,16 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     let idbAll: Map<string, Partial<PageData>> | null = null;
     if (missingPageIndices.length > 0) {
       idbAll = await getAllTemporaryPageData(capturedFilePath);
-      // epoch/filePath 再検証: getAllTemporaryPageData の await 中にファイル切替が
-      // 割り込むと、captured スナップショットを set() して旧ドキュメントで新ファイルを
-      // 上書きしてしまう。clearOcrAllPages (PCT-181) と同じ「遅延実行は再検証」規律。
+      // epoch/filePath/pageOrder 再検証: getAllTemporaryPageData の await 中にファイル切替や
+      // 並べ替えが割り込むと、captured スナップショットを set() して旧ドキュメントで新ファイルを
+      // 上書きしたり、別ページを回転させてしまう。clearOcrAllPages (PCT-181) と同じ
+      // 「遅延実行は再検証」規律を pageOrder にも拡張する (R2-3)。
       const live = get();
       if (
         useInfraStore.getState().documentEpoch !== capturedEpoch ||
         !live.document ||
-        live.document.filePath !== capturedFilePath
+        live.document.filePath !== capturedFilePath ||
+        !pageOrderEquals(live.pageOrder, capturedPageOrder)
       ) {
         return { skippedPageIndices: pageIndices };
       }
@@ -849,8 +856,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
 
     const action: RotatePagesAction = { type: 'rotate_pages', changes };
     set((live) => {
-      // await 後にファイル切替が起きていれば適用しない (旧ドキュメント復活の防止)。
+      // await 後にファイル切替/並べ替えが起きていれば適用しない (旧ドキュメント復活や
+      // 別ページへの誤回転の防止)。R2-3 (bug-hunt round2): pageIndex は capturedPageOrder
+      // 体系で解決済みのため、live.pageOrder が変わっていれば同じ key が別の物理ページを指す。
       if (!live.document || live.document.filePath !== capturedFilePath) return live;
+      if (!pageOrderEquals(live.pageOrder, capturedPageOrder)) return live;
       const newPages = new Map(live.document.pages);
       for (const [pageIndex, rotated] of rotatedByIndex) {
         // in-memory の最新ページがあれば rotation だけ差し替えて他の編集を保持、
@@ -875,7 +885,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       .filter(([pageIndex]) => restoredEvictedIndices.has(pageIndex))
       .map(([pageIndex, data]) => ({ filePath: capturedFilePath, pageIndex, data }));
     if (idbWriteBackEntries.length > 0) {
-      schedulePendingIdbWrite(idbWriteBackEntries, state.pageOrder);
+      // R2-3: capturedPageOrder (= state.pageOrder。await 前のスナップショット) を使う。
+      // 上の再検証を通過した時点で live.pageOrder と一致していることが確定しているが、
+      // 変数を一本化して「どの pageOrder 体系で解決したか」を読み手に明示する。
+      schedulePendingIdbWrite(idbWriteBackEntries, capturedPageOrder);
     }
 
     return { skippedPageIndices };
@@ -1889,11 +1902,24 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       return { hits: 0, blocks: 0, pages: 0, skippedBlocks };
     }
 
+    // R2-4 (bug-hunt round2): set() 実行時点で pageOrder が pageOrderAtEntry と
+    // 食い違っていれば in-memory 反映を中止する。entries の pageIndex は
+    // pageOrderAtEntry 体系で解決済みなので、await 中に movePage が割り込むと
+    // filePath は同じでも同じ pageIndex が別の物理ページを指してしまう
+    // (IDB 側は #394 で正しい pageId に書かれるが、in-memory の
+    // newPages.set(e.pageIndex, e.after) は素通しだと別ページを上書きする)。
+    let abortedByPageOrderChange = false;
+
     // store に反映
     set((s) => {
       // F-1 (bug-hunt): entries は capturedEpoch/filePath 時点のドキュメントを基準に
       // 組み立てた差分。set() 実行時点で別ファイルに切り替わっていたら適用しない。
       if (!s.document || s.document.filePath !== filePath) return s;
+      if (!pageOrderEquals(s.pageOrder, pageOrderAtEntry)) {
+        abortedByPageOrderChange = true;
+        console.warn('[Store] replaceText: await 中に pageOrder が変化したため in-memory 反映を中止しました (IDB は #394 で正しく書込み済みのため次回ロード時に反映されます)');
+        return s;
+      }
       const newPages = new Map(s.document.pages);
       for (const e of entries) {
         // 退避済みページの after も in-memory に積む (LRU で再度退避され得る)
@@ -1919,10 +1945,17 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // 冒頭の getAllTemporaryPageData await 中に movePage が割り込んだ場合、
     // entries 解決時の pageOrder と書き込み時の pageOrder が食い違い、
     // resolvePageId が別ページの pageId に誤マップする (PCT-108 違反)。
+    // R2-4 (bug-hunt round2): in-memory 反映が abortedByPageOrderChange で中止されても、
+    // この IDB 書き込みは pageOrderAtEntry 基準のまま実行する (#394 の保証を保つ)。
+    // 中止時は次回ロード時に IDB からこの正しい内容が読み直される。
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
       pageOrderAtEntry,
     );
+
+    if (abortedByPageOrderChange) {
+      return { hits: 0, blocks: 0, pages: 0, skippedBlocks };
+    }
 
     return { hits: totalHits, blocks: totalBlocks, pages: entries.length, skippedBlocks };
   },
@@ -2086,11 +2119,21 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       return { totalHits: 0, perRuleHits, invalidRuleIndices };
     }
 
+    // R2-4 (bug-hunt round2): replaceText と同型。entries の pageIndex は
+    // pageOrderAtEntry 体系で解決済みのため、set() 実行時点で pageOrder が
+    // 変わっていれば in-memory 反映を中止する (filePath 一致だけでは検出できない)。
+    let abortedByPageOrderChange = false;
+
     // store に反映し、undoStack に 1 entry だけ積む
     set((s) => {
       // F-1 (bug-hunt): entries は capturedEpoch/filePath 時点のドキュメントを基準に
       // 組み立てた差分。set() 実行時点で別ファイルに切り替わっていたら適用しない。
       if (!s.document || s.document.filePath !== filePath) return s;
+      if (!pageOrderEquals(s.pageOrder, pageOrderAtEntry)) {
+        abortedByPageOrderChange = true;
+        console.warn('[Store] replaceTextBatch: await 中に pageOrder が変化したため in-memory 反映を中止しました (IDB は #394 で正しく書込み済みのため次回ロード時に反映されます)');
+        return s;
+      }
       const newPages = new Map(s.document.pages);
       for (const e of entries) {
         newPages.set(e.pageIndex, e.after);
@@ -2113,10 +2156,17 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // #394 (PCT-163): replaceText と同様、entries 解決に使った pageOrderAtEntry で書く。
     // get().pageOrder (live) は冒頭の IDB read await 中の movePage 割込みで
     // entries 解決時点の pageOrder と食い違い、書き込み先 pageId がずれる。
+    // R2-4 (bug-hunt round2): in-memory 反映が abortedByPageOrderChange で中止されても、
+    // この IDB 書き込みは pageOrderAtEntry 基準のまま実行する (#394 の保証を保つ)。
+    // 中止時は次回ロード時に IDB からこの正しい内容が読み直される。
     schedulePendingIdbWrite(
       entries.map(e => ({ filePath, pageIndex: e.pageIndex, data: e.after })),
       pageOrderAtEntry,
     );
+
+    if (abortedByPageOrderChange) {
+      return { totalHits: 0, perRuleHits: rules.map(() => 0), invalidRuleIndices };
+    }
 
     return { totalHits, perRuleHits, invalidRuleIndices };
   },

@@ -1923,6 +1923,84 @@ describe('pdfSaver / Worker 経路', () => {
     })
   })
 
+  // ── R2-2 (bug-hunt round2): onProgress が非dirtyページ sweep ループ /
+  //    GC 区間でも呼ばれる ─────────────────────────────────────────
+  // M-1 は「dirty page 処理ループ」と「embed 前」「save 直前」のみ onProgress を配線して
+  // いたため、未編集ページの sweep ループ（sweepNonDirtyPage を全非dirtyページに適用する
+  // 区間）と GC (sweepUnreachableObjects) 区間には heartbeat 空白が残っていた。1000ページ
+  // 級ではこの空白だけで5秒 (PREVIOUS_SAVE_TIMEOUT_MS) を超えうる。
+  describe('R2-2: onProgress が非dirtyページ sweep ループと GC 区間でも呼ばれる', () => {
+    it('dirty 1 ページ + 非dirty 2 ページの保存では onProgress が sweep ループ分だけ多く呼ばれる', async () => {
+      const pages = Array.from({ length: 3 }, () => ({
+        drawImage:    m.drawImage,
+        drawText:     m.drawText,
+        pushOperators: m.pushOperators,
+        node: {
+          Contents: vi.fn().mockReturnValue(null),
+          set: vi.fn(),
+          get: vi.fn().mockReturnValue(null),
+          Resources: vi.fn().mockReturnValue(undefined),
+        },
+        getWidth: () => 595,
+        getHeight: () => 842,
+        getSize: () => ({ width: 595, height: 842 }),
+        getRotation: () => ({ angle: 0 }),
+      }))
+      const mockContext = makeSweepableContext() as any
+      const mockPdfDoc = {
+        registerFontkit: m.registerFontkit,
+        embedFont:       m.embedFont,
+        removePage:      m.removePage,
+        addPage:         m.addPage,
+        copyPages:       m.copyPages,
+        getPage:         vi.fn((index: number) => pages[index]),
+        getPages:        vi.fn().mockReturnValue(pages),
+        getPageCount:    vi.fn().mockReturnValue(3),
+        save:            m.save,
+        context:         mockContext,
+        catalog:         makeCatalogMock(),
+        getInfoDict:     vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined), set: vi.fn(), delete: vi.fn(), lookup: vi.fn() }),
+      }
+      m.pdfLoad.mockResolvedValue(mockPdfDoc)
+
+      // page 0 のみ dirty (textBlocks あり)。page 1/2 は documentState.pages に
+      // エントリを持たない = 非dirty として sweep ループを通る。
+      const serializedPage = {
+        pageIndex: 0,
+        width: 595,
+        height: 842,
+        isDirty: true,
+        textBlocks: [{
+          id: 'b0',
+          text: 'Hello',
+          originalText: 'Hello',
+          writingMode: 'horizontal' as WritingMode,
+          order: 0,
+          isNew: false,
+          isDirty: true,
+          bbox: { x: 10, y: 20, width: 100, height: 30 },
+        }],
+      }
+
+      const onProgress = vi.fn()
+      await __handleSavePdfForTest(
+        new Uint8Array([1, 2, 3]),
+        { pages: { 0: serializedPage }, totalPages: 3 },
+        undefined,
+        [],
+        undefined,
+        undefined,
+        onProgress,
+      )
+
+      // 内訳: embed 前1 + dirty page (page0) 1 + sweep ループ非dirty (page1, page2) 2
+      //      + GC 前1 + save 直前1 = 6。
+      // このモックでは context.trailerInfo.Root が未設定のため sweepUnreachableObjects は
+      // 即 dropped:0 で返り compact はスキップされる (compact 前の onProgress は呼ばれない)。
+      expect(onProgress).toHaveBeenCalledTimes(6)
+    })
+  })
+
   // ── U-W-05: URL 経路 ─────────────────────────────────────────
   // source として {url} を渡した場合、bytes を transfer せず url を Worker に転送する。
   // 受け取った Worker 側は worker 内で fetch する責務を持つ（本テストは postMessage の payload のみを検証）。

@@ -292,18 +292,29 @@ export function ThumbnailWindow() {
   // ---- ページをワーカーに分散してサムネイル生成 ----
   // このリクエストの生成番号を返り値に含め、呼び出し側で古い応答を判定できるようにする
   const generateViaWorker = useCallback((pageIdx: number): Promise<{ url: string | null; generation: number }> => {
-    const generation = (pageGenerationRef.current.get(pageIdx) ?? 0) + 1;
-    pageGenerationRef.current.set(pageIdx, generation);
     return new Promise(resolve => {
       const workers = workersRef.current;
       const pendingsByWorker = pendingsByWorkerRef.current;
-      if (workers.length === 0) { resolve({ url: null, generation }); return; }
+      if (workers.length === 0) {
+        resolve({ url: null, generation: pageGenerationRef.current.get(pageIdx) ?? 0 });
+        return;
+      }
 
       const workerIdx = pageIdx % workers.length;
       const worker = workers[workerIdx];
       const myPending = pendingsByWorker[workerIdx];
 
-      if (pendingRequestIdByPageRef.current.has(pageIdx)) { resolve({ url: null, generation }); return; }
+      // 重複呼び出し (既に in-flight のリクエストがある) の場合は generation を
+      // 進めない。ここで進めてしまうと、in-flight の応答が戻ってきたときに
+      // 359-364行の世代チェック (generation !== latestGen) で「古い応答」と
+      // 誤判定され、正しい結果が破棄されてプレースホルダーが固着する。
+      if (pendingRequestIdByPageRef.current.has(pageIdx)) {
+        resolve({ url: null, generation: pageGenerationRef.current.get(pageIdx) ?? 0 });
+        return;
+      }
+
+      const generation = (pageGenerationRef.current.get(pageIdx) ?? 0) + 1;
+      pageGenerationRef.current.set(pageIdx, generation);
 
       const requestId = ++nextWorkerRequestIdRef.current;
       const timeout = setTimeout(() => {
@@ -388,7 +399,9 @@ export function ThumbnailWindow() {
 
   const requestThumbnail = useCallback((pageIndex: number) => {
     if (thumbnailsRef.current.has(pageIndex)) return;
-    if (!thumbnailQueueSetRef.current.has(pageIndex)) {
+    // useThumbnailPanel.ts の requestThumbnail と同様、既に in-flight のリクエスト
+    // があるページは再キューイングしない (横展開漏れ: 別窓だけこのガードが無かった)。
+    if (!thumbnailQueueSetRef.current.has(pageIndex) && !pendingRequestIdByPageRef.current.has(pageIndex)) {
       thumbnailQueueRef.current.push(pageIndex);
       thumbnailQueueSetRef.current.add(pageIndex);
     }

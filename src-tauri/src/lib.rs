@@ -1008,6 +1008,57 @@ async fn replace_pdf_file(
     .map_err(|e| format!("spawn_blocking error: {}", e))?
 }
 
+/// AZKi C-1: `write_pdf_chunk` 段階（rename=`replace_pdf_file` を試みる前）で保存が
+/// 失敗したときに残る temp を即座に削除する。
+///
+/// `replace_target_with_temp_inner` の rename 失敗時は target 側が無傷であることの
+/// 保証と引き換えに temp をユーザーデータ救済のため意図的に残す設計だが、この
+/// コマンドはその手前（書き込み自体の失敗）専用であり、rename は一度も試みられて
+/// いないため温存する理由がない。機密文書の完全コピーが保存先フォルダに残り続ける
+/// ことを避けるため、JS 側 (`writeFileAtomically`) の catch から呼ばれる想定。
+///
+/// temp が既に存在しない場合（二重呼び出し等）は成功として扱う。
+#[tauri::command]
+async fn remove_pdf_temp_file(app: tauri::AppHandle, temp_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let temp = normalize_child_path(&temp_path)?;
+        // write_pdf_chunk と同じ理由 (PCT-113/PCT-118): temp 自身ではなく対応する
+        // target に対してホワイトリスト照合を行う。temp_target_path が正規の
+        // `.pecotool-...tmp` 形式であることも併せて検証する。
+        let target = temp_target_path(&temp)?;
+        validate_pdf_file_name(&target)?;
+        validate_allowed_resolved_path(&app, &target)?;
+
+        remove_temp_file_ignoring_missing(&temp)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
+/// AZKi C-1: 保存成功後などに fire-and-forget で呼ばれ、`target_path` に隣接する
+/// 失敗/中断済みの `<target のファイル名>.pecotool-<...>.tmp` を掃除する。
+///
+/// 対象は「まだ書き込み中の可能性を否定できない」ものを誤って消さないよう、
+/// 最終更新時刻が `STALE_PDF_TEMP_MIN_AGE` 以上前のものに限る
+/// (`find_stale_pdf_temp_siblings` のドキュメント参照)。戻り値は掃除できた件数で、
+/// 呼び出し元は失敗しても無視してよい（保存/オープンの成否には影響させない）。
+#[tauri::command]
+async fn cleanup_stale_pdf_temp_files(
+    app: tauri::AppHandle,
+    target_path: String,
+) -> Result<u32, String> {
+    tokio::task::spawn_blocking(move || -> Result<u32, String> {
+        let target = validate_allowed_pdf_target_path(&app, &target_path)?;
+        Ok(cleanup_stale_pdf_temp_files_core(
+            &target,
+            STALE_PDF_TEMP_MIN_AGE,
+            SystemTime::now(),
+        ))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {}", e))?
+}
+
 /// temp を target へ単一 rename で移動する（target 既存なら上書き）。
 /// rename 前に temp を fsync し、書き込み済みチャンクを物理ディスクへ確定させる
 /// (PCT-078)。
@@ -1053,6 +1104,96 @@ fn replace_target_with_temp_inner(
             temp.to_string_lossy()
         )
     })
+}
+
+/// AZKi C-1: stale 判定の閾値。保存の一時ファイルが「まだ書き込み中」の可能性を
+/// 否定できないとみなす最大経過時間。
+///
+/// JS 側 (`useFileOperations.ts`) は `writeFileAtomically` 全体に 180_000ms (3分) の
+/// heartbeat タイムアウトを設定しており、通常の保存はこの範囲内で完了する。誤削除を
+/// 最優先で避けるため、想定所要時間の 3 倍以上の余裕をとって 10 分とする。この
+/// 経過時間を超えてなお残っている temp のみを「失敗/中断で放置された残骸」とみなす。
+const STALE_PDF_TEMP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// `target` と同じディレクトリに残る `<target のファイル名>.pecotool-<...>.tmp` のうち、
+/// 最終更新時刻が `min_age` 以上前のものだけを列挙する（削除は行わない。判定ロジックを
+/// 副作用から分離してテスト容易にするため）。
+///
+/// マッチ条件は「target のファイル名プレフィクス + `.pecotool-` + 任意 + `.tmp` サフィクス」の
+/// 厳密一致のみで、ワイルドカードには拡大しない（誤って無関係なファイルを対象にしない）。
+/// mtime が取得できない・未来時刻である等、経過時間の算出に失敗した場合は「まだ新しい
+/// かもしれない」側に倒して対象から除外する（誤削除ゼロを優先）。
+fn find_stale_pdf_temp_siblings(
+    target: &std::path::Path,
+    min_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> Vec<std::path::PathBuf> {
+    let mut stale = Vec::new();
+    let Some(parent) = target.parent() else {
+        return stale;
+    };
+    let Some(target_name) = target.file_name().and_then(|n| n.to_str()) else {
+        return stale;
+    };
+    let prefix = format!("{target_name}.pecotool-");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return stale;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".tmp") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if matches!(now.duration_since(modified), Ok(age) if age >= min_age) {
+            stale.push(entry.path());
+        }
+    }
+    stale
+}
+
+/// `find_stale_pdf_temp_siblings` が列挙した stale な temp を実際に削除し、削除できた
+/// 件数を返す。個々のファイルの削除失敗（既に他プロセスに消された等）は握りつぶして
+/// 続行する（fire-and-forget な呼び出し元の成否に影響させないため）。
+fn cleanup_stale_pdf_temp_files_core(
+    target: &std::path::Path,
+    min_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> u32 {
+    let stale = find_stale_pdf_temp_siblings(target, min_age, now);
+    let mut removed = 0u32;
+    for path in stale {
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                eprintln!(
+                    "[cleanup_stale_pdf_temp_files] failed to remove stale save temp file: {} ({e})",
+                    path.display()
+                );
+            }
+        }
+    }
+    removed
+}
+
+/// temp ファイルを削除する。存在しない場合（二重呼び出し等）も成功として扱う。
+fn remove_temp_file_ignoring_missing(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove temp file failed: {e}")),
+    }
 }
 
 fn normalize_child_path(path: &str) -> Result<std::path::PathBuf, String> {
@@ -1649,6 +1790,138 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── AZKi C-1: remove_temp_file_ignoring_missing ──────────────────────
+
+    #[test]
+    fn remove_temp_file_ignoring_missing_removes_existing_file() {
+        let dir = make_replace_test_dir("rm_a");
+        let path = dir.join("doc.pdf.pecotool-1.tmp");
+        std::fs::write(&path, b"data").unwrap();
+
+        remove_temp_file_ignoring_missing(&path).expect("remove must succeed");
+
+        assert!(!path.exists(), "temp file must be gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_temp_file_ignoring_missing_is_idempotent_for_missing_file() {
+        let dir = make_replace_test_dir("rm_b");
+        let path = dir.join("gone.pdf.pecotool-1.tmp");
+
+        // ファイルは一度も作らない（既に削除済み/二重呼び出しを模す）。
+        let result = remove_temp_file_ignoring_missing(&path);
+
+        assert!(result.is_ok(), "missing file must be treated as already-removed success");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── AZKi C-1: find_stale_pdf_temp_siblings / cleanup_stale_pdf_temp_files_core ──
+
+    /// テスト用の一意なファイルパスを作り、指定 mtime で書き込む（backup.rs の
+    /// write_file_with_mtime と同じ std::fs::File::set_modified 方式）。
+    fn write_file_with_mtime(path: &std::path::Path, content: &[u8], mtime: std::time::SystemTime) {
+        use std::fs::File;
+        std::fs::write(path, content).unwrap();
+        let file = File::options().write(true).open(path).expect("open for mtime failed");
+        file.set_modified(mtime).expect("set_modified failed");
+    }
+
+    /// 「自プロセスの生きている（≒書き込み中とみなせる新しい）temp は消さない」:
+    /// mtime が閾値未満（十分新しい）の temp は stale 一覧に含まれない。
+    #[test]
+    fn find_stale_pdf_temp_siblings_excludes_fresh_temp() {
+        let dir = make_replace_test_dir("stale_fresh");
+        let target = dir.join("doc.pdf");
+        let fresh_temp = dir.join("doc.pdf.pecotool-fresh123.tmp");
+        let now = std::time::SystemTime::now();
+        write_file_with_mtime(&fresh_temp, b"in-flight write", now);
+
+        let stale = find_stale_pdf_temp_siblings(&target, std::time::Duration::from_secs(600), now);
+
+        assert!(
+            stale.is_empty(),
+            "a temp modified 'now' must not be considered stale (still may be in-flight): {stale:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 「stale は消える」: mtime が閾値以上前の temp は stale 一覧に含まれる。
+    #[test]
+    fn find_stale_pdf_temp_siblings_includes_old_temp() {
+        let dir = make_replace_test_dir("stale_old");
+        let target = dir.join("doc.pdf");
+        let old_temp = dir.join("doc.pdf.pecotool-old999.tmp");
+        let now = std::time::SystemTime::now();
+        let min_age = std::time::Duration::from_secs(600);
+        let old_mtime = now - min_age - std::time::Duration::from_secs(1);
+        write_file_with_mtime(&old_temp, b"abandoned write", old_mtime);
+
+        let stale = find_stale_pdf_temp_siblings(&target, min_age, now);
+
+        assert_eq!(stale, vec![old_temp], "temp older than min_age must be reported as stale");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 「パターン外は触らない」: 対象ファイル名プレフィクスに一致しないファイル
+    /// (別ファイルの temp / .tmp サフィクスなしの残骸 / 拡張子違い) は経過時間に
+    /// 関わらず対象外。
+    #[test]
+    fn find_stale_pdf_temp_siblings_ignores_non_matching_names() {
+        let dir = make_replace_test_dir("stale_pattern");
+        let target = dir.join("doc.pdf");
+        let now = std::time::SystemTime::now();
+        let very_old = now - std::time::Duration::from_secs(10_000);
+
+        // 別ファイル (other.pdf) の temp は doc.pdf の掃除対象ではない。
+        let other_temp = dir.join("other.pdf.pecotool-1.tmp");
+        write_file_with_mtime(&other_temp, b"x", very_old);
+
+        // .tmp サフィクスが無い残骸。
+        let no_tmp_suffix = dir.join("doc.pdf.pecotool-2.bak");
+        write_file_with_mtime(&no_tmp_suffix, b"x", very_old);
+
+        // プレフィクスに '.pecotool-' マーカーが無い無関係ファイル。
+        let unrelated = dir.join("doc.pdf.other-3.tmp");
+        write_file_with_mtime(&unrelated, b"x", very_old);
+
+        let stale = find_stale_pdf_temp_siblings(&target, std::time::Duration::from_secs(600), now);
+
+        assert!(
+            stale.is_empty(),
+            "no pattern-matching temp exists for doc.pdf; must not report unrelated files: {stale:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// cleanup_stale_pdf_temp_files_core: stale な temp のみ実際に削除され、
+    /// 新しい temp・target 本体・無関係ファイルには触れない。
+    #[test]
+    fn cleanup_stale_pdf_temp_files_core_removes_only_stale_matching_temp() {
+        let dir = make_replace_test_dir("stale_cleanup");
+        let target = dir.join("doc.pdf");
+        let now = std::time::SystemTime::now();
+        let min_age = std::time::Duration::from_secs(600);
+        let old_mtime = now - min_age - std::time::Duration::from_secs(1);
+
+        std::fs::write(&target, b"final content").unwrap();
+        let stale_temp = dir.join("doc.pdf.pecotool-abandoned.tmp");
+        write_file_with_mtime(&stale_temp, b"abandoned", old_mtime);
+        let fresh_temp = dir.join("doc.pdf.pecotool-fresh.tmp");
+        write_file_with_mtime(&fresh_temp, b"in-flight", now);
+        let unrelated = dir.join("other.pdf.pecotool-1.tmp");
+        write_file_with_mtime(&unrelated, b"x", old_mtime);
+
+        let removed = cleanup_stale_pdf_temp_files_core(&target, min_age, now);
+
+        assert_eq!(removed, 1, "exactly the one stale matching temp must be removed");
+        assert!(!stale_temp.exists(), "stale temp must be removed");
+        assert!(fresh_temp.exists(), "fresh (possibly in-flight) temp must remain");
+        assert!(target.exists(), "target file itself must never be touched");
+        assert!(unrelated.exists(), "unrelated sibling's temp must never be touched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── write_chunk_at: AppHandle-free core of write_pdf_chunk ──────────
 
     /// (a) offset==0 で新規ファイルが作成され、内容が一致すること。
@@ -2226,6 +2499,8 @@ pub fn run() {
             open_pdf_preview,
             write_pdf_chunk,
             replace_pdf_file,
+            remove_pdf_temp_file,
+            cleanup_stale_pdf_temp_files,
             backup::save_backup,
             backup::check_pending_backups,
             backup::clear_backup,

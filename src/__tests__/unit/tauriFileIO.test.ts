@@ -20,7 +20,13 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import { readFile } from '@tauri-apps/plugin-fs';
-import { writeFileChunked, writeFileAtomically, isWriteAccessError, readFileSafe } from '../../utils/tauriFileIO';
+import {
+  writeFileChunked,
+  writeFileAtomically,
+  cleanupStalePdfTempFiles,
+  isWriteAccessError,
+  readFileSafe,
+} from '../../utils/tauriFileIO';
 
 const readFileMock = readFile as unknown as ReturnType<typeof vi.fn>;
 
@@ -107,6 +113,93 @@ describe('writeFileAtomically', () => {
     // tempPath は '.pecotool-' を含む一時パス
     expect(replaceArgs.tempPath).toContain('.pecotool-');
     expect(replaceArgs.tempPath).toContain('.tmp');
+  });
+
+  // ── AZKi C-1: 保存一時ファイル残骸の掃除経路 ──────────────────────
+
+  it('保存成功後に cleanup_stale_pdf_temp_files を対象パスで fire-and-forget 呼び出しする', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    await writeFileAtomically('/out/final.pdf', bytes);
+
+    // writeFileAtomically は cleanup を待たずに resolve するため、マイクロタスクを
+    // 1 周させて fire-and-forget の invoke 呼び出しを確定させる。
+    await Promise.resolve();
+
+    const cleanupCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'cleanup_stale_pdf_temp_files');
+    expect(cleanupCalls.length).toBe(1);
+    const [, cleanupArgs] = cleanupCalls[0] as [string, { targetPath: string }];
+    expect(cleanupArgs.targetPath).toBe('/out/final.pdf');
+  });
+
+  it('write_pdf_chunk 段階 (rename 未試行) の失敗では remove_pdf_temp_file で即座に temp を削除し、元エラーを再送出する', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'write_pdf_chunk') return Promise.reject(new Error('disk full'));
+      return Promise.resolve(undefined);
+    });
+
+    await expect(writeFileAtomically('/out/final.pdf', new Uint8Array([1, 2, 3]))).rejects.toThrow('disk full');
+
+    const removeCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'remove_pdf_temp_file');
+    expect(removeCalls.length).toBe(1);
+    const [, removeArgs] = removeCalls[0] as [string, { tempPath: string }];
+    expect(removeArgs.tempPath).toContain('.pecotool-');
+    expect(removeArgs.tempPath).toContain('.tmp');
+
+    // rename (replace_pdf_file) は一度も試みられていないこと
+    const replaceCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'replace_pdf_file');
+    expect(replaceCalls.length).toBe(0);
+  });
+
+  it('remove_pdf_temp_file 自体が失敗しても、書き込み失敗の元エラーが優先してスローされる', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'write_pdf_chunk') return Promise.reject(new Error('disk full'));
+      if (cmd === 'remove_pdf_temp_file') return Promise.reject(new Error('cleanup also failed'));
+      return Promise.resolve(undefined);
+    });
+
+    await expect(writeFileAtomically('/out/final.pdf', new Uint8Array([1, 2, 3]))).rejects.toThrow('disk full');
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('rename (replace_pdf_file) 失敗時は temp を削除せず (remove_pdf_temp_file 未呼出)、元エラーを再送出する', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'replace_pdf_file') return Promise.reject(new Error('rename temp->target failed: sharing violation'));
+      return Promise.resolve(undefined);
+    });
+
+    await expect(writeFileAtomically('/out/final.pdf', new Uint8Array([1, 2, 3]))).rejects.toThrow(
+      'rename temp->target failed',
+    );
+
+    const removeCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'remove_pdf_temp_file');
+    expect(removeCalls.length).toBe(0);
+    const cleanupCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'cleanup_stale_pdf_temp_files');
+    expect(cleanupCalls.length).toBe(0);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+});
+
+describe('cleanupStalePdfTempFiles', () => {
+  it('cleanup_stale_pdf_temp_files を targetPath で呼ぶ', async () => {
+    await cleanupStalePdfTempFiles('/docs/report.pdf');
+
+    const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'cleanup_stale_pdf_temp_files');
+    expect(calls.length).toBe(1);
+    const [, args] = calls[0] as [string, { targetPath: string }];
+    expect(args.targetPath).toBe('/docs/report.pdf');
+  });
+
+  it('invoke が失敗しても例外を伝播させない (fire-and-forget)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    invokeMock.mockImplementation(() => Promise.reject(new Error('scope error')));
+
+    await expect(cleanupStalePdfTempFiles('/docs/report.pdf')).resolves.toBeUndefined();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });
 
