@@ -492,6 +492,38 @@ describe('pdfSaver / savePDF', () => {
 
       warnSpy.mockRestore()
     })
+
+    // B-3 (bug-hunt round3): 描画例外で失敗したブロックは、修正前は bboxMeta には
+    // text 込みで残ったまま content stream には描画されず「メタと実PDFの乖離」が
+    // 発生し、かつ skippedChars にも計上されずユーザーに一切見えなかった。
+    it('drawText が throw したブロックは skippedChars(block-render-error) に計上され bboxMeta から除外される', async () => {
+      m.drawText.mockImplementationOnce(() => { throw new Error('encoding error') })
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const onSkippedChars = vi.fn()
+
+      const doc = makeDoc([
+        { writingMode: 'horizontal', text: '壊れたテキスト', order: 0 },
+        { writingMode: 'horizontal', text: '正常なテキスト', order: 1 },
+      ])
+      await savePDF(new Uint8Array(), doc, undefined, [], onSkippedChars)
+
+      // skippedChars に block-render-error として計上される（可視化）。
+      expect(onSkippedChars).toHaveBeenCalled()
+      const skipped = onSkippedChars.mock.calls[0][0] as Array<{ reason: string; count: number; pages: number[]; char: string }>
+      const blockErrors = skipped.filter((s) => s.reason === 'block-render-error')
+      expect(blockErrors).toHaveLength(1)
+      expect(blockErrors[0].count).toBe(1)
+      expect(blockErrors[0].pages).toEqual([1])
+      expect(blockErrors[0].char).toContain('壊れたテキスト')
+
+      // bboxMeta からは失敗したブロックが除外され、正常に描画されたブロックのみ残る
+      // （メタには残るが content には描画されない乖離を修正）。
+      const parsed = readLastMetadataJson(defaultPdfDocMock.context)
+      expect(parsed['0']).toHaveLength(1)
+      expect(parsed['0'][0].text).toBe('正常なテキスト')
+
+      warnSpy.mockRestore()
+    })
   })
 
   describe('U-SV-18: Only dirty pages are processed', () => {
@@ -2465,5 +2497,78 @@ describe('pdfSaver / Worker 経路', () => {
         vi.useRealTimers()
       }
     })
+  })
+})
+
+// ── B-1 (bug-hunt round3): main-thread fallback 経路でも直列化が保たれる ──
+// Worker が使えない環境（createSaveWorker が null を返す）では worker.terminate() に
+// 相当する中断手段が無い。旧実装は fallback タスクに currentSaveReject を登録しないため、
+// stale 判定（PREVIOUS_SAVE_TIMEOUT_MS 超過）に達すると「何もできないまま」
+// currentSaveTask を null にしてしまい、後続 savePDF が新規タスクを起動していた
+// （= 先行 fallback と後続タスクが両方 resolve し、書き込み順序が入れ替わりうる）。
+describe('B-1 (bug-hunt round3): main-thread fallback 経路の直列化', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    __setSaveWorkerFactoryForTest(() => null)
+    __resetSaveStateForTest()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function makeSimpleDoc(): PecoDocument {
+    const page: PageData = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [],
+      isDirty: true,
+      thumbnail: null,
+    }
+    return {
+      filePath: '', fileName: 'test.pdf', totalPages: 1, metadata: {},
+      pages: new Map([[0, page]]),
+    }
+  }
+
+  it('先行 fallback 保存が PREVIOUS_SAVE_TIMEOUT_MS を超えて実行中でも、後続 savePDF は先行の完了を待ってから開始する（直列化）', async () => {
+    const doc = makeSimpleDoc()
+
+    // pdfDoc.save() を手動 resolve 制御可能にし、「時間のかかる buildPdfDocument」を模す。
+    const saveResolvers: Array<(bytes: Uint8Array) => void> = []
+    m.save.mockImplementation(() => new Promise<Uint8Array>((resolve) => {
+      saveResolvers.push(resolve)
+    }))
+
+    // 1 回目: fallback 実行を開始。save() 到達まで microtask を回す。
+    const p1 = savePDF(new Uint8Array(), doc)
+    for (let k = 0; k < 20; k++) await Promise.resolve()
+    expect(saveResolvers.length).toBe(1) // p1 が save() まで到達し、pending のまま止まっている
+
+    // 2 回目: p1 がまだ pending のうちに発行。stale 判定の待機ループへ入る。
+    const p2 = savePDF(new Uint8Array(), doc)
+
+    // PREVIOUS_SAVE_TIMEOUT_MS(5秒) を超過させる。fallback には heartbeat が無いため
+    // lastSaveActivityAt はタスク開始時刻のまま固定 → stale 判定に達する。
+    await vi.advanceTimersByTimeAsync(5001)
+    for (let k = 0; k < 20; k++) await Promise.resolve()
+
+    // 修正前（バグ）: ここで p2 が先行タスクを強制テイクオーバーして自分の
+    // buildPdfDocument を起動してしまい、save() が 2 回目に到達 → saveResolvers.length === 2
+    // 修正後: p2 は p1 の完了を待つ側に回るため、save() はまだ 1 回しか呼ばれていない。
+    expect(saveResolvers.length).toBe(1)
+
+    // p1 を完了させる
+    saveResolvers[0](new Uint8Array([1]))
+    const r1 = await p1
+    expect(Array.from(r1)).toEqual([1])
+
+    // p1 完了を受けて、ようやく p2 の buildPdfDocument が save() に到達する。
+    for (let k = 0; k < 20; k++) await Promise.resolve()
+    expect(saveResolvers.length).toBe(2)
+    saveResolvers[1](new Uint8Array([2]))
+    const r2 = await p2
+    expect(Array.from(r2)).toEqual([2])
   })
 })

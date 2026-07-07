@@ -23,7 +23,10 @@ export type SavePdfRequestData = {
   options?: SaveDialogOptions;
 } & SavePdfSource;
 
-export type SkippedPdfTextReason = 'control-character' | 'unsupported-font';
+// B-3 (bug-hunt round3): 'block-render-error' はブロック全体の描画が例外で失敗したケース。
+// 個々の文字ではなくブロック単位の失敗だが、既存の警告表示配線 (skippedChars) に載せて
+// ユーザーへ可視化するため同じ union に追加する。
+export type SkippedPdfTextReason = 'control-character' | 'unsupported-font' | 'block-render-error';
 
 export interface SkippedPdfTextChar {
   char: string;

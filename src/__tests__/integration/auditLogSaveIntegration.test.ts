@@ -122,6 +122,40 @@ function pushTextEditAction(filePath: string, blockId: string, before: string, a
   __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
 }
 
+// B-9 (bug-hunt round3): 構造変更 (並べ替え) を伴う保存を再現するための 2 ページ doc。
+// pageOrder を identity ([0, 1]) ではなく [1, 0] にしておくことで、保存完了後の
+// normalizePageOrderAfterSave が「pageOrder を identity へ正規化」を実行し、
+// その副作用として store の undoStack/redoStack をクリアする分岐を踏む。
+function setupReorderedTwoPageDoc(filePath: string): PecoDocument {
+  const doc: PecoDocument = {
+    filePath,
+    fileName: filePath.split('/').pop()!,
+    totalPages: 2,
+    metadata: {},
+    pages: new Map([
+      [0, {
+        pageIndex: 0, width: 595, height: 842,
+        textBlocks: [{ id: 'blk-1', text: 'EDITED', originalText: 'ORIGINAL', bbox: { x: 0, y: 0, width: 100, height: 20 }, writingMode: 'horizontal', order: 0, isNew: false, isDirty: true }],
+        isDirty: true, thumbnail: null,
+      } as PageData],
+      [1, {
+        pageIndex: 1, width: 595, height: 842,
+        textBlocks: [],
+        isDirty: false, thumbnail: null,
+      } as PageData],
+    ]),
+  } as unknown as PecoDocument;
+  usePecoStore.setState({
+    document: doc,
+    isDirty: true,
+    undoStack: [],
+    redoStack: [],
+    pageOrder: [1, 0],
+  });
+  __originalBytesCacheForTest.set(filePath, new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+  return doc;
+}
+
 describe('AuditLog + useFileOperations integration (#413 / PCT-182)', () => {
   it('AL-01: 通常保存 (handleSave) で write_audit_log が entries 非空で呼ばれる', async () => {
     const filePath = '/audit-log/normal-save.pdf';
@@ -242,5 +276,49 @@ describe('AuditLog + useFileOperations integration (#413 / PCT-182)', () => {
     const secondBody = JSON.parse((auditCalls[1][1] as { body: string }).body);
     // 2回目の diff は 1回目保存以降のアクションのみを含む (blk-1 の再掲載ではなく blk-2 の追加分)
     expect(secondBody.entries.some((e: { blockId: string }) => e.blockId === 'blk-2')).toBe(true);
+  });
+
+  it('AL-05 (B-9): 並べ替えを含む保存 (pageOrder 正規化で undoStack がクリアされる) でも監査ログの diff が失われない', async () => {
+    const filePath = '/audit-log/reorder-save.pdf';
+    setupReorderedTwoPageDoc(filePath);
+    pushTextEditAction(filePath, 'blk-1', 'ORIGINAL', 'EDITED');
+    // pushTextEditAction は lastSavedActionIndex を上書きするが pageOrder はそのままにする
+    // 必要がある (setupReorderedTwoPageDoc で設定した [1, 0] を保つ)。
+    expect(usePecoStore.getState().pageOrder).toEqual([1, 0]);
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleSave();
+    });
+
+    expect(ok).toBe(true);
+    expect(savePDF).toHaveBeenCalled();
+
+    // 保存完了時点で pageOrder が identity へ正規化され、undoStack がクリアされて
+    // いることを確認する (= このテストが実際に B-9 の分岐を踏んでいることの確認)。
+    expect(usePecoStore.getState().pageOrder).toEqual([0, 1]);
+    expect(usePecoStore.getState().undoStack).toEqual([]);
+
+    // バグ再現時 (修正前): _writeAuditLog が事後にストアから undoStack を読み直すため、
+    // 上記のクリア後の空配列を掴んで diff.entries が常に空になり write_audit_log が
+    // 一度も呼ばれない。
+    const auditCalls = (invoke as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (args: unknown[]) => args[0] === 'write_audit_log',
+    );
+    expect(auditCalls.length).toBe(1);
+
+    const body = JSON.parse((auditCalls[0][1] as { body: string }).body);
+    expect(body.filePath).toBe(filePath);
+    expect(body.entries.length).toBeGreaterThan(0);
+    expect(body.entries[0]).toMatchObject({
+      pageIndex: 0,
+      blockId: 'blk-1',
+      before: 'ORIGINAL',
+      after: 'EDITED',
+      changeType: 'modified',
+    });
   });
 });

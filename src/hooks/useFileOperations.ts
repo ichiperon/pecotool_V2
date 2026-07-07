@@ -32,7 +32,7 @@ import {
   loadFallbackFontsLazy,
   loadFontLazy,
 } from './useFontLoader';
-import { PecoDocument, PageData } from '../types';
+import { PecoDocument, PageData, Action } from '../types';
 import { perf } from '../utils/perfLogger';
 import { commitActiveOcrCardEdit } from '../utils/ocrCardCommit';
 import { computeSaveDiff } from '../utils/saveDiffSummary';
@@ -1109,6 +1109,19 @@ export function useFileOperations(
           showToast('別の保存処理が進行中です。完了してから再度お試しください。');
           return false;
         }
+        // B-8 (bug-hunt round3): 上と同じ待機ウィンドウで、ユーザーが別の PDF に
+        // 切り替えた (handleOpen 等で document が差し替わった) 場合も中断する。
+        // 承認された diffSummary は待機開始時点の document に対するものであり、
+        // _executeSave はストアから document を都度再取得するため、ここで
+        // 再検証しないと「別ファイル宛ての承認」を新ドキュメントの保存に
+        // 転用してしまい、かつ _writeAuditLog / clearBackupWithRetry も
+        // 旧 filePath (document.filePath) 宛てに実行されて監査ログ・バックアップ
+        // 削除が実際に保存したファイルと食い違う。
+        const documentAfterPreview = usePecoStore.getState().document;
+        if (documentAfterPreview?.filePath !== document.filePath) {
+          showToast('プレビュー確認中に別のファイルに切り替わったため、保存を中止しました。再度保存してください。', true);
+          return false;
+        }
       }
     }
 
@@ -1119,6 +1132,13 @@ export function useFileOperations(
     isSavingRef.current = true;
     setIsSaving?.(true);
     showToast("保存処理を開始しました...");
+    // B-9 (bug-hunt round3): _executeSave 内の normalizePageOrderAfterSave は、
+    // 並べ替え/回転/削除を伴う保存 (構造変更) で pageOrder を正規化した際に
+    // store の undoStack を [] へクリアする。_writeAuditLog を後段でストアから
+    // undoStack を読み直す実装のままだと、構造変更を含む保存では diff が常に
+    // 空になり監査ログが書かれない。保存開始前のスナップショットを取っておき、
+    // それを _writeAuditLog に渡す。
+    const preSaveUndoStack = usePecoStore.getState().undoStack;
     try {
       const result = await _executeSave();
       if (result !== null) {
@@ -1153,7 +1173,7 @@ export function useFileOperations(
           showToast(formatSaveToast('保存しました', result.size, result.skippedChars));
         }
         // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
-        void _writeAuditLog(document.filePath, preSaveActionIndex).catch((e) => {
+        void _writeAuditLog(document.filePath, preSaveUndoStack, preSaveActionIndex).catch((e) => {
           console.warn('[save] audit log write failed (ignored):', e);
         });
         // 正常保存後はバックアップファイルを削除する（fire-and-forget、失敗時は警告+リトライ1回）
@@ -1258,6 +1278,11 @@ export function useFileOperations(
           // #392: 別名保存も undecodable 源では byte-preserve で編集を落とす。捕捉して警告する。
           const hadUnsavedEdits = usePecoStore.getState().isDirty
             || Array.from(usePecoStore.getState().document?.pages.values() || []).some((p) => p.isDirty);
+          // B-9 (bug-hunt round3): 通常保存と同じ理由で、_executeSave 呼び出し前に
+          // undoStack をスナップショットしておく (normalizePageOrderAfterSave が
+          // 構造変更を伴う保存で undoStack をクリアするため、事後に読み直すと
+          // diff が空になる)。
+          const preSaveUndoStack = usePecoStore.getState().undoStack;
           const result = await _executeSave(path, options);
           if (result !== null) {
             const currentDoc = usePecoStore.getState().document;
@@ -1290,7 +1315,7 @@ export function useFileOperations(
               showToast(formatSaveToast('名前を付けて保存しました', result.size, result.skippedChars));
             }
             // issue #201: NDJSON 監査ログを出力する (fire-and-forget)
-            void _writeAuditLog(path, preSaveActionIndex).catch((e) => {
+            void _writeAuditLog(path, preSaveUndoStack, preSaveActionIndex).catch((e) => {
               console.warn('[save-as] audit log write failed (ignored):', e);
             });
             addToRecent(path);
@@ -1313,10 +1338,21 @@ export function useFileOperations(
   /**
    * issue #201: 保存成功後に NDJSON 監査ログを appData/pecotool/audit/<YYYY-MM-DD>.ndjson に追記する。
    * undoStack の直近変更エントリを集約して 1 行の JSON として書き出す。
+   *
+   * B-9 (bug-hunt round3): undoStack は呼び出し元が _executeSave 呼び出し前に
+   * スナップショットした配列を渡すこと。_executeSave 内の normalizePageOrderAfterSave
+   * は構造変更（並べ替え/回転/削除）を伴う保存で pageOrder が正規化された場合に
+   * store の undoStack/redoStack を [] へクリアする。この関数がここで
+   * usePecoStore.getState().undoStack を読み直すと、そのクリア後の空配列を
+   * 掴んでしまい、構造変更を含む保存では実際に変更があっても diff が常に空になり
+   * 監査ログが書かれなくなる（テキスト編集自体は本来ログ対象）。
    */
-  const _writeAuditLog = async (filePath: string, preSaveActionIndex: number): Promise<void> => {
-    const { undoStack } = usePecoStore.getState();
-    const diff = computeSaveDiff(undoStack, preSaveActionIndex);
+  const _writeAuditLog = async (
+    filePath: string,
+    undoStackSnapshot: Action[],
+    preSaveActionIndex: number,
+  ): Promise<void> => {
+    const diff = computeSaveDiff(undoStackSnapshot, preSaveActionIndex);
     if (diff.entries.length === 0) return;
     const record = {
       timestamp: new Date().toISOString(),

@@ -1450,7 +1450,11 @@ export async function buildPdfDocumentCore(
     // userRotation が undefined のページは finalRotation===originalRotation となり
     // remapBboxForRotation(delta=0) が恒等 (bbox そのまま) を返す。
     const finalRotationForMeta = normalizeRotation(page.getRotation?.().angle ?? 0);
-    bboxMeta[String(pageIndex)] = sortedBlocks.map(b => {
+    // B-3 (bug-hunt round3): メタは描画ループより前に一括構築される。個別ブロックの描画が
+    // 例外で失敗した場合、そのエントリを描画ループ後に取り除く (failedBlockIndices 参照)。
+    // pageMetaEntries は bboxMeta[pageIndex] と同一配列参照のため、フィルタして再代入すれば
+    // 反映される。
+    const pageMetaEntries = sortedBlocks.map(b => {
       const remappedBbox = remapBboxForRotation(b.bbox, originalRotation, finalRotationForMeta, pageW, pageH);
       const entry: Record<string, unknown> = {
         bbox: remappedBbox,
@@ -1465,6 +1469,7 @@ export async function buildPdfDocumentCore(
       if (b.confidence !== undefined) entry.confidence = b.confidence;
       return entry;
     });
+    bboxMeta[String(pageIndex)] = pageMetaEntries;
     metaChanged = true;
 
     // #71: bbox は OCR / 既存テキスト経由いずれも viewport 空間 (rotated screen, y-down)。
@@ -1497,8 +1502,13 @@ export async function buildPdfDocumentCore(
     const pageFontKeys = new Map<PDFFont, PDFName>();
     setPageFontWithStableKey(page, customFont, pageFontKeys);
 
+    // B-3 (bug-hunt round3): 描画に失敗したブロックの index を集め、ループ後に
+    // pageMetaEntries (= bboxMeta[pageIndex]) から取り除く。
+    const failedBlockIndices = new Set<number>();
+
     // Now draw the NEW text blocks onto the cleaned page
-    for (const block of sortedBlocks) {
+    for (let blockIdx = 0; blockIdx < sortedBlocks.length; blockIdx++) {
+      const block = sortedBlocks[blockIdx];
       if (!block.text) continue;
 
       try {
@@ -1685,8 +1695,20 @@ export async function buildPdfDocumentCore(
           }
         }
       } catch(e) {
+        // B-3 (bug-hunt round3): drawText/encodeText 等の例外で描画されなかったブロックは、
+        // bboxMeta には既に text が書き込み済み (描画ループより前に一括構築) のため、この
+        // まま何もしないと「メタにはテキストがあるのに実 PDF の text layer には存在しない」
+        // 乖離が生まれる (再オープン時に選択・検索できないテキストが「ある」ように見える)。
+        // skippedChars と同じ警告経路に計上してユーザーへ可視化しつつ、failedBlockIndices に
+        // 記録してループ後に該当エントリを bboxMeta から除外する。
+        failedBlockIndices.add(blockIdx);
+        recordSkippedTextChar(skippedChars, 'block-render-error', block.text.slice(0, 20), pageIndex);
         console.warn(`[buildPdfDocumentCore] Page ${pageIndex} block error:`, e);
       }
+    }
+
+    if (failedBlockIndices.size > 0) {
+      bboxMeta[String(pageIndex)] = pageMetaEntries.filter((_, idx) => !failedBlockIndices.has(idx));
     }
   }
 

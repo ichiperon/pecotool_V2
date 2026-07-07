@@ -108,6 +108,15 @@ let currentSaveTask: Promise<Uint8Array> | null = null;
 // 先行タスクの Promise を settle させない（onmessage/onerror が発火しないため）。
 // これを保持しておき、terminate と同時に明示 reject して宙吊りを防ぐ（#425）。
 let currentSaveReject: ((err: unknown) => void) | null = null;
+// B-1 (bug-hunt round3): 現在の currentSaveTask が「terminate 手段の無い main-thread
+// fallback（Worker API 不在）」由来かどうかを示すフラグ。fallback は activeWorker.terminate()
+// に相当する中断手段を持たないため、旧実装は fallback タスクに currentSaveReject を
+// 登録しないまま stale 判定（PREVIOUS_SAVE_TIMEOUT_MS 超過）に達すると、何もできずに
+// currentSaveTask を null にして後続 savePDF を先に進めてしまっていた。結果、先行
+// fallback タスクと後続タスクが両方 resolve し、ファイル書き込み順序が入れ替わりうる
+// バグがあった。fallback タスクが currentSaveTask に載っている間は、stale 判定でも
+// 強制テイクオーバーせず、先行タスクの完了を待つ側に倒す。
+let currentSaveIsFallback = false;
 // PCT-194 (#425): 進捗ベースの生存判定用タイムスタンプ。worker タスク開始時、および
 // SAVE_PDF_HEARTBEAT 受信のたびに更新する。「前回タスクが完了したか」ではなく
 // 「前回タスクの worker が最後に何か通知してきたのはいつか」を基準にすることで、
@@ -148,6 +157,7 @@ export function __resetSaveStateForTest(): void {
   activeSaveWorker = null;
   currentSaveTask = null;
   currentSaveReject = null;
+  currentSaveIsFallback = false;
   lastSaveActivityAt = 0;
 }
 
@@ -183,6 +193,13 @@ export async function savePDF(
       const elapsedSinceActivity = Date.now() - lastSaveActivityAt;
       const remainingMs = PREVIOUS_SAVE_TIMEOUT_MS - elapsedSinceActivity;
       if (remainingMs <= 0) {
+        if (currentSaveIsFallback) {
+          // B-1 (bug-hunt round3): fallback には terminate 手段が無いため、stale 判定でも
+          // 強制テイクオーバーしない。先行タスクの settle をそのまま待ち、待ち直しは
+          // outer for(;;) に委ねる（M-2 と同じ「break 後に再チェック」の枠組みに乗せる）。
+          await currentSaveTask.then(() => {}, () => {});
+          break;
+        }
         console.warn('[savePDF] Previous save did not complete within timeout (no heartbeat); terminating stale worker.');
         if (activeSaveWorker) {
           try { activeSaveWorker.terminate(); } catch { /* noop: terminate の二重呼び出しは無害扱い */ }
@@ -258,6 +275,9 @@ export async function savePDF(
         // 「従来どおりの固定タイムアウト待機」を維持する（レビューHIGH: 未設定だと
         // 前回保存の待機猶予がゼロになり保存が並走しうる）。
         lastSaveActivityAt = Date.now();
+        // B-1 (bug-hunt round3): このタスクには terminate 手段が無いことを次の
+        // savePDF 呼び出しに伝える（stale 判定での強制テイクオーバーを禁止するため）。
+        currentSaveIsFallback = true;
         buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options, onBytePreserved)
           .then(settleResolve)
           .catch(settleReject);
@@ -265,6 +285,8 @@ export async function savePDF(
       }
       const activeWorker = worker;
       activeSaveWorker = activeWorker;
+      // worker 経路は terminate 可能なので stale 判定での強制テイクオーバー対象。
+      currentSaveIsFallback = false;
       // stale worker として terminate された際に先行 Promise を reject できるよう登録。
       currentSaveReject = myReject;
       // PCT-194 (#425): このタスクの「生存基準時刻」をタスク開始時点にセットする。
@@ -379,6 +401,8 @@ export async function savePDF(
       console.warn('[savePDF] Worker creation failed, falling back to main thread:', err);
       // fallback 経路にも活動時刻を記録（レビューHIGH: 上の Worker 不在分岐と同旨）。
       lastSaveActivityAt = Date.now();
+      // B-1 (bug-hunt round3): この経路も terminate 手段の無い fallback 実行に切り替わる。
+      currentSaveIsFallback = true;
       buildPdfDocument(source, documentState, fontBytes, fallbackFontBytes, onSkippedChars, pageOrder, options, onBytePreserved)
         .then(settleResolve)
         .catch(settleReject);
