@@ -636,13 +636,14 @@ describe('S-01-94: zoom 連続変更で Canvas サイズ乖離が起きない (i
     // bitmap cache が hit する状況を作る: getBitmapCache を真に返すよう mock 上書き
     const cacheModule = await import('../../utils/bitmapCache')
     const bitmap = { close: vi.fn() } as unknown as ImageBitmap
-    // renderCacheKey は filePath:sourcePageIndex:displayPageIndex:documentEpoch:zoom:dpr:r<rotation> の形式。
+    // renderCacheKey は filePath:sourcePageIndex:displayPageIndex:documentEpoch:r<rotation>:dpr:zoom の形式
+    // (内側 LRU キー = 末尾セグメント = zoom。るしあ C-5 修正で dpr でなく zoom を末尾に固定)。
     // jsdom では window.devicePixelRatio が undefined になるため 1 に固定して dpr=100 にする。
     const origDpr = window.devicePixelRatio
     Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true, writable: true })
     // viewport(scale=1) は 200x100 になる; key の dpr 部分は Math.round(1*100)=100, rotation=0
     vi.mocked(cacheModule.getBitmapCache).mockImplementation((key) => {
-      if (key === 'file-A.pdf:0:0:0:100:r0:100') {
+      if (key === 'file-A.pdf:0:0:0:r0:100:100') {
         return { bitmap, zoom: 100, width: 200, height: 100 } as any
       }
       return undefined
@@ -929,6 +930,82 @@ describe('S-01-debounce: isAutoFit × isPageChange によるデバウンス dela
       expect(result.current.pdfPage).toBe(page)
     } finally {
       vi.useRealTimers()
+    }
+  })
+})
+
+// ── C-5 (るしあ): renderCacheKey の内側 LRU セグメント (末尾) が zoom になっている ──
+//
+// 背景: renderCacheKey は以前 `...:${zoom}:r${rotation}:${dpr}` の順で末尾が dpr
+// だった。bitmapCache.parseKey は「末尾セグメント = 内側 LRU キー」として扱うため、
+// 実際に内側 LRU に入っていたのは dpr (通常セッション中一定) で、zoom は外側
+// pageKey 側に混入していた。結果として zoom を変えるたびに外側 pageMap の別
+// エントリを消費し、MAX_ZOOMS_PER_PAGE による zoom 変種の間引きが機能せず、
+// zoom 連打で他ページのキャッシュを押し出していた。
+// 修正: zoom を末尾に固定し、rotation/dpr は外側 pageKey 側に含める。
+// 本テストは setBitmapCache に渡る実際のキー文字列を捕捉し、zoom 変更時に
+// 末尾セグメントだけが変化し、それ以外 (filePath/sourcePageIndex/pageIndex/
+// documentEpoch/rotation/dpr) のプレフィックスが同一であることを確認する。
+describe('C-5: renderCacheKey の末尾セグメントが zoom になっている (dpr 混入バグの回帰確認)', () => {
+  it('zoom 変更後、setBitmapCache へ渡るキーは末尾(zoom)のみ変化しプレフィックスは共通', async () => {
+    const cacheModule = await import('../../utils/bitmapCache')
+    vi.mocked(cacheModule.setBitmapCache).mockClear()
+    vi.mocked(cacheModule.getBitmapCache).mockReturnValue(undefined as any)
+
+    const origDpr = window.devicePixelRatio
+    Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true, writable: true })
+    const originalCreateImageBitmap = globalThis.createImageBitmap
+    ;(globalThis as any).createImageBitmap = vi.fn().mockResolvedValue({ close: vi.fn() } as unknown as ImageBitmap)
+
+    const page = makeFakePage('A:0')
+    getCachedPageProxyMock.mockResolvedValue(page)
+
+    try {
+      const refs = makeRefs()
+      const { result, rerender } = renderHook(
+        (props: HookProps) =>
+          usePdfRendering({
+            ...refs,
+            filePath: props.filePath,
+            totalPages: 3,
+            pageIndex: props.pageIndex,
+            zoom: props.zoom,
+            renderOverlaysRef: refs.renderOverlaysRef,
+          }),
+        { initialProps: { filePath: 'file-A.pdf', pageIndex: 0, zoom: 100 } }
+      )
+
+      await waitFor(() => expect(result.current.pdfPage).toBe(page))
+      await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+      await act(async () => { await Promise.resolve() })
+      await act(async () => { await Promise.resolve() })
+
+      rerender({ filePath: 'file-A.pdf', pageIndex: 0, zoom: 150 })
+      await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+      await act(async () => { await Promise.resolve() })
+      await act(async () => { await Promise.resolve() })
+
+      const calls = vi.mocked(cacheModule.setBitmapCache).mock.calls
+      expect(calls.length).toBeGreaterThanOrEqual(2)
+      const key100 = calls[0][0] as string
+      const key150 = calls[1][0] as string
+
+      // 末尾セグメントのみ zoom 値として変化する
+      expect(key100.endsWith(':100')).toBe(true)
+      expect(key150.endsWith(':150')).toBe(true)
+      // 末尾を除いたプレフィックス (filePath:sourcePageIndex:pageIndex:documentEpoch:r0:dpr) は共通
+      const prefix100 = key100.slice(0, key100.lastIndexOf(':'))
+      const prefix150 = key150.slice(0, key150.lastIndexOf(':'))
+      expect(prefix100).toBe(prefix150)
+      // dpr(=100) が末尾ではなくプレフィックス側に含まれていることも確認
+      expect(prefix100).toContain(':r0:100')
+    } finally {
+      if (originalCreateImageBitmap) {
+        ;(globalThis as any).createImageBitmap = originalCreateImageBitmap
+      } else {
+        delete (globalThis as any).createImageBitmap
+      }
+      Object.defineProperty(window, 'devicePixelRatio', { value: origDpr, configurable: true, writable: true })
     }
   })
 })

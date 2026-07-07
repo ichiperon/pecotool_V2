@@ -515,6 +515,47 @@ export function ThumbnailWindow() {
         const { currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder, rotations: rot } = e.payload;
         const nextPageOrder = [...pageOrder];
 
+        // Differential cache invalidation (PCT-perf-delete), ported from
+        // useThumbnailPanel.ts's pageOrder-change effect: instead of revoking
+        // every cached thumbnail and regenerating all of them, only revoke the
+        // entries whose source page was removed and remap surviving pages
+        // (matched by sourcePageIndex) to their new display index. An entry we
+        // cannot match to a surviving source page is revoked rather than kept,
+        // so no stale thumbnail can ever be shown under the wrong page.
+        const oldPageOrder = pageOrderRef.current;
+        const sourceToEntry = new Map<number, { url: string; generation: number; storedGeneration: number }>();
+        for (let oldIdx = 0; oldIdx < oldPageOrder.length; oldIdx++) {
+          const url = thumbnailsRef.current.get(oldIdx);
+          if (url === undefined) continue;
+          const srcPage = oldPageOrder[oldIdx];
+          sourceToEntry.set(srcPage, {
+            url,
+            generation: pageGenerationRef.current.get(oldIdx) ?? 0,
+            storedGeneration: storedGenerationRef.current.get(oldIdx) ?? 0,
+          });
+        }
+
+        const newThumbnails = new Map<number, string>();
+        const newPageGeneration = new Map<number, number>();
+        const newStoredGeneration = new Map<number, number>();
+        const reusedSources = new Set<number>();
+        for (let newIdx = 0; newIdx < nextPageOrder.length; newIdx++) {
+          const srcPage = nextPageOrder[newIdx];
+          const entry = sourceToEntry.get(srcPage);
+          if (entry === undefined) continue;
+          newThumbnails.set(newIdx, entry.url);
+          newPageGeneration.set(newIdx, entry.generation);
+          newStoredGeneration.set(newIdx, entry.storedGeneration);
+          reusedSources.add(srcPage);
+        }
+
+        // Revoke only the URLs that could not be remapped (deleted pages).
+        sourceToEntry.forEach((entry, srcPage) => {
+          if (!reusedSources.has(srcPage)) {
+            URL.revokeObjectURL(entry.url);
+          }
+        });
+
         epochRef.current++;
         const epoch = epochRef.current;
         thumbnailQueueRef.current = [];
@@ -528,10 +569,9 @@ export function ThumbnailWindow() {
           p.clear();
         });
         pendingRequestIdByPageRef.current.clear();
-        thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
-        thumbnailsRef.current = new Map();
-        pageGenerationRef.current = new Map();
-        storedGenerationRef.current = new Map();
+        thumbnailsRef.current = newThumbnails;
+        pageGenerationRef.current = newPageGeneration;
+        storedGenerationRef.current = newStoredGeneration;
         pageOrderRef.current = nextPageOrder;
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
         setTotalPages(total);

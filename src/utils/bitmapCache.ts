@@ -104,6 +104,13 @@ export function setBitmapCache(key: string, entry: Entry) {
   // bytes 超過時は最古ページの 1 zoom 変種を 1 つずつ落とす (page 全 evict は避け、
   // 同じページの他 zoom が残っていれば再レンダリング不要にする)。
   // 1 zoom 落としても閾値を下回らない場合は次の最古ページへ進む。
+  //
+  // 注意: 挿入したばかりのエントリ (entry) は evict 対象から除外する。
+  // 単一エントリの footprint だけで MAX_BITMAP_CACHE_BYTES を超えるケースでは、
+  // 他に evict 可能な既存エントリが無い場合 zoomMap の最古キーが新規挿入分自身に
+  // なってしまい、呼び出し元がまだ使用中の bitmap を即 close してしまう事故が
+  // あった。挿入直後のエントリは常に残し、閾値超過分は許容する
+  // (呼び出し元の bitmap 所有権を壊さないことを優先)。
   while (totalBytes > MAX_BITMAP_CACHE_BYTES && pageMap.size > 0) {
     let evicted = false;
     for (const [pageKey, zoomMap] of pageMap) {
@@ -111,10 +118,16 @@ export function setBitmapCache(key: string, entry: Entry) {
         pageMap.delete(pageKey);
         continue;
       }
-      const oldestZoom = zoomMap.keys().next().value as number;
-      const entry = zoomMap.get(oldestZoom);
-      zoomMap.delete(oldestZoom);
-      if (entry) evictEntry(entry);
+      let candidateZoom: number | undefined;
+      for (const zoomKey of zoomMap.keys()) {
+        if (zoomMap.get(zoomKey) === entry) continue;
+        candidateZoom = zoomKey;
+        break;
+      }
+      if (candidateZoom === undefined) continue;
+      const candidateEntry = zoomMap.get(candidateZoom);
+      zoomMap.delete(candidateZoom);
+      if (candidateEntry) evictEntry(candidateEntry);
       if (zoomMap.size === 0) pageMap.delete(pageKey);
       evicted = true;
       break;

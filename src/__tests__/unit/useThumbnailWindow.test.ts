@@ -541,4 +541,277 @@ describe('useThumbnailWindow', () => {
       ).toBe(baseline)
     })
   })
+
+  describe('R22狩りWave4 (C-9回帰): 窓マウント時の request-state 応答と doc-open effect の近接二重発火を防ぐ', () => {
+    it('同一tick内でrequest-stateに応答してもthumbnail:file-openedは1回しかemitされない', async () => {
+      // 修正前は、窓マウント時の request-state 応答 (thumbnail:request-state
+      // リスナー) と doc-open 由来の effect emit が近接して両方走ると、
+      // 同一 (filePath, documentEpoch) に対して thumbnail:file-opened が
+      // 2連発していた (別窓側で LOAD_PDF が二重に走る)。
+      usePecoStore.setState({
+        document: makeDoc([makePage(0, [], false)]),
+        currentPageIndex: 0,
+        pageOrder: [0],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+
+      // マウント直後、マイクロタスクを一つも消化しないうちに、別窓側から
+      // 実際に届く thumbnail:request-state イベントを模擬して即座に呼び出す。
+      // doc-open effect が同期的に emit した直後、デデュープキーの解除
+      // (マイクロタスクで解除) がまだ走っていないタイミングで request-state
+      // 応答が重なる近接ケースを再現する。
+      const requestStateListener = m.listeners.get('thumbnail:request-state')?.[0]
+      requestStateListener?.()
+
+      await flushEffects()
+
+      expect(fileOpenedEmits()).toHaveLength(1)
+    })
+
+    it('epoch bump 後 (別タイミング) は改めて thumbnail:file-opened が emit される', async () => {
+      usePecoStore.setState({
+        document: makeDoc([makePage(0, [], false)]),
+        currentPageIndex: 0,
+        pageOrder: [0],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      act(() => {
+        useInfraStore.setState({ documentEpoch: 1 })
+      })
+      await flushEffects()
+
+      expect(fileOpenedEmits()).toHaveLength(1)
+      expect(fileOpenedEmits()[0]?.[1]).toMatchObject({ documentEpoch: 1 })
+    })
+  })
+
+  describe('R22狩りWave4 (C-4軽減回帰): 非表示の別窓への file-opened emit を保留し、再表示時に1回だけ flush する', () => {
+    function makeFakeThumbnailWindow(initialVisible: boolean) {
+      return {
+        label: 'thumbnail-window',
+        isVisible: vi.fn().mockResolvedValue(initialVisible),
+        show: vi.fn().mockResolvedValue(undefined),
+        hide: vi.fn().mockResolvedValue(undefined),
+        setFocus: vi.fn().mockResolvedValue(undefined),
+      }
+    }
+
+    it('非表示中の epoch bump は file-opened を emit せず、再表示 (toggle) 時に1回だけ flush される', async () => {
+      const fakeWin = makeFakeThumbnailWindow(true)
+      m.getAllWindows.mockResolvedValue([fakeWin])
+
+      usePecoStore.setState({
+        document: makeDoc([makePage(0, [], false)]),
+        currentPageIndex: 0,
+        pageOrder: [0],
+      } as any)
+
+      const { result } = renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      // 窓を生成・表示状態にする (thumbWinRef をセットする)
+      await act(async () => {
+        await result.current.toggleThumbnailWindow()
+      })
+      await flushEffects()
+      expect(result.current.isThumbnailOpen).toBe(true)
+
+      m.emit.mockClear()
+
+      // × ボタン相当: 窓を非表示にする
+      fakeWin.isVisible.mockResolvedValue(false)
+      await act(async () => {
+        await result.current.toggleThumbnailWindow()
+      })
+      await flushEffects()
+      expect(result.current.isThumbnailOpen).toBe(false)
+
+      // 非表示中に上書き保存等で epoch が進む (修正前は LOAD_PDF ×3 が無条件で走っていた)
+      act(() => {
+        useInfraStore.setState({ documentEpoch: 1 })
+      })
+      await flushEffects()
+      await flushEffects()
+
+      // 非表示中は file-opened が emit されない
+      expect(fileOpenedEmits()).toHaveLength(0)
+
+      // 再表示すると、保留していた最新状態が1回だけ flush される
+      fakeWin.isVisible.mockResolvedValue(true)
+      await act(async () => {
+        await result.current.toggleThumbnailWindow()
+      })
+      await flushEffects()
+      await flushEffects()
+
+      const emitsAfterShow = fileOpenedEmits()
+      expect(emitsAfterShow).toHaveLength(1)
+      expect(emitsAfterShow[0]?.[1]).toMatchObject({ documentEpoch: 1 })
+    })
+
+    it('非表示中に epoch が2回進んでも、再表示時の flush は最新1回分だけでよい', async () => {
+      const fakeWin = makeFakeThumbnailWindow(true)
+      m.getAllWindows.mockResolvedValue([fakeWin])
+
+      usePecoStore.setState({
+        document: makeDoc([makePage(0, [], false)]),
+        currentPageIndex: 0,
+        pageOrder: [0],
+      } as any)
+
+      const { result } = renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      await act(async () => {
+        await result.current.toggleThumbnailWindow()
+      })
+      await flushEffects()
+
+      fakeWin.isVisible.mockResolvedValue(false)
+      await act(async () => {
+        await result.current.toggleThumbnailWindow()
+      })
+      await flushEffects()
+
+      m.emit.mockClear()
+
+      act(() => {
+        useInfraStore.setState({ documentEpoch: 1 })
+      })
+      await flushEffects()
+      await flushEffects()
+
+      act(() => {
+        useInfraStore.setState({ documentEpoch: 2 })
+      })
+      await flushEffects()
+      await flushEffects()
+
+      expect(fileOpenedEmits()).toHaveLength(0)
+
+      fakeWin.isVisible.mockResolvedValue(true)
+      await act(async () => {
+        await result.current.toggleThumbnailWindow()
+      })
+      await flushEffects()
+      await flushEffects()
+
+      const emitsAfterShow = fileOpenedEmits()
+      expect(emitsAfterShow).toHaveLength(1)
+      expect(emitsAfterShow[0]?.[1]).toMatchObject({ documentEpoch: 2 })
+    })
+  })
+
+  describe('R22狩りWave4 (C-10回帰): dirty/rotation シリアライズのメモ化が正しい値を保つ', () => {
+    it('pages Map 参照が同一のまま無関係な store 更新があっても dirty-update は増えず、実際に dirty が変化した時は正しい値が emit される', async () => {
+      const pages = new Map([
+        [0, makePage(0, [], false)],
+        [1, makePage(1, [], false)],
+      ])
+      usePecoStore.setState({
+        document: {
+          filePath: 'cache.pdf',
+          fileName: 'cache.pdf',
+          totalPages: 2,
+          metadata: {},
+          pages,
+          mtime: 1,
+        } as PecoDocument,
+        currentPageIndex: 0,
+        pageOrder: [0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+      m.emit.mockClear()
+
+      // pages の参照は変えず、無関係な currentPageIndex だけ変える
+      // (キャッシュがあれば dirtyPagesSerialized の再走査自体は起きないが、
+      //  emit されない挙動は変わらないことを検証する)
+      act(() => {
+        usePecoStore.setState({ currentPageIndex: 1 } as any)
+      })
+      await flushEffects()
+
+      expect(dirtyEmitCount()).toBe(0)
+
+      // 実際に dirty を変える (pages 参照を新規化) → キャッシュが正しく
+      // 無効化され、正しい新しい値が emit されることを確認する
+      const newPages = new Map(pages)
+      newPages.set(0, makePage(0, [], true))
+      act(() => {
+        usePecoStore.setState({
+          document: {
+            filePath: 'cache.pdf',
+            fileName: 'cache.pdf',
+            totalPages: 2,
+            metadata: {},
+            pages: newPages,
+            mtime: 1,
+          } as PecoDocument,
+        } as any)
+      })
+      await flushEffects()
+
+      const dirtyEmits = m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:dirty-update')
+      expect(dirtyEmits.at(-1)?.[1]).toEqual({ dirtyPages: [0] })
+    })
+
+    it('pages Map 参照が同一のまま無関係な store 更新があっても rotation-update は増えず、実際に回転が変化した時は正しい値が emit される', async () => {
+      const pages = new Map([
+        [0, makePage(0, [], false, 0)],
+        [1, makePage(1, [], false, 0)],
+      ])
+      usePecoStore.setState({
+        document: {
+          filePath: 'cache2.pdf',
+          fileName: 'cache2.pdf',
+          totalPages: 2,
+          metadata: {},
+          pages,
+          mtime: 1,
+        } as PecoDocument,
+        currentPageIndex: 0,
+        pageOrder: [0, 1],
+      } as any)
+
+      renderHook(() => useThumbnailWindow())
+      await flushEffects()
+
+      const baseline = m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:rotation-update').length
+
+      act(() => {
+        usePecoStore.setState({ currentPageIndex: 1 } as any)
+      })
+      await flushEffects()
+
+      expect(
+        m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:rotation-update').length
+      ).toBe(baseline)
+
+      const newPages = new Map(pages)
+      newPages.set(1, makePage(1, [], false, 90))
+      act(() => {
+        usePecoStore.setState({
+          document: {
+            filePath: 'cache2.pdf',
+            fileName: 'cache2.pdf',
+            totalPages: 2,
+            metadata: {},
+            pages: newPages,
+            mtime: 1,
+          } as PecoDocument,
+        } as any)
+      })
+      await flushEffects()
+
+      const rotationEmits = m.emit.mock.calls.filter((c) => c[0] === 'thumbnail:rotation-update')
+      expect(rotationEmits.at(-1)?.[1]).toEqual({ rotations: [0, 90] })
+    })
+  })
 })

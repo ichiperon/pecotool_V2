@@ -120,4 +120,60 @@ describe('bitmapCache', () => {
     expect((oldBitmap as any).close).toHaveBeenCalledOnce();
     expect((newBitmap as any).close).not.toHaveBeenCalled();
   });
+
+  // ── るしあ C-5: 内側 LRU (zoom) が正しいキーセグメントに効くことの回帰テスト ──
+  //
+  // 背景: usePdfRendering.renderCacheKey が末尾セグメントを dpr にしてしまい、
+  // bitmapCache.parseKey が「末尾 = 内側 LRU キー」として dpr を拾っていた。
+  // dpr は通常セッション中一定のため、内側 LRU (MAX_ZOOMS_PER_PAGE) が実質
+  // 機能せず、zoom を変えるたびに外側 pageMap の別エントリを消費して他ページの
+  // キャッシュを押し出していた。以下はキーが "pageKey:zoom" という正しい構造で
+  // 渡されたときに、内側/外側 2 層 LRU の意図どおりの挙動を保証する。
+  it('U-BC-13: 同一ページで zoom を MAX_ZOOMS_PER_PAGE(5) を超えて set しても、外側ページは 1 件のまま増えない', () => {
+    for (let z = 1; z <= 8; z++) {
+      setBitmapCache(`page1:${z}`, makeEntry(undefined, z));
+    }
+    // 内側 LRU (上限5) により最古の zoom (1,2,3) は evict 済み
+    expect(getBitmapCache('page1:1')).toBeUndefined();
+    expect(getBitmapCache('page1:2')).toBeUndefined();
+    expect(getBitmapCache('page1:3')).toBeUndefined();
+    // 直近 5 件 (4..8) は残っている
+    for (let z = 4; z <= 8; z++) {
+      expect(getBitmapCache(`page1:${z}`)).toBeDefined();
+    }
+
+    // page1 の zoom 連打で消費した外側スロットは 1 つだけのはず。
+    // 別ページを 19 件 (=MAX_PAGES 20 に到達するちょうどの数) 追加しても、
+    // page1 はまだ evict されない。
+    for (let i = 1; i <= 19; i++) {
+      setBitmapCache(`other${i}:100`, makeEntry());
+    }
+    expect(getBitmapCache('page1:8')).toBeDefined();
+  });
+
+  it('U-BC-14: 1ページの zoom 連打 (6回以上) が他ページのエントリを外側 LRU から押し出さない', () => {
+    // 先に別ページを 19 件 set (外側スロットを 19 消費、MAX_PAGES=20 に余裕あり)
+    for (let i = 1; i <= 19; i++) {
+      setBitmapCache(`other${i}:100`, makeEntry());
+    }
+    // page1 の zoom を連打 (10 回)。内側 LRU で間引かれるだけで、外側スロットは
+    // page1 用の 1 つしか消費しないはず。
+    for (let z = 1; z <= 10; z++) {
+      setBitmapCache(`page1:${z}`, makeEntry(undefined, z));
+    }
+    // 合計外側スロットは 19(other) + 1(page1) = 20 = MAX_PAGES ちょうどなので
+    // other 系はまだ evict されていない。
+    expect(getBitmapCache('other1:100')).toBeDefined();
+    expect(getBitmapCache('other19:100')).toBeDefined();
+    expect(getBitmapCache('page1:10')).toBeDefined();
+  });
+
+  it('U-BC-15: 単一エントリの footprint だけで MAX_TOTAL_BYTES を超える場合、挿入直後の get で取得でき close() されない', () => {
+    const bitmap = makeBitmap();
+    // 8000 * 5000 * 4 = 160MB > 128MB cap (単独で閾値超過)
+    setBitmapCache('huge.pdf:0:100', makeEntry(bitmap, 1, 8_000, 5_000));
+
+    expect(getBitmapCache('huge.pdf:0:100')).toBeDefined();
+    expect((bitmap as any).close).not.toHaveBeenCalled();
+  });
 });

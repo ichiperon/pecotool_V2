@@ -1297,4 +1297,66 @@ describe('PCT-perf-delete: differential cache invalidation on pageOrder change',
 
     unmount()
   })
+
+  it('PCT-epoch-remap: pageOrder 変更が processThumbnailQueue 実行中に来ても旧ループが生存して新ループと二重処理しない', async () => {
+    // 8 ページを一括リクエストすると CONCURRENCY=4 のため 1 バッチ目 (0-3) が
+    // worker に送出され、ループは Promise.allSettled を await で中断する。
+    // その「実行中」の状態のまま pageOrder を変更し、直後に (await を挟まず)
+    // 同じ 8 ページを再リクエストする。これは itemListeners 通知を受けた
+    // アイテムが再レンダー後の effect で onRequest を呼ぶタイミングを模している。
+    //
+    // 修正前は pageOrder 変更 effect が thumbnailEpochRef のみ bump し
+    // epochRef (旧実装ではキュー処理と共用) を bump しなかったため、
+    // 中断していた旧ループが isProcessingRef 強制リセット後に「自分はまだ
+    // epoch が有効」と誤認して queueRef から追加でバッチを取り出し、
+    // 新ループ (setTimeout 経由で起動) と同時に処理してしまう
+    // (CONCURRENCY が実質 2 倍化する)。
+    const { useThumbnailPanel } = await import('../../hooks/useThumbnailPanel')
+    const { usePecoStore } = await import('../../store/pecoStore')
+    await setDoc('/path/A.pdf', 8, [0, 1, 2, 3, 4, 5, 6, 7])
+
+    const { result, unmount } = renderHook(() => useThumbnailPanel())
+    await flush()
+
+    act(() => {
+      for (let i = 0; i < 8; i++) result.current.requestThumbnail(i)
+    })
+    // processThumbnailQueue の setTimeout(0) を発火させ、1 バッチ目 (4件) を
+    // worker へ送出させる。まだ flushAllThumbnails は呼ばず「実行中」に保つ。
+    await new Promise((r) => setTimeout(r, 0))
+    expect(createdWorkers[0].pendingGenerates.length).toBe(4)
+    const pendingBeforeReorder = createdWorkers[0].pendingGenerates.length
+
+    // ループが await で中断している間に pageOrder を変更し、
+    // 間に await を挟まず同じ 8 ページを再リクエストする。
+    act(() => {
+      usePecoStore.setState({ pageOrder: [7, 6, 5, 4, 3, 2, 1, 0] })
+    })
+    act(() => {
+      for (let i = 0; i < 8; i++) result.current.requestThumbnail(i)
+    })
+
+    // 旧ループの中断済み Promise が解決される 1 マイクロタスク分だけ進める。
+    // 新ループの setTimeout(0) はこの直後のマクロタスクで発火する。
+    await Promise.resolve()
+    await Promise.resolve()
+    await new Promise((r) => setTimeout(r, 0))
+
+    // 旧ループが生きていれば、ここで queueRef の 8 件を「旧ループ 4 件 + 新ループ
+    // 4 件」の二重処理で消費し尽くしてしまう。正しくは新ループ 1 バッチ分 (4件)
+    // だけが worker に送出され、残り 4 件はまだ queueRef 側に留まるはず。
+    const sentAfterReorder = createdWorkers[0].pendingGenerates.length - pendingBeforeReorder
+    expect(sentAfterReorder).toBeLessThanOrEqual(4)
+
+    act(() => { createdWorkers.forEach((w) => w.flushAllThumbnails()) })
+    await flush()
+    act(() => { createdWorkers.forEach((w) => w.flushAllThumbnails()) })
+    await flush()
+
+    for (let i = 0; i < 8; i++) {
+      expect(result.current.getThumbnail(i)).toBeDefined()
+    }
+
+    unmount()
+  })
 })
