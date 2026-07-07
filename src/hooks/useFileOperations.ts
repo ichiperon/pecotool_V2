@@ -883,14 +883,45 @@ export function useFileOperations(
     // 保存前メタを返す stale キャッシュを明示破棄する。
     // clearCachedPages / destroySharedPdfProxy と同じ「ディスク差し替え後の stale 破棄」規約に参加。
     invalidateBBoxMetaCache();
-    const liveStateBeforeNormalize = usePecoStore.getState();
-    const liveDoc = liveStateBeforeNormalize.document;
+    const liveStateAtWriteComplete = usePecoStore.getState();
+    const liveDoc = liveStateAtWriteComplete.document;
     if (!liveDoc || liveDoc.filePath !== sourceFilePath) {
       throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
     }
-    const pageOrderMatchesSnapshot = pageOrderEquals(liveStateBeforeNormalize.pageOrder, savePageOrder);
+
+    // H-1 (bug-hunt round2 TOCTOU 修正): pageOrderMatchesSnapshot の判定と、それに
+    // 基づく originalBytesCache 更新・normalize・remap 引数確定・orderMatched 確定は
+    // 必ず同じタイミングの値を使う「check-and-use」でなければならない。判定を先に
+    // 行い、その後の await (fingerprint 読み取り・IDB 書き込み待機) をまたいで同じ
+    // 判定値を使い回すと、await 中の movePage 等で判定時点と適用時点の pageOrder が
+    // 食い違い、無関係なページへ #437 と同型の rotation/bbox 誤リベースが再侵入する
+    // (実測)。
+    //
+    // 対策: await を要する処理を先にすべて完了させ、判定→分岐→適用は await を挟まない
+    // 同期ブロックでまとめて行う。fingerprint (writePath の stat 読み取り) は読むだけで
+    // 副作用が無く、両分岐 (一致/不一致) とも同じ writePath に対して同じ値を読んでいた
+    // ため、判定より前に一度だけ読んで使い回す（二重呼び出しの解消も兼ねる）。
+    const writeFingerprint = await readOriginalBytesFingerprint(writePath);
+    // PCT-050: savePDF の実行中にユーザーが別ページを編集すると、LRU パージで
+    // 新たな saveTemporaryPageDataBatch が pendingIdbSaves へ追加される場合がある。
+    // IDB クリア/remap の直前に再度待機し、それらの書き込みが完了してから処理する。
+    await withStep('waitIdbSavesBeforeClear', 15_000, () => waitForPendingIdbSaves())
+      .catch((e) => { console.warn('[save] waitIdbSavesBeforeClear failed (ignored):', e); });
+
+    // ここから先は await を挟まない同期ブロック（TOCTOU 窓を閉じる）。
+    const postWaitState = usePecoStore.getState();
+    // H-1 追補 (Orchestrator ゲート): 上の書き込み完了時点の filePath 検証は待機前の
+    // 状態に対するもの。最大 15 秒の IDB 待機中にファイル切替が完了していると、
+    // postWaitState は新ドキュメントを指し、その pageOrder で pageOrderMatchesSnapshot
+    // を判定してしまう（新旧どちらも identity のとき誤って「一致」になる等）。
+    // 同期ブロックの入口で再検証し、切替済みなら状態反映を中止する（書き込み自体は
+    // 完了しているためデータは失われない。既存の 886 行検証と同じエラーメッセージ）。
+    if (!postWaitState.document || postWaitState.document.filePath !== sourceFilePath) {
+      throw new Error('保存中に別のPDFへ切り替わったため、状態反映を中止しました。');
+    }
+    const pageOrderMatchesSnapshot = pageOrderEquals(postWaitState.pageOrder, savePageOrder);
     const hasPostSnapshotChanges =
-      !pageOrderMatchesSnapshot || liveStateBeforeNormalize.undoStack.length > savedActionIndex;
+      !pageOrderMatchesSnapshot || postWaitState.undoStack.length > savedActionIndex;
     // #437 (PCT-204): pageOrderMatchesSnapshot=false のとき、この直後の
     // normalizePageOrderAfterSave（pecoStore 側、同じ pageOrderEquals 判定）は
     // no-op になり、ライブ pageOrder は「保存前（旧）のページ番号体系」のまま
@@ -906,7 +937,7 @@ export function useFileOperations(
     if (pageOrderMatchesSnapshot) {
       // 次回保存時もこの累積変更をベースにするようにキャッシュを更新する。
       // 上書き保存先 (writePath) を最新のオリジナルとみなしてキャッシュへ入れる。
-      setOriginalBytesCache(writePath, savedBytes, await readOriginalBytesFingerprint(writePath));
+      setOriginalBytesCache(writePath, savedBytes, writeFingerprint);
     } else {
       const preSaveEntry = originalBytesCache.get(writePath);
       if (preSaveEntry) {
@@ -916,7 +947,7 @@ export function useFileOperations(
         // この書き込みで変わった）」と検知してこのエントリを追い出し、readFile で
         // 新しい（リナンバー済みの）bytes を再取得してしまう。それは温存した
         // pageOrder の番号空間とまた食い違うため、温存した意味が失われる。
-        setOriginalBytesCache(writePath, preSaveEntry.bytes, await readOriginalBytesFingerprint(writePath));
+        setOriginalBytesCache(writePath, preSaveEntry.bytes, writeFingerprint);
       } else {
         // 保存前に一度もキャッシュされていなかった（background prefetch が
         // 完了する前に保存された等）場合、番号空間が整合するフォールバック
@@ -926,31 +957,30 @@ export function useFileOperations(
       }
     }
 
-    // PCT-050: savePDF の実行中にユーザーが別ページを編集すると、LRU パージで
-    // 新たな saveTemporaryPageDataBatch が pendingIdbSaves へ追加される場合がある。
-    // IDB クリア/remap の直前に再度待機し、それらの書き込みが完了してから処理する。
-    await withStep('waitIdbSavesBeforeClear', 15_000, () => waitForPendingIdbSaves())
-      .catch((e) => { console.warn('[save] waitIdbSavesBeforeClear failed (ignored):', e); });
-
-    // B1: 裁定「案1簡約版」実装
-    // 1. normalizePageOrderAfterSave（pageOrder を normalize 後の状態に更新）
-    if (executeOptions.normalizePageOrderForCurrentDocument !== false) {
-      liveStateBeforeNormalize.normalizePageOrderAfterSave(savePageOrder);
-    }
-    // 2. remap ブロック: 旧体系キーを normalize 後の新キーで再構築し、保存済みページを破棄
-    //    - 旧体系キー全読み出し → 解決不能・dirtyOnlyPages 該当（保存済み）を破棄
-    //    - 残りを normalize 後の新キーで再構築（旧キー削除）
-    //    - put（新キー書込）→ delete（旧キー削除）の順（原子性: クラッシュ時も旧キーが残る安全側）
-    //
-    // PCT-104 差し戻し R1: ターゲット順序ゲーティング
-    //   normalizePageOrderForCurrentDocument=false（handleSaveTo 経路）、または
-    //   保存中の move で pageOrderMatchesSnapshot=false になった場合（normalize が no-op）は、
-    //   ライブ pageOrder をターゲットにすると保存スナップショット外の順序でキーが生成され
-    //   IDB 層でページ間混線が起きる（保証ライン①違反）。
-    //   その経路では normalizedPageOrder=savePageOrder を渡すことで、remap は
-    //   newKey==oldKey の全エントリに対してスキップし、dirty 破棄＋旧形式移行のみに退化する
-    //   （旧 clearIdbDirty と同等の不動点）。
-    {
+    // H-2 (bug-hunt round2): bytePreserved (undecodable byte-preserve 短絡) のときは
+    // 何も焼き込まれていない。以下の normalize / IDB dirty remap は「新しいページ
+    // 番号体系で実際に書き込まれた」ことを前提にした後処理のため、resetDirty の
+    // P1-1 ガードと同じ思想でスキップし、pageOrder / undoStack・redoStack / IDB
+    // 一時データを「保存されなかった」状態のまま温存する。
+    if (!bytePreserved) {
+      // B1: 裁定「案1簡約版」実装
+      // 1. normalizePageOrderAfterSave（pageOrder を normalize 後の状態に更新）
+      if (executeOptions.normalizePageOrderForCurrentDocument !== false) {
+        postWaitState.normalizePageOrderAfterSave(savePageOrder);
+      }
+      // 2. remap ブロック: 旧体系キーを normalize 後の新キーで再構築し、保存済みページを破棄
+      //    - 旧体系キー全読み出し → 解決不能・dirtyOnlyPages 該当（保存済み）を破棄
+      //    - 残りを normalize 後の新キーで再構築（旧キー削除）
+      //    - put（新キー書込）→ delete（旧キー削除）の順（原子性: クラッシュ時も旧キーが残る安全側）
+      //
+      // PCT-104 差し戻し R1: ターゲット順序ゲーティング
+      //   normalizePageOrderForCurrentDocument=false（handleSaveTo 経路）、または
+      //   保存中の move で pageOrderMatchesSnapshot=false になった場合（normalize が no-op）は、
+      //   ライブ pageOrder をターゲットにすると保存スナップショット外の順序でキーが生成され
+      //   IDB 層でページ間混線が起きる（保証ライン①違反）。
+      //   その経路では normalizedPageOrder=savePageOrder を渡すことで、remap は
+      //   newKey==oldKey の全エントリに対してスキップし、dirty 破棄＋旧形式移行のみに退化する
+      //   （旧 clearIdbDirty と同等の不動点）。
       const normalizeActive =
         executeOptions.normalizePageOrderForCurrentDocument !== false && pageOrderMatchesSnapshot;
       const normalizedPageOrder = normalizeActive
@@ -1098,7 +1128,11 @@ export function useFileOperations(
         // 直後の _writeAuditLog が読む値が既に更新後になり、diff が常に空になる。
         const preSaveActionIndex = usePecoStore.getState().lastSavedActionIndex;
         // issue #201: 保存成功時に lastSavedActionIndex を更新する
-        setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+        // H-2 (bug-hunt round2): bytePreserved のときは何も焼き込まれていないため、
+        // 未保存の編集位置を「保存済み」として記録してはいけない。
+        if (!result.bytePreserved) {
+          setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+        }
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
         }
@@ -1235,7 +1269,11 @@ export function useFileOperations(
             // (通常保存と同じ非対称バグが別名保存にもあった)。
             const preSaveActionIndex = usePecoStore.getState().lastSavedActionIndex;
             // issue #201: 保存成功時に lastSavedActionIndex を更新する
-            setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+            // H-2 (bug-hunt round2): bytePreserved のときは何も焼き込まれていないため、
+            // 未保存の編集位置を「保存済み」として記録してはいけない。
+            if (!result.bytePreserved) {
+              setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+            }
             if (result.hasPostSnapshotChanges) {
               usePecoStore.setState({ isDirty: true });
             }
@@ -1332,7 +1370,11 @@ export function useFileOperations(
       });
       if (result !== null) {
         resetDirty(result.savedPageSnapshots, result.bytePreserved, result.orderMatched);
-        setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+        // H-2 (bug-hunt round2): bytePreserved のときは何も焼き込まれていないため、
+        // 未保存の編集位置を「保存済み」として記録してはいけない。
+        if (!result.bytePreserved) {
+          setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+        }
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
         }
@@ -1440,7 +1482,11 @@ export function useFileOperations(
       if (result === null) return false;
       // P1-1 (bug-hunt): bytePreserved のときは rotation/bbox/isDirty を変更しない。
       resetDirty(result.savedPageSnapshots, result.bytePreserved, result.orderMatched);
-      setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+      // H-2 (bug-hunt round2): bytePreserved のときは何も焼き込まれていないため、
+      // 未保存の編集位置を「保存済み」として記録してはいけない。
+      if (!result.bytePreserved) {
+        setLastSavedActionIndex(Math.min(result.savedActionIndex, usePecoStore.getState().undoStack.length));
+      }
       if (result.hasPostSnapshotChanges) {
         usePecoStore.setState({ isDirty: true });
       }

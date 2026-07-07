@@ -406,6 +406,64 @@ describe('S-01-06: store.currentPageProxy 共有チャネル経由で二重 getC
   })
 })
 
+// ── H-5: render() 失敗時に loadError は立つが pdfPage は維持され、
+// onRenderComplete も呼ばれる (isLoadingPageRender 固着防止) ──────────
+//
+// 背景: pdfjs の render() が cancel/destroyed 以外の実エラーで reject したとき、
+// 旧実装は setLoadError(true) して return するだけで onRenderComplete を
+// 呼んでいなかった。onRenderComplete は usePageNavigation.isLoadingPageRender を
+// false にする唯一の経路のため、呼ばれないとローディング状態が固着したまま
+// 復帰しない (るしあ C-5 相当)。
+// また、この loadError はプロキシ取得失敗 (setPdfPage(null) を伴う) とは別経路
+// なので、pdfPage は直前の proxy を維持したまま loadError=true になる。
+// PdfCanvas 側のエラーオーバーレイ表示条件を直すには、この
+// 「loadError=true かつ pdfPage!==null」という状態を正しく再現できている
+// ことが前提となる。
+describe('H-5: render() 失敗時の loadError/pdfPage/onRenderComplete', () => {
+  it('render() が実エラーで reject した場合、pdfPage は維持されたまま loadError=true になり、onRenderComplete が呼ばれる', async () => {
+    const refs = makeRefs()
+    const page = makeFakePage('A:0')
+    // Promise.reject は render() 呼び出し時に遅延生成する (mockImplementation)。
+    // 事前に生成した reject 済み Promise を使い回すと、実際に await される前の
+    // タイミングでテストランナーが unhandled rejection を報告してしまうため。
+    page.render = vi.fn().mockImplementation(() => ({
+      promise: Promise.reject(new Error('render boom')),
+      cancel: vi.fn(),
+    }))
+    getCachedPageProxyMock.mockResolvedValue(page)
+    const onRenderComplete = vi.fn()
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const { result } = renderHook(() =>
+        usePdfRendering({
+          ...refs,
+          filePath: 'file-A.pdf',
+          totalPages: 3,
+          pageIndex: 0,
+          zoom: 100,
+          onRenderComplete,
+          renderOverlaysRef: refs.renderOverlaysRef,
+        })
+      )
+
+      // proxy 取得は成功するので pdfPage はまず解決される
+      await waitFor(() => expect(result.current.pdfPage).toBe(page))
+
+      // render() の reject を経て loadError が立つ
+      await waitFor(() => expect(result.current.loadError).toBe(true))
+
+      // pdfPage は破棄されない (プロキシ取得失敗経路とは別)
+      expect(result.current.pdfPage).toBe(page)
+
+      // isLoadingPageRender 固着防止のため、エラー経路でも完了通知される
+      expect(onRenderComplete).toHaveBeenCalled()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+})
+
 // ── S-01-94: issue #94 zoom 連続変更時の canvas size 乖離回避 ──────
 //
 // 問題: usePdfRendering の render effect は 30ms debounce で render を遅延させる。

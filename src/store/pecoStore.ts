@@ -483,6 +483,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     // 基準に決めた値。待機中にファイル切替が起きると、待機後の pre.document は既に
     // 別ファイルに変わっているにもかかわらず、以降の処理は無検証で displayIndices を
     // その新ドキュメントへ適用してしまい、無関係なページを削除する事故になる。
+    // H-3 (bug-hunt round2): このガードは元々 `!onIdbWork &&` 付きだったが、UI からの
+    // 実操作 (usePageManagement 経由) は常に onIdbWork を渡すため丸ごとスキップされ、
+    // 事実上無効化されていた。onIdbWork の有無に関わらず「この関数内で await した後」は
+    // 必ず再検証する。onIdbWork 経路では実際の待機 (waitForPendingIdbSaves) は呼び出し元
+    // hook が担うため、hook 側でも同型のガードを別途行う (usePageManagement.ts 参照)。
     const entryFilePath = get().document?.filePath ?? null;
     const entryEpoch = useInfraStore.getState().documentEpoch;
     // #215: 進行中の IDB 書き込みが完了してから delete を実行することで
@@ -492,10 +497,9 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const pre = get();
     if (!pre.document || displayIndices.length === 0) return;
 
-    // F-6 (bug-hunt): 待機中にファイル切替/開き直しが起きていたら中止する。
+    // F-6 (bug-hunt / H-3 bug-hunt round2): 待機中にファイル切替/開き直しが起きていたら中止する。
     if (
-      !onIdbWork &&
-      (useInfraStore.getState().documentEpoch !== entryEpoch || pre.document.filePath !== entryFilePath)
+      useInfraStore.getState().documentEpoch !== entryEpoch || pre.document.filePath !== entryFilePath
     ) {
       return;
     }
@@ -678,6 +682,10 @@ export const usePecoStore = create<PecoState>((set, get) => ({
   movePage: async (fromDisplayIndex, toDisplayIndex, onIdbWork) => {
     // F-6 (bug-hunt): deletePages と同型。待機前のドキュメント同一性をキャプチャし、
     // 待機中のファイル切替を検知できるようにする。
+    // H-3 (bug-hunt round2): deletePages と同様、`!onIdbWork &&` を外す。UI からの実操作
+    // (usePageManagement 経由) は常に onIdbWork を渡すため、条件付きのままだとこのガードが
+    // 丸ごとスキップされていた。onIdbWork 経路の実際の待機は呼び出し元 hook が担うため、
+    // hook 側でも同型のガードを別途行う (usePageManagement.ts 参照)。
     const entryFilePath = get().document?.filePath ?? null;
     const entryEpoch = useInfraStore.getState().documentEpoch;
     // PCT-104 (A-lite 段階3): movePage は IDB キー操作不要（pageId 不変）。
@@ -687,12 +695,11 @@ export const usePecoStore = create<PecoState>((set, get) => ({
     const state = get();
     if (!state.document) return;
 
-    // F-6 (bug-hunt): 待機中にファイル切替/開き直しが起きていたら中止する。待機後の
+    // F-6 (bug-hunt / H-3 bug-hunt round2): 待機中にファイル切替/開き直しが起きていたら中止する。待機後の
     // state.document が新ファイルに変わっている場合、fromDisplayIndex/toDisplayIndex
     // (旧ファイルの pageOrder 基準) を新ファイルへ誤適用しないようにする。
     if (
-      !onIdbWork &&
-      (useInfraStore.getState().documentEpoch !== entryEpoch || state.document.filePath !== entryFilePath)
+      useInfraStore.getState().documentEpoch !== entryEpoch || state.document.filePath !== entryFilePath
     ) {
       return;
     }
@@ -1400,12 +1407,28 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // のみに絞る。生存ページの内容は削除前後で不変であり、物理的な存在は pageOrder が
       // 担保する (#436 Test3 で実証済み)。全ページ強制だと 1 ページの delete→undo で
       // byte-preserve 短絡を失い、大ページ数 PDF の保存が全ページ再描画になるため。
+      // H-4 (bug-hunt round2): beforePages 全量で丸ごと差し替えると、削除〜undo の間に
+      // updatePageData(..., false) (undoable=false, 例: 全ページOCR) で加えられた
+      // undoStack に乗らない生存ページの編集が消し飛ぶ (afterPages 側 redo にも
+      // 反映されないため redo でも戻せない永久喪失になる)。reorder_pages の undo/redo
+      // (ライブ pages から再構築) と同じ思想で、削除されていたページのみ beforePages
+      // から復元し、生存ページはライブ document.pages の現内容を維持する。
       const deletedSet = new Set(action.deletedPageIndices);
-      const restoredPages = new Map(
-        Array.from(action.beforePages.entries()).map(([pi, page]) =>
-          deletedSet.has(pi) ? ([pi, { ...page, isDirty: true }] as const) : ([pi, page] as const),
-        ),
-      );
+      const restoredPages = new Map<number, PageData>();
+      action.beforeOrder.forEach((origPageIndex, bi) => {
+        if (deletedSet.has(bi)) {
+          const page = action.beforePages.get(bi);
+          if (page) restoredPages.set(bi, { ...page, isDirty: true });
+          return;
+        }
+        // 生存ページ: 削除後の表示位置 (afterOrder 上の displayIndex) をたどってライブ
+        // 内容を取得する。in-memory に無い (LRU 退避済み) 場合のみ beforePages の
+        // スナップショットへフォールバックする。
+        const liveDisplayIndex = action.afterOrder.indexOf(origPageIndex);
+        const livePage = liveDisplayIndex >= 0 ? document.pages.get(liveDisplayIndex) : undefined;
+        const page = livePage ?? action.beforePages.get(bi);
+        if (page) restoredPages.set(bi, page.pageIndex === bi ? page : { ...page, pageIndex: bi });
+      });
       // F-4 (bug-hunt): scheduleRotateUndoRedoIdbWrite と同様、set() 実行時点 (同期) の
       // epoch をキャプチャして渡す (遅延実行中の live 参照は禁止)。
       const capturedEpoch = useInfraStore.getState().documentEpoch;
@@ -1542,10 +1565,21 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // issue #193: ページ削除をやり直す
       // F-4 (bug-hunt): set() 実行時点 (同期) の epoch をキャプチャして渡す。
       const capturedEpoch = useInfraStore.getState().documentEpoch;
+      // H-4 (bug-hunt round2): undo と対称に、afterPages スナップショットで丸ごと
+      // 差し替えるのではなく、生存ページはライブ document.pages (undo〜redo の間に
+      // undoable=false で加えられた編集を含む) を維持する。afterOrder に現れない
+      // (= 削除されていた) origPageIndex は自動的に除外される。
+      const restoredPages = new Map<number, PageData>();
+      action.afterOrder.forEach((origPageIndex, newIdx) => {
+        const beforeDisplayIndex = action.beforeOrder.indexOf(origPageIndex);
+        const livePage = beforeDisplayIndex >= 0 ? document.pages.get(beforeDisplayIndex) : undefined;
+        const page = livePage ?? action.afterPages.get(newIdx);
+        if (page) restoredPages.set(newIdx, page.pageIndex === newIdx ? page : { ...page, pageIndex: newIdx });
+      });
       set({
         document: {
           ...document,
-          pages: action.afterPages,
+          pages: restoredPages,
           totalPages: action.afterTotalPages,
         },
         pageOrder: action.afterOrder,
@@ -1556,7 +1590,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         isDirty: true,
       });
       // PCT-104 (A-lite 段階3): 削除時と同じ IDB キー操作 (delete) を再適用してから
-      // afterPages の内容で強制同期する。rename は pageId 不変により不要。
+      // restoredPages (ライブ内容維持済み) で強制同期する。rename は pageId 不変により不要。
       // deletedPageIndices は action.beforeOrder の displayIndex なので beforeOrder で変換。
       {
         const redoDeletePageIds = (action.deletedPageIndices ?? []).map((di) =>
@@ -1565,7 +1599,7 @@ export const usePecoStore = create<PecoState>((set, get) => ({
         // PCT-108: set() で pageOrder は action.afterOrder に確定済み。その値を渡す。
         scheduleStructuralUndoRedoIdbSync(document.filePath, {
           deletePageIds: redoDeletePageIds,
-          contentEntries: Array.from(action.afterPages.entries()).map(([pi, page]) => ({
+          contentEntries: Array.from(restoredPages.entries()).map(([pi, page]) => ({
             pageIndex: pi,
             data: page,
           })),

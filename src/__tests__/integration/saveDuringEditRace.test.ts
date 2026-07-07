@@ -838,9 +838,13 @@ describe('PCT-108: schedulePendingIdbWrite/scheduleStructuralUndoRedoIdbSync が
     await waitForPendingIdbSaves();
 
     // beforeOrder=[0,1,2] のキャプチャ値で書かれるため、displayIndex 0/1/2 → src:0/1/2 に正しく着地。
-    expect((fakeIdb.get('/c108b.pdf:src:0') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P0_RESTORED');
+    // H-4 (bug-hunt round2): delete_pages の undo は生存ページ (origPageIndex 0/2) を
+    // ライブ document.pages の内容で復元し、実際に削除されていたページ (origPageIndex 1)
+    // のみ beforePages スナップショットから復元する。そのため src:0/src:2 は
+    // (beforePages ではなく) undo 実行時点のライブ内容 'P0'/'P2' に着地する。
+    expect((fakeIdb.get('/c108b.pdf:src:0') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P0');
     expect((fakeIdb.get('/c108b.pdf:src:1') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P1_RESTORED');
-    expect((fakeIdb.get('/c108b.pdf:src:2') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P2_RESTORED');
+    expect((fakeIdb.get('/c108b.pdf:src:2') as { textBlocks: TextBlock[] }).textBlocks[0].text).toBe('P2');
   });
 });
 

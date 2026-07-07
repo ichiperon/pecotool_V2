@@ -85,6 +85,62 @@ async function makePdfDocWithArrayFilterFlateStream(
   return pdfDoc;
 }
 
+/** private BBox stream の JSON 本文中、CJK 文字（マルチバイト UTF-8）を
+ * 1バイトだけ破壊した FlateDecode stream を作る helper（H-6 repro）。
+ * JSON の構造文字（括弧・引用符・カンマ等）はすべて ASCII 1バイトなので、
+ * マルチバイト文字の continuation byte だけを壊せば JSON 構造は無傷のまま
+ * テキスト部分だけが不正 UTF-8 になる状況を再現できる。
+ * 非 fatal decode（旧実装）だとこの不正バイト列が U+FFFD に置換されて
+ * decode “成功” し、JSON.parse も通ってしまう（=気づかず 'ok' 採用）。
+ */
+async function makePdfDocWithCorruptedCjkByteStream(
+  meta: Record<string, unknown>,
+  cjkMarker: string,
+): Promise<PDFDocument> {
+  const pdfDoc = await PDFDocument.create();
+
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(meta));
+  const markerBytes = new TextEncoder().encode(cjkMarker);
+  let idx = -1;
+  for (let i = 0; i <= jsonBytes.length - markerBytes.length; i++) {
+    let match = true;
+    for (let j = 0; j < markerBytes.length; j++) {
+      if (jsonBytes[i + j] !== markerBytes[j]) { match = false; break; }
+    }
+    if (match) { idx = i; break; }
+  }
+  if (idx === -1) {
+    throw new Error('fixture setup: CJK marker byte sequence not found in JSON');
+  }
+  const corrupted = new Uint8Array(jsonBytes);
+  // マーカー文字列内の 2 バイト目（マルチバイト文字の continuation byte）を
+  // 不正な値（0xff: どの UTF-8 continuation byte としても無効）に差し替える。
+  corrupted[idx + 1] = 0xff;
+
+  const context = pdfDoc.context as unknown as {
+    register: (obj: unknown) => unknown;
+    stream: (bytes: Uint8Array, dict: Record<string, unknown>) => unknown;
+  };
+  const catalog = pdfDoc.catalog as unknown as {
+    set: (key: PDFName, value: unknown) => void;
+  };
+
+  const compressed = deflate(corrupted);
+  const rawStream = context.stream(compressed, { Subtype: 'BBoxes' }) as {
+    dict: { set: (k: PDFName, v: unknown) => void };
+  };
+  rawStream.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+  const streamRef = context.register(rawStream);
+
+  const pecoToolDict = (pdfDoc.context as unknown as {
+    obj: (d: Record<string, unknown>) => unknown;
+  }).obj({ Version: 1, BBoxes: streamRef });
+
+  catalog.set(PDFName.of('PecoTool'), pecoToolDict as never);
+
+  return pdfDoc;
+}
+
 /** 現在 Catalog/PecoTool/BBoxes が指す PDFRawStream の生バイトを取り出す。
  * 破壊検知用: 書込前後で同一バイトなら既存 stream が温存されたことを意味する。 */
 function getPrivateBBoxRawBytes(pdfDoc: PDFDocument): Uint8Array | null {
@@ -390,6 +446,29 @@ describe('pdfPecoToolMetadata — readPecoToolBBoxMetaFromPdfDoc', () => {
     const bytes = await pdfDoc.save({ useObjectStreams: false });
     const fromBytes = await readPecoToolBBoxMetaWithStatusFromBytes(bytes);
     expect(fromBytes.status).toBe('undecodable');
+  });
+
+  // ── U-PM-17 (H-6 / R22 round2): CJK 1バイト破損は U+FFFD に化けず undecodable 扱いになる ──
+  //
+  // 根拠: private BBox stream の JSON 本文中、CJK 等マルチバイト文字の一部だけが破損した場合、
+  // JSON の構造文字（括弧・引用符）は ASCII 1バイトのため無傷のまま残り、非 fatal TextDecoder
+  // は不正バイト列を U+FFFD に置換して decode を “成功” させてしまう。結果 JSON.parse も通り、
+  // status='ok' として『�入りテキスト』が正史扱いされ、#392 の undecodable 保護（byte-preserve）
+  // を素通りする。次の保存でこの破損テキストが既存メタを上書きし、正しいテキストが恒久喪失する。
+  it('U-PM-17: private stream の CJK バイト破損は U+FFFD 置換で ok 化けせず undecodable になる', async () => {
+    const meta = {
+      version: 2,
+      pages: {
+        '0': [{ x: 1, y: 2, w: 3, h: 4, text: 'テスト' }],
+      },
+    };
+    const pdfDoc = await makePdfDocWithCorruptedCjkByteStream(meta, 'テ');
+
+    const read = readPecoToolBBoxMetaWithStatus(pdfDoc);
+    expect(read.status).toBe('undecodable');
+    expect(read.meta).toEqual({});
+    // undecodable 判定と読み取り結果の一貫性（hasUnreadablePrivateBBoxStream 経由）を明示
+    expect(readPecoToolBBoxMetaFromPdfDoc(pdfDoc)).toEqual({});
   });
 });
 

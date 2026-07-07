@@ -4281,6 +4281,77 @@ describe('pecoStore', () => {
       expect(state.currentPageIndex).toBeGreaterThanOrEqual(0)
       expect(state.currentPageIndex).toBeLessThan(totalPages)
     })
+
+    // ── H-4 (bug-hunt round2): undo が undoable=false の編集 (OCR等) を消さない ──
+    //
+    // reorder_pages の undo/redo (ライブ pages から再構築) と対称に、delete_pages の
+    // undo/redo も生存ページはライブ内容を維持しなければならない。以前は beforePages/
+    // afterPages のスナップショットで丸ごと差し替えていたため、削除〜undo の間に
+    // updatePageData(..., false) (undoable=false, 例: 全ページOCR) で加えられた生存
+    // ページの編集が undo で消え、afterPages にも反映されていないため redo でも
+    // 戻せない永久喪失になっていた。
+
+    it('H-4: undo after deletePages does not wipe a non-undoable edit made on a survivor page', async () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      // ページ 0 を削除 → 生存ページ 1,2,3,4 は新インデックス 0,1,2,3 へ詰まる
+      await usePecoStore.getState().deletePages([0])
+      expect(usePecoStore.getState().document!.totalPages).toBe(4)
+
+      // 全ページ OCR 相当の更新を undoable=false で適用する (undoStack に乗らない)。
+      // 新インデックス 0 = 削除前の元ページ 1 に対応する。
+      const ocrBlock = makeBlock({ id: 'ocr-block', text: 'ocr result' })
+      usePecoStore.getState().updatePageData(0, { textBlocks: [ocrBlock], isDirty: true }, false)
+      expect(usePecoStore.getState().document!.pages.get(0)!.textBlocks).toHaveLength(1)
+      // undoable=false のため redoStack はクリアされず、undoStack にも積まれない
+      expect(usePecoStore.getState().undoStack).toHaveLength(1)
+
+      // Ctrl+Z: delete_pages を undo する
+      usePecoStore.getState().undo()
+
+      const afterUndo = usePecoStore.getState()
+      expect(afterUndo.document!.totalPages).toBe(5)
+      expect(afterUndo.pageOrder).toEqual([0, 1, 2, 3, 4])
+      // 元ページ 1 (undo後の displayIndex=1) は生存ページであり、OCR 結果が保持される
+      const restoredPage1 = afterUndo.document!.pages.get(1)
+      expect(restoredPage1).toBeDefined()
+      expect(restoredPage1!.textBlocks).toHaveLength(1)
+      expect(restoredPage1!.textBlocks[0].id).toBe('ocr-block')
+    })
+
+    it('H-4: redo after undo also preserves a non-undoable edit made on a survivor page', async () => {
+      const doc = makeFivePagesDoc()
+      usePecoStore.setState({
+        document: doc,
+        pageOrder: [0, 1, 2, 3, 4],
+        currentPageIndex: 0,
+        undoStack: [],
+        redoStack: [],
+      })
+
+      await usePecoStore.getState().deletePages([0])
+      const ocrBlock = makeBlock({ id: 'ocr-block', text: 'ocr result' })
+      usePecoStore.getState().updatePageData(0, { textBlocks: [ocrBlock], isDirty: true }, false)
+
+      usePecoStore.getState().undo()
+      // undo 後、生存ページ (displayIndex=1) の OCR 結果を確認済み (前テストと同様)
+
+      usePecoStore.getState().redo()
+      const afterRedo = usePecoStore.getState()
+      expect(afterRedo.document!.totalPages).toBe(4)
+      // redo 後、元ページ1は displayIndex=0 に戻る。OCR 結果が保持されているべき。
+      const restoredPage0 = afterRedo.document!.pages.get(0)
+      expect(restoredPage0).toBeDefined()
+      expect(restoredPage0!.textBlocks).toHaveLength(1)
+      expect(restoredPage0!.textBlocks[0].id).toBe('ocr-block')
+    })
   })
 
   // ── #191: isRangeOcrMode ────────────────────────────────────────────────────

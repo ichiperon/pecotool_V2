@@ -487,4 +487,83 @@ describe('PdfCanvas', () => {
       expect(dynamicCtx.fillRect.mock.calls.length).toBeGreaterThan(baseDynamicFillRectCalls)
     })
   })
+
+  // ── H-5: render 失敗時のエラーオーバーレイ・再試行導線 ──────────────
+  //
+  // 旧実装: エラーオーバーレイの表示条件は `loadError && !pdfPage` だった。
+  // proxy 取得(getCachedPageProxy)は成功しつつ pdfjs の render() が実エラーで
+  // 失敗するケースでは loadError=true でも pdfPage!==null のため、オーバーレイが
+  // 永久に出ず「白紙 + 無通知 + 復帰導線ゼロ」の永続ホワイトアウトになっていた。
+  //
+  // 実 timer (setTimeout 50ms debounce) はこのテスト環境 (jsdom + vmThreads pool)
+  // では実時間の待機だけでは確実に発火しないため、vi.useFakeTimers() +
+  // vi.runAllTimers() で確定的に進める（usePdfRendering.test.ts の
+  // S-01-debounce と同じ方式）。
+  describe('H-5: render() 失敗時のエラーオーバーレイ表示と再試行', () => {
+    async function flushMicrotasks(n = 6) {
+      for (let i = 0; i < n; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+    }
+
+    it('page.render() が実エラーで reject してもエラーオーバーレイが表示され、再試行で復帰できる', async () => {
+      vi.useFakeTimers();
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        const rejectingPage = {
+          getViewport: vi.fn().mockReturnValue({ width: 500, height: 500 }),
+          // Promise.reject は render() 呼び出し時 (mockImplementation) に遅延生成する。
+          // 事前に生成した reject 済み Promise を使い回すと、実際に await される前の
+          // タイミングでテストランナーが unhandled rejection を報告してしまうため。
+          render: vi.fn().mockImplementation(() => ({
+            promise: Promise.reject(new Error('render boom')),
+            cancel: vi.fn(),
+          })),
+        };
+        (pdfLoader.getCachedPageProxy as any).mockResolvedValue(rejectingPage);
+
+        const { container } = render(<PdfCanvas pageIndex={0} />);
+
+        // proxy 取得 (Promise.resolve) を解決させ、render effect が
+        // debounce (isAutoFit 既定 true → 50ms) をスケジュールするまで進める。
+        await flushMicrotasks(6);
+        // debounce を発火させて renderPdfTask → curPage.render() を実行させる。
+        await act(async () => {
+          vi.runAllTimers();
+        });
+        // render() の reject → catch → setLoadError(true) + onRenderComplete() まで
+        // microtask を流す。
+        await flushMicrotasks(6);
+
+        // loadError=true かつ pdfPage!==null (proxy 取得は成功済み) の状態で
+        // エラーオーバーレイが表示されること。
+        expect(container.querySelector('.pdf-load-error-overlay')).not.toBeNull();
+        const retryBtn = container.querySelector('.pdf-load-error-retry-btn') as HTMLButtonElement | null;
+        expect(retryBtn).not.toBeNull();
+
+        // 再試行ボタンから復帰できること。
+        const okPage = {
+          getViewport: vi.fn().mockReturnValue({ width: 500, height: 500 }),
+          render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+        };
+        (pdfLoader.getCachedPageProxy as any).mockResolvedValue(okPage);
+
+        fireEvent.click(retryBtn!);
+
+        await flushMicrotasks(6);
+        await act(async () => {
+          vi.runAllTimers();
+        });
+        await flushMicrotasks(6);
+
+        expect(container.querySelector('.pdf-load-error-overlay')).toBeNull();
+      } finally {
+        errorSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+  });
 });

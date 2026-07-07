@@ -995,7 +995,7 @@ export function PdfCanvas({
           BB を 1 つ選択 → 3 点クリックで弧 / ダブルクリック開始で折れ線
         </div>
       )}
-      {loadError && !pdfPage && (
+      {loadError && (
         <div
           className="pdf-load-error-overlay"
           role="alert"

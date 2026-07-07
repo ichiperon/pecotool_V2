@@ -342,6 +342,10 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           if (typeof err?.message === "string" && err.message.toLowerCase().includes("destroyed")) return;
           console.error("PDF render error:", err);
           setLoadError(true);
+          // H-5 (るしあ C-5 相当): render() 同期 throw のまま return すると
+          // onRenderComplete が呼ばれず、後続の再 render も走らないため
+          // isLoadingPageRender が固着する。エラー経路でも完了通知して解除する。
+          onRenderComplete?.();
           return;
         }
 
@@ -355,6 +359,8 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           if (typeof err?.message === "string" && err.message.toLowerCase().includes("destroyed")) return;
           console.error("PDF render error:", err);
           setLoadError(true);
+          // H-5: render task 失敗時も完了通知し isLoadingPageRender の固着を防ぐ。
+          onRenderComplete?.();
           return;
         }
 
