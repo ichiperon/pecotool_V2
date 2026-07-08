@@ -18,6 +18,12 @@ export interface PdfState {
   error: string | null;
   /** フィットモード。"width"=幅フィット / "page"=全体フィット / "custom"=手動 */
   fitMode: FitMode;
+  /**
+   * ユーザー回転（全ページ一括・90°刻み）。ページ固有の /Rotate に加算合成して
+   * 表示・サムネイル・OCR クロップの全 viewport 生成経路に同値で渡す（単一ソース）。
+   * 経路間で値がズレると欄座標が全ずれするため、コンポーネントはローカルに持たない。
+   */
+  rotation: 0 | 90 | 180 | 270;
 
   // actions
   setLoading: (loading: boolean) => void;
@@ -28,6 +34,8 @@ export interface PdfState {
   setFitMode: (mode: FitMode) => void;
   goToPrevPage: () => void;
   goToNextPage: () => void;
+  /** ユーザー回転を ±90° 進める（欄座標のリマップは reportStore 側で先に行うこと）。 */
+  rotateBy: (delta: 90 | -90) => void;
   reset: () => void;
 }
 
@@ -42,6 +50,7 @@ export const usePdfStore = create<PdfState>((set, get) => ({
   isLoading: false,
   error: null,
   fitMode: "width",
+  rotation: 0,
 
   setLoading: (loading) => set({ isLoading: loading }),
 
@@ -54,6 +63,8 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       currentPage: 1,
       isLoading: false,
       error: null,
+      // 回転はその PDF 個体（スキャンロット）の性質なので、別 PDF では 0 に戻す
+      rotation: 0,
     }),
 
   setCurrentPage: (page) => {
@@ -80,6 +91,12 @@ export const usePdfStore = create<PdfState>((set, get) => ({
     setCurrentPage(currentPage + 1);
   },
 
+  rotateBy: (delta) => {
+    const { rotation } = get();
+    const next = (((rotation + delta) % 360) + 360) % 360;
+    set({ rotation: next as 0 | 90 | 180 | 270 });
+  },
+
   reset: () =>
     set({
       filePath: null,
@@ -89,5 +106,6 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       isLoading: false,
       error: null,
       fitMode: "width",
+      rotation: 0,
     }),
 }));

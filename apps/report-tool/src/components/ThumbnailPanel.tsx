@@ -15,6 +15,7 @@ const ThumbnailPanel: FC = () => {
   const numPages = usePdfStore((s) => s.numPages);
   const currentPage = usePdfStore((s) => s.currentPage);
   const setCurrentPage = usePdfStore((s) => s.setCurrentPage);
+  const rotation = usePdfStore((s) => s.rotation);
 
   const [thumbnails, setThumbnails] = useState<ThumbnailItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -71,7 +72,8 @@ const ThumbnailPanel: FC = () => {
             const { canvas: c } = await renderPageOffscreen(
               pdfDoc,
               i,
-              THUMBNAIL_RENDER_SCALE
+              THUMBNAIL_RENDER_SCALE,
+              rotation
             );
             canvas = c;
 
@@ -112,7 +114,7 @@ const ThumbnailPanel: FC = () => {
       cancelled = true;
       abortRef.current = true;
     };
-  }, [filePath, numPages]);
+  }, [filePath, numPages, rotation]);
 
   // コンポーネント解除時に pdfDoc を破棄
   useEffect(() => {

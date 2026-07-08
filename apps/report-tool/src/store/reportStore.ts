@@ -3,6 +3,12 @@ import type { CellMatrix, ReportField, ReportRow, ReportTemplate, PageOffset } f
 import { ZERO_OFFSET } from "../types/report";
 import { applyCellMove } from "../logic/cellEdit";
 import type { CellMoveMode } from "../logic/cellEdit";
+import {
+  rotateRectCW,
+  rotateRectCCW,
+  rotateOffsetCW,
+  rotateOffsetCCW,
+} from "../logic/rotateTemplate";
 
 export type { CellMoveMode };
 
@@ -187,6 +193,14 @@ interface ReportState {
   undo: () => void;
   /** undo で戻した操作をやり直す。future が空なら no-op。 */
   redo: () => void;
+  /**
+   * ビュー回転（±90°）に合わせて欄 rect と pageOffsets を新しい座標空間へ写像する。
+   * pageWidth/pageHeight は回転前（現在）の scale=1 ページ寸法。
+   * cells / confidences / edited は紙面上の同じ領域を指し続けるため保持する。
+   * 座標空間が変わるためスナップショットとの整合が取れず、履歴はクリアする（ロード境界）。
+   * pdfStore.rotateBy と必ず対で呼ぶこと（先にこちら＝回転前の寸法でリマップ）。
+   */
+  rotateTemplateSpace: (direction: 90 | -90, pageWidth: number, pageHeight: number) => void;
 }
 
 /**
@@ -842,6 +856,29 @@ export const useReportStore = create<ReportState>((set) => ({
         future: [...state.future, snapshotOf(state)],
         // undo を挟んだら nudge 合流を打ち切る（合流先エントリがもう対応しない）
         lastUndoableTag: null,
+      };
+    });
+  },
+
+  rotateTemplateSpace: (direction, pageWidth, pageHeight) => {
+    set((state) => {
+      const rotateRect = direction === 90 ? rotateRectCW : rotateRectCCW;
+      const rotateOffset = direction === 90 ? rotateOffsetCW : rotateOffsetCCW;
+
+      const fields = state.template.fields.map((f) => ({
+        ...f,
+        rect: rotateRect(f.rect, pageWidth, pageHeight),
+      }));
+
+      const nextOffsets = new Map<number, PageOffset>();
+      for (const [pageNum, offset] of state.pageOffsets) {
+        nextOffsets.set(pageNum, rotateOffset(offset));
+      }
+
+      return {
+        template: { fields },
+        pageOffsets: nextOffsets,
+        ...historyClearPatch(),
       };
     });
   },

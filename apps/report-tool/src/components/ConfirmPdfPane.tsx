@@ -10,6 +10,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { usePdfStore } from "../store/pdfStore";
+import { effectiveRotation } from "../logic/rotateTemplate";
 import { useReportStore } from "../store/reportStore";
 import OffsetAdjustOverlay from "./OffsetAdjustOverlay";
 import type { OverlayGeom } from "../types/overlay";
@@ -64,6 +65,7 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
     setFitMode,
     goToPrevPage,
     goToNextPage,
+    rotation,
   } = usePdfStore();
 
   const mode = useReportStore((s) => s.mode);
@@ -145,7 +147,9 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
         if (cancelled) return;
 
         // scale:1 のページサイズを取得し、フィット計算に使う
-        const base = page.getViewport({ scale: 1 });
+        // ページ固有 /Rotate にユーザー回転を加算合成（PdfViewer・OCR と同一ソース）
+        const effRotation = effectiveRotation(page.rotate ?? 0, rotation);
+        const base = page.getViewport({ scale: 1, rotation: effRotation });
         setPageSize((prev) => {
           if (prev && prev.width === base.width && prev.height === base.height) {
             return prev; // 同値なら更新しない（無限ループ防止）
@@ -155,7 +159,10 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
 
         const scale = zoom / 100;
         const devicePixelRatio = window.devicePixelRatio || 1;
-        const viewport = page.getViewport({ scale: scale * devicePixelRatio });
+        const viewport = page.getViewport({
+          scale: scale * devicePixelRatio,
+          rotation: effRotation,
+        });
 
         canvas.width = viewport.width;
         canvas.height = viewport.height;
@@ -203,7 +210,7 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
         renderTaskRef.current = null;
       }
     };
-  }, [filePath, pdfDoc, currentPage, zoom]);
+  }, [filePath, pdfDoc, currentPage, zoom, rotation]);
 
   // ResizeObserver でコンテナサイズを監視し、fitMode に応じてズームを自動調整する
   useEffect(() => {

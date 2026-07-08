@@ -203,12 +203,19 @@ async function runOcrSinglePage(
   pageNumber: number,
   fields: ReportField[],
   offset: PageOffset,
-  isCancelled: () => boolean
+  isCancelled: () => boolean,
+  userRotation: number = 0
 ): Promise<OcrSinglePageResult | null> {
   let canvas: HTMLCanvasElement | null = null;
 
   try {
-    const rendered = await renderPageOffscreen(pdfDoc, pageNumber, REPORT_OCR_RENDER_SCALE);
+    // 表示側と同じ回転で描画する（欄 rect は回転後の座標空間で定義されている）
+    const rendered = await renderPageOffscreen(
+      pdfDoc,
+      pageNumber,
+      REPORT_OCR_RENDER_SCALE,
+      userRotation
+    );
     canvas = rendered.canvas;
     const pageWidth = rendered.pageWidth;
 
@@ -340,7 +347,8 @@ export function useReportOcr(): UseReportOcrReturn {
 
   const runOcr = useCallback(async () => {
     const { template, setCells, setConfidences, pageOffsets } = useReportStore.getState();
-    const { filePath, numPages } = usePdfStore.getState();
+    // rotation は実行開始時に1回だけ読む（実行中に変わっても途中から混ざらない）
+    const { filePath, numPages, rotation } = usePdfStore.getState();
 
     if (!filePath || numPages === 0) return;
     if (template.fields.length === 0) return;
@@ -397,7 +405,8 @@ export function useReportOcr(): UseReportOcrReturn {
             pageNumber,
             template.fields,
             offset,
-            isCancelled
+            isCancelled,
+            rotation
           );
 
           if (result === null) break; // キャンセル
@@ -492,7 +501,7 @@ export function useReportOcr(): UseReportOcrReturn {
 
   const runOcrForPage = useCallback(async (pageNum: number) => {
     const { template, pageOffsets, setCellsForPage, setConfidencesForPage } = useReportStore.getState();
-    const { filePath } = usePdfStore.getState();
+    const { filePath, rotation } = usePdfStore.getState();
 
     if (!filePath) return;
     if (template.fields.length === 0) return;
@@ -524,7 +533,8 @@ export function useReportOcr(): UseReportOcrReturn {
           pageNum,
           template.fields,
           offset,
-          isCancelled
+          isCancelled,
+          rotation
         );
 
         if (result !== null && !isCancelled()) {
