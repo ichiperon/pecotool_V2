@@ -147,3 +147,37 @@ describe("pdfStore.rotation / rotateBy", () => {
     expect(usePdfStore.getState().rotation).toBe(0);
   });
 });
+
+describe("回転連打の寸法契約（レビューBLOCKER回帰）", () => {
+  // handleRotate は「リマップ後に W/H を同期スワップした寸法」で次のリマップを呼ぶ契約。
+  // stale な pageSize（スワップ前の寸法）で2回目を呼ぶと (H-W) 分の全ずれになる。
+  const rect = { x: 100, y: 200, width: 50, height: 30 };
+
+  it("CW→CW（スワップ済み寸法）が 180° 写像 (x,y)→(W-x-w, H-y-h) と一致する", () => {
+    const once = rotateRectCW(rect, W, H);
+    const twice = rotateRectCW(once, H, W); // 1回目の後の空間は H×W
+    expect(twice).toEqual({
+      x: W - rect.x - rect.width,
+      y: H - rect.y - rect.height,
+      width: rect.width,
+      height: rect.height,
+    });
+  });
+
+  it("stale 寸法（スワップし忘れ）で2回目を呼ぶと 180° 写像からずれる（非正方形の破壊を検出）", () => {
+    const once = rotateRectCW(rect, W, H);
+    const wrong = rotateRectCW(once, W, H); // 誤: 旧寸法のまま
+    expect(wrong.x).not.toBe(W - rect.x - rect.width); // (H-W)=247pt ずれる
+  });
+
+  it("CW×4（毎回スワップ）で恒等写像に戻る", () => {
+    let r = rect;
+    let w = W;
+    let h = H;
+    for (let i = 0; i < 4; i++) {
+      r = rotateRectCW(r, w, h);
+      [w, h] = [h, w];
+    }
+    expect(r).toEqual(rect);
+  });
+});

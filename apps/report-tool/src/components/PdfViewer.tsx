@@ -57,6 +57,10 @@ const PdfViewer: FC = () => {
 
   // scale:1 のページサイズ（フィット計算に使用）
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
+  // 回転リマップ用の「論理寸法」。pageSize(state) は非同期 effect でしか更新されず、
+  // 回転ボタン連打時に stale 値でリマップすると欄座標が不可逆に全ずれする（レビューBLOCKER）。
+  // 90°刻みの回転後寸法は常に W/H スワップなので、ref で同期的に追跡する。
+  const logicalDimsRef = useRef<{ width: number; height: number } | null>(null);
 
   const mode = useReportStore((s) => s.mode);
   const resetExtractedData = useReportStore((s) => s.resetExtractedData);
@@ -213,6 +217,7 @@ const PdfViewer: FC = () => {
         // ページ固有 /Rotate にユーザー回転を加算合成（表示・OCR で単一ソース）
         const effRotation = effectiveRotation(page.rotate ?? 0, rotation);
         const base = page.getViewport({ scale: 1, rotation: effRotation });
+        logicalDimsRef.current = { width: base.width, height: base.height };
         setPageSize((prev) => {
           if (prev && prev.width === base.width && prev.height === base.height) {
             return prev; // 同値なら更新しない（無限ループ防止）
@@ -361,8 +366,14 @@ const PdfViewer: FC = () => {
    * cells / confidences / edited は保持される（同じ物理領域を指し続ける）。
    */
   const handleRotate = (direction: 90 | -90) => {
-    if (!pageSize) return;
-    useReportStore.getState().rotateTemplateSpace(direction, pageSize.width, pageSize.height);
+    // state の pageSize でなく同期管理の論理寸法を使う。連打時、テンプレは既に
+    // 新空間へ移行済みなのに pageSize は旧値のままという race で、2回目のリマップが
+    // 誤寸法で走り undo 不能の全ずれになる（レビューBLOCKER）。
+    const dims = logicalDimsRef.current ?? pageSize;
+    if (!dims) return;
+    useReportStore.getState().rotateTemplateSpace(direction, dims.width, dims.height);
+    // 90°回転後の空間寸法は W/H スワップ。effect の完了を待たず同期更新する
+    logicalDimsRef.current = { width: dims.height, height: dims.width };
     rotateBy(direction);
   };
 

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FC, type KeyboardEvent } from "react";
 import { useTemplateLibraryStore } from "../store/templateLibraryStore";
 import { useReportStore } from "../store/reportStore";
+import { usePdfStore } from "../store/pdfStore";
 import type { TemplateSummary } from "../lib/templateStorage";
 
 /**
@@ -65,6 +66,16 @@ const TemplateLibraryPanel: FC = () => {
       return;
     }
 
+    // テンプレは回転メタデータを持たない（欄 rect は現在の表示空間のまま保存される）。
+    // 回転中に保存して回転 0 の別 PDF で読み込むと座標が二重回転で全ずれするため、
+    // 回転中の保存は明示確認を挟む（恒久対応=回転メタデータの保存は別issue）。
+    if (overwriteId === undefined && usePdfStore.getState().rotation !== 0) {
+      const ok = window.confirm(
+        "ページを回転した状態で保存します。このテンプレートは同じ回転状態でのみ正しく使えます。続けますか？"
+      );
+      if (!ok) return;
+    }
+
     setIsSaving(true);
     setSaveError(null);
     const result = await saveAs(trimmed, new Date().toISOString(), overwriteId);
@@ -96,6 +107,12 @@ const TemplateLibraryPanel: FC = () => {
     if (cells.size > 0) {
       const ok = window.confirm(
         "現在の抽出データ（OCR結果・手編集）が破棄されます。よろしいですか？"
+      );
+      if (!ok) return;
+    }
+    if (usePdfStore.getState().rotation !== 0) {
+      const ok = window.confirm(
+        "ページを回転した状態でテンプレートを読み込みます。テンプレートが回転なしで保存されている場合、欄の位置がずれます。続けますか？"
       );
       if (!ok) return;
     }
