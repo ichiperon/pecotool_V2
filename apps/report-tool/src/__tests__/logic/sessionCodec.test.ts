@@ -92,3 +92,25 @@ describe("sessionCodec: 不正入力の拒否", () => {
     expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
   });
 });
+
+describe("sessionCodec: 値レベル検証（レビューMEDIUM回帰）", () => {
+  it("rotation が 90 刻みでない（45等）は ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.rotation = 45;
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("セル値に非 string（数値）が混入していたら ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.cells = [[1, [[["f1", 123]]]]];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("fields に null 要素・rect 欠落があれば ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.fields = [null];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+    obj.fields = [{ id: "f1", name: "金額" }]; // rect なし
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+});

@@ -87,18 +87,48 @@ export function deserializeSession(json: string): DecodeResult {
   if (typeof obj.savedAt !== "string") {
     return { ok: false, reason: "savedAt がありません" };
   }
-  if (typeof obj.rotation !== "number") {
-    return { ok: false, reason: "rotation がありません" };
+  // rotation は 90°刻みのみ許容。任意角が store に入ると PdfViewer の回転幾何
+  //（W/H スワップ前提）が壊れる（レビューMEDIUM: 値レベル検証）
+  if (
+    typeof obj.rotation !== "number" ||
+    ![0, 90, 180, 270].includes(obj.rotation)
+  ) {
+    return { ok: false, reason: "rotation が不正です" };
   }
   if (!Array.isArray(obj.fields)) {
     return { ok: false, reason: "fields がありません" };
+  }
+  // fields の最低限の形（id/name が string・rect がオブジェクト）を検証する。
+  // as キャスト素通しだと null 要素等が store に入り描画で落ちる
+  for (const f of obj.fields as unknown[]) {
+    if (
+      typeof f !== "object" ||
+      f === null ||
+      typeof (f as { id?: unknown }).id !== "string" ||
+      typeof (f as { name?: unknown }).name !== "string" ||
+      typeof (f as { rect?: unknown }).rect !== "object" ||
+      (f as { rect?: unknown }).rect === null
+    ) {
+      return { ok: false, reason: "fields の要素が不正です" };
+    }
   }
 
   try {
     const cells: CellMatrix = new Map(
       (obj.cells as Array<[number, Array<Array<[string, string]>>]>).map(([page, rows]) => [
         page,
-        rows.map((row) => new Map(row)),
+        rows.map(
+          (row) =>
+            new Map(
+              row.map(([k, v]) => {
+                // セル値は string のみ。数値等が混入すると CSV/編集の string 前提で落ちる
+                if (typeof k !== "string" || typeof v !== "string") {
+                  throw new Error("cell value must be string");
+                }
+                return [k, v] as [string, string];
+              })
+            )
+        ),
       ])
     );
     const confidences: ConfidenceMatrix = new Map(

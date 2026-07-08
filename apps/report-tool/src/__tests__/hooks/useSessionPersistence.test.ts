@@ -188,3 +188,66 @@ describe("useSessionPersistence: 復元", () => {
     expect(window.confirm).not.toHaveBeenCalled();
   });
 });
+
+describe("useSessionPersistence: flushNow（クローズ前フラッシュ・レビューHIGH回帰）", () => {
+  it("デバウンス満了前でも flushNow で即時保存され true を返す", async () => {
+    const storage = makeStorage();
+    const { result } = renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "直前編集"]])]]]));
+    });
+
+    // デバウンス（2秒）を待たずにフラッシュ
+    let saved = false;
+    await act(async () => {
+      saved = await result.current.flushNow();
+    });
+    expect(saved).toBe(true);
+    expect(storage.saved[storage.saved.length - 1]).toContain("直前編集");
+
+    // フラッシュ済みなので保留タイマーからの二重保存はない
+    const countAfterFlush = storage.saved.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_AUTOSAVE_DEBOUNCE_MS + 10);
+    });
+    expect(storage.saved.length).toBe(countAfterFlush);
+  });
+
+  it("抽出データが無ければ flushNow は false（保存しない）", async () => {
+    const storage = makeStorage();
+    const { result } = renderHook(() => useSessionPersistence(storage));
+    let saved = true;
+    await act(async () => {
+      saved = await result.current.flushNow();
+    });
+    expect(saved).toBe(false);
+    expect(storage.save).not.toHaveBeenCalled();
+  });
+
+  it("保存失敗時は false を返す（クローズ側が警告文言に切り替えられる）", async () => {
+    const storage = makeStorage();
+    (storage.save as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, reason: "disk" });
+    const { result } = renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "v"]])]]]));
+    });
+
+    let saved = true;
+    await act(async () => {
+      saved = await result.current.flushNow();
+    });
+    expect(saved).toBe(false);
+  });
+});

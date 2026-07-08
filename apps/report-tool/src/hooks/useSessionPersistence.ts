@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useReportStore } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 import { serializeSession, deserializeSession } from "../logic/sessionCodec";
@@ -18,23 +18,30 @@ export const SESSION_AUTOSAVE_DEBOUNCE_MS = 2000;
  *   オフセット・除外・回転）を復元する。undo 履歴は復元しない（新しい境界）。
  *
  * @param storage テスト用の差し替え口。省略時は Tauri invoke ベースの既定実装。
+ * @returns flushNow: デバウンスを待たず即時保存する。クローズ前フラッシュ用
+ *   （保存に成功したら true。抽出データなし・保存失敗・ランタイム外は false）。
  */
-export function useSessionPersistence(storage?: SessionFileStorage): void {
+export function useSessionPersistence(storage?: SessionFileStorage): {
+  flushNow: () => Promise<boolean>;
+} {
   const storageRef = useRef<SessionFileStorage | null>(null);
   if (storageRef.current === null) {
     storageRef.current = storage ?? createSessionFileStorage();
   }
+  // effect 内で確定する即時保存関数への安定参照（クローズガードから呼ぶ）
+  const flushRef = useRef<() => Promise<boolean>>(async () => false);
+  const flushNow = useCallback(() => flushRef.current(), []);
 
   useEffect(() => {
     const store = storageRef.current!;
     let timer: number | null = null;
     let disposed = false;
 
-    const saveNow = async () => {
+    const saveNow = async (): Promise<boolean> => {
       const rs = useReportStore.getState();
       const ps = usePdfStore.getState();
       // 抽出データが無い状態は保存しない（reset 直後に有効なセッションを潰さない）
-      if (!ps.filePath || rs.cells.size === 0) return;
+      if (!ps.filePath || rs.cells.size === 0) return false;
       const json = serializeSession({
         pdfPath: ps.filePath,
         savedAt: new Date().toISOString(),
@@ -46,7 +53,17 @@ export function useSessionPersistence(storage?: SessionFileStorage): void {
         pageOffsets: rs.pageOffsets,
         excludedPages: rs.excludedPages,
       });
-      await store.save(json);
+      const result = await store.save(json);
+      return result.ok;
+    };
+
+    // クローズ前フラッシュ: 保留中のデバウンスを破棄して即時保存する
+    flushRef.current = async () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      return saveNow();
     };
 
     const schedule = () => {
@@ -114,4 +131,6 @@ export function useSessionPersistence(storage?: SessionFileStorage): void {
       if (timer !== null) window.clearTimeout(timer);
     };
   }, []);
+
+  return { flushNow };
 }

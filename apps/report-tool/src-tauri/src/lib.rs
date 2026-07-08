@@ -598,7 +598,7 @@ fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
-    std::fs::rename(temp, target).map_err(|e| format!("テンプレート atomic rename 失敗: {e}"))
+    std::fs::rename(temp, target).map_err(|e| format!("ファイルの atomic rename 失敗: {e}"))
 }
 
 /// app_data_dir()/templates を解決する。存在しなくてもここでは作らない
