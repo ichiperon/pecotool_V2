@@ -40,13 +40,17 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] })
   const excludedPages = useReportStore((s) => s.excludedPages);
   const pdfFilePath = usePdfStore((s) => s.filePath);
   const [opts, setOpts] = useState<CsvOptions>(DEFAULT_OPTIONS);
+  // ページを逆順で出力（スキャナが束を逆順で吐いたケースの救済。
+  // ツール内 DnD 並び替えの安価な代替 — UXレビュー⑩）
+  const [reverseOrder, setReverseOrder] = useState(false);
   const [status, setStatus] = useState<"idle" | "saving" | "done" | "error" | "unavailable">("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
 
   // 除外ページは CSV に出さない（OCR後に除外された場合も cells に残っているため必ずフィルタ）
-  const pageNumbers = Array.from(cells.keys())
+  const pageNumbersAsc = Array.from(cells.keys())
     .filter((p) => !excludedPages.has(p))
     .sort((a, b) => a - b);
+  const pageNumbers = reverseOrder ? [...pageNumbersAsc].reverse() : pageNumbersAsc;
 
   // 意図して除外したページは「OCR失敗」警告の対象から外す（除外＝出力しない宣言済み）
   const visibleFailedPages = failedPages.filter((p) => !excludedPages.has(p));
@@ -162,6 +166,15 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] })
             onChange={(e) => toggle("includePageNumber", e.target.checked)}
           />
           <span>ページ番号列を含める</span>
+        </label>
+
+        <label className="csv-export__option-row">
+          <input
+            type="checkbox"
+            checked={reverseOrder}
+            onChange={(e) => setReverseOrder(e.target.checked)}
+          />
+          <span>ページを逆順で出力する（逆順スキャンの救済）</span>
         </label>
 
         <label className="csv-export__option-row">

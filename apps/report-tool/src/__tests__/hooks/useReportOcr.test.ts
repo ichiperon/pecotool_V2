@@ -1416,3 +1416,97 @@ describe("useReportOcr: ページ除外との連携", () => {
     expect(result.current.isRunning).toBe(false);
   });
 });
+
+describe("useReportOcr: 手修正保持再OCR（preserveEdited・UXレビュー⑨）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+  const okResponse = JSON.stringify({
+    status: "ok",
+    blocks: [{ text: "OCR新値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+  });
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+    invokeStub.mockResolvedValue(okResponse);
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+      edited: new Map(),
+      pageOffsets: new Map(),
+      excludedPages: new Set(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 2,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** 1回 OCR → 手修正 → 状態を返す */
+  async function runAndEdit(result: { current: ReturnType<typeof useReportOcr> }) {
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    act(() => {
+      useReportStore.getState().setCellValue(1, "field-1", "人の修正値");
+    });
+  }
+
+  it("preserveEdited=true（既定）: 再OCRしても手修正値と✎フラグが残り、confidence は付かない", async () => {
+    const { result } = renderHook(() => useReportOcr());
+    expect(result.current.preserveEdited).toBe(true);
+    await runAndEdit(result);
+
+    await act(async () => {
+      await result.current.runOcr(); // 再実行（OCRは "OCR新値" を返す）
+    });
+
+    const rs = useReportStore.getState();
+    expect(rs.cells.get(1)?.[0]?.get("field-1")).toBe("人の修正値");
+    expect(rs.edited.get(1)?.[0]?.has("field-1")).toBe(true);
+    expect(rs.confidences.get(1)?.[0]?.has("field-1")).toBe(false);
+    // 手修正していないページ2は新しいOCR値
+    expect(rs.cells.get(2)?.[0]?.get("field-1")).toBe("OCR新値");
+  });
+
+  it("preserveEdited=false: 手修正値は破棄され新しいOCR値になる（フラグも消える）", async () => {
+    const { result } = renderHook(() => useReportOcr());
+    await runAndEdit(result);
+
+    act(() => {
+      result.current.setPreserveEdited(false);
+    });
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const rs = useReportStore.getState();
+    expect(rs.cells.get(1)?.[0]?.get("field-1")).toBe("OCR新値");
+    expect(rs.edited.get(1)?.[0]?.has("field-1")).not.toBe(true);
+  });
+
+  it("単一ページ再OCRでも手修正が保持される", async () => {
+    const { result } = renderHook(() => useReportOcr());
+    await runAndEdit(result);
+
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    const rs = useReportStore.getState();
+    expect(rs.cells.get(1)?.[0]?.get("field-1")).toBe("人の修正値");
+    expect(rs.edited.get(1)?.[0]?.has("field-1")).toBe(true);
+  });
+});

@@ -38,9 +38,18 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
     layoutMismatchPages,
     layoutBasePage,
     engineError,
+    preserveEdited,
+    setPreserveEdited,
     runOcr,
     cancelOcr,
   } = ocrHook;
+
+  // 手修正済みセルの総数（confirm 文言と保持チェックの表示判断に使う）
+  const edited = useReportStore((s) => s.edited);
+  let editedCount = 0;
+  for (const rows of edited.values()) {
+    for (const set of rows) editedCount += set.size;
+  }
 
   const canRun = !isRunning && !!filePath && numPages > 0 && fields.length > 0;
   const progressPct =
@@ -48,19 +57,39 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
       ? Math.round((progress.done / progress.total) * 100)
       : 0;
 
-  // cells が非空のとき確認ダイアログを挟む（手編集データ損失防止）
+  // cells が非空のとき確認ダイアログを挟む（手編集データ損失防止）。
+  // 手修正の件数と保持/破棄を明示する（「破棄されます」だけでは規模が伝わらない）
   const handleRunOcr = useCallback(() => {
     if (cells.size > 0) {
+      const editedNote =
+        editedCount > 0
+          ? preserveEdited
+            ? `手修正済み ${editedCount} 件の値は保持されます。`
+            : `手修正済み ${editedCount} 件も破棄されます。`
+          : "";
       const ok = window.confirm(
-        "既存のOCR結果（手編集を含む）は破棄されます。続けますか？"
+        `既存のOCR結果は再実行で置き換わります。${editedNote}続けますか？`
       );
       if (!ok) return;
     }
     runOcr();
-  }, [cells, runOcr]);
+  }, [cells, runOcr, editedCount, preserveEdited]);
 
   return (
     <div className="ocr-run-panel">
+      {/* 手修正保持オプション（再OCRで50ページ分の手直しが消える事故の防止） */}
+      {editedCount > 0 && (
+        <label className="ocr-run-panel__preserve-row">
+          <input
+            type="checkbox"
+            checked={preserveEdited}
+            onChange={(e) => setPreserveEdited(e.target.checked)}
+            disabled={isRunning}
+          />
+          <span>✎ 手修正済みセルの値を保持して再実行（{editedCount} 件）</span>
+        </label>
+      )}
+
       <div className="ocr-run-panel__actions">
         <button
           type="button"

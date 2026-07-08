@@ -1599,6 +1599,14 @@ button {
   text-align: right;
 }
 
+.ocr-run-panel__preserve-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #2d3748;
+}
+
 .ocr-run-panel__hint {
   font-size: 0.75rem;
   color: #a0aec0;
