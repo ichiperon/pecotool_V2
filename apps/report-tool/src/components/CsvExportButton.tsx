@@ -1,9 +1,10 @@
-import { useState, type FC } from "react";
+import { useState, useMemo, type FC } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useReportStore } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 import { buildTemplateCsv } from "../logic/templateCsv";
 import { encodeCsvUtf8Bom } from "../logic/csvEncode";
+import { listReviewTargets, countReviewTargets } from "../logic/reviewTargets";
 import type { CsvOptions } from "../types/report";
 
 /**
@@ -25,11 +26,17 @@ const DEFAULT_OPTIONS: CsvOptions = {
 interface CsvExportButtonProps {
   /** テスト・ブラウザ環境からファイル保存APIを差し込むための注入口。省略時はTauriプラグインを使う。 */
   onSave?: (data: Uint8Array, csv: string) => Promise<void>;
+  /**
+   * 直近の全ページ OCR で処理失敗したページ番号（App の ocrHook から渡す）。
+   * 失敗ページは cells に載らず CSV から行ごと消えるため、出力前に明示警告する。
+   */
+  failedPages?: number[];
 }
 
-const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
+const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] }) => {
   const template = useReportStore((s) => s.template);
   const cells = useReportStore((s) => s.cells);
+  const confidences = useReportStore((s) => s.confidences);
   const pdfFilePath = usePdfStore((s) => s.filePath);
   const [opts, setOpts] = useState<CsvOptions>(DEFAULT_OPTIONS);
   const [status, setStatus] = useState<"idle" | "saving" | "done" | "error" | "unavailable">("idle");
@@ -37,11 +44,26 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
 
   const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
 
+  // 出力前ゲート用: 未確認の要確認セル（低信頼・空）の残数
+  const reviewCounts = useMemo(
+    () => countReviewTargets(listReviewTargets(cells, confidences, template.fields)),
+    [cells, confidences, template.fields]
+  );
+
   const handleExport = async () => {
     if (template.fields.length === 0) {
       setErrorMessage("欄が定義されていません。先に欄を追加してください。");
       setStatus("error");
       return;
+    }
+
+    // OCR 未実行（cells 空）だとヘッダ＋空行1行の CSV が「保存しました」で成功して
+    // しまい、初見ユーザーが成功と誤認する。明示確認を挟む（ブロックはしない）。
+    if (cells.size === 0) {
+      const ok = window.confirm(
+        "OCR 結果がありません。ヘッダーと空の行だけの CSV を出力しますか？"
+      );
+      if (!ok) return;
     }
 
     setStatus("saving");
@@ -146,6 +168,18 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
           />
         </label>
       </section>
+
+      {/* 出力前ゲート: 出す前に「直すべきものが残っていないか」を明示する */}
+      {reviewCounts.lowConfidence > 0 && (
+        <p className="csv-export__gate csv-export__gate--warn" role="note">
+          ⚠ 低信頼セルが {reviewCounts.lowConfidence} 件未確認です。確認ステップで見直してからの出力を推奨します
+        </p>
+      )}
+      {failedPages.length > 0 && (
+        <p className="csv-export__gate csv-export__gate--alert" role="alert">
+          ページ {failedPages.join(", ")} は OCR 失敗のため CSV に行が含まれません（行とページの対応がずれます）
+        </p>
+      )}
 
       <button
         className={`csv-export__btn ${status === "saving" ? "csv-export__btn--saving" : ""}`}

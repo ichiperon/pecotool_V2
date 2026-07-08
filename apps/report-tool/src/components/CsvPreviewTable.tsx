@@ -3,6 +3,7 @@ import {
   useRef,
   useCallback,
   useEffect,
+  useMemo,
   type FC,
   type KeyboardEvent,
   type PointerEvent,
@@ -10,6 +11,11 @@ import {
 import { useReportStore } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 import { makeAnnouncement } from "../lib/announce";
+import {
+  listReviewTargets,
+  countReviewTargets,
+  LOW_CONFIDENCE_THRESHOLD,
+} from "../logic/reviewTargets";
 
 /** フォーカス位置（段対応） */
 interface FocusPos {
@@ -136,6 +142,55 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
     announcementToggleRef.current = !announcementToggleRef.current;
     setAnnouncement(makeAnnouncement(text, announcementToggleRef.current));
   }, []);
+
+  // 要確認セル（低信頼・空）のドキュメント順リストと件数（ナビ・サマリチップ用）
+  const reviewTargets = useMemo(
+    () => listReviewTargets(cells, confidences, fields),
+    [cells, confidences, fields]
+  );
+  const reviewCounts = useMemo(() => countReviewTargets(reviewTargets), [reviewTargets]);
+
+  const fieldIndexById = useMemo(
+    () => new Map(fields.map((f, i) => [f.id, i])),
+    [fields]
+  );
+
+  /**
+   * 「次の要確認セルへ」: 現在フォーカス位置よりドキュメント順で後ろにある
+   * 最初の要確認セルへフォーカスを移す（末尾まで行ったら先頭へ循環）。
+   * 確認画面では左 PDF のページも同期する。
+   */
+  const handleGoToNextReview = useCallback(() => {
+    if (reviewTargets.length === 0) return;
+
+    const pageOrder = new Map(pageNumbers.map((p, i) => [p, i]));
+    // タプル逐次比較（page→row→field）。合成キーだと段・欄数の上限仮定が要る
+    // （段1000超で桁あふれ）ため、上限仮定なしの比較にする。
+    const isAfterFocus = (pageNum: number, rowIndex: number, fieldIndex: number): boolean => {
+      if (!focusPos) return true;
+      const pi = pageOrder.get(pageNum) ?? -1;
+      const cp = pageOrder.get(focusPos.pageNum) ?? -1;
+      if (pi !== cp) return pi > cp;
+      if (rowIndex !== focusPos.rowIndex) return rowIndex > focusPos.rowIndex;
+      return fieldIndex > focusPos.fieldIndex;
+    };
+
+    const next =
+      reviewTargets.find((t) =>
+        isAfterFocus(t.pageNum, t.rowIndex, fieldIndexById.get(t.fieldId) ?? 0)
+      ) ?? reviewTargets[0]; // 末尾まで確認したら先頭へ循環
+
+    const fieldIndex = fieldIndexById.get(next.fieldId) ?? 0;
+    setFocusPos({ pageNum: next.pageNum, rowIndex: next.rowIndex, fieldIndex });
+    if (activePage != null) {
+      setCurrentPage(next.pageNum);
+    }
+    const fieldName = fields[fieldIndex]?.name ?? "";
+    const kindLabel = next.kind === "lowConfidence" ? "低信頼" : "空";
+    announce(
+      `${next.pageNum}ページ目 段${next.rowIndex + 1} ${fieldName}（${kindLabel}）へ移動。要確認 残り${reviewTargets.length}件`
+    );
+  }, [reviewTargets, pageNumbers, focusPos, fieldIndexById, fields, activePage, setCurrentPage, announce]);
 
   /**
    * 編集開始。isLineItem フィールドは textarea、固定欄は input で開く。
@@ -689,6 +744,35 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
             ↷
           </button>
         </div>
+        {(reviewCounts.lowConfidence > 0 || reviewCounts.empty > 0) && (
+          <div className="csv-preview__review-nav">
+            {reviewCounts.lowConfidence > 0 && (
+              <span
+                className="csv-preview__review-chip csv-preview__review-chip--lowconf"
+                title="OCR 信頼度が低いセルの残数"
+              >
+                ⚠ 低信頼 {reviewCounts.lowConfidence}
+              </span>
+            )}
+            {reviewCounts.empty > 0 && (
+              <span
+                className="csv-preview__review-chip csv-preview__review-chip--empty"
+                title="値が空のセルの残数"
+              >
+                空 {reviewCounts.empty}
+              </span>
+            )}
+            <button
+              type="button"
+              className="csv-preview__review-next-btn"
+              onClick={handleGoToNextReview}
+              aria-label="次の要確認セルへ移動"
+              title="次の要確認セル（低信頼・空）へ移動"
+            >
+              次の要確認 ▶
+            </button>
+          </div>
+        )}
         {import.meta.env.DEV && (
           <button type="button" className="csv-preview__sample-btn" onClick={injectSampleData}>
             サンプル再挿入（開発用）
@@ -817,12 +901,13 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
                       // 固定欄かつ2段目以降: 〃表示（編集不可）
                       const isDittoCell = !isLineItem && rowIndex > 0;
 
-                      // OCR 信頼度: 閾値(<=0.5)かつ〃セル・空セル以外のとき低信頼強調
+                      // OCR 信頼度: 閾値以下かつ〃セル・空セル以外のとき低信頼強調
+                      // （閾値は reviewTargets の列挙ロジックと共有 — 判定のズレ防止）
                       const pageConfRows = confidences.get(pageNum);
                       const cellConf = pageConfRows?.[rowIndex]?.get(field.id);
                       const isLowConfidence =
                         cellConf !== undefined &&
-                        cellConf <= 0.5 &&
+                        cellConf <= LOW_CONFIDENCE_THRESHOLD &&
                         !isDittoCell &&
                         !isEmpty;
 

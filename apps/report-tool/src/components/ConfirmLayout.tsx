@@ -32,8 +32,9 @@ const ConfirmLayout: FC<Props> = ({ ocrHook }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
 
-  const { reocrTarget, runOcrForPage } = ocrHook;
+  const { reocrTarget, runOcrForPage, failedPages, layoutMismatchPages, layoutBasePage } = ocrHook;
   const currentPage = usePdfStore((s) => s.currentPage);
+  const setCurrentPage = usePdfStore((s) => s.setCurrentPage);
 
   // クランプ付きリサイズ
   const clampLeft = useCallback((desired: number): number => {
@@ -163,6 +164,43 @@ const ConfirmLayout: FC<Props> = ({ ocrHook }) => {
             確認中: {currentPage} ページ目
           </span>
         </div>
+
+        {/* OCR 実行結果の警告を確認画面に持ち込む。
+            OCR 完了で自動的にステップ③へ遷移するため、ステップ②の OcrRunPanel だけに
+            表示すると警告が出た瞬間に画面ごと切り替わり誰も読めない（UXレビュー指摘 P1）。
+            ページ番号ボタンで該当ページへジャンプできる。 */}
+        {failedPages.length > 0 && (
+          <p className="confirm-layout__ocr-alert" role="alert">
+            OCR 失敗（CSV に行が含まれません）:
+            {failedPages.map((p) => (
+              <button
+                key={p}
+                type="button"
+                className="confirm-layout__page-jump-btn"
+                onClick={() => setCurrentPage(p)}
+                aria-label={`OCR に失敗した ${p} ページ目を表示`}
+              >
+                {p}
+              </button>
+            ))}
+          </p>
+        )}
+        {layoutMismatchPages.length > 0 && layoutBasePage !== null && (
+          <p className="confirm-layout__ocr-note" role="note">
+            用紙サイズ・向きが基準ページ（{layoutBasePage}ページ目）と異なるページ:
+            {layoutMismatchPages.map((p) => (
+              <button
+                key={p}
+                type="button"
+                className="confirm-layout__page-jump-btn"
+                onClick={() => setCurrentPage(p)}
+                aria-label={`用紙サイズ・向きが異なる ${p} ページ目を表示`}
+              >
+                {p}
+              </button>
+            ))}
+          </p>
+        )}
         <CsvPreviewTable
           activePage={currentPage}
           reocrTarget={reocrTarget}

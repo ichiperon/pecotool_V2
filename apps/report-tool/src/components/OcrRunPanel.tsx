@@ -31,8 +31,16 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
   const cells = useReportStore((s) => s.cells);
   const filePath = usePdfStore((s) => s.filePath);
   const numPages = usePdfStore((s) => s.numPages);
-  const { isRunning, progress, failedPages, layoutMismatchPages, layoutBasePage, runOcr, cancelOcr } =
-    ocrHook;
+  const {
+    isRunning,
+    progress,
+    failedPages,
+    layoutMismatchPages,
+    layoutBasePage,
+    engineError,
+    runOcr,
+    cancelOcr,
+  } = ocrHook;
 
   const canRun = !isRunning && !!filePath && numPages > 0 && fields.length > 0;
   const progressPct =
@@ -104,6 +112,14 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
             {progress.done} / {progress.total} ページ
           </span>
         </div>
+      )}
+
+      {/* エンジン死亡（最初のページで全欄 invoke 失敗 → 実行中断・cells 非破壊） */}
+      {!isRunning && engineError && (
+        <p className="ocr-run-panel__failed" role="alert">
+          OCR を実行できませんでした。Windows の設定 &gt; 時刻と言語 &gt; 言語と地域 で
+          日本語の言語パックが追加されているか確認してください。既存の抽出結果は保持されています
+        </p>
       )}
 
       {/* OCR 処理エラーになったページの通知 */}

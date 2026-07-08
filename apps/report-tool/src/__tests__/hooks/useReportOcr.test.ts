@@ -513,8 +513,9 @@ describe("useReportOcr: runOcrForPage", () => {
 
     const { result } = renderHook(() => useReportOcr());
 
+    // 再OCRの失敗は握りつぶさず reject で呼び出し元（ConfirmLayout の reocrError）へ伝播する
     await act(async () => {
-      await result.current.runOcrForPage(1);
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow("読み込み失敗");
     });
 
     // readFile 失敗時も isRunning/reocrTarget が確実に戻り、ボタンが永久 disable にならないこと
@@ -533,7 +534,7 @@ describe("useReportOcr: runOcrForPage", () => {
     const { result } = renderHook(() => useReportOcr());
 
     await act(async () => {
-      await result.current.runOcrForPage(1);
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow("Invalid PDF structure");
     });
 
     expect(result.current.isRunning).toBe(false);
@@ -1124,5 +1125,238 @@ describe("useReportOcr: レイアウト混在検出 × 処理エラーの相互�
 
     expect(result.current.layoutBasePage).toBe(1);
     expect(result.current.layoutMismatchPages).toEqual([2]);
+  });
+});
+
+describe("useReportOcr: エンジン死亡検知（engineError）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  function setFields(ids: string[]) {
+    useReportStore.setState({
+      template: {
+        fields: ids.map((id) => ({
+          id,
+          name: id,
+          color: "#7cb9e8",
+          rect: { x: 10, y: 10, width: 100, height: 50 },
+        })),
+      },
+      pageOffsets: new Map(),
+    });
+  }
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+
+    setFields(["field-1"]);
+    // 既存の抽出結果がある状態を再現（エンジン死亡時に破壊されないことの検証用）
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([["field-1", "既存値"]])]]]),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("最初のページで全欄 invoke 失敗 → engineError=true・実行中断・既存 cells 非破壊", async () => {
+    invokeStub.mockRejectedValue(new Error("OCR engine unavailable"));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(true);
+    expect(result.current.isRunning).toBe(false);
+    // 既存 cells が空 Map で上書きされていない
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("既存値");
+    // 残ページを回さず中断している（1欄×1ページ分の invoke のみ）
+    expect(invokeStub).toHaveBeenCalledTimes(1);
+  });
+
+  it("エンジンは生きているがページ2だけ全欄失敗 → failedPages に昇格し空行を CSV に載せない", async () => {
+    invokeStub
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          status: "ok",
+          blocks: [{ text: "値1", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+        })
+      )
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          status: "ok",
+          blocks: [{ text: "値3", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+        })
+      );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(false);
+    expect(result.current.failedPages).toEqual([2]);
+    const cells = useReportStore.getState().cells;
+    expect(cells.get(1)?.[0]?.get("field-1")).toBe("値1");
+    expect(cells.has(2)).toBe(false); // 全欄空の行として混入しない
+    expect(cells.get(3)?.[0]?.get("field-1")).toBe("値3");
+  });
+
+  it("一部の欄だけ invoke 失敗したページは行として残り failedPages に載らない", async () => {
+    setFields(["field-1", "field-2"]);
+    usePdfStore.setState({ numPages: 1 });
+    invokeStub
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          status: "ok",
+          blocks: [{ text: "成功値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+        })
+      )
+      .mockRejectedValueOnce(new Error("transient"));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(false);
+    expect(result.current.failedPages).toEqual([]);
+    const row = useReportStore.getState().cells.get(1)?.[0];
+    expect(row?.get("field-1")).toBe("成功値");
+    expect(row?.get("field-2")).toBe(""); // 失敗欄は空文字
+  });
+
+  it("エンジン復旧後の再実行で engineError がクリアされる", async () => {
+    invokeStub.mockRejectedValue(new Error("dead"));
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.engineError).toBe(true);
+
+    invokeStub.mockReset();
+    invokeStub.mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [{ text: "復旧", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+      })
+    );
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.engineError).toBe(false);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("復旧");
+  });
+});
+
+describe("useReportOcr: 再OCR × 警告の整合（レビュー指摘 MAJOR-1/-2）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 2,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const okResponse = JSON.stringify({
+    status: "ok",
+    blocks: [{ text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+  });
+
+  it("失敗ページを再OCRで修復すると failedPages から外れる（MAJOR-1: 嘘の警告を残さない）", async () => {
+    // 全ページ実行: page1 成功・page2 全欄失敗
+    invokeStub
+      .mockResolvedValueOnce(okResponse)
+      .mockRejectedValueOnce(new Error("transient"));
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.failedPages).toEqual([2]);
+
+    // page2 を再OCR（今度は成功）
+    invokeStub.mockResolvedValue(okResponse);
+    await act(async () => {
+      await result.current.runOcrForPage(2);
+    });
+
+    expect(result.current.failedPages).toEqual([]);
+    expect(useReportStore.getState().cells.get(2)?.[0]?.get("field-1")).toBe("値");
+  });
+
+  it("再OCRで全欄 invoke 失敗のとき既存データを上書きせず reject する（MAJOR-2）", async () => {
+    // まず正常に全ページ実行して確定データを作る
+    invokeStub.mockResolvedValue(okResponse);
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+
+    // エンジン停止を再現して page1 を再OCR
+    invokeStub.mockReset();
+    invokeStub.mockRejectedValue(new Error("engine down"));
+    await act(async () => {
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow(/OCR エンジン停止の可能性/);
+    });
+
+    // 空行で上書きされていない（undo 不能な破壊の防止）
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+    expect(result.current.isRunning).toBe(false);
+    expect(result.current.reocrTarget).toBeNull();
+  });
+
+  it("エンジン死亡で中断した実行は前回の警告を消さない（MINOR-1: cells と警告の整合）", async () => {
+    // 1回目: page1 成功・page2 全欄失敗 → failedPages=[2]
+    invokeStub
+      .mockResolvedValueOnce(okResponse)
+      .mockRejectedValueOnce(new Error("transient"));
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.failedPages).toEqual([2]);
+
+    // 2回目: エンジン死亡（page1 から全滅）→ 中断・cells 保持・警告も保持
+    invokeStub.mockReset();
+    invokeStub.mockRejectedValue(new Error("dead"));
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(true);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+    expect(result.current.failedPages).toEqual([2]); // 消えていない
   });
 });

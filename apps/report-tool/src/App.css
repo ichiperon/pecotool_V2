@@ -995,6 +995,49 @@ button {
   opacity: 1;
 }
 
+/* 要確認セルのナビ（ツールバー右側: 残数チップ + 次へボタン） */
+.csv-preview__review-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.csv-preview__review-chip {
+  font-size: 0.72rem;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.csv-preview__review-chip--lowconf {
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.csv-preview__review-chip--empty {
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #fed7d7;
+}
+
+.csv-preview__review-next-btn {
+  font-size: 0.75rem;
+  padding: 1px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  background: #fff;
+  color: #2d3748;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.csv-preview__review-next-btn:hover {
+  background: #ebf8ff;
+  border-color: #4299e1;
+}
+
 /* 明細欄セル */
 .csv-preview__td--lineitem {
   white-space: pre-wrap;
@@ -1539,6 +1582,62 @@ button {
   border: 1px solid #fde68a;
   border-radius: 5px;
   padding: 0.5rem 0.75rem;
+}
+
+/* 確認画面（ステップ③）に持ち込む OCR 警告バナー */
+.confirm-layout__ocr-alert,
+.confirm-layout__ocr-note {
+  font-size: 0.78rem;
+  border-radius: 5px;
+  padding: 0.35rem 0.6rem;
+  margin: 0 0.5rem 0.35rem;
+}
+
+.confirm-layout__ocr-alert {
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #fed7d7;
+}
+
+.confirm-layout__ocr-note {
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+/* 警告内のページジャンプボタン */
+.confirm-layout__page-jump-btn {
+  margin-left: 4px;
+  padding: 0 7px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.confirm-layout__page-jump-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* CSV 出力前ゲート（残課題の明示） */
+.csv-export__gate {
+  font-size: 0.78rem;
+  border-radius: 5px;
+  padding: 0.5rem 0.75rem;
+}
+
+.csv-export__gate--warn {
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.csv-export__gate--alert {
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #fed7d7;
 }
 
 /* ===== ステップパネル（右ペイン・ステップごとの内容） ===== */

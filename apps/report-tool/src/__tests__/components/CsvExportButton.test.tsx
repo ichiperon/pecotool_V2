@@ -26,10 +26,15 @@ beforeEach(() => {
   useReportStore.setState({
     template: { fields: [] },
     cells: new Map(),
+    confidences: new Map(),
     mode: "idle",
     selectedFieldId: null,
   });
   usePdfStore.getState().reset();
+  // cells 空での出力は確認ダイアログを挟むようになった（出力前ゲート）。
+  // jsdom の confirm は未実装で falsy を返すため、既定は OK として既存テストの
+  // 保存経路検証を通す（ゲート自体の検証は「出力前ゲート」describe で行う）。
+  vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
 function addField(name: string) {
@@ -297,5 +302,78 @@ describe("CsvExportButton (Tauri 経路)", () => {
     expect(cmd).toBe("save_csv");
     expect((args as { path: string; csv: string }).path).toBe("/tmp/report.csv");
     expect(typeof (args as { path: string; csv: string }).csv).toBe("string");
+  });
+});
+
+describe("CsvExportButton – 出力前ゲート", () => {
+  it("低信頼セルが残っていると件数付きの注意（role=note）を表示する", () => {
+    addField("金額");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([[id, "1000"]])]]]),
+      confidences: new Map([[1, [new Map([[id, 0.3]])]]]),
+    });
+    render(<CsvExportButton />);
+    expect(screen.getByRole("note")).toHaveTextContent(/低信頼セルが 1 件未確認/);
+  });
+
+  it("低信頼セルがなければ注意を出さない", () => {
+    addField("金額");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([[id, "1000"]])]]]),
+      confidences: new Map(),
+    });
+    render(<CsvExportButton />);
+    expect(screen.queryByText(/低信頼セル/)).not.toBeInTheDocument();
+  });
+
+  it("failedPages があると「CSV に行が含まれない」旨の alert を表示する", () => {
+    addField("金額");
+    render(<CsvExportButton failedPages={[3, 7]} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /ページ 3, 7 は OCR 失敗のため CSV に行が含まれません/
+    );
+  });
+
+  it("cells が空のとき出力前に確認ダイアログを出し、キャンセルで出力しない", () => {
+    addField("金額");
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<CsvExportButton onSave={onSave} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    expect(confirmSpy).toHaveBeenCalledWith(
+      "OCR 結果がありません。ヘッダーと空の行だけの CSV を出力しますか？"
+    );
+    expect(onSave).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("cells が空でも確認 OK なら出力できる（ブロックはしない）", async () => {
+    addField("金額");
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<CsvExportButton onSave={onSave} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    confirmSpy.mockRestore();
+  });
+
+  it("cells が非空なら確認ダイアログを出さずに出力する", async () => {
+    addField("金額");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([[id, "1000"]])]]]),
+    });
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<CsvExportButton onSave={onSave} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 });

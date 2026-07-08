@@ -43,6 +43,13 @@ export interface UseReportOcrReturn {
    * 警告文言で「どのページと比べて違うのか」を正確に示すために公開する。
    */
   layoutBasePage: number | null;
+  /**
+   * OCR エンジン自体が動いていない疑い（最初に処理したページで全欄の invoke が失敗）。
+   * per-field の invoke 失敗は空文字＋console.error で握りつぶされるため、
+   * 言語パック未導入等では「全セル空のまま正常終了に見える」事故になる（UXレビュー指摘）。
+   * true のとき残ページの実行は中断され、既存 cells は上書きされない。
+   */
+  engineError: boolean;
   runOcr: () => Promise<void>;
   cancelOcr: () => void;
   /** 指定ページのみを再 OCR して setCellsForPage で部分更新する。 */
@@ -55,6 +62,10 @@ interface OcrSinglePageResult {
   confRows: Array<Map<string, number>>;
   pageWidth: number;
   pageHeight: number;
+  /** このページで run_report_ocr invoke を試行した欄数（クロップ0件の欄は含まない） */
+  invokeAttempts: number;
+  /** invoke が例外になった欄数。attempts と一致＝ページ全欄失敗（エンジン死亡疑い） */
+  invokeFailures: number;
 }
 
 /**
@@ -205,6 +216,8 @@ async function runOcrSinglePage(
     // 欄単位の confidence を集める。段配列への組み立ては全欄処理後にまとめて行う。
     const valuesByField = new Map<string, string[]>();
     const confByField = new Map<string, number>();
+    let invokeAttempts = 0;
+    let invokeFailures = 0;
 
     for (const field of fields) {
       if (isCancelled()) return null;
@@ -232,6 +245,7 @@ async function runOcrSinglePage(
           : pngBytes.slice().buffer;
 
       let raw: string;
+      invokeAttempts++;
       try {
         raw = await invoke<string>("run_report_ocr", body, {
           headers: {
@@ -245,6 +259,7 @@ async function runOcrSinglePage(
           `[ReportOCR] invoke エラー (page=${pageNumber}, field=${field.id}):`,
           e
         );
+        invokeFailures++;
         valuesByField.set(field.id, field.isLineItem === true ? [] : [""]);
         continue;
       }
@@ -279,7 +294,14 @@ async function runOcrSinglePage(
     const rows = buildRowsFromFieldValues(fields, valuesByField);
     const confRows = buildConfRowsFromFieldConfidence(fields, confByField, rows.length);
 
-    return { rows, confRows, pageWidth, pageHeight: rendered.pageHeight };
+    return {
+      rows,
+      confRows,
+      pageWidth,
+      pageHeight: rendered.pageHeight,
+      invokeAttempts,
+      invokeFailures,
+    };
   } finally {
     if (canvas) {
       canvas.width = 0;
@@ -310,6 +332,7 @@ export function useReportOcr(): UseReportOcrReturn {
   const [failedPages, setFailedPages] = useState<number[]>([]);
   const [layoutMismatchPages, setLayoutMismatchPages] = useState<number[]>([]);
   const [layoutBasePage, setLayoutBasePage] = useState<number | null>(null);
+  const [engineError, setEngineError] = useState(false);
 
   // キャンセル制御: epoch が変わったらループを中断する
   const epochRef = useRef(0);
@@ -328,9 +351,11 @@ export function useReportOcr(): UseReportOcrReturn {
 
     setIsRunning(true);
     setProgress({ done: 0, total: numPages });
-    setFailedPages([]);
-    setLayoutMismatchPages([]);
-    setLayoutBasePage(null);
+    setEngineError(false);
+    // failedPages / layoutMismatchPages / layoutBasePage はここでリセットしない:
+    // エンジン死亡等で中断した場合は cells が保持されるため、対応する警告も
+    // 保持しないと「データは古いのに警告だけ消える」非対称になる（レビュー指摘）。
+    // 成功コミット時に finally 側でまとめて置換する。
 
     const matrix: CellMatrix = new Map();
     const confMatrix: ConfidenceMatrix = new Map();
@@ -338,6 +363,9 @@ export function useReportOcr(): UseReportOcrReturn {
     const mismatched: number[] = [];
     // レイアウト混在検出の基準（最初に処理成功したページの scale=1 寸法とページ番号）
     let baseDims: { width: number; height: number; pageNumber: number } | null = null;
+    // エンジン死亡検知: この実行でまだ1欄も invoke 成功していないか
+    let anyInvokeSucceeded = false;
+    let engineDead = false;
 
     const isCancelled = () =>
       cancelledRef.current || epochRef.current !== currentEpoch;
@@ -374,7 +402,30 @@ export function useReportOcr(): UseReportOcrReturn {
 
           if (result === null) break; // キャンセル
 
-          const { rows, confRows, pageWidth, pageHeight } = result;
+          const { rows, confRows, pageWidth, pageHeight, invokeAttempts, invokeFailures } =
+            result;
+
+          const allInvokesFailed = invokeAttempts > 0 && invokeFailures === invokeAttempts;
+
+          // エンジン死亡検知: まだ1欄も成功していない状態でページ全欄の invoke が
+          // 失敗＝言語パック未導入等でエンジン自体が動いていない疑い。残ページを
+          // 回しても全滅するだけなので即中断し、既存 cells を空で上書きしない。
+          if (allInvokesFailed && !anyInvokeSucceeded) {
+            engineDead = true;
+            break;
+          }
+          if (invokeAttempts > invokeFailures) {
+            anyInvokeSucceeded = true;
+          }
+
+          // ページ内全欄の invoke 失敗（エンジンは生きているが、このページだけ全滅）は
+          // 「全欄空の行」として黙って CSV に載せず、処理失敗ページへ昇格する
+          if (allInvokesFailed) {
+            failed.push(pageNumber);
+            setProgress({ done: pageIndex + 1, total: numPages });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            continue;
+          }
 
           // 用紙サイズ・向きの混在検出: 基準ページと寸法が異なるページは
           // 欄テンプレートが内容とずれて空振りしうるため警告対象に積む（§7.2）
@@ -412,7 +463,12 @@ export function useReportOcr(): UseReportOcrReturn {
       pdfDoc?.destroy().catch(() => {});
       setIsRunning(false);
 
-      if (!cancelledRef.current && epochRef.current === currentEpoch && !loadFailed) {
+      if (
+        !cancelledRef.current &&
+        epochRef.current === currentEpoch &&
+        !loadFailed &&
+        !engineDead
+      ) {
         setCells(matrix);
         // setCells が confidences をクリアするので後から setConfidences を呼ぶ
         setConfidences(confMatrix);
@@ -422,6 +478,10 @@ export function useReportOcr(): UseReportOcrReturn {
         setLayoutBasePage(baseDims?.pageNumber ?? null);
       } else {
         setProgress(null);
+        // エンジン死亡時は既存 cells を保持したままエラーだけ可視化する
+        if (engineDead && !cancelledRef.current && epochRef.current === currentEpoch) {
+          setEngineError(true);
+        }
       }
     }
   }, []);
@@ -468,17 +528,34 @@ export function useReportOcr(): UseReportOcrReturn {
         );
 
         if (result !== null && !isCancelled()) {
-          const { rows, confRows } = result;
+          const { rows, confRows, invokeAttempts, invokeFailures } = result;
+
+          // 全欄 invoke 失敗（エンジン停止疑い）は書き込まない。空行で既存データを
+          // 上書きすると、再OCR取り込みは undo 境界（履歴クリア）のため Ctrl+Z でも
+          // 戻せない（レビュー指摘 MAJOR-2・全ページ実行の engineDead ガードと対称化）。
+          if (invokeAttempts > 0 && invokeFailures === invokeAttempts) {
+            throw new Error(
+              "全欄の OCR 呼び出しに失敗しました（OCR エンジン停止の可能性）。既存の値は変更していません"
+            );
+          }
+
           // 全置換せず対象ページのみ部分更新する（複数段対応: rows.length 段）
           setCellsForPage(pageNum, rows);
           // setCellsForPage が confidences をクリアするので後から setConfidencesForPage を呼ぶ
           setConfidencesForPage(pageNum, confRows);
+          // 再OCRが成功したページは「OCR失敗」警告から外す。残すとステップ③の
+          // バナーと出力前ゲートが事実と逆の警告を出し続ける（レビュー指摘 MAJOR-1）。
+          setFailedPages((prev) => prev.filter((p) => p !== pageNum));
         }
       } finally {
         pdfDoc.destroy().catch(() => {});
       }
     } catch (e) {
       console.error(`[ReportOCR] 単一ページ再 OCR エラー (page=${pageNum}):`, e);
+      // ConfirmLayout の reocrError（インラインエラー＋再試行ボタン）へ伝播させる。
+      // 握りつぶすと再OCR失敗が無反応に見える（従来はここで握りつぶしており
+      // reocrError 表示が実質デッドコードだった）。
+      throw e;
     } finally {
       setIsRunning(false);
       setReocrTarget(null);
@@ -492,6 +569,7 @@ export function useReportOcr(): UseReportOcrReturn {
     failedPages,
     layoutMismatchPages,
     layoutBasePage,
+    engineError,
     runOcr,
     cancelOcr,
     runOcrForPage,

@@ -13,6 +13,7 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     failedPages: [],
     layoutMismatchPages: [],
     layoutBasePage: null,
+    engineError: false,
     runOcr: vi.fn(),
     cancelOcr: vi.fn(),
     runOcrForPage: vi.fn().mockResolvedValue(undefined),
@@ -205,5 +206,28 @@ describe("OcrRunPanel – layoutMismatchPages（用紙サイズ・向き混在�
     render(<OcrRunPanel ocrHook={ocrHook} />);
     expect(screen.getByRole("alert")).toHaveTextContent(/ページ 3/);
     expect(screen.getByRole("note")).toHaveTextContent(/ページ 2/);
+  });
+});
+
+describe("OcrRunPanel – engineError（エンジン死亡）表示", () => {
+  it("engineError=true のとき言語パック案内付きの alert を表示する", () => {
+    render(<OcrRunPanel ocrHook={makeOcrHook({ engineError: true })} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/OCR を実行できませんでした/);
+    expect(alert).toHaveTextContent(/言語パック/);
+    expect(alert).toHaveTextContent(/既存の抽出結果は保持されています/);
+  });
+
+  it("isRunning 中は engineError を表示しない", () => {
+    render(
+      <OcrRunPanel
+        ocrHook={makeOcrHook({
+          isRunning: true,
+          progress: { done: 0, total: 2 },
+          engineError: true,
+        })}
+      />
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

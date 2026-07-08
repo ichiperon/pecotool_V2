@@ -165,7 +165,7 @@ const App: FC = () => {
                       先に欄を定義してください（ステップ 1）
                     </p>
                   )}
-                  <CsvExportButton />
+                  <CsvExportButton failedPages={ocrHook.failedPages} />
                 </div>
               )}
 
