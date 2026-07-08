@@ -308,12 +308,25 @@ OCR不能欄に矩形ドラッグで手動BB作成＋テキスト直接入力。
 
 ## 10. 未確定事項（着手前に確定）
 
-- Tauri NSISの実インストール先パス（`Peco\Peco.exe` の階層）→ ランチャー定数確定に必須
-- NSIS `/PASSIVE` のTauri v2対応、`makensis` のCI導入
+### 確定済み（2026-07-08・Tauri NSIS 生成 installer.nsi の実測）
+
+- **Tauri NSISの実インストール先パス** → 両アプリとも `installMode=currentUser`（既定）で
+  本体 `%LOCALAPPDATA%\Peco\Peco.exe` / 帳票 `%LOCALAPPDATA%\PecoReportTool\PecoReportTool.exe`。
+  帳票の exe 名は `mainBinaryName: "PecoReportTool"` を tauri.conf.json に追加して統一
+  （未指定だと crate 名由来の `report-tool.exe` になることをビルドで実測）。
+  ランチャーは2段解決（隣接ポータブル→ `%LOCALAPPDATA%` 既定レイアウト）に変更済み。
+- **NSIS `/PASSIVE`** → NSIS に該当フラグは無い（msiexec 系の流儀）。サイレントは `/S` を使う
+  （実機での終了コード・ショートカット生成有無の確認は残・`installer/bundle.nsi` に記載）。
+- 複数行欄の改行保持 → **対応済み**（明細欄=textarea・y座標段分割・複数段CSV展開 / 2fcc321）
+
+### 未確定（実機・運用判断待ち）
+
+- `/S` サイレント実行の終了コードとショートカット生成有無（統合インストーラ実機テスト時）
+- `makensis` のCI導入（`choco install nsis`）
 - Ctrl+ダブルクリックの検出精度（Explorer上でのタイミング差）
 - 帳票ツールの配布を `pecotool-releases` に `bundle-v*`/`report-v*` 同居でよいか
-- 起動時にPDFパス／ページ範囲を渡す実需があるか（無ければランチャーは分岐のみで簡素化）
-- 複数行欄の改行保持の要否（MVPは直結）
+- updater 鍵の生成・保管（OPS-1・ユーザー判断。`scripts/release-report-tool.ps1` の前提1）
+- 起動時にPDFパス／ページ範囲を渡す実需があるか（引数転送は実装済み・受け側が未配線）
 - 項目マッピングは座標ベースで足りるか、内容ベース推定も要るか
 - rotation混在PDFの扱い（MVPは対象外＝警告で足りるか）
 

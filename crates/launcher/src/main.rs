@@ -15,20 +15,48 @@ use windows::core::PCWSTR;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-// インストール先レイアウトは Tauri NSIS の実出力を実機確認してから確定する (計画書 R5 / 未確定事項)。
-// 暫定の前提: ランチャーと同じディレクトリに本体 exe、サブフォルダに帳票ツール exe が配置される。
+// 起動先の解決は2段構え（計画書 R5 — Tauri NSIS 生成スクリプトの実測で確定・2026-07-08）:
+//   1. ランチャー隣接（ポータブル配置・統合インストーラが /D= で誘導した場合）
+//   2. Tauri NSIS 既定のインストール先（installMode=currentUser・両アプリとも既定）
+//        %LOCALAPPDATA%\Peco\Peco.exe
+//        %LOCALAPPDATA%\PecoReportTool\PecoReportTool.exe
+//      ※ 帳票ツールの exe 名は tauri.conf.json の mainBinaryName で PecoReportTool.exe に
+//        統一済み（未指定だと crate 名由来の report-tool.exe になる）。
 const MAIN_APP_REL: &str = "Peco.exe";
 const REPORT_APP_REL: &str = "report-tool/PecoReportTool.exe";
+const MAIN_APP_INSTALLED: &str = "Peco/Peco.exe";
+const REPORT_APP_INSTALLED: &str = "PecoReportTool/PecoReportTool.exe";
 
 /// 起動直後の Ctrl キー押下状態を返す。GetAsyncKeyState の最上位ビットが押下を表す。
 fn ctrl_held() -> bool {
     unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16) & 0x8000 != 0 }
 }
 
-/// ランチャー exe の隣を起点に、起動対象 exe の絶対パスを組み立てる。
-fn resolve_target(base_dir: &PathBuf, ctrl: bool) -> PathBuf {
-    let rel = if ctrl { REPORT_APP_REL } else { MAIN_APP_REL };
-    base_dir.join(rel)
+/// 起動対象 exe の絶対パスを解決する。
+///
+/// ランチャー隣接（ポータブル/統合インストーラ配置）を優先し、無ければ
+/// %LOCALAPPDATA% 配下の Tauri NSIS 既定インストール先へフォールバックする。
+/// どちらにも実在しない場合は隣接パスを返し、spawn 失敗時の MessageBox で
+/// パス込みのエラーが可視化される（無反応事故の防止は main 側の既存機構）。
+fn resolve_target(base_dir: &PathBuf, local_app_data: Option<PathBuf>, ctrl: bool) -> PathBuf {
+    let portable = base_dir.join(if ctrl { REPORT_APP_REL } else { MAIN_APP_REL });
+    if portable.is_file() {
+        return portable;
+    }
+    // PCT-199 AQ-5 の不変条件「相対パスを Command::new に渡さない」を env 由来経路でも守る:
+    // LOCALAPPDATA が空文字/相対パスだと join 結果が相対になり、is_file() の CWD 基準判定を
+    // すり抜けて相対パス起動（binary planting の表層）が復活する。絶対パスのみ受け付ける。
+    if let Some(lad) = local_app_data.filter(|p| p.is_absolute()) {
+        let installed = lad.join(if ctrl {
+            REPORT_APP_INSTALLED
+        } else {
+            MAIN_APP_INSTALLED
+        });
+        if installed.is_file() {
+            return installed;
+        }
+    }
+    portable
 }
 
 /// PCT-199 AQ-5: `std::env::current_exe()` の結果から起動先解決の起点ディレクトリを求める。
@@ -74,7 +102,8 @@ fn main() {
         }
     };
 
-    let target = resolve_target(&base_dir, ctrl_held());
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let target = resolve_target(&base_dir, local_app_data, ctrl_held());
 
     // ランチャーに渡された引数はそのまま転送する (将来の PDF パス受け渡しに使う)。
     let forwarded: Vec<String> = std::env::args().skip(1).collect();
@@ -97,22 +126,92 @@ mod tests {
     #[test]
     fn resolves_main_app_when_ctrl_not_held() {
         let base = PathBuf::from(r"C:\Program Files\Peco");
-        let p = resolve_target(&base, false);
+        let p = resolve_target(&base, None, false);
         assert!(p.ends_with("Peco.exe"));
     }
 
     #[test]
     fn resolves_report_tool_when_ctrl_held() {
         let base = PathBuf::from(r"C:\Program Files\Peco");
-        let p = resolve_target(&base, true);
+        let p = resolve_target(&base, None, true);
         assert!(p.ends_with("PecoReportTool.exe"));
     }
 
     #[test]
     fn target_is_anchored_to_base_dir() {
         let base = PathBuf::from(r"C:\Program Files\Peco");
-        let p = resolve_target(&base, false);
+        let p = resolve_target(&base, None, false);
         assert!(p.starts_with(r"C:\Program Files\Peco"));
+    }
+
+    /// テスト用の一時ディレクトリを作る（テスト名で分離・毎回クリーン）。
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("peco-launcher-test").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(path: &PathBuf) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"").unwrap();
+    }
+
+    // R5 実測レイアウト: 隣接に exe が無く LOCALAPPDATA 側に実在する場合、
+    // Tauri NSIS 既定インストール先（%LOCALAPPDATA%\Peco\Peco.exe）へフォールバックする。
+    #[test]
+    fn falls_back_to_default_install_layout_when_not_adjacent() {
+        let base = temp_dir("fallback-base"); // 隣接には何も置かない
+        let lad = temp_dir("fallback-lad");
+        touch(&lad.join("Peco").join("Peco.exe"));
+        touch(&lad.join("PecoReportTool").join("PecoReportTool.exe"));
+
+        let main = resolve_target(&base, Some(lad.clone()), false);
+        assert_eq!(main, lad.join("Peco").join("Peco.exe"));
+
+        let report = resolve_target(&base, Some(lad.clone()), true);
+        assert_eq!(report, lad.join("PecoReportTool").join("PecoReportTool.exe"));
+    }
+
+    // 隣接（ポータブル配置）に exe が実在するなら LOCALAPPDATA より優先する。
+    #[test]
+    fn adjacent_portable_layout_takes_precedence() {
+        let base = temp_dir("portable-base");
+        touch(&base.join("Peco.exe"));
+        let lad = temp_dir("portable-lad");
+        touch(&lad.join("Peco").join("Peco.exe"));
+
+        let p = resolve_target(&base, Some(lad), false);
+        assert_eq!(p, base.join("Peco.exe"));
+    }
+
+    // どちらにも実在しない場合は隣接パスを返す（spawn 失敗の MessageBox で可視化される）。
+    #[test]
+    fn returns_adjacent_path_when_nothing_exists() {
+        let base = temp_dir("missing-base");
+        let lad = temp_dir("missing-lad");
+        let p = resolve_target(&base, Some(lad), false);
+        assert_eq!(p, base.join("Peco.exe"));
+    }
+
+    // PCT-199 AQ-5 同型回帰: LOCALAPPDATA が空文字（var_os は unset=None だが空値=Some("")）
+    // でも相対パスを返さない。空文字を join すると相対パスになり、CWD 基準の is_file() を
+    // すり抜けて相対パス起動が復活する穴をセキュリティレビューで指摘・封止した。
+    #[test]
+    fn empty_local_app_data_never_yields_relative_path() {
+        let base = temp_dir("empty-lad-base"); // 隣接なし
+        let p = resolve_target(&base, Some(PathBuf::from("")), false);
+        assert!(p.is_absolute());
+        assert_eq!(p, base.join("Peco.exe"));
+    }
+
+    // 同上: 相対パスの LOCALAPPDATA も拒否する。
+    #[test]
+    fn relative_local_app_data_is_rejected() {
+        let base = temp_dir("rel-lad-base");
+        let p = resolve_target(&base, Some(PathBuf::from(r"AppData\Local")), false);
+        assert!(p.is_absolute());
+        assert_eq!(p, base.join("Peco.exe"));
     }
 
     // PCT-199 AQ-5 回帰: current_exe() 成功時は親ディレクトリを返す。
