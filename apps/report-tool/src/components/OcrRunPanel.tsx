@@ -64,7 +64,7 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
       const editedNote =
         editedCount > 0
           ? preserveEdited
-            ? `手修正済み ${editedCount} 件の値は保持されます。`
+            ? `手修正済み ${editedCount} 件の値は保持されます（除外・OCR失敗ページや段構成が変わった箇所は保持できません）。`
             : `手修正済み ${editedCount} 件も破棄されます。`
           : "";
       const ok = window.confirm(
