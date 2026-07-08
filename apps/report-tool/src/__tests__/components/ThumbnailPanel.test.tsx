@@ -134,10 +134,10 @@ describe("ThumbnailPanel", () => {
       render(<ThumbnailPanel />);
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(3);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(3);
       });
 
-      const labels = screen.getAllByRole("button").map((btn) => btn.getAttribute("aria-label"));
+      const labels = screen.getAllByRole("button", { name: /^\d+ ページ目/ }).map((btn) => btn.getAttribute("aria-label"));
       expect(labels).toEqual(["1 ページ目", "2 ページ目", "3 ページ目"]);
     });
 
@@ -159,7 +159,7 @@ describe("ThumbnailPanel", () => {
       render(<ThumbnailPanel />);
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(3);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(3);
       });
 
       expect(renderPageOffscreen).toHaveBeenCalledTimes(3);
@@ -185,7 +185,7 @@ describe("ThumbnailPanel", () => {
       render(<ThumbnailPanel />);
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(3);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(3);
       });
 
       const btn2 = screen.getByLabelText("2 ページ目");
@@ -214,7 +214,7 @@ describe("ThumbnailPanel", () => {
       const { unmount } = render(<ThumbnailPanel />);
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(2);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(2);
       });
 
       unmount();
@@ -247,7 +247,7 @@ describe("ThumbnailPanel", () => {
       render(<ThumbnailPanel />);
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(5);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(5);
       });
 
       act(() => {
@@ -255,10 +255,10 @@ describe("ThumbnailPanel", () => {
       });
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(2);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(2);
       });
 
-      const labels = screen.getAllByRole("button").map((btn) => btn.getAttribute("aria-label"));
+      const labels = screen.getAllByRole("button", { name: /^\d+ ページ目/ }).map((btn) => btn.getAttribute("aria-label"));
       // 旧PDFの3〜5ページ目のサムネイルが残留していないこと
       expect(labels).toEqual(["1 ページ目", "2 ページ目"]);
     });
@@ -286,7 +286,7 @@ describe("ThumbnailPanel", () => {
       render(<ThumbnailPanel />);
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(5);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(5);
       });
 
       // currentPage は意図的に古い値(5)のまま差替える（store の setPdf を介さない直接更新で
@@ -296,10 +296,10 @@ describe("ThumbnailPanel", () => {
       });
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(2);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(2);
       });
 
-      const buttons = screen.getAllByRole("button");
+      const buttons = screen.getAllByRole("button", { name: /^\d+ ページ目/ });
       expect(buttons.every((b) => b.getAttribute("aria-current") !== "true")).toBe(true);
       expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual([
         "1 ページ目",
@@ -330,7 +330,7 @@ describe("ThumbnailPanel", () => {
       render(<ThumbnailPanel />);
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(2);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(2);
       });
 
       act(() => {
@@ -382,7 +382,7 @@ describe("ThumbnailPanel", () => {
       });
 
       await vi.waitFor(() => {
-        expect(screen.getAllByRole("button")).toHaveLength(2);
+        expect(screen.getAllByRole("button", { name: /^\d+ ページ目/ })).toHaveLength(2);
       });
 
       // ここでようやく旧ロードの getDocument が解決する（読み込み遅延を模す）
@@ -393,7 +393,7 @@ describe("ThumbnailPanel", () => {
       });
 
       // 旧ロードの解決後も新PDFのサムネイル配列（2件）のまま、旧ページ分が混入していない
-      const labels = screen.getAllByRole("button").map((btn) => btn.getAttribute("aria-label"));
+      const labels = screen.getAllByRole("button", { name: /^\d+ ページ目/ }).map((btn) => btn.getAttribute("aria-label"));
       expect(labels).toEqual(["1 ページ目", "2 ページ目"]);
     });
   });

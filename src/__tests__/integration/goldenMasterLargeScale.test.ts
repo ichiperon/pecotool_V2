@@ -529,6 +529,254 @@ async function runHighDensityTest(
   ).toEqual([]);
 }
 
+// ── 複合シナリオ共通ロジック（多ページ × 高密度）────────────────────────────
+
+/**
+ * 多ページ × 高密度の複合シナリオを検証する。
+ *
+ * runLargeScaleTest（LRU 退避境界跨ぎ）と runHighDensityTest（1 ページ大量ブロック）の
+ * 検証観点を統合し、「多ページ全てに大量ブロックを持たせた」状態でも保存が欠落しない
+ * ことを検証する。pageCount は必ず MAX_CACHED_PAGES を超える値を渡すこと
+ * （LRU 退避発火を前提としたアサートを含む）。
+ *
+ * 検証観点:
+ *   - メモリ在ページ数 <= MAX_CACHED_PAGES、IDB 退避件数 >= 期待値（LRU 退避発火）
+ *   - 保存再集約（merge → dirtyOnly）が全ページ分
+ *   - 保存後 PDF のブロック総数が pageCount × blocksPerPage と一致（全数照合）
+ *   - 一意マーカーが 1 件も欠落しない（サンプリングなし・全ページ全ブロック走査）
+ *   - text/bbox/order/writingMode が入力と一致（全ページ全ブロック照合）
+ *   - 2 サイクル耐久（保存→再ロード→再保存でマーカー総数・ブロック数が不変）
+ *
+ * @param pageCount       ページ数（MAX_CACHED_PAGES 超過必須）
+ * @param blocksPerPage   1 ページあたりのブロック数
+ * @param saveTimeLimitMs savePDF 1 回の所要時間上限（catastrophic 検知のみ・緩い閾値）
+ */
+async function runCompositeLargeScaleTest(
+  pageCount: number,
+  blocksPerPage: number,
+  saveTimeLimitMs: number,
+): Promise<void> {
+  // コーパス生成（格子配置・はみ出しなし・多ページ×高密度）
+  const corpus = await buildLargeScale(pageCount, blocksPerPage);
+
+  const initialDoc: PecoDocument = {
+    ...corpus.doc,
+    pages: new Map(
+      Array.from({ length: pageCount }, (_, i) => [
+        i,
+        {
+          pageIndex: i,
+          width: 595,
+          height: 842,
+          textBlocks: [],
+          isDirty: false,
+          thumbnail: null,
+          isTextExtracted: true,
+        } satisfies PageData,
+      ]),
+    ),
+    totalPages: pageCount,
+  };
+
+  usePecoStore.getState().setDocument(initialDoc);
+
+  const store = usePecoStore.getState();
+
+  // 全ページを corpus のブロック（blocksPerPage 個）で dirty 化し、LRU 退避を発火させる
+  for (let pi = 0; pi < pageCount; pi++) {
+    const pageData = corpus.doc.pages.get(pi);
+    if (!pageData) throw new Error(`corpus page ${pi} missing`);
+    const blocks: TextBlock[] = pageData.textBlocks.map((b) => ({
+      ...b,
+      isDirty: true,
+    }));
+    store.updatePageData(pi, { textBlocks: blocks, isDirty: true }, false);
+  }
+
+  // ── アサート 1: メモリ在ページ数が MAX_CACHED_PAGES 以下 ──────────────────
+  const afterEditState = usePecoStore.getState();
+  const memoryPageCount = afterEditState.document!.pages.size;
+  expect(memoryPageCount, 'memory pages must not exceed MAX_CACHED_PAGES').toBeLessThanOrEqual(
+    MAX_CACHED_PAGES,
+  );
+
+  // ── アサート 2: IDB 退避件数が (totalPages - memoryPageCount) 以上 ──────
+  const expectedEvicted = pageCount - MAX_CACHED_PAGES;
+  expect(fakeIdb.size, `IDB eviction count must be >= ${expectedEvicted}`).toBeGreaterThanOrEqual(
+    expectedEvicted,
+  );
+
+  // ── 保存再集約経路を再現（useFileOperations._executeSave のコアと等価）──
+  await waitForPendingIdbSaves();
+
+  const { getAllTemporaryPageData } = await import('../../utils/pdfTemporaryStorage');
+  const filePath = initialDoc.filePath;
+  const tempPages = await getAllTemporaryPageData(filePath);
+
+  const merged = new Map<number, PageData>(afterEditState.document!.pages);
+  for (const [pageId, data] of tempPages.entries()) {
+    const pageIndex = parsePageId(pageId);
+    if (pageIndex === null) continue;
+    if (!merged.has(pageIndex)) {
+      merged.set(pageIndex, data as PageData);
+    }
+  }
+
+  const dirtyOnly = new Map<number, PageData>(
+    [...merged.entries()].filter(([, p]) => p.isDirty),
+  );
+
+  // ── アサート 3: メモリ在 + IDB 退避を merge した結果が全ページ分 ──────────
+  expect(merged.size, `merged total must be ${pageCount}`).toBe(pageCount);
+
+  // ── アサート 4: dirty ページが全ページ分（欠落なし）──────────────────────
+  expect(dirtyOnly.size, `dirtyOnly must be ${pageCount}`).toBe(pageCount);
+
+  // ── アサート 5: メモリ在 + IDB 退避の両方がカバーされていること ───────────
+  let idbCoveredCount = 0;
+  for (const [pageId] of tempPages.entries()) {
+    const pageIndex = parsePageId(pageId);
+    if (pageIndex !== null && !afterEditState.document!.pages.has(pageIndex)) {
+      idbCoveredCount++;
+    }
+  }
+  expect(
+    idbCoveredCount,
+    `IDB-covered page count must be >= ${expectedEvicted}`,
+  ).toBeGreaterThanOrEqual(expectedEvicted);
+
+  const docForSave: PecoDocument = { ...initialDoc, pages: dirtyOnly };
+  const expectedTotalBlocks = pageCount * blocksPerPage;
+
+  // ── サイクル 1: savePDF（保存時間計測）──────────────────────────────────
+  const t0 = performance.now();
+  const savedBytes = await savePDF(
+    { bytes: corpus.inputBytes },
+    docForSave,
+    fontBytes,
+  );
+  const saveMs = Math.round(performance.now() - t0);
+  console.log(
+    `[composite] ${pageCount}p×${blocksPerPage}BB (total ${expectedTotalBlocks}): savePDF cycle1=${saveMs}ms, output=${(savedBytes.byteLength / 1024).toFixed(0)}KB`,
+  );
+
+  // ── 保存時間ガード（catastrophic 検知のみ・緩い上限）────────────────────
+  expect(
+    saveMs,
+    `savePDF must complete within ${saveTimeLimitMs}ms (catastrophic guard). Actual: ${saveMs}ms`,
+  ).toBeLessThan(saveTimeLimitMs);
+
+  // ── サイクル 1 再ロード検証 ────────────────────────────────────────────────
+  const { meta: meta1, totalPages: reloadedTotal1 } = await reloadBBoxMetaViaPdfjs(savedBytes);
+
+  expect(meta1, 'cycle 1: meta must not be null').not.toBeNull();
+  expect(reloadedTotal1, `cycle 1: totalPages must be ${pageCount}`).toBe(pageCount);
+
+  // ── アサート: ブロック総数の一致（全数照合・件数無欠落）───────────────────
+  let totalSavedBlocks = 0;
+  for (const blocks of Object.values(meta1!)) {
+    totalSavedBlocks += blocks.length;
+  }
+  expect(
+    totalSavedBlocks,
+    `cycle 1: total saved blocks must be ${expectedTotalBlocks}`,
+  ).toBe(expectedTotalBlocks);
+
+  // ── アサート: 一意マーカー全件存在（サンプリングなし・全ページ全ブロック走査）
+  const missingMarkers: string[] = [];
+  for (let pi = 0; pi < pageCount; pi++) {
+    const pageKey = String(pi);
+    const pageBlocks = meta1![pageKey];
+    if (!pageBlocks) {
+      for (let bi = 0; bi < blocksPerPage; bi++) {
+        missingMarkers.push(`L-${pi}-${bi}`);
+      }
+      continue;
+    }
+    const foundTexts = new Set(pageBlocks.map((b) => b.text));
+    for (let bi = 0; bi < blocksPerPage; bi++) {
+      const marker = `L-${pi}-${bi}`;
+      if (!foundTexts.has(marker)) {
+        missingMarkers.push(marker);
+      }
+    }
+  }
+  expect(
+    missingMarkers,
+    `cycle 1: missing markers (${missingMarkers.length} of ${expectedTotalBlocks}, first 20): ${JSON.stringify(missingMarkers.slice(0, 20))}`,
+  ).toEqual([]);
+
+  // ── アサート: text/bbox/order/writingMode 一致（全ページ全ブロック照合）───
+  for (let pi = 0; pi < pageCount; pi++) {
+    const pageKey = String(pi);
+    const inputBlocks = corpus.doc.pages.get(pi)!.textBlocks.slice().sort((a, b) => a.order - b.order);
+    const reloadedBlocks = meta1![pageKey];
+    expect(reloadedBlocks, `page ${pi}: meta must exist`).toBeDefined();
+    expect(reloadedBlocks.length, `page ${pi}: block count`).toBe(inputBlocks.length);
+
+    for (let bi = 0; bi < inputBlocks.length; bi++) {
+      const inp = inputBlocks[bi];
+      const rel = reloadedBlocks[bi];
+      expect(rel.text, `p${pi} b${bi}: text`).toBe(inp.text);
+      expect(rel.writingMode, `p${pi} b${bi}: writingMode`).toBe(inp.writingMode);
+      expect(rel.order, `p${pi} b${bi}: order`).toBe(bi);
+      expect(rel.bbox.x, `p${pi} b${bi}: bbox.x`).toBeCloseTo(inp.bbox.x, 0);
+      expect(rel.bbox.y, `p${pi} b${bi}: bbox.y`).toBeCloseTo(inp.bbox.y, 0);
+      expect(rel.bbox.width, `p${pi} b${bi}: bbox.width`).toBeCloseTo(inp.bbox.width, 0);
+      expect(rel.bbox.height, `p${pi} b${bi}: bbox.height`).toBeCloseTo(inp.bbox.height, 0);
+    }
+  }
+
+  // ── サイクル 2 耐久: 再保存でマーカー総数・件数不変 ─────────────────────
+  const t1 = performance.now();
+  const savedBytes2 = await savePDF(
+    { bytes: savedBytes },
+    docForSave,
+    fontBytes,
+  );
+  const saveMs2 = Math.round(performance.now() - t1);
+  console.log(
+    `[composite] ${pageCount}p×${blocksPerPage}BB: savePDF cycle2=${saveMs2}ms`,
+  );
+
+  const { meta: meta2, totalPages: reloadedTotal2 } = await reloadBBoxMetaViaPdfjs(savedBytes2);
+
+  expect(meta2, 'cycle 2: meta must not be null').not.toBeNull();
+  expect(reloadedTotal2, `cycle 2: totalPages must be ${pageCount}`).toBe(pageCount);
+
+  let totalSavedBlocks2 = 0;
+  for (const blocks of Object.values(meta2!)) {
+    totalSavedBlocks2 += blocks.length;
+  }
+  expect(
+    totalSavedBlocks2,
+    `cycle 2: total saved blocks must still be ${expectedTotalBlocks}`,
+  ).toBe(expectedTotalBlocks);
+
+  const missingMarkers2: string[] = [];
+  for (let pi = 0; pi < pageCount; pi++) {
+    const pageKey = String(pi);
+    const pageBlocks = meta2![pageKey];
+    if (!pageBlocks) {
+      for (let bi = 0; bi < blocksPerPage; bi++) {
+        missingMarkers2.push(`L-${pi}-${bi}`);
+      }
+      continue;
+    }
+    const foundTexts = new Set(pageBlocks.map((b) => b.text));
+    for (let bi = 0; bi < blocksPerPage; bi++) {
+      const marker = `L-${pi}-${bi}`;
+      if (!foundTexts.has(marker)) {
+        missingMarkers2.push(marker);
+      }
+    }
+  }
+  expect(
+    missingMarkers2,
+    `cycle 2: missing markers (${missingMarkers2.length} of ${expectedTotalBlocks}, first 20): ${JSON.stringify(missingMarkers2.slice(0, 20))}`,
+  ).toEqual([]);
+}
+
 // ── テストスイート ───────────────────────────────────────────────────────────
 
 describe('LRU 退避大規模保存 — ブロック無欠落不変則', () => {
@@ -549,6 +797,23 @@ describe('LRU 退避大規模保存 — ブロック無欠落不変則', () => {
     },
     // 120 ページは 51 より重い。CI 実行時間 3 分以内（180 秒）に収める
     180_000,
+  );
+});
+
+// bug-hunt round2 Wave3: 「多ページ × 高密度」複合シナリオの CI 常設回帰枠。
+// env ゲートなしで test:pdf:acceptance / test:critical に載る。
+// 120 ページ（既存の LRU 退避テストと同一規模）× 100 ブロック/ページ（既存最大密度
+// である 3 ページ×400BB より 1 ページあたりのブロック数は少ないが、退避が起きる
+// ページ数と組み合わさる点が新規）で計 1.2 万ブロックを検証する。
+describe('複合シナリオ — 多ページ × 高密度の無欠落不変則（CI 常設）', () => {
+  it(
+    '120 ページ × 100 ブロック/ページ（複合: 計 1.2 万ブロック）: LRU 退避発火 + 全ブロック無欠落 + text/bbox/order 一致・2 サイクル耐久',
+    async () => {
+      // 保存時間上限: catastrophic 検知のみ（緩い閾値）。実測値は本 PR の実行ログを参照。
+      await runCompositeLargeScaleTest(120, 100, 60_000);
+    },
+    // 120p×3BB(180秒枠)よりブロック数が33倍多いため、フレームワークタイムアウトにも余裕を持たせる
+    300_000,
   );
 });
 
@@ -581,6 +846,19 @@ describe('LRU 退避 1000 ページ規模 — 検証スケール回復 (env ガ�
     },
     // 1000 ページ×3 ブロックの savePDF を 2 サイクル + pdfjs 再ロード 2 回。
     // 120 ページの 180 秒上限からの外挿で余裕を持って 10 分に設定（手動実行前提のため厳しくしない）。
+    600_000,
+  );
+
+  // bug-hunt round2 Wave3: 「多ページ × 高密度」複合シナリオが未カバーだった穴を埋める。
+  // 既存の 1000p×3BB（計 3,000 ブロック）に対し、本ケースは 1000p×50BB（計 50,000 ブロック・
+  // 約 16.7 倍のブロック総数）で LRU 退避 + 高密度の同時発生を検証する。
+  // savePDF 上限は 1000p×3BB の実測（~11秒）からブロック数比で外挿すると ~180 秒相当だが、
+  // ブロック数増加時のオーバーヘッド増大を見込み、手動実行前提のため 10 分枠に十分な余裕を持たせる。
+  it.skipIf(!LARGE_SCALE_1000_ENABLED)(
+    '1000 ページ × 50 ブロック/ページ（複合: 計 5 万ブロック）: LRU 退避発火 + 全ブロック無欠落 + text/bbox/order 一致・2 サイクル耐久',
+    async () => {
+      await runCompositeLargeScaleTest(1000, 50, 300_000);
+    },
     600_000,
   );
 });

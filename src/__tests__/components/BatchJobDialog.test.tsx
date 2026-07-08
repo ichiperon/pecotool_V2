@@ -52,3 +52,27 @@ describe('BatchJobDialog backdrop click guard (PCT-056)', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+// #442 (R23狩り Wave4): ヘッダの✕ボタンは backdrop クリックガード(PCT-056)と非対称に
+// isRunning を見ず無条件で onClose を呼んでいた。backdrop 側と同じガードを適用する。
+describe('BatchJobDialog header close (X) button guard (#442)', () => {
+  it('isRunning=true のときヘッダの✕ボタンをクリックしても onClose が呼ばれない', () => {
+    const onClose = vi.fn();
+    const { getByTitle } = render(
+      <BatchJobDialog {...defaultProps} onClose={onClose} isRunning={true} />,
+    );
+    const closeButton = getByTitle('実行中は閉じられません');
+    fireEvent.click(closeButton);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('isRunning=false のときヘッダの✕ボタンをクリックすると onClose が呼ばれる', () => {
+    const onClose = vi.fn();
+    const { getByTitle } = render(
+      <BatchJobDialog {...defaultProps} onClose={onClose} isRunning={false} />,
+    );
+    const closeButton = getByTitle('閉じる');
+    fireEvent.click(closeButton);
+    expect(onClose).toHaveBeenCalled();
+  });
+});

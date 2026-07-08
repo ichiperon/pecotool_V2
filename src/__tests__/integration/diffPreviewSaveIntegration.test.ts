@@ -546,6 +546,97 @@ describe('PCT-075: プレビュー/ダイアログ await 後の isSavingRef 再�
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────
+// B-8 (bug-hunt round3): diff プレビュー await 中にユーザーが別の PDF に
+// 切り替えた場合の再検証。PCT-075 (isSavingRef 再チェック) と同じ待機窓だが、
+// 「別の保存が並走した」ではなく「document 自体が差し替わった」ケース。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('B-8: diff プレビュー await 中のドキュメント切替の再検証', () => {
+  it('プレビュー await 中に別ファイルへ切り替わったら confirmed=true でも保存を中止する', async () => {
+    const filePath = '/b8/preview-doc-switch-original.pdf';
+    setupDirtyDoc(filePath);
+    pushTextEditAction(filePath, 'blk-1', 'ORIGINAL', 'EDITED');
+
+    let resolvePreview!: (confirmed: boolean) => void;
+    const onRequestDiffPreview = vi.fn().mockImplementation(
+      () => new Promise<boolean>((resolve) => { resolvePreview = resolve; }),
+    );
+    const showToast = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(
+        showToast,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        onRequestDiffPreview,
+      ),
+    );
+
+    const savePromise = result.current.handleSave();
+    await waitFor(() => expect(onRequestDiffPreview).toHaveBeenCalledTimes(1));
+
+    // プレビュー表示中にユーザーが別の PDF を開いた状況を再現する
+    // (handleOpen 等が store の document を新しいファイルへ差し替える)。
+    const otherDoc: PecoDocument = {
+      filePath: '/b8/switched-during-preview.pdf',
+      fileName: 'switched-during-preview.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map([[0, {
+        pageIndex: 0, width: 595, height: 842,
+        textBlocks: [], isDirty: false, thumbnail: null,
+      } as PageData]]),
+    } as unknown as PecoDocument;
+    usePecoStore.setState({ document: otherDoc, isDirty: false });
+    resolvePreview(true);
+
+    // 修正前: confirmed=true をそのまま信じて _executeSave へ進み、承認されていない
+    // 新ドキュメントを保存し、かつ監査ログ/バックアップ削除は旧 filePath 宛てに実行される。
+    // 修正後: document の切替を検知して中断し false を返す。
+    await expect(savePromise).resolves.toBe(false);
+    expect(savePDF).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringMatching(/別のファイルに切り替わった/),
+      true,
+    );
+  });
+
+  it('プレビュー await 中に同じファイルのままなら confirmed=true で通常通り保存される (回帰防止)', async () => {
+    const filePath = '/b8/preview-doc-same.pdf';
+    setupDirtyDoc(filePath);
+    pushTextEditAction(filePath, 'blk-1', 'ORIGINAL', 'EDITED');
+
+    let resolvePreview!: (confirmed: boolean) => void;
+    const onRequestDiffPreview = vi.fn().mockImplementation(
+      () => new Promise<boolean>((resolve) => { resolvePreview = resolve; }),
+    );
+    const showToast = vi.fn();
+    const { result } = renderHook(() =>
+      useFileOperations(
+        showToast,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        onRequestDiffPreview,
+      ),
+    );
+
+    const savePromise = result.current.handleSave();
+    await waitFor(() => expect(onRequestDiffPreview).toHaveBeenCalledTimes(1));
+    resolvePreview(true);
+
+    await expect(savePromise).resolves.toBe(true);
+    expect(savePDF).toHaveBeenCalled();
+  });
+});
+
 describe('PCT-075: requestDiffPreview の resolver 二重設定ガード (ゾンビ Promise 解消)', () => {
   it('resolver 二重設定時は旧 Promise が false で解決される', async () => {
     const resolverRef: DiffPreviewResolverRef = { current: null };

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, type FC } from "react";
 import "./App.css";
 import StepBar, { type StepNumber } from "./components/StepBar";
 import FieldListPanel from "./components/FieldListPanel";
+import TemplateLibraryPanel from "./components/TemplateLibraryPanel";
 import CsvExportButton from "./components/CsvExportButton";
 import PdfViewer from "./components/PdfViewer";
 import OcrRunPanel from "./components/OcrRunPanel";
@@ -9,6 +10,8 @@ import ThumbnailPanel from "./components/ThumbnailPanel";
 import ConfirmLayout from "./components/ConfirmLayout";
 import { useReportStore } from "./store/reportStore";
 import { useReportOcr } from "./hooks/useReportOcr";
+import { useUndoShortcuts, type UndoActionType } from "./hooks/useUndoShortcuts";
+import { makeAnnouncement } from "./lib/announce";
 
 const STEP_LABELS: Record<StepNumber, string> = {
   1: "欄を定義",
@@ -25,6 +28,70 @@ const App: FC = () => {
 
   // OCR フックを App 上位で呼び出し（全ステップ共通・ConfirmLayout に渡す）
   const ocrHook = useReportOcr();
+
+  // 作業消失対策（第一段）: 抽出データ（OCR結果・手編集）はメモリのみで永続化されない。
+  // 未保存データがある状態のウィンドウクローズに確認を挟む（本格的なセッション保存は別issue）。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const un = await getCurrentWindow().onCloseRequested((event) => {
+          if (useReportStore.getState().cells.size === 0) return;
+          const ok = window.confirm(
+            "OCR 結果と手修正はアプリを閉じると失われます（CSV 出力がまだなら先に出力してください）。閉じますか？"
+          );
+          if (!ok) event.preventDefault();
+        });
+        if (disposed) {
+          un();
+        } else {
+          unlisten = un;
+        }
+      } catch {
+        // Tauri ランタイム外（ブラウザ・テスト環境）や登録失敗時も含め no-op
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Undo/Redo のキー操作フィードバック（チップ表示 + aria-live）。
+  // キーボード undo は視覚変化がスクロール外で起きうるため、何が起きたかを明示する。
+  const [undoNotice, setUndoNotice] = useState("");
+  const undoNoticeTimerRef = useRef<number | null>(null);
+  const undoNoticeToggleRef = useRef(false);
+  const handleUndoAction = (type: UndoActionType, applied: boolean) => {
+    const text =
+      type === "undo"
+        ? applied
+          ? "元に戻しました"
+          : "これ以上戻せる操作はありません"
+        : applied
+          ? "やり直しました"
+          : "やり直せる操作はありません";
+    undoNoticeToggleRef.current = !undoNoticeToggleRef.current;
+    setUndoNotice(makeAnnouncement(text, undoNoticeToggleRef.current));
+    if (undoNoticeTimerRef.current !== null) {
+      window.clearTimeout(undoNoticeTimerRef.current);
+    }
+    undoNoticeTimerRef.current = window.setTimeout(() => setUndoNotice(""), 2000);
+  };
+  useEffect(() => {
+    return () => {
+      if (undoNoticeTimerRef.current !== null) {
+        window.clearTimeout(undoNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  // エディタ操作の Undo/Redo（Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z）。
+  // undo 対象（セル編集・オフセット調整）が見えるステップ③でのみ有効化する —
+  // 他ステップで効かせると「見えない画面のデータが無言で巻き戻る」遠隔作用になる。
+  useUndoShortcuts(currentStep === 3, handleUndoAction);
 
   // OCR 完了（cells が空→非空に変わった）を検知して自動ステップ③へ
   const prevCellsSizeRef = useRef(cells.size);
@@ -107,6 +174,7 @@ const App: FC = () => {
                   <p className="step-panel__hint">
                     PDF を開き、欄をドラッグして定義してください
                   </p>
+                  <TemplateLibraryPanel />
                   <FieldListPanel />
                 </div>
               )}
@@ -127,7 +195,7 @@ const App: FC = () => {
                       先に欄を定義してください（ステップ 1）
                     </p>
                   )}
-                  <CsvExportButton />
+                  <CsvExportButton failedPages={ocrHook.failedPages} />
                 </div>
               )}
 
@@ -167,6 +235,14 @@ const App: FC = () => {
           </aside>
         </main>
       )}
+
+      {/* Undo/Redo フィードバックチップ（常設 live region・内容トグルで表示） */}
+      <div
+        className={`undo-notice${undoNotice ? " undo-notice--visible" : ""}`}
+        role="status"
+      >
+        {undoNotice}
+      </div>
 
       {/* フッタ: ステータスバー */}
       <footer className="app__footer" aria-label="ステータスバー">

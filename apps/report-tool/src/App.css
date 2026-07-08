@@ -273,6 +273,215 @@ button {
   gap: 0.375rem;
 }
 
+/* ===== テンプレートライブラリ ===== */
+.template-library-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.template-library-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.template-library-panel__title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #2d3748;
+}
+
+.template-library-panel__save-btn {
+  padding: 0.35rem 0.7rem;
+  background-color: #4299e1;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.template-library-panel__save-btn:hover:not(:disabled) {
+  background-color: #3182ce;
+}
+
+.template-library-panel__save-btn:disabled {
+  background-color: #a0aec0;
+  cursor: not-allowed;
+}
+
+.template-library-panel__save-form {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.template-library-panel__save-input {
+  flex: 1;
+  min-width: 120px;
+  border: 1px solid #4299e1;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.4rem;
+}
+
+.template-library-panel__save-input:focus-visible {
+  outline: 2px solid #4299e1;
+  outline-offset: -2px;
+}
+
+.template-library-panel__save-confirm-btn {
+  padding: 0.3rem 0.6rem;
+  background-color: #38a169;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.76rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.template-library-panel__save-confirm-btn:hover:not(:disabled) {
+  background-color: #2f855a;
+}
+
+.template-library-panel__save-confirm-btn:disabled,
+.template-library-panel__save-cancel-btn:disabled {
+  background-color: #a0aec0;
+  cursor: not-allowed;
+}
+
+.template-library-panel__save-cancel-btn {
+  padding: 0.3rem 0.6rem;
+  background-color: transparent;
+  color: #718096;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.template-library-panel__save-cancel-btn:hover:not(:disabled) {
+  background-color: #f7fafc;
+}
+
+.template-library-panel__error {
+  font-size: 0.78rem;
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #feb2b2;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+}
+
+.template-library-panel__loading {
+  font-size: 0.78rem;
+  color: #a0aec0;
+}
+
+.template-library-panel__empty {
+  font-size: 0.78rem;
+  color: #a0aec0;
+  padding: 0.75rem 0.5rem;
+  text-align: center;
+  background-color: #f7fafc;
+  border: 1px dashed #e2e8f0;
+  border-radius: 6px;
+  line-height: 1.6;
+}
+
+.template-library-panel__list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.template-library-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  background-color: #fdfdfe;
+}
+
+.template-library-row:hover {
+  border-color: #bee3f8;
+  background-color: #f0f8ff;
+}
+
+.template-library-row__name {
+  flex: 1;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 0.8rem;
+  color: #2d3748;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-library-row__name:hover:not(:disabled) {
+  color: #2b6cb0;
+  text-decoration: underline dotted;
+}
+
+.template-library-row__name:disabled {
+  color: #cbd5e0;
+  cursor: not-allowed;
+}
+
+.template-library-row__unreadable {
+  font-size: 0.72rem;
+  color: #c53030;
+}
+
+.template-library-row__name-input {
+  flex: 1;
+  border: 1px solid #4299e1;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  padding: 0.1rem 0.3rem;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25);
+}
+
+.template-library-row__name-input:focus-visible {
+  outline: 2px solid #4299e1;
+  outline-offset: -2px;
+}
+
+.template-library-row__rename-btn,
+.template-library-row__remove-btn {
+  background: none;
+  border: none;
+  color: #a0aec0;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.3rem;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.template-library-row__rename-btn:hover {
+  color: #2b6cb0;
+  background-color: #ebf8ff;
+}
+
+.template-library-row__remove-btn:hover {
+  color: #c53030;
+  background-color: #fff5f5;
+}
+
 /* ===== 欄行 ===== */
 .field-row {
   display: flex;
@@ -715,6 +924,158 @@ button {
 .csv-preview__td--low-confidence {
   background-color: #fffbeb;
   color: #92400e;
+}
+
+/* 手修正済みセル（人が編集・削除・移動・分割で触った印）
+   値の視認を邪魔しない薄いバッジ（左上の小さな✎）＋左端のアクセント線。
+   低信頼(--low-confidence)と重なった場合も背景は琥珀のまま、
+   アクセント線と✎で「人が触れた」ことが分かる。 */
+.csv-preview__td--edited {
+  box-shadow: inset 2px 0 0 #2b6cb0;
+}
+
+.csv-preview__edited-mark {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  font-size: 9px;
+  line-height: 1.2;
+  color: #2b6cb0;
+  pointer-events: none;
+}
+
+/* ツールバーの Undo/Redo ボタン群 */
+.csv-preview__undo-group {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 0.5rem;
+}
+
+.csv-preview__undo-btn {
+  min-width: 26px;
+  padding: 1px 6px;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  background: #fff;
+  color: #2d3748;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.csv-preview__undo-btn:hover:not(:disabled) {
+  background: #ebf8ff;
+  border-color: #4299e1;
+}
+
+.csv-preview__undo-btn:disabled {
+  color: #cbd5e0;
+  cursor: default;
+}
+
+/* Undo/Redo キー操作のフィードバックチップ（App 直下・常設 live region）
+   表示は opacity トグルのみ（DOM 常設で aria-live の確実な発火を優先） */
+.undo-notice {
+  position: fixed;
+  bottom: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 14px;
+  border-radius: 14px;
+  background: rgba(45, 55, 72, 0.92);
+  color: #fff;
+  font-size: 0.8rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+  z-index: 1000;
+}
+
+.undo-notice--visible {
+  opacity: 1;
+}
+
+/* 要確認セルのナビ（ツールバー右側: 残数チップ + 次へボタン） */
+.csv-preview__review-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.csv-preview__review-chip {
+  font-size: 0.72rem;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.csv-preview__review-chip--lowconf {
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.csv-preview__review-chip--empty {
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #fed7d7;
+}
+
+.csv-preview__review-next-btn {
+  font-size: 0.75rem;
+  padding: 1px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  background: #fff;
+  color: #2d3748;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.csv-preview__review-next-btn:hover {
+  background: #ebf8ff;
+  border-color: #4299e1;
+}
+
+/* 除外ページの行（CSV 非出力・OCR 対象外） */
+.csv-preview__row--excluded {
+  opacity: 0.45;
+}
+
+.csv-preview__excluded-pill {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  color: #718096;
+  background: #edf2f7;
+  border: 1px solid #cbd5e0;
+  white-space: nowrap;
+}
+
+/* サムネイルの除外トグル */
+.thumbnail-panel__item--excluded .thumbnail-panel__img {
+  opacity: 0.35;
+}
+
+.thumbnail-panel__exclude-btn {
+  display: block;
+  width: 100%;
+  margin-top: 2px;
+  padding: 1px 4px;
+  font-size: 0.68rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  background: #fff;
+  color: #4a5568;
+  cursor: pointer;
+}
+
+.thumbnail-panel__exclude-btn--on {
+  background: #edf2f7;
+  color: #718096;
+  border-style: dashed;
 }
 
 /* 明細欄セル */
@@ -1241,6 +1602,82 @@ button {
 .ocr-run-panel__hint {
   font-size: 0.75rem;
   color: #a0aec0;
+}
+
+/* OCR 処理エラーページの通知（エラー: 赤系・既存 empty セルと同パレット） */
+.ocr-run-panel__failed {
+  font-size: 0.78rem;
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #fed7d7;
+  border-radius: 5px;
+  padding: 0.5rem 0.75rem;
+}
+
+/* 用紙サイズ・向き混在の警告（低信頼セルと同じ琥珀系・エラーより弱いトーン） */
+.ocr-run-panel__mismatch {
+  font-size: 0.78rem;
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 5px;
+  padding: 0.5rem 0.75rem;
+}
+
+/* 確認画面（ステップ③）に持ち込む OCR 警告バナー */
+.confirm-layout__ocr-alert,
+.confirm-layout__ocr-note {
+  font-size: 0.78rem;
+  border-radius: 5px;
+  padding: 0.35rem 0.6rem;
+  margin: 0 0.5rem 0.35rem;
+}
+
+.confirm-layout__ocr-alert {
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #fed7d7;
+}
+
+.confirm-layout__ocr-note {
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+/* 警告内のページジャンプボタン */
+.confirm-layout__page-jump-btn {
+  margin-left: 4px;
+  padding: 0 7px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.confirm-layout__page-jump-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* CSV 出力前ゲート（残課題の明示） */
+.csv-export__gate {
+  font-size: 0.78rem;
+  border-radius: 5px;
+  padding: 0.5rem 0.75rem;
+}
+
+.csv-export__gate--warn {
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.csv-export__gate--alert {
+  color: #c53030;
+  background-color: #fff5f5;
+  border: 1px solid #fed7d7;
 }
 
 /* ===== ステップパネル（右ペイン・ステップごとの内容） ===== */

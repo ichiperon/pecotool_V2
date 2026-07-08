@@ -16,6 +16,7 @@ import FieldOverlayCanvas from "./FieldOverlayCanvas";
 import type { OverlayGeom } from "../types/overlay";
 import { computeFitZoom } from "../lib/fitZoom";
 import { usePdfShortcuts } from "../hooks/usePdfShortcuts";
+import { effectiveRotation } from "../logic/rotateTemplate";
 import { usePdfPanZoom } from "../hooks/usePdfPanZoom";
 
 // workerSrc の設定（本体 pdfLoader.ts と同じ ?url import パターン）
@@ -56,6 +57,10 @@ const PdfViewer: FC = () => {
 
   // scale:1 のページサイズ（フィット計算に使用）
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
+  // 回転リマップ用の「論理寸法」。pageSize(state) は非同期 effect でしか更新されず、
+  // 回転ボタン連打時に stale 値でリマップすると欄座標が不可逆に全ずれする（レビューBLOCKER）。
+  // 90°刻みの回転後寸法は常に W/H スワップなので、ref で同期的に追跡する。
+  const logicalDimsRef = useRef<{ width: number; height: number } | null>(null);
 
   const mode = useReportStore((s) => s.mode);
   const resetExtractedData = useReportStore((s) => s.resetExtractedData);
@@ -76,6 +81,8 @@ const PdfViewer: FC = () => {
     setFitMode,
     goToPrevPage,
     goToNextPage,
+    rotation,
+    rotateBy,
   } = usePdfStore();
 
   // ページ番号入力フィールドの一時状態
@@ -207,7 +214,10 @@ const PdfViewer: FC = () => {
         if (cancelled) return;
 
         // scale:1 のページサイズを取得し、フィット計算に使う
-        const base = page.getViewport({ scale: 1 });
+        // ページ固有 /Rotate にユーザー回転を加算合成（表示・OCR で単一ソース）
+        const effRotation = effectiveRotation(page.rotate ?? 0, rotation);
+        const base = page.getViewport({ scale: 1, rotation: effRotation });
+        logicalDimsRef.current = { width: base.width, height: base.height };
         setPageSize((prev) => {
           if (prev && prev.width === base.width && prev.height === base.height) {
             return prev; // 同値なら更新しない（無限ループ防止）
@@ -217,7 +227,10 @@ const PdfViewer: FC = () => {
 
         const scale = zoom / 100;
         const devicePixelRatio = window.devicePixelRatio || 1;
-        const viewport = page.getViewport({ scale: scale * devicePixelRatio });
+        const viewport = page.getViewport({
+          scale: scale * devicePixelRatio,
+          rotation: effRotation,
+        });
 
         // canvas の物理サイズ（高解像度対応）
         canvas.width = viewport.width;
@@ -278,7 +291,7 @@ const PdfViewer: FC = () => {
     };
     // PCT-153 (blocker): pdfDoc を依存配列に追加（旧実装の pdfDocRef では
     // 同一 filePath 再読込で effect が再実行されなかった）。
-  }, [filePath, pdfDoc, currentPage, zoom, setError]);
+  }, [filePath, pdfDoc, currentPage, zoom, rotation, setError]);
 
   // ResizeObserver でコンテナサイズを監視し、fitMode に応じてズームを自動調整する
   useEffect(() => {
@@ -345,6 +358,23 @@ const PdfViewer: FC = () => {
   const handleZoomIn = () => {
     setZoom(zoom + ZOOM_STEP);
     setFitMode("custom");
+  };
+
+  /**
+   * ビューを ±90° 回転する。欄 rect / pageOffsets は回転前の寸法（現在の pageSize）
+   * で新空間へリマップしてから回転値を進める（順序が逆だと座標が壊れる）。
+   * cells / confidences / edited は保持される（同じ物理領域を指し続ける）。
+   */
+  const handleRotate = (direction: 90 | -90) => {
+    // state の pageSize でなく同期管理の論理寸法を使う。連打時、テンプレは既に
+    // 新空間へ移行済みなのに pageSize は旧値のままという race で、2回目のリマップが
+    // 誤寸法で走り undo 不能の全ずれになる（レビューBLOCKER）。
+    const dims = logicalDimsRef.current ?? pageSize;
+    if (!dims) return;
+    useReportStore.getState().rotateTemplateSpace(direction, dims.width, dims.height);
+    // 90°回転後の空間寸法は W/H スワップ。effect の完了を待たず同期更新する
+    logicalDimsRef.current = { width: dims.height, height: dims.width };
+    rotateBy(direction);
   };
 
   const handleZoomOut = () => {
@@ -477,6 +507,31 @@ const PdfViewer: FC = () => {
           aria-label="拡大"
         >
           ＋
+        </button>
+
+        <div className="pdf-viewer__divider" aria-hidden="true" />
+
+        {/* 回転（全ページ一括・90°刻み）。スキャンが横向き/逆さの帳票を
+            ツール内で正立させる。表示・サムネ・OCR が同じ回転で描画される */}
+        <button
+          type="button"
+          className="pdf-viewer__zoom-btn"
+          onClick={() => handleRotate(-90)}
+          disabled={!pageSize}
+          aria-label="左に90度回転"
+          title="左に90度回転（全ページ）"
+        >
+          ⟲
+        </button>
+        <button
+          type="button"
+          className="pdf-viewer__zoom-btn"
+          onClick={() => handleRotate(90)}
+          disabled={!pageSize}
+          aria-label="右に90度回転"
+          title="右に90度回転（全ページ）"
+        >
+          ⟳
         </button>
 
         <div className="pdf-viewer__divider" aria-hidden="true" />

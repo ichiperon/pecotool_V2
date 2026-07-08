@@ -3,6 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import { useReportOcr } from "../../hooks/useReportOcr";
 import { useReportStore } from "../../store/reportStore";
 import { usePdfStore } from "../../store/pdfStore";
+import { buildTemplateCsv } from "../../logic/templateCsv";
 
 // ===== モック: @tauri-apps/api/core =====
 vi.mock("@tauri-apps/api/core", () => ({
@@ -512,8 +513,9 @@ describe("useReportOcr: runOcrForPage", () => {
 
     const { result } = renderHook(() => useReportOcr());
 
+    // 再OCRの失敗は握りつぶさず reject で呼び出し元（ConfirmLayout の reocrError）へ伝播する
     await act(async () => {
-      await result.current.runOcrForPage(1);
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow("読み込み失敗");
     });
 
     // readFile 失敗時も isRunning/reocrTarget が確実に戻り、ボタンが永久 disable にならないこと
@@ -532,7 +534,7 @@ describe("useReportOcr: runOcrForPage", () => {
     const { result } = renderHook(() => useReportOcr());
 
     await act(async () => {
-      await result.current.runOcrForPage(1);
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow("Invalid PDF structure");
     });
 
     expect(result.current.isRunning).toBe(false);
@@ -662,5 +664,755 @@ describe("useReportOcr: runOcr の confidences 投入", () => {
     const conf = useReportStore.getState().confidences;
     // confMap.size === 0 なので matrix に格納されない
     expect(conf.size).toBe(0);
+  });
+});
+
+describe("useReportOcr: 明細欄の複数段抽出", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  function ocrResponse(blocks: Array<{ text: string; x: number; y: number; confidence?: number }>) {
+    return JSON.stringify({
+      status: "ok",
+      blocks: blocks.map((b) => ({
+        text: b.text,
+        bbox: { x: b.x, y: b.y, width: 40, height: 15 },
+        confidence: b.confidence,
+      })),
+    });
+  }
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 1,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("固定欄＋明細欄(品名3段) → 明細欄が3段に分割され、固定欄はrows[0]のみに入る", async () => {
+    // fields の処理順は template.fields の定義順（日付 → 品名 → 合計）と一致する
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "date", name: "日付", color: "#000", rect: { x: 10, y: 10, width: 100, height: 20 } },
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 40, width: 100, height: 100 },
+            isLineItem: true,
+          },
+          { id: "total", name: "合計", color: "#000", rect: { x: 10, y: 150, width: 100, height: 20 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () => ocrResponse([{ text: "2026-07-08", x: 0, y: 0, confidence: 0.9 }]))
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "商品A", x: 0, y: 0, confidence: 0.9 },
+          { text: "商品B", x: 0, y: 30, confidence: 0.8 },
+          { text: "商品C", x: 0, y: 60, confidence: 0.7 },
+        ])
+      )
+      .mockImplementationOnce(async () => ocrResponse([{ text: "1000", x: 0, y: 0, confidence: 0.95 }]));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(3);
+    expect(rows?.[0]?.get("date")).toBe("2026-07-08");
+    expect(rows?.[0]?.get("name")).toBe("商品A");
+    expect(rows?.[0]?.get("total")).toBe("1000");
+    expect(rows?.[1]?.get("name")).toBe("商品B");
+    expect(rows?.[1]?.has("date")).toBe(false);
+    expect(rows?.[1]?.has("total")).toBe(false);
+    expect(rows?.[2]?.get("name")).toBe("商品C");
+
+    // confidence は段では分割せず、欄クロップ全体の最小値（decideCellConfidence）を
+    // 各段に複製する。品名欄は 0.9/0.8/0.7 の最小値 0.7 が全段に入る。
+    const confRows = useReportStore.getState().confidences.get(1);
+    expect(confRows).toHaveLength(3);
+    expect(confRows?.[0]?.get("date")).toBe(0.9);
+    expect(confRows?.[0]?.get("name")).toBe(0.7);
+    expect(confRows?.[1]?.get("name")).toBe(0.7);
+    expect(confRows?.[2]?.get("name")).toBe(0.7);
+  });
+
+  it("CSV出力で3データ行になり、固定欄は複製・品名だけ段ごとに異なる（templateCsv 経由の統合テスト）", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "date", name: "日付", color: "#000", rect: { x: 10, y: 10, width: 100, height: 20 } },
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 40, width: 100, height: 100 },
+            isLineItem: true,
+          },
+          { id: "total", name: "合計", color: "#000", rect: { x: 10, y: 150, width: 100, height: 20 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () => ocrResponse([{ text: "2026-07-08", x: 0, y: 0 }]))
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "商品A", x: 0, y: 0 },
+          { text: "商品B", x: 0, y: 30 },
+          { text: "商品C", x: 0, y: 60 },
+        ])
+      )
+      .mockImplementationOnce(async () => ocrResponse([{ text: "1000", x: 0, y: 0 }]));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const { template, cells } = useReportStore.getState();
+    const csv = buildTemplateCsv(
+      template,
+      cells,
+      { includeFileName: false, includePageNumber: false, emptyValue: "", normalizeNumbers: false },
+      { pageNumbers: [1] }
+    );
+    const lines = csv.split("\r\n");
+
+    expect(lines).toHaveLength(4); // header + 3 data rows
+    expect(lines[1]).toBe("2026-07-08,商品A,1000");
+    expect(lines[2]).toBe("2026-07-08,商品B,1000");
+    expect(lines[3]).toBe("2026-07-08,商品C,1000");
+  });
+
+  it("代表明細欄(品名3段)より単価が少ない(2段)場合、単価の3段目は空にそろえられる", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 10, width: 100, height: 100 },
+            isLineItem: true,
+          },
+          {
+            id: "price",
+            name: "単価",
+            color: "#000",
+            rect: { x: 120, y: 10, width: 100, height: 100 },
+            isLineItem: true,
+          },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "商品A", x: 0, y: 0 },
+          { text: "商品B", x: 0, y: 30 },
+          { text: "商品C", x: 0, y: 60 },
+        ])
+      )
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "100", x: 0, y: 0 },
+          { text: "200", x: 0, y: 30 },
+        ])
+      );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(3);
+    expect(rows?.[0]?.get("price")).toBe("100");
+    expect(rows?.[1]?.get("price")).toBe("200");
+    expect(rows?.[2]?.get("price")).toBe("");
+  });
+
+  it("isLineItem 欄が1つも無いテンプレは従来どおり1段のみ（回帰なし）", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "date", name: "日付", color: "#000", rect: { x: 10, y: 10, width: 100, height: 20 } },
+          { id: "total", name: "合計", color: "#000", rect: { x: 10, y: 40, width: 100, height: 20 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () => ocrResponse([{ text: "2026-07-08", x: 0, y: 0 }]))
+      .mockImplementationOnce(async () => ocrResponse([{ text: "1000", x: 0, y: 0 }]));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0]?.get("date")).toBe("2026-07-08");
+    expect(rows?.[0]?.get("total")).toBe("1000");
+  });
+
+  it("単一ページ再OCR（runOcrForPage）でも明細欄が複数段に分割される（両経路の対称性）", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 10, width: 100, height: 100 },
+            isLineItem: true,
+          },
+        ],
+      },
+      cells: new Map([[1, [new Map([["name", "旧品名"]])]]]),
+      confidences: new Map(),
+      pageOffsets: new Map(),
+    });
+
+    invokeStub.mockImplementationOnce(async () =>
+      ocrResponse([
+        { text: "新品A", x: 0, y: 0 },
+        { text: "新品B", x: 0, y: 30 },
+      ])
+    );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(2);
+    expect(rows?.[0]?.get("name")).toBe("新品A");
+    expect(rows?.[1]?.get("name")).toBe("新品B");
+  });
+});
+
+describe("useReportOcr: レイアウト混在検出（layoutMismatchPages）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+  let renderStub: ReturnType<typeof vi.fn>;
+
+  /** ページ番号→寸法のマップで renderPageOffscreen を差し替える */
+  function setRenderDims(dimsByPage: Record<number, { w: number; h: number }>) {
+    renderStub.mockImplementation(async (_doc: unknown, pageNumber: number) => {
+      const d = dimsByPage[pageNumber] ?? { w: 595, h: 842 };
+      return {
+        canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+        pageWidth: d.w,
+        pageHeight: d.h,
+      };
+    });
+  }
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+    invokeStub.mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [
+          { text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 },
+        ],
+      })
+    );
+
+    const ocrCrop = await import("../../lib/ocrCrop");
+    renderStub = vi.mocked(ocrCrop.renderPageOffscreen);
+
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "field-1",
+            name: "欄1",
+            color: "#7cb9e8",
+            rect: { x: 10, y: 10, width: 100, height: 50 },
+          },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(async () => {
+    // ページ別 mockImplementation を既定実装へ戻して他 describe への汚染を防ぐ
+    renderStub.mockImplementation(async () => ({
+      canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+      pageWidth: 595,
+      pageHeight: 842,
+    }));
+    vi.clearAllMocks();
+  });
+
+  it("先頭ページと寸法が異なるページ（横向き混在）が layoutMismatchPages に積まれる", async () => {
+    // ページ2だけ A4 横向き（width/height が入れ替わる）
+    setRenderDims({ 2: { w: 842, h: 595 } });
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.layoutMismatchPages).toEqual([2]);
+  });
+
+  it("全ページ同一寸法なら layoutMismatchPages は空", async () => {
+    setRenderDims({});
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([]);
+  });
+
+  it("1pt 以下の浮動小数の端数は混在扱いしない（許容誤差）", async () => {
+    setRenderDims({ 2: { w: 595.5, h: 842.4 } });
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([]);
+  });
+
+  it("複数ページの混在は昇順で全件積まれる", async () => {
+    setRenderDims({ 2: { w: 842, h: 595 }, 3: { w: 1190, h: 842 } });
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([2, 3]);
+  });
+
+  it("再実行で前回の混在警告がクリアされる", async () => {
+    setRenderDims({ 2: { w: 842, h: 595 } });
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([2]);
+
+    // 全ページ同一寸法に差し替えて再実行 → クリア
+    setRenderDims({});
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([]);
+  });
+});
+
+describe("useReportOcr: レイアウト混在検出 × 処理エラーの相互作用", () => {
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    vi.mocked(tauriCore.invoke).mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [{ text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+      })
+    );
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(async () => {
+    const ocrCrop = await import("../../lib/ocrCrop");
+    vi.mocked(ocrCrop.renderPageOffscreen).mockImplementation(async () => ({
+      canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+      pageWidth: 595,
+      pageHeight: 842,
+    }));
+    vi.clearAllMocks();
+  });
+
+  it("ページ1が処理エラーのとき基準は次の成功ページになり、失敗ページは混在判定されない", async () => {
+    const ocrCrop = await import("../../lib/ocrCrop");
+    vi.mocked(ocrCrop.renderPageOffscreen).mockImplementation(
+      async (_doc: unknown, pageNumber: number) => {
+        // ページ1: render 失敗（failedPages 行き・寸法が取れないので基準/混在の判定外）
+        if (pageNumber === 1) throw new Error("render失敗");
+        // ページ2: A4 縦（最初の成功ページ＝基準）／ページ3: A4 横（基準と不一致）
+        const d = pageNumber === 3 ? { w: 842, h: 595 } : { w: 595, h: 842 };
+        return {
+          canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+          pageWidth: d.w,
+          pageHeight: d.h,
+        };
+      }
+    );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.failedPages).toEqual([1]);
+    expect(result.current.layoutBasePage).toBe(2);
+    expect(result.current.layoutMismatchPages).toEqual([3]);
+  });
+
+  it("混在ありの正常実行では layoutBasePage=1 が公開される", async () => {
+    const ocrCrop = await import("../../lib/ocrCrop");
+    vi.mocked(ocrCrop.renderPageOffscreen).mockImplementation(
+      async (_doc: unknown, pageNumber: number) => {
+        const d = pageNumber === 2 ? { w: 842, h: 595 } : { w: 595, h: 842 };
+        return {
+          canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+          pageWidth: d.w,
+          pageHeight: d.h,
+        };
+      }
+    );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.layoutBasePage).toBe(1);
+    expect(result.current.layoutMismatchPages).toEqual([2]);
+  });
+});
+
+describe("useReportOcr: エンジン死亡検知（engineError）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  function setFields(ids: string[]) {
+    useReportStore.setState({
+      template: {
+        fields: ids.map((id) => ({
+          id,
+          name: id,
+          color: "#7cb9e8",
+          rect: { x: 10, y: 10, width: 100, height: 50 },
+        })),
+      },
+      pageOffsets: new Map(),
+    });
+  }
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+
+    setFields(["field-1"]);
+    // 既存の抽出結果がある状態を再現（エンジン死亡時に破壊されないことの検証用）
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([["field-1", "既存値"]])]]]),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("最初のページで全欄 invoke 失敗 → engineError=true・実行中断・既存 cells 非破壊", async () => {
+    invokeStub.mockRejectedValue(new Error("OCR engine unavailable"));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(true);
+    expect(result.current.isRunning).toBe(false);
+    // 既存 cells が空 Map で上書きされていない
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("既存値");
+    // 残ページを回さず中断している（1欄×1ページ分の invoke のみ）
+    expect(invokeStub).toHaveBeenCalledTimes(1);
+  });
+
+  it("エンジンは生きているがページ2だけ全欄失敗 → failedPages に昇格し空行を CSV に載せない", async () => {
+    invokeStub
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          status: "ok",
+          blocks: [{ text: "値1", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+        })
+      )
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          status: "ok",
+          blocks: [{ text: "値3", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+        })
+      );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(false);
+    expect(result.current.failedPages).toEqual([2]);
+    const cells = useReportStore.getState().cells;
+    expect(cells.get(1)?.[0]?.get("field-1")).toBe("値1");
+    expect(cells.has(2)).toBe(false); // 全欄空の行として混入しない
+    expect(cells.get(3)?.[0]?.get("field-1")).toBe("値3");
+  });
+
+  it("一部の欄だけ invoke 失敗したページは行として残り failedPages に載らない", async () => {
+    setFields(["field-1", "field-2"]);
+    usePdfStore.setState({ numPages: 1 });
+    invokeStub
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          status: "ok",
+          blocks: [{ text: "成功値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+        })
+      )
+      .mockRejectedValueOnce(new Error("transient"));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(false);
+    expect(result.current.failedPages).toEqual([]);
+    const row = useReportStore.getState().cells.get(1)?.[0];
+    expect(row?.get("field-1")).toBe("成功値");
+    expect(row?.get("field-2")).toBe(""); // 失敗欄は空文字
+  });
+
+  it("エンジン復旧後の再実行で engineError がクリアされる", async () => {
+    invokeStub.mockRejectedValue(new Error("dead"));
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.engineError).toBe(true);
+
+    invokeStub.mockReset();
+    invokeStub.mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [{ text: "復旧", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+      })
+    );
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.engineError).toBe(false);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("復旧");
+  });
+});
+
+describe("useReportOcr: 再OCR × 警告の整合（レビュー指摘 MAJOR-1/-2）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 2,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const okResponse = JSON.stringify({
+    status: "ok",
+    blocks: [{ text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+  });
+
+  it("失敗ページを再OCRで修復すると failedPages から外れる（MAJOR-1: 嘘の警告を残さない）", async () => {
+    // 全ページ実行: page1 成功・page2 全欄失敗
+    invokeStub
+      .mockResolvedValueOnce(okResponse)
+      .mockRejectedValueOnce(new Error("transient"));
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.failedPages).toEqual([2]);
+
+    // page2 を再OCR（今度は成功）
+    invokeStub.mockResolvedValue(okResponse);
+    await act(async () => {
+      await result.current.runOcrForPage(2);
+    });
+
+    expect(result.current.failedPages).toEqual([]);
+    expect(useReportStore.getState().cells.get(2)?.[0]?.get("field-1")).toBe("値");
+  });
+
+  it("再OCRで全欄 invoke 失敗のとき既存データを上書きせず reject する（MAJOR-2）", async () => {
+    // まず正常に全ページ実行して確定データを作る
+    invokeStub.mockResolvedValue(okResponse);
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+
+    // エンジン停止を再現して page1 を再OCR
+    invokeStub.mockReset();
+    invokeStub.mockRejectedValue(new Error("engine down"));
+    await act(async () => {
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow(/OCR エンジン停止の可能性/);
+    });
+
+    // 空行で上書きされていない（undo 不能な破壊の防止）
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+    expect(result.current.isRunning).toBe(false);
+    expect(result.current.reocrTarget).toBeNull();
+  });
+
+  it("エンジン死亡で中断した実行は前回の警告を消さない（MINOR-1: cells と警告の整合）", async () => {
+    // 1回目: page1 成功・page2 全欄失敗 → failedPages=[2]
+    invokeStub
+      .mockResolvedValueOnce(okResponse)
+      .mockRejectedValueOnce(new Error("transient"));
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.failedPages).toEqual([2]);
+
+    // 2回目: エンジン死亡（page1 から全滅）→ 中断・cells 保持・警告も保持
+    invokeStub.mockReset();
+    invokeStub.mockRejectedValue(new Error("dead"));
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.engineError).toBe(true);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+    expect(result.current.failedPages).toEqual([2]); // 消えていない
+  });
+});
+
+describe("useReportOcr: ページ除外との連携", () => {
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    vi.mocked(tauriCore.invoke).mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [{ text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+      })
+    );
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+      excludedPages: new Set([2]),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    useReportStore.setState({ excludedPages: new Set() });
+  });
+
+  it("除外ページは OCR がスキップされ cells にも failed にも載らない", async () => {
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    const cells = useReportStore.getState().cells;
+    expect(cells.has(1)).toBe(true);
+    expect(cells.has(2)).toBe(false); // スキップ
+    expect(cells.has(3)).toBe(true);
+    expect(result.current.failedPages).toEqual([]);
+  });
+
+  it("除外ページへの runOcrForPage は no-op（cells を変えない）", async () => {
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcrForPage(2);
+    });
+    expect(useReportStore.getState().cells.has(2)).toBe(false);
+    expect(result.current.isRunning).toBe(false);
   });
 });

@@ -77,6 +77,14 @@ export function useThumbnailPanel() {
 
   const epochRef = useRef(0);
   const thumbnailEpochRef = useRef(0);
+  // キュー処理専用の epoch。epochRef はファイル切替の識別 (LOAD_PDF フローの
+  // ガード) を兼ねているため、pageOrder 変更のたびにここを bump すると
+  // ロード中の startWorkerLoad/kickoff (epochRef 依存) まで巻き込んで
+  // 中断してしまう。ThumbnailWindow.tsx は epochRef (キュー用) と
+  // pdfLoadEpochRef (ロード用) を最初から分離しているため、対称化のため
+  // ここでも processThumbnailQueue/requestThumbnail が読む epoch だけを
+  // 分離する。pageOrder 変更 effect はこの queueEpochRef のみを bump する。
+  const queueEpochRef = useRef(0);
   const pageOrderRef = useRef<number[]>(usePecoStore.getState().pageOrder);
   const pageOrderKeyRef = useRef(usePecoStore.getState().pageOrder.join(','));
   const isPdfReadyRef = useRef(false);
@@ -242,7 +250,7 @@ export function useThumbnailPanel() {
     isProcessingRef.current = true;
     try {
       while (queueRef.current.length > 0) {
-        if (epochRef.current !== epoch) break;
+        if (queueEpochRef.current !== epoch) break;
 
         const batch: number[] = [];
         while (batch.length < CONCURRENCY && queueRef.current.length > 0) {
@@ -257,7 +265,7 @@ export function useThumbnailPanel() {
             const thumbEpoch = thumbnailEpochRef.current;
             const url = await generateViaWorker(pageIdx);
             if (!url) return;
-            if (epochRef.current === epoch && thumbnailEpochRef.current === thumbEpoch) {
+            if (queueEpochRef.current === epoch && thumbnailEpochRef.current === thumbEpoch) {
               pendingBatchRef.current.push([pageIdx, url, thumbEpoch]);
               if (!batchTimerRef.current) {
                 batchTimerRef.current = setTimeout(flushBatch, BATCH_FLUSH_MS);
@@ -270,7 +278,7 @@ export function useThumbnailPanel() {
       }
     } finally {
       isProcessingRef.current = false;
-      if (queueRef.current.length > 0 && epochRef.current === epoch) {
+      if (queueRef.current.length > 0 && queueEpochRef.current === epoch) {
         setTimeout(() => processThumbnailQueue(epoch), 0);
       }
     }
@@ -428,6 +436,7 @@ export function useThumbnailPanel() {
 
     epochRef.current++;
     thumbnailEpochRef.current++;
+    queueEpochRef.current++;
     const epoch = epochRef.current;
     queueRef.current = [];
     queueSetRef.current.clear();
@@ -476,6 +485,7 @@ export function useThumbnailPanel() {
     const capturedFilePath = document.filePath;
     const capturedDocumentIdentity = documentIdentity;
     const capturedEpoch = epoch;
+    const capturedQueueEpoch = queueEpochRef.current;
 
     const startWorkerLoad = async () => {
       if (epochRef.current !== capturedEpoch) return;
@@ -502,7 +512,7 @@ export function useThumbnailPanel() {
         logger.log(`[ThumbnailPanel] All workers ready, results=${JSON.stringify(results)}, epoch=${capturedEpoch}, current=${epochRef.current}, queue=${queueRef.current.length}`);
         if (epochRef.current !== capturedEpoch) return;
         isPdfReadyRef.current = true;
-        processThumbnailQueue(capturedEpoch);
+        processThumbnailQueue(capturedQueueEpoch);
       });
     };
 
@@ -597,6 +607,13 @@ export function useThumbnailPanel() {
     queueRef.current = [];
     queueSetRef.current.clear();
     isProcessingRef.current = false;
+    // 横展開漏れ修正 (Fix1): 旧 processThumbnailQueue ループは epoch 引数として
+    // queueEpochRef の値をクロージャに持っている。ここを bump しないと、上の
+    // isProcessingRef 強制リセット後に新しいキュー処理が始まっても、旧ループが
+    // 自身の epoch チェックを通過し続けて同じ queueRef を取り合い、
+    // CONCURRENCY が実質 2 倍になってしまう (ThumbnailWindow.tsx の
+    // page-order-changed ハンドラの epochRef++ と対称の bump)。
+    queueEpochRef.current++;
 
     // Cancel all in-flight worker requests (their sourcePageIndex mapping may
     // have changed; re-requests will be issued via setLoadEpoch → requestThumbnail).
@@ -626,7 +643,7 @@ export function useThumbnailPanel() {
       queueRef.current.push(pageIndex);
       queueSetRef.current.add(pageIndex);
     }
-    const epoch = epochRef.current;
+    const epoch = queueEpochRef.current;
     setTimeout(() => processThumbnailQueue(epoch), 0);
   }, [processThumbnailQueue]);
 

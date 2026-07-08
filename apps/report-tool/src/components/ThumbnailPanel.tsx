@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FC } from "react";
 import { usePdfStore } from "../store/pdfStore";
+import { useReportStore } from "../store/reportStore";
 import { renderPageOffscreen } from "../lib/ocrCrop";
 
 /** サムネイル描画スケール（0.25 = 25%縮小）。MVP は全件描画。大量ページ(100+)では lazy 化を検討する。 */
@@ -15,6 +16,9 @@ const ThumbnailPanel: FC = () => {
   const numPages = usePdfStore((s) => s.numPages);
   const currentPage = usePdfStore((s) => s.currentPage);
   const setCurrentPage = usePdfStore((s) => s.setCurrentPage);
+  const rotation = usePdfStore((s) => s.rotation);
+  const excludedPages = useReportStore((s) => s.excludedPages);
+  const togglePageExclusion = useReportStore((s) => s.togglePageExclusion);
 
   const [thumbnails, setThumbnails] = useState<ThumbnailItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -71,7 +75,8 @@ const ThumbnailPanel: FC = () => {
             const { canvas: c } = await renderPageOffscreen(
               pdfDoc,
               i,
-              THUMBNAIL_RENDER_SCALE
+              THUMBNAIL_RENDER_SCALE,
+              rotation
             );
             canvas = c;
 
@@ -112,7 +117,7 @@ const ThumbnailPanel: FC = () => {
       cancelled = true;
       abortRef.current = true;
     };
-  }, [filePath, numPages]);
+  }, [filePath, numPages, rotation]);
 
   // コンポーネント解除時に pdfDoc を破棄
   useEffect(() => {
@@ -149,26 +154,47 @@ const ThumbnailPanel: FC = () => {
   return (
     <div className="thumbnail-panel" aria-label={`全 ${numPages} ページ`}>
       <ol className="thumbnail-panel__list">
-        {thumbnails.map(({ pageNumber, dataUrl }) => (
-          <li key={pageNumber} className="thumbnail-panel__item">
-            <button
-              type="button"
-              className={`thumbnail-panel__btn${currentPage === pageNumber ? " thumbnail-panel__btn--active" : ""}`}
-              onClick={() => setCurrentPage(pageNumber)}
-              aria-current={currentPage === pageNumber ? "true" : undefined}
-              aria-label={`${pageNumber} ページ目`}
+        {thumbnails.map(({ pageNumber, dataUrl }) => {
+          const isExcluded = excludedPages.has(pageNumber);
+          return (
+            <li
+              key={pageNumber}
+              className={`thumbnail-panel__item${isExcluded ? " thumbnail-panel__item--excluded" : ""}`}
             >
-              <img
-                src={dataUrl}
-                alt={`${pageNumber} ページ目のサムネイル`}
-                className="thumbnail-panel__img"
-              />
-              <span className="thumbnail-panel__page-num" aria-hidden="true">
-                {pageNumber}
-              </span>
-            </button>
-          </li>
-        ))}
+              <button
+                type="button"
+                className={`thumbnail-panel__btn${currentPage === pageNumber ? " thumbnail-panel__btn--active" : ""}`}
+                onClick={() => setCurrentPage(pageNumber)}
+                aria-current={currentPage === pageNumber ? "true" : undefined}
+                aria-label={`${pageNumber} ページ目${isExcluded ? "（除外中）" : ""}`}
+              >
+                <img
+                  src={dataUrl}
+                  alt={`${pageNumber} ページ目のサムネイル`}
+                  className="thumbnail-panel__img"
+                />
+                <span className="thumbnail-panel__page-num" aria-hidden="true">
+                  {pageNumber}
+                </span>
+              </button>
+              {/* 白紙・送付状など対象外ページを OCR/CSV から外すトグル */}
+              <button
+                type="button"
+                className={`thumbnail-panel__exclude-btn${isExcluded ? " thumbnail-panel__exclude-btn--on" : ""}`}
+                onClick={() => togglePageExclusion(pageNumber)}
+                aria-pressed={isExcluded}
+                aria-label={
+                  isExcluded
+                    ? `除外解除: ${pageNumber}ページ目`
+                    : `除外: ${pageNumber}ページ目（OCR・CSV対象外にする）`
+                }
+                title={isExcluded ? "除外を解除" : "このページを除外（OCR・CSV対象外）"}
+              >
+                {isExcluded ? "除外中" : "除外"}
+              </button>
+            </li>
+          );
+        })}
         {isLoading && thumbnails.length > 0 && (
           <li className="thumbnail-panel__loading-more" aria-live="polite">
             読込中...

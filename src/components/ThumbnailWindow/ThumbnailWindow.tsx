@@ -292,18 +292,29 @@ export function ThumbnailWindow() {
   // ---- ページをワーカーに分散してサムネイル生成 ----
   // このリクエストの生成番号を返り値に含め、呼び出し側で古い応答を判定できるようにする
   const generateViaWorker = useCallback((pageIdx: number): Promise<{ url: string | null; generation: number }> => {
-    const generation = (pageGenerationRef.current.get(pageIdx) ?? 0) + 1;
-    pageGenerationRef.current.set(pageIdx, generation);
     return new Promise(resolve => {
       const workers = workersRef.current;
       const pendingsByWorker = pendingsByWorkerRef.current;
-      if (workers.length === 0) { resolve({ url: null, generation }); return; }
+      if (workers.length === 0) {
+        resolve({ url: null, generation: pageGenerationRef.current.get(pageIdx) ?? 0 });
+        return;
+      }
 
       const workerIdx = pageIdx % workers.length;
       const worker = workers[workerIdx];
       const myPending = pendingsByWorker[workerIdx];
 
-      if (pendingRequestIdByPageRef.current.has(pageIdx)) { resolve({ url: null, generation }); return; }
+      // 重複呼び出し (既に in-flight のリクエストがある) の場合は generation を
+      // 進めない。ここで進めてしまうと、in-flight の応答が戻ってきたときに
+      // 359-364行の世代チェック (generation !== latestGen) で「古い応答」と
+      // 誤判定され、正しい結果が破棄されてプレースホルダーが固着する。
+      if (pendingRequestIdByPageRef.current.has(pageIdx)) {
+        resolve({ url: null, generation: pageGenerationRef.current.get(pageIdx) ?? 0 });
+        return;
+      }
+
+      const generation = (pageGenerationRef.current.get(pageIdx) ?? 0) + 1;
+      pageGenerationRef.current.set(pageIdx, generation);
 
       const requestId = ++nextWorkerRequestIdRef.current;
       const timeout = setTimeout(() => {
@@ -388,7 +399,9 @@ export function ThumbnailWindow() {
 
   const requestThumbnail = useCallback((pageIndex: number) => {
     if (thumbnailsRef.current.has(pageIndex)) return;
-    if (!thumbnailQueueSetRef.current.has(pageIndex)) {
+    // useThumbnailPanel.ts の requestThumbnail と同様、既に in-flight のリクエスト
+    // があるページは再キューイングしない (横展開漏れ: 別窓だけこのガードが無かった)。
+    if (!thumbnailQueueSetRef.current.has(pageIndex) && !pendingRequestIdByPageRef.current.has(pageIndex)) {
       thumbnailQueueRef.current.push(pageIndex);
       thumbnailQueueSetRef.current.add(pageIndex);
     }
@@ -502,6 +515,47 @@ export function ThumbnailWindow() {
         const { currentPageIndex: page, totalPages: total, dirtyPages: dirty, pageOrder, rotations: rot } = e.payload;
         const nextPageOrder = [...pageOrder];
 
+        // Differential cache invalidation (PCT-perf-delete), ported from
+        // useThumbnailPanel.ts's pageOrder-change effect: instead of revoking
+        // every cached thumbnail and regenerating all of them, only revoke the
+        // entries whose source page was removed and remap surviving pages
+        // (matched by sourcePageIndex) to their new display index. An entry we
+        // cannot match to a surviving source page is revoked rather than kept,
+        // so no stale thumbnail can ever be shown under the wrong page.
+        const oldPageOrder = pageOrderRef.current;
+        const sourceToEntry = new Map<number, { url: string; generation: number; storedGeneration: number }>();
+        for (let oldIdx = 0; oldIdx < oldPageOrder.length; oldIdx++) {
+          const url = thumbnailsRef.current.get(oldIdx);
+          if (url === undefined) continue;
+          const srcPage = oldPageOrder[oldIdx];
+          sourceToEntry.set(srcPage, {
+            url,
+            generation: pageGenerationRef.current.get(oldIdx) ?? 0,
+            storedGeneration: storedGenerationRef.current.get(oldIdx) ?? 0,
+          });
+        }
+
+        const newThumbnails = new Map<number, string>();
+        const newPageGeneration = new Map<number, number>();
+        const newStoredGeneration = new Map<number, number>();
+        const reusedSources = new Set<number>();
+        for (let newIdx = 0; newIdx < nextPageOrder.length; newIdx++) {
+          const srcPage = nextPageOrder[newIdx];
+          const entry = sourceToEntry.get(srcPage);
+          if (entry === undefined) continue;
+          newThumbnails.set(newIdx, entry.url);
+          newPageGeneration.set(newIdx, entry.generation);
+          newStoredGeneration.set(newIdx, entry.storedGeneration);
+          reusedSources.add(srcPage);
+        }
+
+        // Revoke only the URLs that could not be remapped (deleted pages).
+        sourceToEntry.forEach((entry, srcPage) => {
+          if (!reusedSources.has(srcPage)) {
+            URL.revokeObjectURL(entry.url);
+          }
+        });
+
         epochRef.current++;
         const epoch = epochRef.current;
         thumbnailQueueRef.current = [];
@@ -515,10 +569,9 @@ export function ThumbnailWindow() {
           p.clear();
         });
         pendingRequestIdByPageRef.current.clear();
-        thumbnailsRef.current.forEach(url => { if (url) URL.revokeObjectURL(url); });
-        thumbnailsRef.current = new Map();
-        pageGenerationRef.current = new Map();
-        storedGenerationRef.current = new Map();
+        thumbnailsRef.current = newThumbnails;
+        pageGenerationRef.current = newPageGeneration;
+        storedGenerationRef.current = newStoredGeneration;
         pageOrderRef.current = nextPageOrder;
         itemListenersRef.current.forEach(cbs => cbs.forEach(cb => cb()));
         setTotalPages(total);

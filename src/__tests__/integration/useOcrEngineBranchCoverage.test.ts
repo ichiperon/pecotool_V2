@@ -1586,6 +1586,33 @@ describe('runOcrOnRegion: 未カバー分岐', () => {
     expect(liveDoc.pages.get(0)!.textBlocks).toHaveLength(0);
     expect(toasts.some((t) => t.err === true && t.msg.includes('ページ順序が変更されました'))).toBe(true);
   });
+
+  it('#R22狩りWave2-M-1 (PCT-076 横展開): 別経路の OCR 実行中は runOcrOnRegion も多重起動ガードで即拒否する', async () => {
+    usePecoStore.getState().setDocument(makeDoc(1));
+    let releaseOpen!: (pdf: unknown) => void;
+    h.openFreshPdfDocMock.mockImplementationOnce(() => new Promise((resolve) => { releaseOpen = resolve; }));
+
+    const toasts: Array<{ msg: string; err?: boolean }> = [];
+    const { result } = renderHook(() => useOcrEngine((m, e) => toasts.push({ msg: m, err: e })));
+
+    // 別経路 (runOcrAllPagesSilent) の OCR を openFreshPdfDoc 待機中の状態で止めておく。
+    let silentDone!: Promise<boolean>;
+    act(() => { silentDone = result.current.runOcrAllPagesSilent(); });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const canvas = makeOffscreenCanvas(400, 600);
+    await act(async () => {
+      await result.current.runOcrOnRegion(canvas, { x: 0, y: 0, width: 40, height: 20 }, 0, 100);
+    });
+
+    expect(toasts.some((t) => t.err === true && t.msg.includes('OCR実行中のため、新しいOCRを開始できません'))).toBe(true);
+    expect(h.invokeMock).not.toHaveBeenCalledWith('run_ocr', expect.anything());
+
+    await act(async () => {
+      releaseOpen(makeMockPdf(1));
+      await silentDone;
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

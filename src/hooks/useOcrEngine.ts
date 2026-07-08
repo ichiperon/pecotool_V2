@@ -15,6 +15,7 @@ import { loadPage } from '../utils/pdfTextExtractor';
 import { parsePageRange } from '../utils/pageRangeParser';
 import { displayToSourcePageIndex, resolvePageId } from '../utils/pageOrder';
 import { bboxRectToRotatedScreenRect, rotatedScreenRectToBbox } from '../utils/canvasRotation';
+import { commitActiveOcrCardEdit } from '../utils/ocrCardCommit';
 
 const RENDER_SCALE = 2.0;
 
@@ -361,6 +362,12 @@ export function useOcrEngine(
           // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
           // pdfSaver が page.getRotation() を読んで cm で位置補正する。
           const newBlocks = toTextBlocks(result.blocks ?? [], settings);
+          // R22狩り(交差汚染 HIGH): textBlocks を丸ごと差し替える直前に、フォーカス中
+          // カードの未確定編集を commit する。ここで flush しないと、OCR結果が新しい
+          // block id で textBlocks を置き換えた後にフォーカス側の blur/unmount コミットが
+          // 走っても対象ブロックが既に存在せず、編集が黙って消える (computeItemKey 導入後は
+          // 汚染ではなく消失になるが、いずれにせよ commit してから上書きするのが仕様上正しい)。
+          commitActiveOcrCardEdit();
           usePecoStore.getState().updatePageData(i, {
             textBlocks: newBlocks,
             isDirty: true,
@@ -487,6 +494,9 @@ export function useOcrEngine(
       // #71: bbox は viewport 空間 (rotated screen) のまま store に入れる。
       // pdfSaver が page.getRotation() を読んで cm で位置補正する。
       const newBlocks = toTextBlocks(result.blocks ?? [], settings);
+      // R22狩り(交差汚染 HIGH): processAllPages と同様、textBlocks 差し替え直前に
+      // フォーカス中カードの未確定編集を commit してから上書きする。
+      commitActiveOcrCardEdit();
       usePecoStore.getState().updatePageData(pageIdx, {
         textBlocks: newBlocks,
         isDirty: true,
@@ -879,6 +889,9 @@ export function useOcrEngine(
           const pageData = pageDataList[idx];
           if (!pageData) continue;
           if (displayToSourcePageIndex(usePecoStore.getState().pageOrder, pageIndex) !== displayToSourcePageIndex(pageOrder, pageIndex)) continue;
+          // R22狩り(交差汚染 HIGH): テキスト層取り込みも textBlocks を丸ごと差し替えるため、
+          // OCR経路と同様にフォーカス中カードの未確定編集を commit してから上書きする。
+          commitActiveOcrCardEdit();
           usePecoStore.getState().updatePageData(pageIndex, {
             textBlocks: pageData.textBlocks,
             isDirty: true,
@@ -974,6 +987,13 @@ export function useOcrEngine(
     pageIndex: number,
     zoom: number,
   ) => {
+    // PCT-076 横展開: 他の OCR 入口 (runOcrCurrentPage/runOcrAllPages/runOcrRange/
+    // runOcrFolder) と同様の多重起動ガード。既に別経路の OCR が走っている状態で
+    // ここを通すと同一ページへ並行 updatePageData して結果が混在するため拒否する。
+    if (isOcrRunningRef.current) {
+      showToast('OCR実行中のため、新しいOCRを開始できません。', true);
+      return;
+    }
     const state = usePecoStore.getState();
     const doc = state.document;
     if (!doc) return;
@@ -1115,6 +1135,10 @@ export function useOcrEngine(
       });
 
       const newBlocks = toTextBlocks(adjustedBlocks, settings);
+      // R22狩り(交差汚染 HIGH): 範囲OCRは既存 textBlocks とマージするため id 消失は
+      // 起きないが、フォーカス中カードの最新テキストをマージ元スナップショットに
+      // 含めるため、既存ブロックを読む前に commit しておく。
+      commitActiveOcrCardEdit();
       const currentPage = usePecoStore.getState().document?.pages.get(pageIndex);
       const existingBlocks = currentPage?.textBlocks ?? [];
       // #365 (PCT-142): existingBlocks.length ベースの採番は、削除後の非連続 order

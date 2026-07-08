@@ -24,7 +24,21 @@ export function usePageManagement() {
 
   const handleDeletePages = useCallback(
     (displayIndices: number[]) => enqueuePageOperation(async () => {
+      // H-3 (bug-hunt round2): displayIndices はこの時点で開いているドキュメントの
+      // pageOrder を基準に決めた値。onIdbWork を渡すこの経路では pecoStore.deletePages
+      // 内の F-6 ガードは実質的な待機を検出できない (待機自体をこの hook が担うため)。
+      // 待機前の epoch/filePath をここでキャプチャし、待機後に再検証する。待機中に
+      // ファイル切替/開き直しが完了していたら、旧ドキュメント基準の displayIndices を
+      // 新ドキュメントへ誤適用しないよう中止する。
+      const entryEpoch = useInfraStore.getState().documentEpoch;
+      const entryFilePath = usePecoStore.getState().document?.filePath ?? null;
       await waitForPendingIdbSaves();
+      if (
+        useInfraStore.getState().documentEpoch !== entryEpoch ||
+        (usePecoStore.getState().document?.filePath ?? null) !== entryFilePath
+      ) {
+        return;
+      }
 
       // PCT-104 (A-lite 段階3): deletedPageIds は pageId 文字列配列。rename は不要。
       await deletePages(displayIndices, (filePath, deletedPageIds) => {
@@ -45,7 +59,18 @@ export function usePageManagement() {
 
   const handleMovePage = useCallback(
     (fromDisplayIndex: number, toDisplayIndex: number) => enqueuePageOperation(async () => {
+      // H-3 (bug-hunt round2): handleDeletePages と同型のガード。fromDisplayIndex/
+      // toDisplayIndex は待機開始時点のドキュメント基準の値なので、待機中にファイル
+      // 切替が完了していたら新ドキュメントへ誤適用しないよう中止する。
+      const entryEpoch = useInfraStore.getState().documentEpoch;
+      const entryFilePath = usePecoStore.getState().document?.filePath ?? null;
       await waitForPendingIdbSaves();
+      if (
+        useInfraStore.getState().documentEpoch !== entryEpoch ||
+        (usePecoStore.getState().document?.filePath ?? null) !== entryFilePath
+      ) {
+        return;
+      }
 
       // PCT-104 (A-lite 段階3): movePage は IDB キー操作不要（pageId 不変）。
       // onIdbWork コールバックは no-op として渡す。

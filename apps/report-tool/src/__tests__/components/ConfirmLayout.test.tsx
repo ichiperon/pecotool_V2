@@ -41,6 +41,9 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     progress: null,
     reocrTarget: null,
     failedPages: [],
+    layoutMismatchPages: [],
+    layoutBasePage: null,
+    engineError: false,
     runOcr: vi.fn(),
     cancelOcr: vi.fn(),
     runOcrForPage: vi.fn().mockResolvedValue(undefined),
@@ -165,5 +168,44 @@ describe("ConfirmLayout – activePage / reocrTarget の伝搬", () => {
   it("ocrHook.reocrTarget が CsvPreviewTable に渡される", () => {
     render(<ConfirmLayout ocrHook={makeOcrHook({ reocrTarget: 3 })} />);
     expect(screen.getByTestId("reocr-target-right")).toHaveTextContent("3");
+  });
+});
+
+describe("ConfirmLayout – OCR警告バナーの持ち込み（ステップ③置き去り修正）", () => {
+  beforeEach(() => {
+    usePdfStore.setState({ filePath: "/test.pdf", numPages: 10, currentPage: 1 });
+  });
+
+  it("failedPages があると role=alert のバナーが確認画面に出る", () => {
+    render(<ConfirmLayout ocrHook={makeOcrHook({ failedPages: [3, 7] })} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/OCR 失敗/);
+    expect(alert).toHaveTextContent(/CSV に行が含まれません/);
+  });
+
+  it("失敗ページ番号ボタンをクリックすると該当ページへジャンプする", () => {
+    render(<ConfirmLayout ocrHook={makeOcrHook({ failedPages: [3, 7] })} />);
+    fireEvent.click(screen.getByRole("button", { name: "OCR に失敗した 7 ページ目を表示" }));
+    expect(usePdfStore.getState().currentPage).toBe(7);
+  });
+
+  it("用紙サイズ混在は role=note で基準ページ付きで表示され、ジャンプできる", () => {
+    render(
+      <ConfirmLayout
+        ocrHook={makeOcrHook({ layoutMismatchPages: [2], layoutBasePage: 1 })}
+      />
+    );
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent(/基準ページ（1ページ目）/);
+    fireEvent.click(
+      screen.getByRole("button", { name: "用紙サイズ・向きが異なる 2 ページ目を表示" })
+    );
+    expect(usePdfStore.getState().currentPage).toBe(2);
+  });
+
+  it("警告なしのときバナーは表示されない", () => {
+    render(<ConfirmLayout ocrHook={makeOcrHook()} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 });

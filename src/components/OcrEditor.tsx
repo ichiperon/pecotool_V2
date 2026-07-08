@@ -459,6 +459,20 @@ export function OcrEditor({
     });
   }, [lastSelectedId]);
 
+  // 交差汚染バグ (R22狩り): Virtuoso はデフォルトで index をキーにコンポーネントを
+  // 再利用するため、リストの並び/構成が変わると同じ index に別ブロックが割り当てられ
+  // 既存の SortableOcrCard/OcrCard インスタンスがそのまま retarget される。
+  // OcrCard 側の blockIdRef はフォーカス中でも render 毎に無条件で最新 block.id へ
+  // 更新される実装のため、retarget が起きると「フォーカス中に編集した旧テキスト」が
+  // blur/unmount コミット時に別ブロックへ書き込まれてしまう。
+  // computeItemKey で block.id をキーに固定し、コンポーネント同一性を id ベースに
+  // することでこの retarget を構造的に防ぐ (id が変われば React が別インスタンスとして
+  // マウント/アンマウントするため、旧インスタンスの cleanup は旧 block.id のみを対象にする)。
+  const computeItemKey = useCallback(
+    (index: number) => filteredBlocksRef.current[index]?.id ?? index,
+    []
+  );
+
   // Virtuoso の item レンダラ。memo化された SortableOcrCard へ stable な props を渡す。
   // setCardRef は空依存 useCallback で安定しているため、ここの依存配列は空にして
   // renderItem の identity を mount 中固定にする (Virtuoso itemContent の memoization 維持)。
@@ -544,6 +558,7 @@ export function OcrEditor({
                 style={{ height: '100%' }}
                 totalCount={filteredBlocks.length}
                 itemContent={renderItem}
+                computeItemKey={computeItemKey}
                 overscan={400}
                 increaseViewportBy={{ top: 400, bottom: 400 }}
               />

@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { usePecoStore, waitForPendingIdbSaves } from '../../store/pecoStore';
+import { usePecoStore, waitForPendingIdbSaves, trackPendingIdbWork } from '../../store/pecoStore';
 import { useInfraStore } from '../../store/infraStore';
 import type { PageData, PecoDocument } from '../../types';
 
@@ -405,6 +405,138 @@ describe('U-PM2-03: handleMovePage — 移動元=移動先のとき no-op', () =
     } finally {
       deleteWork.resolve();
       await Promise.allSettled([movePromise, deletePromise]);
+      await waitForPendingIdbSaves();
+    }
+  });
+});
+
+// ── H-3 (bug-hunt round2): onIdbWork 経路でも F-6 ガードが効くこと ────────
+//
+// UI からの実操作は常に onIdbWork を渡すため、pecoStore.deletePages/movePage 内の
+// F-6 ガード (`!onIdbWork &&` 条件) は丸ごとスキップされていた。
+// waitForPendingIdbSaves() の待機中にファイル切替 (documentEpoch の変化 / filePath 変更)
+// が完了した場合、待機開始時点のドキュメント基準の displayIndices / from・toDisplayIndex を
+// 新ドキュメントへ誤適用しないことを検証する。
+
+describe('H-3 (bug-hunt round2): 待機中のファイル切替ガード (onIdbWork 経路)', () => {
+  function makeOtherDoc(pageCount: number): PecoDocument {
+    const pages = new Map<number, PageData>();
+    for (let i = 0; i < pageCount; i++) pages.set(i, makePage(i));
+    return {
+      filePath: 'other.pdf',
+      fileName: 'other.pdf',
+      totalPages: pageCount,
+      metadata: {},
+      pages,
+    };
+  }
+
+  it('handleDeletePages: waitForPendingIdbSaves 待機中に別ファイルへ切り替わったら新ドキュメントを削除しない', async () => {
+    // pending な IDB 保存を意図的に登録し、hook 内部の waitForPendingIdbSaves() を足止めする。
+    let releasePending!: () => void;
+    const pendingGate = new Promise<void>((resolve) => { releasePending = resolve; });
+    trackPendingIdbWork(pendingGate);
+
+    const doc1 = makeDoc(3); // filePath: 'test.pdf'
+    usePecoStore.setState({
+      document: doc1,
+      pageOrder: [0, 1, 2],
+      currentPageIndex: 0,
+    });
+
+    const { result } = renderHook(() => usePageManagement());
+
+    let deleteDone = false;
+    let deletePromise: Promise<void> = Promise.resolve();
+
+    try {
+      await act(async () => {
+        // displayIndex=1 (doc1 基準) の削除を要求する。hook 内部の
+        // waitForPendingIdbSaves() が pendingGate 解決まで足止めするため、
+        // entryEpoch/entryFilePath のキャプチャ後で待機に入る。
+        deletePromise = result.current.handleDeletePages([1]);
+        deletePromise.then(() => { deleteDone = true; });
+        // マイクロタスクを回し、hook 内部が entryEpoch/entryFilePath を
+        // キャプチャ (doc1 基準) した上で waitForPendingIdbSaves() で足止めされるまで進める。
+        await flushMicrotasks();
+      });
+
+      expect(deleteDone).toBe(false);
+
+      // 待機中に別ファイルへ切り替える (documentEpoch が変化する)。
+      const doc2 = makeOtherDoc(3);
+      usePecoStore.setState({
+        document: doc2,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+      });
+      useInfraStore.setState({ documentEpoch: useInfraStore.getState().documentEpoch + 1 });
+
+      releasePending();
+      await act(async () => {
+        await deletePromise;
+      });
+
+      const state = usePecoStore.getState();
+      // 修正前は displayIndex=1 が doc2 (無関係なドキュメント) に適用され totalPages が
+      // 2 に減ってしまう。修正後は doc2 が無傷のまま維持される。
+      expect(state.document?.filePath).toBe('other.pdf');
+      expect(state.document?.totalPages).toBe(3);
+      expect(state.pageOrder).toEqual([0, 1, 2]);
+      expect(deleteTemporaryPageKeys).not.toHaveBeenCalled();
+    } finally {
+      releasePending();
+      await waitForPendingIdbSaves();
+    }
+  });
+
+  it('handleMovePage: waitForPendingIdbSaves 待機中に別ファイルへ切り替わったら新ドキュメントを並べ替えない', async () => {
+    let releasePending!: () => void;
+    const pendingGate = new Promise<void>((resolve) => { releasePending = resolve; });
+    trackPendingIdbWork(pendingGate);
+
+    const doc1 = makeDoc(3); // filePath: 'test.pdf'
+    usePecoStore.setState({
+      document: doc1,
+      pageOrder: [0, 1, 2],
+      currentPageIndex: 0,
+    });
+
+    const { result } = renderHook(() => usePageManagement());
+
+    let moveDone = false;
+    let movePromise: Promise<void> = Promise.resolve();
+
+    try {
+      await act(async () => {
+        // fromDisplayIndex=0/toDisplayIndex=2 (doc1 基準) の移動を要求する。
+        movePromise = result.current.handleMovePage(0, 2);
+        movePromise.then(() => { moveDone = true; });
+        await flushMicrotasks();
+      });
+
+      expect(moveDone).toBe(false);
+
+      const doc2 = makeOtherDoc(3);
+      usePecoStore.setState({
+        document: doc2,
+        pageOrder: [0, 1, 2],
+        currentPageIndex: 0,
+      });
+      useInfraStore.setState({ documentEpoch: useInfraStore.getState().documentEpoch + 1 });
+
+      releasePending();
+      await act(async () => {
+        await movePromise;
+      });
+
+      const state = usePecoStore.getState();
+      // 修正前は fromDisplayIndex=0/toDisplayIndex=2 (doc1 基準) が doc2 に適用され
+      // pageOrder が並び替わってしまう。修正後は doc2 の pageOrder が無傷のまま維持される。
+      expect(state.document?.filePath).toBe('other.pdf');
+      expect(state.pageOrder).toEqual([0, 1, 2]);
+    } finally {
+      releasePending();
       await waitForPendingIdbSaves();
     }
   });

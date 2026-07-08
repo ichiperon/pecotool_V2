@@ -104,12 +104,17 @@ export async function renderPageOffscreen(
   // pdfjs-dist v5 の型定義との不整合を避けるための措置
   pdfDoc: unknown,
   pageNumber: number,
-  renderScale: number
+  renderScale: number,
+  // ユーザー回転（90°刻み）。ページ固有 /Rotate に加算合成する。
+  // 表示側（PdfViewer/ConfirmPdfPane）と同じ値を使わないと欄座標が全ずれするため、
+  // 呼び出し元は pdfStore.rotation を渡すこと（既定 0 は後方互換）。
+  userRotation: number = 0
 ): Promise<{ canvas: HTMLCanvasElement; pageWidth: number; pageHeight: number }> {
   type PdfDoc = { getPage(n: number): Promise<PdfPage> };
   type PdfPage = {
+    rotate?: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    getViewport(opts: { scale: number }): any;
+    getViewport(opts: { scale: number; rotation?: number }): any;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     render(opts: any): { promise: Promise<void> };
     cleanup(): void;
@@ -119,11 +124,13 @@ export async function renderPageOffscreen(
   const canvas = document.createElement("canvas");
 
   try {
-    const viewport1 = page.getViewport({ scale: 1.0 });
+    // pdfjs の rotation 指定はページ固有 /Rotate の「上書き」なので加算合成する
+    const rotation = ((((page.rotate ?? 0) + userRotation) % 360) + 360) % 360;
+    const viewport1 = page.getViewport({ scale: 1.0, rotation });
     const pageWidth = viewport1.width;
     const pageHeight = viewport1.height;
 
-    const viewport = page.getViewport({ scale: renderScale });
+    const viewport = page.getViewport({ scale: renderScale, rotation });
     canvas.width = Math.round(viewport.width);
     canvas.height = Math.round(viewport.height);
 

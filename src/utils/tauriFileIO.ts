@@ -53,11 +53,61 @@ export async function readFileSafe(path: string): Promise<Uint8Array> {
 /**
  * 一時ファイル → atomic rename で write を完了する。
  * 中断/クラッシュ時の半書き出しを防止する。
+ *
+ * AZKi C-1: 失敗/中断した保存の `.pecotool-<uuid>.tmp` がユーザーの保存先フォルダに
+ * 永久に残り続けないよう、2つの掃除経路を持つ:
+ * - rename (`replace_pdf_file`) を試みる前の書き込み失敗は、温存する理由がないため
+ *   即座に削除する。
+ * - rename 自体の失敗は Rust 側の設計判断で temp をデータ救済のため残すため削除せず、
+ *   パスを可視化するだけに留める。
+ * - 保存が成功した場合は、同名の隣に残っている過去の失敗/中断分の temp を
+ *   fire-and-forget で掃除する（保存自体の成否には影響させない）。
  */
 export async function writeFileAtomically(path: string, bytes: Uint8Array): Promise<void> {
   const tempPath = `${path}.pecotool-${Date.now()}-${crypto.randomUUID()}.tmp`;
-  await writeFileChunked(tempPath, bytes);
-  await invoke('replace_pdf_file', { tempPath, targetPath: path });
+
+  try {
+    await writeFileChunked(tempPath, bytes);
+  } catch (writeError) {
+    // rename は一度も試みられていない。温存する理由がないため即座に削除する。
+    try {
+      await invoke('remove_pdf_temp_file', { tempPath });
+    } catch (cleanupError) {
+      console.warn(
+        `[writeFileAtomically] failed to remove temp file after write failure: ${tempPath}`,
+        cleanupError,
+      );
+    }
+    throw writeError;
+  }
+
+  try {
+    await invoke('replace_pdf_file', { tempPath, targetPath: path });
+  } catch (replaceError) {
+    // rename 失敗時は Rust 側の設計判断で temp をデータ救済のため残す
+    // (replace_target_with_temp_inner のコメント参照)。削除はせず可視化のみ行う。
+    console.warn(
+      `[writeFileAtomically] replace_pdf_file failed; temp file kept for recovery at: ${tempPath}`,
+    );
+    throw replaceError;
+  }
+
+  // 保存成功: 隣接する過去の失敗/中断分の temp を fire-and-forget で掃除する。
+  void cleanupStalePdfTempFiles(path);
+}
+
+/**
+ * `path` に隣接する、失敗/中断済みの `.pecotool-*.tmp` の残骸を掃除する。
+ *
+ * fire-and-forget を想定しており、失敗しても呼び出し元へは伝播させない
+ * (掃除できなくても次回の掃除機会・起動時掃除等でリカバリ可能なため)。
+ */
+export async function cleanupStalePdfTempFiles(path: string): Promise<void> {
+  try {
+    await invoke('cleanup_stale_pdf_temp_files', { targetPath: path });
+  } catch (e) {
+    console.warn(`[cleanupStalePdfTempFiles] failed for: ${path}`, e);
+  }
 }
 
 /**

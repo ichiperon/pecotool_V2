@@ -15,7 +15,9 @@ const m = vi.hoisted(() => {
   const emit = vi.fn().mockResolvedValue(undefined)
   const hide = vi.fn().mockResolvedValue(undefined)
   const onCloseRequested = vi.fn().mockResolvedValue(() => {})
-  return { listeners, listen, emit, hide, onCloseRequested }
+  // Virtuoso モックの item key に混ぜて、テストから任意のタイミングで
+  // ThumbnailItem の remount (react-virtuoso の実際のリサイクル相当) を発生させるためのトークン。
+  return { listeners, listen, emit, hide, onCloseRequested, remountToken: 0 }
 })
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -42,7 +44,7 @@ vi.mock('react-virtuoso', () => {
     return (
       <div style={style}>
         {Array.from({ length: totalCount }, (_, i) => (
-          <div key={i}>{itemContent(i)}</div>
+          <div key={`${i}-${m.remountToken}`}>{itemContent(i)}</div>
         ))}
       </div>
     )
@@ -123,6 +125,7 @@ describe('ThumbnailWindow', () => {
     cleanup()
     vi.clearAllMocks()
     m.listeners.clear()
+    m.remountToken = 0
     MockThumbnailWorker.instances = []
     MockThumbnailWorker.autoLoadComplete = true
     MockThumbnailWorker.autoThumbnailDone = false
@@ -574,6 +577,140 @@ describe('ThumbnailWindow', () => {
     expect(newGenerates.some((msg) => msg.pageIndex === 2)).toBe(false)
   })
 
+  it('PCT-perf-delete (Window): 並べ替えのみ（削除なし）はキャッシュを再利用し revoke も再生成もしない', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    let nextUrl = 0
+    URL.createObjectURL = vi.fn(() => `blob:reorder-${nextUrl++}`)
+    const revoke = vi.fn()
+    URL.revokeObjectURL = revoke
+    MockThumbnailWorker.autoThumbnailDone = true
+
+    render(<ThumbnailWindow />)
+    await waitFor(() => expect(m.listeners.get('thumbnail:file-opened')?.[0]).toBeDefined())
+
+    act(() => {
+      m.listeners.get('thumbnail:file-opened')![0]({
+        payload: {
+          filePath: 'test.pdf',
+          currentPageIndex: 0,
+          totalPages: 3,
+          dirtyPages: [],
+          pageOrder: [0, 1, 2],
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(document.querySelector('img[alt="Page 1"]')).not.toBeNull()
+      expect(document.querySelector('img[alt="Page 2"]')).not.toBeNull()
+      expect(document.querySelector('img[alt="Page 3"]')).not.toBeNull()
+    })
+
+    const urlForSource0 = document.querySelector('img[alt="Page 1"]')!.getAttribute('src')
+    const urlForSource1 = document.querySelector('img[alt="Page 2"]')!.getAttribute('src')
+    const urlForSource2 = document.querySelector('img[alt="Page 3"]')!.getAttribute('src')
+
+    const generateCountBefore = workerMessages('GENERATE_THUMBNAIL').length
+    revoke.mockClear()
+
+    // 並べ替えのみ（削除なし）: pageOrder [0,1,2] → [2,0,1]
+    act(() => {
+      m.listeners.get('thumbnail:page-order-changed')![0]({
+        payload: {
+          currentPageIndex: 0,
+          totalPages: 3,
+          dirtyPages: [],
+          pageOrder: [2, 0, 1],
+        },
+      })
+    })
+    await flushEffects()
+
+    // 削除ページがないため revoke は一切発生しない
+    expect(revoke).not.toHaveBeenCalled()
+    // 生存ページはキャッシュ再利用され、GENERATE_THUMBNAIL は再発行されない
+    expect(workerMessages('GENERATE_THUMBNAIL').length).toBe(generateCountBefore)
+
+    // 新しい表示順 [2,0,1] へキャッシュがリマップされている
+    await waitFor(() => {
+      expect(document.querySelector('img[alt="Page 1"]')?.getAttribute('src')).toBe(urlForSource2)
+      expect(document.querySelector('img[alt="Page 2"]')?.getAttribute('src')).toBe(urlForSource0)
+      expect(document.querySelector('img[alt="Page 3"]')?.getAttribute('src')).toBe(urlForSource1)
+    })
+
+    URL.createObjectURL = originalCreateObjectURL
+    URL.revokeObjectURL = originalRevokeObjectURL
+  })
+
+  it('PCT-perf-delete (Window): 削除時は該当ページのみ revoke し、生存ページはキャッシュ再利用する', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    let nextUrl = 0
+    URL.createObjectURL = vi.fn(() => `blob:delete-${nextUrl++}`)
+    const revoke = vi.fn()
+    URL.revokeObjectURL = revoke
+    MockThumbnailWorker.autoThumbnailDone = true
+
+    render(<ThumbnailWindow />)
+    await waitFor(() => expect(m.listeners.get('thumbnail:file-opened')?.[0]).toBeDefined())
+
+    act(() => {
+      m.listeners.get('thumbnail:file-opened')![0]({
+        payload: {
+          filePath: 'test.pdf',
+          currentPageIndex: 0,
+          totalPages: 3,
+          dirtyPages: [],
+          pageOrder: [0, 1, 2],
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(document.querySelector('img[alt="Page 1"]')).not.toBeNull()
+      expect(document.querySelector('img[alt="Page 2"]')).not.toBeNull()
+      expect(document.querySelector('img[alt="Page 3"]')).not.toBeNull()
+    })
+
+    const urlForSource0 = document.querySelector('img[alt="Page 1"]')!.getAttribute('src')!
+    const urlForSource1 = document.querySelector('img[alt="Page 2"]')!.getAttribute('src')!
+    const urlForSource2 = document.querySelector('img[alt="Page 3"]')!.getAttribute('src')!
+
+    const generateCountBefore = workerMessages('GENERATE_THUMBNAIL').length
+    revoke.mockClear()
+
+    // sourcePageIndex=1 を削除: pageOrder [0,1,2] → [0,2]
+    act(() => {
+      m.listeners.get('thumbnail:page-order-changed')![0]({
+        payload: {
+          currentPageIndex: 0,
+          totalPages: 2,
+          dirtyPages: [],
+          pageOrder: [0, 2],
+        },
+      })
+    })
+    await flushEffects()
+
+    // 削除された sourcePageIndex=1 の URL のみ revoke される
+    expect(revoke).toHaveBeenCalledWith(urlForSource1)
+    expect(revoke).not.toHaveBeenCalledWith(urlForSource0)
+    expect(revoke).not.toHaveBeenCalledWith(urlForSource2)
+
+    // 生存ページ (sourcePageIndex 0,2) はキャッシュ再利用され、再生成されない
+    expect(workerMessages('GENERATE_THUMBNAIL').length).toBe(generateCountBefore)
+
+    await waitFor(() => {
+      expect(document.querySelector('img[alt="Page 1"]')?.getAttribute('src')).toBe(urlForSource0)
+      expect(document.querySelector('img[alt="Page 2"]')?.getAttribute('src')).toBe(urlForSource2)
+      expect(document.querySelectorAll('.thumbnail-item')).toHaveLength(2)
+    })
+
+    URL.createObjectURL = originalCreateObjectURL
+    URL.revokeObjectURL = originalRevokeObjectURL
+  })
+
   describe('issue #431 (PCT-200 / FB-6): UI 回転の反映', () => {
     it('thumbnail:file-opened の rotations が --thumbnail-rotation / --thumb-box-w の CSS variable に反映される', async () => {
       render(<ThumbnailWindow />)
@@ -644,5 +781,64 @@ describe('ThumbnailWindow', () => {
       // page1 は回転なしのまま
       expect((boxes[1] as HTMLElement).style.getPropertyValue('--thumb-box-w')).toBe('')
     })
+  })
+
+  it('#R22狩りWave2-M-2 (スバル隊C-1): in-flight 中に別窓アイテムが再マウントされても重複要求を出さず正しい応答が採用される', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    URL.createObjectURL = vi.fn(() => 'blob:remount-test')
+    URL.revokeObjectURL = vi.fn()
+    // 応答はテストから deliverThumbnail で手動制御し、in-flight 状態を作り出す。
+    MockThumbnailWorker.autoThumbnailDone = false
+
+    render(<ThumbnailWindow />)
+
+    await waitFor(() => expect(m.listeners.get('thumbnail:file-opened')?.[0]).toBeDefined())
+
+    act(() => {
+      m.listeners.get('thumbnail:file-opened')![0]({
+        payload: {
+          filePath: 'test.pdf',
+          currentPageIndex: 0,
+          totalPages: 1,
+          dirtyPages: [],
+          pageOrder: [0],
+        },
+      })
+    })
+
+    // 1本目の GENERATE_THUMBNAIL がページ0に対して発行され、in-flight のまま待機する。
+    await waitFor(() => {
+      expect(workerMessages('GENERATE_THUMBNAIL').filter((r) => r.pageIndex === 0)).toHaveLength(1)
+    })
+    const firstReq = workerMessages('GENERATE_THUMBNAIL').find((r) => r.pageIndex === 0)!
+    const worker = MockThumbnailWorker.instances.find((w) => w.messages.includes(firstReq))!
+
+    // react-virtuoso の実際のリサイクルを模して、1本目が in-flight のまま
+    // ThumbnailItem(0) を remount させる（rotation-update は pendingRequestIdByPageRef /
+    // pageGenerationRef を一切触らない、純粋な再レンダリング契機として使う）。
+    m.remountToken = 1
+    act(() => {
+      m.listeners.get('thumbnail:rotation-update')![0]({ payload: { rotations: [0] } })
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // 1本目 (唯一の in-flight リクエスト) の応答を返す。
+    act(() => {
+      deliverThumbnail(worker, firstReq)
+    })
+
+    // 世代がずれて「古い応答」と誤判定・破棄されず、正しくサムネイルが採用される。
+    await waitFor(() => {
+      expect(document.querySelector('img[alt="Page 1"]')).not.toBeNull()
+    })
+
+    // in-flight 中の remount による再要求ぶんが、1本目解決後に「別の新規リクエスト」
+    // として後追いで発行されていないことを確認する（重複ガードが効いていれば 1 件のまま）。
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(workerMessages('GENERATE_THUMBNAIL').filter((r) => r.pageIndex === 0)).toHaveLength(1)
+
+    URL.createObjectURL = originalCreateObjectURL
+    URL.revokeObjectURL = originalRevokeObjectURL
   })
 })

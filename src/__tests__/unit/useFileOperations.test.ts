@@ -3378,3 +3378,239 @@ describe('useFileOperations clear_backup 失敗時の warn + リトライ (PCT-1
     warnSpy.mockRestore();
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// bug-hunt round2 Wave1 H-1: pageOrderMatchesSnapshot の TOCTOU 窓
+//
+// _executeSave は writeFileAtomically 完了直後に pageOrderMatchesSnapshot を
+// 一度だけ判定するが、その後の await (fingerprint 読み取り / IDB 書き込み待機)
+// をまたいで同じ値を使い回していた。その await 中に pageOrder が変化すると、
+// 判定時点 (真) と適用時点 (偽になっているべき) が食い違い、無関係なページへ
+// #437 と同型の rotation/bbox 誤リベースが再侵入する。
+// ────────────────────────────────────────────────────────────────────────
+describe('useFileOperations H-1 (bug-hunt round2): pageOrderMatchesSnapshot 判定の TOCTOU 窓', () => {
+  it('判定直後の await 中に pageOrder が入れ替わると、無関係なページへ rotation/bbox が誤って焼き込まれない', async () => {
+    const pageABlock = {
+      id: 'blockA',
+      text: 'A',
+      originalText: 'A',
+      bbox: { x: 10, y: 10, width: 50, height: 20 },
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: true,
+    };
+    const pageA = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [pageABlock],
+      isDirty: true,
+      thumbnail: null,
+      rotation: 90,
+    } as unknown as PageData;
+
+    const pageBBlock = {
+      id: 'blockB',
+      text: 'B',
+      originalText: 'B',
+      bbox: { x: 200, y: 300, width: 80, height: 30 },
+      writingMode: 'horizontal',
+      order: 0,
+      isNew: false,
+      isDirty: false,
+    };
+    const pageB = {
+      pageIndex: 1,
+      width: 595,
+      height: 842,
+      textBlocks: [pageBBlock],
+      isDirty: false,
+      thumbnail: null,
+      rotation: undefined,
+    } as unknown as PageData;
+
+    const doc: PecoDocument = {
+      filePath: '/toctou/race.pdf',
+      fileName: 'race.pdf',
+      totalPages: 2,
+      metadata: {},
+      pages: new Map([[0, pageA], [1, pageB]]),
+    } as unknown as PecoDocument;
+
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0, 1],
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set('/toctou/race.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    // _executeSave は writePath の fingerprint を stat() 経由で読む。
+    // 1 回目 (保存開始時の getFreshOriginalBytesCache) は無害な値を返し、
+    // 2 回目 (writeFileAtomically 完了後、pageOrderMatchesSnapshot 判定直後の
+    // fingerprint 読み取り) で「保存の await 中にユーザーがページを並べ替えた」
+    // 状況を注入する。
+    let statCallCount = 0;
+    (stat as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      statCallCount += 1;
+      if (statCallCount === 2) {
+        const state = usePecoStore.getState();
+        const movedPageB = { ...pageB, pageIndex: 0 };
+        const movedPageA = { ...pageA, pageIndex: 1 };
+        usePecoStore.setState({
+          document: {
+            ...state.document!,
+            pages: new Map([[0, movedPageB], [1, movedPageA]]),
+          },
+          pageOrder: [1, 0],
+          undoStack: [
+            ...state.undoStack,
+            { type: 'reorder_pages' as const, beforeOrder: [0, 1], afterOrder: [1, 0] },
+          ],
+          isDirty: true,
+        });
+      }
+      return { mtime: new Date('2024-01-01'), size: 4 };
+    });
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // H-1 の核心: 割り込みにより idx0 は「保存スナップショットとは無関係な pageB」に
+    // 差し替わっている。stale な pageOrderMatchesSnapshot=true を resetDirty に渡すと、
+    // savedPageSnapshots (idx0=pageA, rotation=90) を根拠に無関係な pageB へ rotation を
+    // 誤注入する。修正後は判定を await 後に再取得するため orderMatched=false になり、
+    // pageB は一切変更されない。
+    const afterIdx0 = usePecoStore.getState().document!.pages.get(0)!;
+    expect(afterIdx0.rotation).toBeUndefined();
+    expect(afterIdx0.textBlocks[0].bbox).toEqual(pageBBlock.bbox);
+    expect(afterIdx0.width).toBe(595);
+    expect(afterIdx0.height).toBe(842);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// bug-hunt round2 Wave1 H-2: bytePreserved=true 時の後処理素通り
+//
+// byte-preserve 短絡 (undecodable メタ検出で原本バイトをそのまま書く保存) では
+// 何も焼き込まれていない。にもかかわらず normalizePageOrderAfterSave / IDB dirty
+// remap / setLastSavedActionIndex が無条件に実行され、並べ替えの黙示的な巻き戻し・
+// undo/redo 全消去・クラッシュ復元層 (IDB temp) の喪失・未保存編集の「保存済み」
+// 誤記録が起きていた。
+// ────────────────────────────────────────────────────────────────────────
+describe('useFileOperations H-2 (bug-hunt round2): bytePreserved=true 時の後処理スキップ', () => {
+  function mockBytePreservedSavePdfOnce(): void {
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (
+        _src: unknown,
+        _doc: unknown,
+        _font: unknown,
+        _fallback: unknown,
+        _onSkipped: unknown,
+        _savePageOrder: unknown,
+        _opts: unknown,
+        onBytePreserved: (bp: boolean) => void,
+      ) => {
+        onBytePreserved(true);
+        return new Uint8Array([9, 9, 9, 9]);
+      },
+    );
+  }
+
+  it('byte-preserve 保存では並べ替え (非identity pageOrder) が normalize で巻き戻されず、undoStack/redoStack も消えない', async () => {
+    const page0 = {
+      pageIndex: 0, width: 595, height: 842,
+      textBlocks: [{ id: 'p0', text: 'P0', isDirty: true }],
+      isDirty: true, thumbnail: null,
+    } as unknown as PageData;
+    const page1 = {
+      pageIndex: 1, width: 595, height: 842,
+      textBlocks: [{ id: 'p1', text: 'P1', isDirty: false }],
+      isDirty: false, thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/bytepreserve/reorder.pdf', fileName: 'reorder.pdf', totalPages: 2, metadata: {},
+      pages: new Map([[0, page0], [1, page1]]),
+    } as unknown as PecoDocument;
+
+    // 非 identity な pageOrder ([1,0]) = 保存前にユーザーが並べ替え済み。
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [1, 0],
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [
+        { type: 'reorder_pages' as const, beforeOrder: [0, 1], afterOrder: [1, 0] },
+      ],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set('/bytepreserve/reorder.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    mockBytePreservedSavePdfOnce();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // H-2 の核心: byte-preserve では実際には何も焼き込まれていないため、
+    // normalize によるページ順の巻き戻し・undo/redo の消去は起きてはならない。
+    expect(usePecoStore.getState().pageOrder).toEqual([1, 0]);
+    expect(usePecoStore.getState().undoStack.length).toBe(1);
+    expect(usePecoStore.getState().redoStack).toEqual([]);
+    // IDB dirty remap (保存済みとして一時データを破棄する処理) も走ってはならない。
+    expect(remapTemporaryPageEntries).not.toHaveBeenCalled();
+  });
+
+  it('byte-preserve 保存では lastSavedActionIndex が未保存の編集位置まで進まない', async () => {
+    const page0 = {
+      pageIndex: 0, width: 595, height: 842,
+      textBlocks: [{ id: 'p0', text: 'EDITED', isDirty: true }],
+      isDirty: true, thumbnail: null,
+    } as unknown as PageData;
+    const doc: PecoDocument = {
+      filePath: '/bytepreserve/lastsaved.pdf', fileName: 'lastsaved.pdf', totalPages: 1, metadata: {},
+      pages: new Map([[0, page0]]),
+    } as unknown as PecoDocument;
+
+    // pageOrder は identity のまま (並べ替えは絡まない)。undoStack に未保存の編集が
+    // 2件積まれている状態で byte-preserve 保存が走るシナリオ。
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0],
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [
+        { type: 'update_page' as const, pageIndex: 0, before: { ...page0, isDirty: false }, after: page0 },
+        { type: 'update_page' as const, pageIndex: 0, before: { ...page0, isDirty: false }, after: page0 },
+      ],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set('/bytepreserve/lastsaved.pdf', new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+
+    mockBytePreservedSavePdfOnce();
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // H-2 の核心: 何も焼き込まれていないのに lastSavedActionIndex を進めると、
+    // 未保存の編集を「保存済み」と誤記録してしまう。
+    expect(usePecoStore.getState().lastSavedActionIndex).toBe(0);
+  });
+});

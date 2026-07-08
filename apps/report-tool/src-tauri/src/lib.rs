@@ -8,6 +8,8 @@
 //   → BitmapDecoder::CreateAsync(stream) → GetSoftwareBitmapAsync
 // ─────────────────────────────────────────────────────────────────────────────
 
+use std::path::{Path, PathBuf};
+
 // ── OCR 言語情報 ─────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -417,6 +419,236 @@ async fn save_csv(path: String, csv: String) -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// テンプレート永続化 (save_template / list_templates / load_template / delete_template)
+//
+// 保存先: app_data_dir()/templates/<id>.json
+// 書込は <id>.json.tmp に書いてから atomic rename で確定する（torn write 防止）。
+// plugin-fs を経由せず std::fs 直書きのため fs-scope 検証には掛からない
+// （save_csv と同じ考え方）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TemplateSummary {
+    id: String,
+    name: String,
+    saved_at: String,
+    schema_version: u32,
+    readable: bool,
+}
+
+/// テンプレートIDのバリデーション。
+///
+/// id はファイル名にそのまま使われるため、`.`/`/`/`\`/`..` を含む文字列を
+/// 許容するとパストラバーサル（例: `../../secret`）でテンプレートディレクトリ外へ
+/// 読み書きできてしまう。uuid 相当の 16 進数字とハイフンのみをホワイトリストで許可する。
+fn validate_template_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("テンプレートIDが空です".to_string());
+    }
+    if !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err(format!("不正なテンプレートIDです: {id}"));
+    }
+    Ok(())
+}
+
+fn template_file_path(templates_dir: &Path, id: &str) -> PathBuf {
+    templates_dir.join(format!("{id}.json"))
+}
+
+fn template_temp_file_path(templates_dir: &Path, id: &str) -> PathBuf {
+    templates_dir.join(format!("{id}.json.tmp"))
+}
+
+/// テンプレートを保存する。id 検証 → temp 書込 → atomic rename の順で行い、
+/// rename が完了するまで既存の final ファイルには一切触れない
+/// （書込途中で中断しても既存ファイルは無傷のまま = torn write 防止）。
+fn save_template_to_dir(templates_dir: &Path, id: &str, json: &str) -> Result<(), String> {
+    validate_template_id(id)?;
+    std::fs::create_dir_all(templates_dir)
+        .map_err(|e| format!("テンプレートディレクトリの作成に失敗しました: {e}"))?;
+
+    let temp_path = template_temp_file_path(templates_dir, id);
+    let final_path = template_file_path(templates_dir, id);
+
+    std::fs::write(&temp_path, json.as_bytes())
+        .map_err(|e| format!("テンプレートの一時保存に失敗しました: {e}"))?;
+
+    let result = atomic_replace_file(&temp_path, &final_path);
+    if result.is_err() {
+        // rename 失敗時は temp を残さない。掃除自体の失敗は握りつぶさず可視化する
+        // （動作は fail-open のまま継続、backup.rs write_backup_file_atomically と同じ考え方）。
+        if let Err(cleanup_err) = std::fs::remove_file(&temp_path) {
+            eprintln!(
+                "[template] failed to remove temp file after write error: {} ({cleanup_err})",
+                temp_path.display()
+            );
+        }
+    }
+    result
+}
+
+/// テンプレートの生 JSON 文字列を読み込む。parse は呼び出し元（TS 側）で行う。
+fn load_template_from_dir(templates_dir: &Path, id: &str) -> Result<String, String> {
+    validate_template_id(id)?;
+    let path = template_file_path(templates_dir, id);
+    std::fs::read_to_string(&path).map_err(|e| format!("テンプレートの読み込みに失敗しました: {e}"))
+}
+
+fn delete_template_from_dir(templates_dir: &Path, id: &str) -> Result<(), String> {
+    validate_template_id(id)?;
+    let path = template_file_path(templates_dir, id);
+    std::fs::remove_file(&path).map_err(|e| format!("テンプレートの削除に失敗しました: {e}"))?;
+    Ok(())
+}
+
+/// templates_dir 内の *.json を列挙してサマリを返す。
+/// 1件でも parse に失敗しても全体を Err にせず、その1件だけ readable:false として返す
+/// （被害を壊れたファイル1件に局所化し、他の正常なテンプレートの一覧性を守る）。
+fn list_templates_from_dir(templates_dir: &Path) -> Result<Vec<TemplateSummary>, String> {
+    std::fs::create_dir_all(templates_dir)
+        .map_err(|e| format!("テンプレートディレクトリの作成に失敗しました: {e}"))?;
+
+    let entries = std::fs::read_dir(templates_dir)
+        .map_err(|e| format!("テンプレート一覧の取得に失敗しました: {e}"))?;
+
+    let mut result = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // .json.tmp や拡張子なしファイルは対象外（拡張子が "json" のものだけを扱う）。
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        result.push(read_template_summary(id, &path));
+    }
+    Ok(result)
+}
+
+fn read_template_summary(id: &str, path: &Path) -> TemplateSummary {
+    let unreadable = || TemplateSummary {
+        id: id.to_string(),
+        name: String::new(),
+        saved_at: String::new(),
+        schema_version: 0,
+        readable: false,
+    };
+
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return unreadable();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return unreadable();
+    };
+
+    TemplateSummary {
+        id: id.to_string(),
+        name: value.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        saved_at: value.get("savedAt").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        schema_version: value.get("schemaVersion").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        readable: true,
+    }
+}
+
+/// temp → final への atomic rename。
+///
+/// Windows では単純な `std::fs::rename` の置換保証がクレート実装依存で変わりうるため、
+/// backup.rs write_backup_file_atomically と同じく MoveFileExW を
+/// MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH で直接呼び、置換の原子性を確定させる。
+#[cfg(windows)]
+fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    let temp_w: Vec<u16> = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target_w: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let ok = unsafe {
+        MoveFileExW(
+            temp_w.as_ptr(),
+            target_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "テンプレート atomic replace 失敗: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
+    std::fs::rename(temp, target).map_err(|e| format!("テンプレート atomic rename 失敗: {e}"))
+}
+
+/// app_data_dir()/templates を解決する。存在しなくてもここでは作らない
+/// （作成は save_template_to_dir / list_templates_from_dir 側の create_dir_all に委ねる）。
+fn resolve_templates_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    let mut dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("アプリデータディレクトリの解決に失敗しました: {e}"))?;
+    dir.push("templates");
+    Ok(dir)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tauri コマンド: save_template / list_templates / load_template / delete_template
+//
+// IPC 契約:
+//   save_template(id: String, json: String) -> Result<(), String>
+//   list_templates() -> Result<Vec<TemplateSummary>, String>
+//     TemplateSummary (camelCase): { id, name, savedAt, schemaVersion, readable }
+//   load_template(id: String) -> Result<String, String>  … 生 JSON 文字列（parse は TS 側）
+//   delete_template(id: String) -> Result<(), String>
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn save_template(app: tauri::AppHandle, id: String, json: String) -> Result<(), String> {
+    let dir = resolve_templates_dir(&app)?;
+    save_template_to_dir(&dir, &id, &json)
+}
+
+#[tauri::command]
+async fn list_templates(app: tauri::AppHandle) -> Result<Vec<TemplateSummary>, String> {
+    let dir = resolve_templates_dir(&app)?;
+    list_templates_from_dir(&dir)
+}
+
+#[tauri::command]
+async fn load_template(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    let dir = resolve_templates_dir(&app)?;
+    load_template_from_dir(&dir, &id)
+}
+
+#[tauri::command]
+async fn delete_template(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let dir = resolve_templates_dir(&app)?;
+    delete_template_from_dir(&dir, &id)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // greet (スケルトンから引き継ぎ)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -435,7 +667,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![greet, run_report_ocr, list_ocr_languages, save_csv])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            run_report_ocr,
+            list_ocr_languages,
+            save_csv,
+            save_template,
+            list_templates,
+            load_template,
+            delete_template
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -447,6 +688,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tauri::http::{HeaderMap, HeaderValue};
 
     // ── do_report_ocr render_scale ガード ────────────────────────────────────
@@ -683,5 +925,249 @@ mod tests {
     fn csv_bytes_with_bom_empty_csv_is_bom_only() {
         let bytes = csv_bytes_with_bom("");
         assert_eq!(bytes, vec![0xEF, 0xBB, 0xBF], "空CSVはBOM3バイトのみ");
+    }
+
+    // ── テンプレート永続化 ────────────────────────────────────────────────────
+
+    /// テスト用の一意な templates_dir を作成して返す。
+    /// `tempfile` クレートを増やさないため std::env::temp_dir + プロセス内カウンタで衝突回避する
+    /// （backup.rs make_backup_dir と同じ方針）。
+    fn make_templates_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut dir = std::env::temp_dir();
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        dir.push(format!(
+            "report_tool_template_test_{}_{}_{}",
+            std::process::id(),
+            tag,
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("templates_dir 作成失敗");
+        dir
+    }
+
+    // ── validate_template_id ──────────────────────────────────────────────────
+
+    #[test]
+    fn validate_template_id_accepts_uuid_like() {
+        assert!(validate_template_id("a1b2c3d4-0000-0000-0000-000000000000").is_ok());
+    }
+
+    #[test]
+    fn validate_template_id_rejects_empty() {
+        assert!(validate_template_id("").is_err());
+    }
+
+    #[test]
+    fn validate_template_id_rejects_path_traversal() {
+        assert!(validate_template_id("../../etc/passwd").is_err());
+        assert!(validate_template_id("..").is_err());
+        assert!(validate_template_id("a/b").is_err());
+        assert!(validate_template_id("a\\b").is_err());
+        assert!(validate_template_id("a.b").is_err());
+    }
+
+    #[test]
+    fn validate_template_id_rejects_additional_dangerous_patterns() {
+        // 絶対パス（Windows）
+        assert!(validate_template_id("C:\\Windows\\System32").is_err());
+        // 絶対パス（Unix）
+        assert!(validate_template_id("/etc/passwd").is_err());
+        // 日本語（非ASCII）
+        assert!(validate_template_id("テンプレ1").is_err());
+        // 二重拡張子（拡張子は id に含めない契約のため拒否されるべき）
+        assert!(validate_template_id("valid-id.json").is_err());
+    }
+
+    // ── save_template_to_dir / load_template_from_dir ──────────────────────────
+
+    #[test]
+    fn save_and_load_template_roundtrip() {
+        let dir = make_templates_dir("roundtrip");
+        let id = "aaaa1111-bbbb-2222-cccc-333344445555";
+        let json = r#"{"name":"請求書テンプレ","savedAt":"2026-07-08T00:00:00Z","schemaVersion":1}"#;
+
+        save_template_to_dir(&dir, id, json).unwrap();
+        let loaded = load_template_from_dir(&dir, id).unwrap();
+        assert_eq!(loaded, json);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_template_rejects_invalid_id() {
+        let dir = make_templates_dir("save_invalid_id");
+        let err = save_template_to_dir(&dir, "../evil", "{}").unwrap_err();
+        assert!(err.contains("不正なテンプレートID"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_template_rejects_invalid_id() {
+        let dir = make_templates_dir("load_invalid_id");
+        let err = load_template_from_dir(&dir, "a/../b").unwrap_err();
+        assert!(err.contains("不正なテンプレートID"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_template_missing_file_returns_err() {
+        let dir = make_templates_dir("load_missing");
+        let err = load_template_from_dir(&dir, "0000-0000").unwrap_err();
+        assert!(err.contains("読み込み"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_template_no_leftover_tmp_file_after_success() {
+        let dir = make_templates_dir("no_leftover");
+        let id = "1111-2222";
+        save_template_to_dir(&dir, id, "{}").unwrap();
+
+        let tmp_path = dir.join(format!("{id}.json.tmp"));
+        assert!(!tmp_path.exists(), "成功後に tmp ファイルが残ってはいけない");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_template_overwrite_replaces_content_atomically() {
+        let dir = make_templates_dir("overwrite");
+        let id = "eeee-5555";
+        save_template_to_dir(&dir, id, r#"{"v":1}"#).unwrap();
+        save_template_to_dir(&dir, id, r#"{"v":2}"#).unwrap();
+
+        let loaded = load_template_from_dir(&dir, id).unwrap();
+        assert_eq!(loaded, r#"{"v":2}"#);
+
+        let tmp_path = dir.join(format!("{id}.json.tmp"));
+        assert!(!tmp_path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// temp 書込段階で失敗した場合（クラッシュ相当のシミュレーション）、
+    /// rename は一切実行されず既存の final ファイルは無傷のまま残ることを確認する
+    /// （torn write 防止＝アトミック性の間接検証）。
+    #[test]
+    fn save_template_failure_before_rename_leaves_existing_file_untouched() {
+        let dir = make_templates_dir("failure_before_rename");
+        let id = "ffff-6666";
+        save_template_to_dir(&dir, id, r#"{"v":"original"}"#).unwrap();
+
+        // temp パスをあらかじめディレクトリとして作っておき、
+        // 次の std::fs::write(temp_path, ...) を強制的に失敗させる。
+        let tmp_path = dir.join(format!("{id}.json.tmp"));
+        std::fs::create_dir_all(&tmp_path).unwrap();
+
+        let err = save_template_to_dir(&dir, id, r#"{"v":"corrupted"}"#).unwrap_err();
+        assert!(!err.is_empty());
+
+        // rename まで到達していないため、既存の final ファイルは書き換わっていない。
+        let loaded = load_template_from_dir(&dir, id).unwrap();
+        assert_eq!(loaded, r#"{"v":"original"}"#);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── delete_template_from_dir ────────────────────────────────────────────
+
+    #[test]
+    fn delete_template_removes_file_and_subsequent_load_fails() {
+        let dir = make_templates_dir("delete");
+        let id = "cccc-3333";
+        save_template_to_dir(&dir, id, "{}").unwrap();
+        assert!(load_template_from_dir(&dir, id).is_ok());
+
+        delete_template_from_dir(&dir, id).unwrap();
+        assert!(load_template_from_dir(&dir, id).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_template_nonexistent_returns_err() {
+        let dir = make_templates_dir("delete_missing");
+        let err = delete_template_from_dir(&dir, "dddd-4444").unwrap_err();
+        assert!(err.contains("削除"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_template_rejects_invalid_id() {
+        let dir = make_templates_dir("delete_invalid_id");
+        let err = delete_template_from_dir(&dir, "../x").unwrap_err();
+        assert!(err.contains("不正なテンプレートID"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── list_templates_from_dir ─────────────────────────────────────────────
+
+    #[test]
+    fn list_templates_empty_dir_returns_empty_vec() {
+        let dir = make_templates_dir("list_empty");
+        let list = list_templates_from_dir(&dir).unwrap();
+        assert!(list.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_templates_returns_summary_for_valid_json() {
+        let dir = make_templates_dir("list_valid");
+        let id = "9999-8888";
+        let json = r#"{"name":"見積書","savedAt":"2026-01-01T00:00:00Z","schemaVersion":2}"#;
+        save_template_to_dir(&dir, id, json).unwrap();
+
+        let list = list_templates_from_dir(&dir).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, id);
+        assert_eq!(list[0].name, "見積書");
+        assert_eq!(list[0].saved_at, "2026-01-01T00:00:00Z");
+        assert_eq!(list[0].schema_version, 2);
+        assert!(list[0].readable);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 破損した1件があっても list 全体は成功し、破損ファイルだけ readable:false になる
+    /// （被害の局所化＝他の正常なテンプレートは読める）。
+    #[test]
+    fn list_templates_marks_corrupt_file_unreadable_without_failing_whole_list() {
+        let dir = make_templates_dir("list_corrupt");
+        save_template_to_dir(
+            &dir,
+            "aaaa-1111",
+            r#"{"name":"正常","savedAt":"2026-01-01T00:00:00Z","schemaVersion":1}"#,
+        )
+        .unwrap();
+        // 破損 JSON を直接書き込む（save_template_to_dir 経由だと validate に弾かれるため直書き）。
+        std::fs::write(dir.join("bbbb-2222.json"), "{not valid json").unwrap();
+
+        let list = list_templates_from_dir(&dir).unwrap();
+        assert_eq!(list.len(), 2, "破損ファイルがあっても一覧全体は失敗してはいけない");
+
+        let corrupt = list.iter().find(|t| t.id == "bbbb-2222").unwrap();
+        assert!(!corrupt.readable);
+        assert_eq!(corrupt.name, "");
+        assert_eq!(corrupt.saved_at, "");
+        assert_eq!(corrupt.schema_version, 0);
+
+        let normal = list.iter().find(|t| t.id == "aaaa-1111").unwrap();
+        assert!(normal.readable);
+        assert_eq!(normal.name, "正常");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// .json.tmp ファイルは一覧に出てはいけない（save 中間状態が UI に漏れないこと）。
+    #[test]
+    fn list_templates_ignores_tmp_files() {
+        let dir = make_templates_dir("list_ignores_tmp");
+        std::fs::write(dir.join("leftover-tmp.json.tmp"), "{}").unwrap();
+
+        let list = list_templates_from_dir(&dir).unwrap();
+        assert!(list.is_empty(), ".json.tmp は一覧に含めてはいけない");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

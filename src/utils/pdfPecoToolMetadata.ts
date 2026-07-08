@@ -121,13 +121,29 @@ function locatePrivateBBoxStream(pdfDoc: PDFDocument): PDFRawStream | null {
   return stream instanceof PDFRawStream ? stream : null;
 }
 
+/** 復号済みバイト列を UTF-8 として厳格 decode する。
+ * fatal:true にすることで、マルチバイト文字（CJK 等）の一部が破損していても
+ * U+FFFD 置換で decode “成功” してしまうケースを弾き、TypeError として
+ * 呼び出し側の undecodable 判定へ合流させる（H-6 / #392 の穴埋め）。
+ * JSON 構造（ASCII の括弧・引用符）自体は無傷でも、中身のテキストが
+ * 静かに置換文字へ化けて 'ok' 採用されるのを防ぐのが目的。 */
+function decodeUtf8Strict(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 function readPrivateBBoxMeta(pdfDoc: PDFDocument): Record<string, unknown> | null {
   const stream = locatePrivateBBoxStream(pdfDoc);
   if (!stream) return null;
 
   const decoded = decodeRawStream(stream);
   if (!decoded) return null;
-  return parseBBoxMetaJson(new TextDecoder().decode(decoded));
+  const text = decodeUtf8Strict(decoded);
+  if (text === null) return null;
+  return parseBBoxMetaJson(text);
 }
 
 /** 既存の private BBox stream が「存在するが decode/parse 不能」かを判定する。
@@ -138,7 +154,9 @@ function hasUnreadablePrivateBBoxStream(pdfDoc: PDFDocument): boolean {
   if (!stream) return false;
   const decoded = decodeRawStream(stream);
   if (!decoded) return true;
-  return parseBBoxMetaJson(new TextDecoder().decode(decoded)) === null;
+  const text = decodeUtf8Strict(decoded);
+  if (text === null) return true;
+  return parseBBoxMetaJson(text) === null;
 }
 
 function getInfoDictSafe(pdfDoc: PDFDocument): PDFDict | undefined {

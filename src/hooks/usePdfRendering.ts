@@ -342,6 +342,10 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           if (typeof err?.message === "string" && err.message.toLowerCase().includes("destroyed")) return;
           console.error("PDF render error:", err);
           setLoadError(true);
+          // H-5 (るしあ C-5 相当): render() 同期 throw のまま return すると
+          // onRenderComplete が呼ばれず、後続の再 render も走らないため
+          // isLoadingPageRender が固着する。エラー経路でも完了通知して解除する。
+          onRenderComplete?.();
           return;
         }
 
@@ -355,6 +359,8 @@ export function usePdfRendering(params: UsePdfRenderingParams): UsePdfRenderingR
           if (typeof err?.message === "string" && err.message.toLowerCase().includes("destroyed")) return;
           console.error("PDF render error:", err);
           setLoadError(true);
+          // H-5: render task 失敗時も完了通知し isLoadingPageRender の固着を防ぐ。
+          onRenderComplete?.();
           return;
         }
 
@@ -480,11 +486,19 @@ function renderCacheKey(meta: RenderPageMeta, zoom: number, rotation: number = 0
   // 差し替え / ブラウザズーム) 時に同一 zoom でも実 pixel が変わるため、
   // 古い解像度の bitmap を再利用するとボケる。
   // rotation を含めることで回転前後の bitmap が混在しない。
-  // 注意: bitmapCache.parseKey は最後の ':' 区切りセグメントを数値(内部 LRU キー)
-  // として Number() する。rotation を末尾に置くと "r0" 等が NaN になりキャッシュが
-  // 全ミスするため (PCT-119)、rotation は dpr の手前に挿入して末尾は数値 dpr を保つ。
+  //
+  // 注意: bitmapCache.parseKey は最後の ':' 区切りセグメントを数値(内部 LRU キー
+  // = zoom) として Number() する。それ以外の全セグメント (filePath 等) は
+  // 外側 LRU キー (ページ単位) として扱われる。
+  // 以前は rotation:dpr の後に何も置かず dpr を末尾にしていたため、内側 LRU に
+  // 入るのが zoom でなく dpr になってしまい (dpr は通常セッション中一定なので
+  // MAX_ZOOMS_PER_PAGE による zoom 変種の間引きが機能せず、zoom を変えるたびに
+  // 外側 pageMap の別エントリを消費して他ページを押し出していた: るしあ C-5)。
+  // zoom を必ず末尾に置くことで、内側 LRU キー = zoom という設計意図を保つ。
+  // rotation は "r0" 等の非数値プレフィックスにして dpr/zoom の数値パースに
+  // 混入しないようにする (PCT-119 の意図を維持)。
   const dpr = typeof window !== "undefined" ? Math.round(window.devicePixelRatio * 100) : 100;
-  return `${meta.filePath}:${meta.sourcePageIndex}:${meta.pageIndex}:${meta.documentEpoch}:${zoom}:r${rotation}:${dpr}`;
+  return `${meta.filePath}:${meta.sourcePageIndex}:${meta.pageIndex}:${meta.documentEpoch}:r${rotation}:${dpr}:${zoom}`;
 }
 
 // 全 Canvas (pdfCanvas + overlay + 静的 overlay + wrapper) のサイズを

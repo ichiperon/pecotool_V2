@@ -48,18 +48,36 @@ export function useDialogState() {
       }
     };
   }, []);
+  // Wave4 regression: #72 の修正はタイマー消去のみで、action 付きトーストが
+  // action 無しの後続 showToast (自動バックアップ通知等) に setNotification で
+  // 置き換えられてしまう問題は残っていた。「別名で保存」等の復旧導線をユーザーが
+  // 選ぶ前に消えてしまうと、そのまま失敗を放置される。
+  // → 優先度ルールを追加: action 付きトーストは action 無しの後続トーストでは
+  //   上書きしない。action 付き同士は後勝ちで置き換える (ユーザー操作待ちの
+  //   復旧導線を別の復旧導線で差し替えるのは妥当なため)。
+  // 上書きを抑止したメッセージは黙って捨てず console.warn に残す
+  // (プロジェクトの eslint no-console 設定は warn/error のみ許可のため)。
+  // dismiss 導線: action ボタンは自身のクリックで setNotification(null) された
+  // 後に action.onClick() が呼ばれる仕様 (App.tsx 側) のため、既存 UI の範囲で
+  // ユーザーは action ボタンから既に dismiss 可能。新規クローズ UI は追加しない。
   const showToast = useCallback((message: string, isError = false, action?: ToastAction) => {
-    if (timerRef.current !== null) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    setNotification({ message, isError, action });
-    if (!action) {
-      timerRef.current = setTimeout(() => {
+    setNotification(prev => {
+      if (prev?.action && !action) {
+        console.warn('[toast] suppressed by pending action toast:', message);
+        return prev;
+      }
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
         timerRef.current = null;
-        setNotification(null);
-      }, 3000);
-    }
+      }
+      if (!action) {
+        timerRef.current = setTimeout(() => {
+          timerRef.current = null;
+          setNotification(null);
+        }, 3000);
+      }
+      return { message, isError, action };
+    });
   }, []);
 
   return {

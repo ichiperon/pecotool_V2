@@ -16,6 +16,7 @@ import { usePecoStore } from '../store/pecoStore';
 import { getAllTemporaryPageData } from '../utils/pdfLoader';
 import { resolveDisplayIndex } from '../utils/pageOrder';
 import { useDebouncedValue } from './useDebouncedValue';
+import { expandReplacementPattern, execArrayToMatch } from '../utils/regexReplacePattern';
 import type { PageData, WritingMode } from '../types';
 
 export type ReplaceScope = 'selection' | 'current' | 'all';
@@ -221,12 +222,16 @@ export function buildMatchPreview(params: {
     for (const b of page.textBlocks) {
       if (scope === 'selection' && !selectedIds.has(b.id)) continue;
 
-      // before のマッチ位置を全列挙
+      // before のマッチ位置を全列挙 (bug-hunt round3: capture group も保持する。
+      // lookbehind/lookahead を含む正規表現の後方参照展開に、マッチ全体の文脈を
+      // 保った re.exec(b.text) の結果をそのまま使うため)
       re.lastIndex = 0;
       const beforeRanges: Array<{ start: number; end: number }> = [];
+      const matches: RegExpExecArray[] = [];
       let m: RegExpExecArray | null;
       while ((m = re.exec(b.text)) !== null) {
         beforeRanges.push({ start: m.index, end: m.index + m[0].length });
+        matches.push(m);
         // ゼロ幅マッチ (例: /(?=x)/) で無限ループにならないよう lastIndex を強制的に進める
         if (m[0].length === 0) re.lastIndex++;
       }
@@ -238,15 +243,21 @@ export function buildMatchPreview(params: {
         // after 文字列とハイライト位置を構築
         // useRegex=false の時は $ の特殊扱いを避けるため文字列ベースで結合する
         // (これは buildMatchPreview の元実装どおりで、issue #105 の literal 保証と一致する)
+        //
+        // bug-hunt round3: useRegex=true の場合、旧実装は切り出した matchStr 単体に
+        // 同じ正規表現を再適用して $1 等を展開していたが、lookbehind/lookahead は
+        // マッチ範囲外の文脈に依存するため matchStr 単体では再マッチに失敗し、
+        // プレビューの after が before と同じ (置換されていないように見える) まま
+        // 表示される不具合があった。re.exec(b.text) で確定済みの capture group
+        // (matches[i]) から直接 $ 展開することで、実行結果 (store 側) と一致させる。
         let after = '';
         const afterRanges: Array<{ start: number; end: number }> = [];
         let cursor = 0;
         for (let i = 0; i < beforeRanges.length; i++) {
           const r = beforeRanges[i];
           after += b.text.slice(cursor, r.start);
-          const matched = b.text.slice(r.start, r.end);
           const replaced = useRegex
-            ? matched.replace(new RegExp(re.source, re.flags.replace(/g/g, '')), replacement)
+            ? expandReplacementPattern(replacement, execArrayToMatch(matches[i]))
             : replacement;
           const insertStart = after.length;
           after += replaced;

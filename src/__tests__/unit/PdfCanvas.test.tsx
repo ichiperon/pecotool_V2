@@ -487,4 +487,172 @@ describe('PdfCanvas', () => {
       expect(dynamicCtx.fillRect.mock.calls.length).toBeGreaterThan(baseDynamicFillRectCalls)
     })
   })
+
+  // ── bug-hunt round3 Wave4 (HIGH): Space 押下中のドラッグ迷子化対策 ──────
+  //
+  // 背景: handleMouseMove/Up は disableDrawing=true (Space 押下によるパン操作中)
+  //       のとき早期 return する。ドラッグ中に Space を押すと finishDragResize が
+  //       呼ばれないまま dragMode/draggedId が残留し、Space 解放後はボタンを
+  //       押していない mousemove でも BB がマウスに追従し続ける「迷子ドラッグ」に
+  //       なる (App.tsx は isSpacePressed を PdfCanvas の disableDrawing prop に
+  //       そのまま渡している)。
+  //
+  // 対策: disableDrawing の false→true 遷移を検知し、進行中のドラッグを
+  //       cancelDragResize でキャンセルする。
+  describe('bug-hunt round3 Wave4: disableDrawing 中のドラッグキャンセル', () => {
+    let rafQueue: Array<{ id: number; cb: FrameRequestCallback }> = [];
+    let rafId = 0;
+
+    beforeEach(() => {
+      rafQueue = [];
+      rafId = 0;
+      vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation(
+        (cb: FrameRequestCallback) => {
+          const id = ++rafId;
+          rafQueue.push({ id, cb });
+          return id;
+        }
+      );
+      vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id: number) => {
+        rafQueue = rafQueue.filter((e) => e.id !== id);
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      rafQueue = [];
+    });
+
+    function flushRaf() {
+      const queued = rafQueue;
+      rafQueue = [];
+      for (const { cb } of queued) cb(performance.now());
+    }
+
+    it('ドラッグ中に disableDrawing が true になると dragPreviewBboxes がクリアされ、bbox は開始前のまま', () => {
+      const { container, rerender } = render(<PdfCanvas pageIndex={0} disableDrawing={false} />);
+      const overlay = container.querySelectorAll('canvas')[OVERLAY_INTERACTIVE_INDEX];
+
+      // b1 (10,10,100,50) 内をクリック → move ドラッグ開始
+      fireEvent.mouseDown(overlay, { clientX: 50, clientY: 30, buttons: 1 });
+      fireEvent.mouseMove(overlay, { clientX: 70, clientY: 50, buttons: 1 });
+      act(() => { flushRaf(); });
+
+      // ドラッグ中: プレビューが書き込まれている
+      expect(useViewerStore.getState().dragPreviewBboxes).not.toBeNull();
+
+      // Space 押下相当: disableDrawing が false→true に遷移
+      rerender(<PdfCanvas pageIndex={0} disableDrawing={true} />);
+
+      // ドラッグはキャンセルされ、プレビューはクリアされる
+      expect(useViewerStore.getState().dragPreviewBboxes).toBeNull();
+      // store の bbox は開始前のまま (commit されていない = finishDragResize は呼ばれていない)
+      const block = usePecoStore.getState().document!.pages.get(0)!.textBlocks[0];
+      expect(block.bbox).toEqual({ x: 10, y: 10, width: 100, height: 50 });
+    });
+
+    it('Space 解放後、ボタンを押していない mousemove では BB が追従しない (迷子ドラッグ防止)', () => {
+      const { container, rerender } = render(<PdfCanvas pageIndex={0} disableDrawing={false} />);
+      const overlay = container.querySelectorAll('canvas')[OVERLAY_INTERACTIVE_INDEX];
+
+      fireEvent.mouseDown(overlay, { clientX: 50, clientY: 30, buttons: 1 });
+      fireEvent.mouseMove(overlay, { clientX: 70, clientY: 50, buttons: 1 });
+      act(() => { flushRaf(); });
+      expect(useViewerStore.getState().dragPreviewBboxes).not.toBeNull();
+
+      // Space 押下 → キャンセル
+      rerender(<PdfCanvas pageIndex={0} disableDrawing={true} />);
+      expect(useViewerStore.getState().dragPreviewBboxes).toBeNull();
+
+      // Space 解放
+      rerender(<PdfCanvas pageIndex={0} disableDrawing={false} />);
+
+      // ボタンを押していない mousemove では drag は再開しない
+      fireEvent.mouseMove(overlay, { clientX: 200, clientY: 200, buttons: 0 });
+      act(() => { flushRaf(); });
+
+      expect(useViewerStore.getState().dragPreviewBboxes).toBeNull();
+      const block = usePecoStore.getState().document!.pages.get(0)!.textBlocks[0];
+      expect(block.bbox).toEqual({ x: 10, y: 10, width: 100, height: 50 });
+    });
+  });
+
+  // ── H-5: render 失敗時のエラーオーバーレイ・再試行導線 ──────────────
+  //
+  // 旧実装: エラーオーバーレイの表示条件は `loadError && !pdfPage` だった。
+  // proxy 取得(getCachedPageProxy)は成功しつつ pdfjs の render() が実エラーで
+  // 失敗するケースでは loadError=true でも pdfPage!==null のため、オーバーレイが
+  // 永久に出ず「白紙 + 無通知 + 復帰導線ゼロ」の永続ホワイトアウトになっていた。
+  //
+  // 実 timer (setTimeout 50ms debounce) はこのテスト環境 (jsdom + vmThreads pool)
+  // では実時間の待機だけでは確実に発火しないため、vi.useFakeTimers() +
+  // vi.runAllTimers() で確定的に進める（usePdfRendering.test.ts の
+  // S-01-debounce と同じ方式）。
+  describe('H-5: render() 失敗時のエラーオーバーレイ表示と再試行', () => {
+    async function flushMicrotasks(n = 6) {
+      for (let i = 0; i < n; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+    }
+
+    it('page.render() が実エラーで reject してもエラーオーバーレイが表示され、再試行で復帰できる', async () => {
+      vi.useFakeTimers();
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        const rejectingPage = {
+          getViewport: vi.fn().mockReturnValue({ width: 500, height: 500 }),
+          // Promise.reject は render() 呼び出し時 (mockImplementation) に遅延生成する。
+          // 事前に生成した reject 済み Promise を使い回すと、実際に await される前の
+          // タイミングでテストランナーが unhandled rejection を報告してしまうため。
+          render: vi.fn().mockImplementation(() => ({
+            promise: Promise.reject(new Error('render boom')),
+            cancel: vi.fn(),
+          })),
+        };
+        (pdfLoader.getCachedPageProxy as any).mockResolvedValue(rejectingPage);
+
+        const { container } = render(<PdfCanvas pageIndex={0} />);
+
+        // proxy 取得 (Promise.resolve) を解決させ、render effect が
+        // debounce (isAutoFit 既定 true → 50ms) をスケジュールするまで進める。
+        await flushMicrotasks(6);
+        // debounce を発火させて renderPdfTask → curPage.render() を実行させる。
+        await act(async () => {
+          vi.runAllTimers();
+        });
+        // render() の reject → catch → setLoadError(true) + onRenderComplete() まで
+        // microtask を流す。
+        await flushMicrotasks(6);
+
+        // loadError=true かつ pdfPage!==null (proxy 取得は成功済み) の状態で
+        // エラーオーバーレイが表示されること。
+        expect(container.querySelector('.pdf-load-error-overlay')).not.toBeNull();
+        const retryBtn = container.querySelector('.pdf-load-error-retry-btn') as HTMLButtonElement | null;
+        expect(retryBtn).not.toBeNull();
+
+        // 再試行ボタンから復帰できること。
+        const okPage = {
+          getViewport: vi.fn().mockReturnValue({ width: 500, height: 500 }),
+          render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+        };
+        (pdfLoader.getCachedPageProxy as any).mockResolvedValue(okPage);
+
+        fireEvent.click(retryBtn!);
+
+        await flushMicrotasks(6);
+        await act(async () => {
+          vi.runAllTimers();
+        });
+        await flushMicrotasks(6);
+
+        expect(container.querySelector('.pdf-load-error-overlay')).toBeNull();
+      } finally {
+        errorSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+  });
 });

@@ -325,3 +325,73 @@ describe('useCanvasDrawing: zoom スケールの座標変換', () => {
     expect(updatePageData).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// #423 regression: trySplit は getSplitRatioSnapped(rawRatio) の戻り値を
+// そのまま splitBlockAtRatio に渡す (ダブルスナップ経路)。snap の戻り値が
+// 文字数比だと、全角/半角混在テキストでこの2回目のマッピングが最初の
+// snap 位置と異なる idx に化け、テキスト分割線と bbox 分割線がズレたまま
+// 保存される。ここでは実際の呼び出し経路 (trySplit) を通して確認する。
+// ─────────────────────────────────────────────────────────────
+describe('useCanvasDrawing: trySplit のダブルスナップ (全角/半角混在テキスト)', () => {
+  it('全角3文字+半角3文字混在ブロックの中央クリックで、テキストと bbox が同じ境界で割れる', () => {
+    // "あああaaa" (weights [2,2,2,1,1,1], totalW=9)。bbox width=100 で中央 (x=50) をクリック
+    // → rawRatio=0.5。直接 getSplitIndex(graphemes, 0.5) は safeIdx=2 ("ああ"/"あaaa") になる。
+    // ダブルスナップが起きると snap→再マッピングで safeIdx=1 ("あ"/"ああaaa") に化けてしまう。
+    const block: TextBlock = {
+      ...makeBlock('multi', 0, { x: 0, y: 0, width: 100, height: 40 }),
+      text: 'あああaaa',
+      originalText: 'あああaaa',
+    };
+    const page = makePage([block]);
+    const { result, updatePageData } = renderDrawing(page);
+
+    let returned: boolean | undefined;
+    act(() => {
+      returned = result.current.trySplit({ x: 50, y: 10 });
+    });
+
+    expect(returned).toBe(true);
+    const blocks = updatePageData.mock.calls[0][1].textBlocks as TextBlock[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].text).toBe('ああ');
+    expect(blocks[1].text).toBe('あaaa');
+    // bbox の分割線もテキスト分割線と同じ ratio を使っているため、合計幅は元幅と一致する
+    expect(blocks[0].bbox.width + blocks[1].bbox.width).toBeCloseTo(100, 5);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// #423 regression: カーブ付きブロックの分割で curve が複製されると、
+// 分割後の両テキストが同一カーブ全長に等配置され二重レイアウトで保存される。
+// splitBlockAtRatio 側で curve を解除する修正の、実経路 (trySplit) での確認。
+// ─────────────────────────────────────────────────────────────
+describe('useCanvasDrawing: trySplit でのカーブ解除', () => {
+  it('curve 付きブロックを分割すると、両子ブロックとも curve が解除される', () => {
+    const block: TextBlock = {
+      ...makeBlock('curved', 0, { x: 50, y: 50, width: 100, height: 40 }),
+      text: 'abcdef',
+      originalText: 'abcdef',
+      curve: {
+        type: 'arc',
+        center: { x: 0, y: 0 },
+        radius: 100,
+        startAngle: 0,
+        endAngle: Math.PI,
+      },
+    };
+    const page = makePage([block]);
+    const { result, updatePageData } = renderDrawing(page);
+
+    let returned: boolean | undefined;
+    act(() => {
+      returned = result.current.trySplit({ x: 100, y: 70 });
+    });
+
+    expect(returned).toBe(true);
+    const blocks = updatePageData.mock.calls[0][1].textBlocks as TextBlock[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].curve).toBeUndefined();
+    expect(blocks[1].curve).toBeUndefined();
+  });
+});

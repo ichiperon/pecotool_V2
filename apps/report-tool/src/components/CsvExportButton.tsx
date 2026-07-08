@@ -1,9 +1,10 @@
-import { useState, type FC } from "react";
+import { useState, useMemo, type FC } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useReportStore } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 import { buildTemplateCsv } from "../logic/templateCsv";
 import { encodeCsvUtf8Bom } from "../logic/csvEncode";
+import { listReviewTargets, countReviewTargets } from "../logic/reviewTargets";
 import type { CsvOptions } from "../types/report";
 
 /**
@@ -25,17 +26,36 @@ const DEFAULT_OPTIONS: CsvOptions = {
 interface CsvExportButtonProps {
   /** テスト・ブラウザ環境からファイル保存APIを差し込むための注入口。省略時はTauriプラグインを使う。 */
   onSave?: (data: Uint8Array, csv: string) => Promise<void>;
+  /**
+   * 直近の全ページ OCR で処理失敗したページ番号（App の ocrHook から渡す）。
+   * 失敗ページは cells に載らず CSV から行ごと消えるため、出力前に明示警告する。
+   */
+  failedPages?: number[];
 }
 
-const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
+const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] }) => {
   const template = useReportStore((s) => s.template);
   const cells = useReportStore((s) => s.cells);
+  const confidences = useReportStore((s) => s.confidences);
+  const excludedPages = useReportStore((s) => s.excludedPages);
   const pdfFilePath = usePdfStore((s) => s.filePath);
   const [opts, setOpts] = useState<CsvOptions>(DEFAULT_OPTIONS);
   const [status, setStatus] = useState<"idle" | "saving" | "done" | "error" | "unavailable">("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
 
-  const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
+  // 除外ページは CSV に出さない（OCR後に除外された場合も cells に残っているため必ずフィルタ）
+  const pageNumbers = Array.from(cells.keys())
+    .filter((p) => !excludedPages.has(p))
+    .sort((a, b) => a - b);
+
+  // 意図して除外したページは「OCR失敗」警告の対象から外す（除外＝出力しない宣言済み）
+  const visibleFailedPages = failedPages.filter((p) => !excludedPages.has(p));
+
+  // 出力前ゲート用: 未確認の要確認セル（低信頼・空）の残数
+  const reviewCounts = useMemo(
+    () => countReviewTargets(listReviewTargets(cells, confidences, template.fields, excludedPages)),
+    [cells, confidences, template.fields, excludedPages]
+  );
 
   const handleExport = async () => {
     if (template.fields.length === 0) {
@@ -44,13 +64,31 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
       return;
     }
 
+    // OCR 未実行（cells 空）だとヘッダ＋空行1行の CSV が「保存しました」で成功して
+    // しまい、初見ユーザーが成功と誤認する。明示確認を挟む（ブロックはしない）。
+    if (cells.size === 0) {
+      const ok = window.confirm(
+        "OCR 結果がありません。ヘッダーと空の行だけの CSV を出力しますか？"
+      );
+      if (!ok) return;
+    } else if (pageNumbers.length === 0) {
+      // cells はあるが全ページ除外 → ヘッダーのみになる。無警告出力を防ぐ
+      const ok = window.confirm(
+        "すべてのページが除外されています。ヘッダーのみの CSV を出力しますか？"
+      );
+      if (!ok) return;
+    }
+
     setStatus("saving");
     setErrorMessage("");
 
     try {
       const csv = buildTemplateCsv(template, cells, opts, {
         fileName: pdfFilePath ? basenameOf(pdfFilePath) : "",
-        pageNumbers: pageNumbers.length > 0 ? pageNumbers : [1],
+        // フォールバック [1] は「OCR 未実行（cells 空）」のときだけ。cells があるのに
+        // pageNumbers が空＝全ページ除外なので、[1] に落とすと除外したページ1の
+        // データが出てしまう（レビューHIGH: 保存の正しさ違反）
+        pageNumbers: pageNumbers.length > 0 ? pageNumbers : cells.size === 0 ? [1] : [],
       });
       const data = encodeCsvUtf8Bom(csv);
 
@@ -146,6 +184,18 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave }) => {
           />
         </label>
       </section>
+
+      {/* 出力前ゲート: 出す前に「直すべきものが残っていないか」を明示する */}
+      {reviewCounts.lowConfidence > 0 && (
+        <p className="csv-export__gate csv-export__gate--warn" role="note">
+          ⚠ 低信頼セルが {reviewCounts.lowConfidence} 件未確認です。確認ステップで見直してからの出力を推奨します
+        </p>
+      )}
+      {visibleFailedPages.length > 0 && (
+        <p className="csv-export__gate csv-export__gate--alert" role="alert">
+          ページ {visibleFailedPages.join(", ")} は OCR 失敗のため CSV に行が含まれません（行とページの対応がずれます）
+        </p>
+      )}
 
       <button
         className={`csv-export__btn ${status === "saving" ? "csv-export__btn--saving" : ""}`}

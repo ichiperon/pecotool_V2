@@ -73,10 +73,11 @@ vi.mock('@dnd-kit/utilities', () => ({
 vi.mock('react-virtuoso', () => {
   const React = require('react') as typeof import('react')
   const Virtuoso = React.forwardRef(function Virtuoso(
-    { totalCount, itemContent, className, style }: any,
+    { totalCount, itemContent, computeItemKey, className, style }: any,
     ref: any
   ) {
     ;(globalThis as any).__lastVirtuosoItemContent = itemContent
+    ;(globalThis as any).__lastVirtuosoComputeItemKey = computeItemKey
 
     const windowSize = (globalThis as any).__virtuosoWindowSize as number | null | undefined
     const isVirtualized = typeof windowSize === 'number' && windowSize > 0
@@ -103,19 +104,23 @@ vi.mock('react-virtuoso', () => {
       },
     }))
 
+    // issue R22狩り(交差汚染): 実 Virtuoso は computeItemKey が渡されると
+    // それをコンポーネントの React key として使う (index キーだと並び/構成が
+    // 変わった際に別ブロックへ retarget されてしまう)。渡されていれば通す。
+    const keyFor = (i: number) => (computeItemKey ? computeItemKey(i) : i)
     const items = []
     if (isVirtualized) {
       // ビューポート窓 [windowStart, windowStart+windowSize) のみ描画。
       const end = Math.min(totalCount, windowStart + (windowSize as number))
       for (let i = windowStart; i < end; i++) {
         items.push(
-          React.createElement('div', { key: i, 'data-virtuoso-index': i }, itemContent(i))
+          React.createElement('div', { key: keyFor(i), 'data-virtuoso-index': i }, itemContent(i))
         )
       }
     } else {
       for (let i = 0; i < totalCount; i++) {
         items.push(
-          React.createElement('div', { key: i, 'data-virtuoso-index': i }, itemContent(i))
+          React.createElement('div', { key: keyFor(i), 'data-virtuoso-index': i }, itemContent(i))
         )
       }
     }
@@ -932,6 +937,47 @@ describe('OcrEditor', () => {
       const cards = container.querySelectorAll('.ocr-card')
       fireEvent.click(cards[2])
       expect(usePecoStore.getState().selectedIds.has('b3')).toBe(true)
+    })
+  })
+
+  // ── R22狩り(交差汚染 HIGH): Virtuoso computeItemKey が block.id を返す ──
+  describe('R22狩り: computeItemKey で Virtuoso のキーが block.id に固定される', () => {
+    // 前提: index ベースの key だと、リストの並び/構成が変わった際に別ブロックへ
+    // コンポーネントが retarget され、フォーカス中カードの未確定編集が別ブロックへ
+    // 混入する (交差汚染)。computeItemKey で id 固定にすることで retarget を防ぐ。
+    it('computeItemKey(i) が filteredBlocks[i].id を返す', () => {
+      const editBlocks = [
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+        makeBlock('b3', 'third', 2),
+      ]
+      setup(editBlocks)
+
+      const computeItemKey = (globalThis as any).__lastVirtuosoComputeItemKey as
+        | ((index: number) => string | number)
+        | undefined
+      expect(typeof computeItemKey).toBe('function')
+      expect(computeItemKey!(0)).toBe('b1')
+      expect(computeItemKey!(1)).toBe('b2')
+      expect(computeItemKey!(2)).toBe('b3')
+    })
+
+    it('検索フィルタ後も computeItemKey はフィルタ後の index に対応する block.id を返す', async () => {
+      const user = userEvent.setup()
+      const editBlocks = [
+        makeBlock('b1', 'apple fruit', 0),
+        makeBlock('b2', 'banana fruit', 1),
+        makeBlock('b3', 'cherry', 2),
+      ]
+      setup(editBlocks)
+
+      await user.type(screen.getByPlaceholderText('検索...'), 'fruit')
+
+      const computeItemKey = (globalThis as any).__lastVirtuosoComputeItemKey as
+        (index: number) => string | number
+      // フィルタ後配列は [b1, b2] (fruit を含む2件)
+      expect(computeItemKey(0)).toBe('b1')
+      expect(computeItemKey(1)).toBe('b2')
     })
   })
 

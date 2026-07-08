@@ -157,6 +157,11 @@ export function useCanvasDrawing(params: UseCanvasDrawingParams): UseCanvasDrawi
             return false;
           }
           const { b1, b2 } = split;
+          if (block.curve) {
+            // #423 / PCT-192: カーブ付きブロックを分割すると curve は解除される
+            // (splitBlockAtRatio 側の仕様)。ユーザーに気づける最小限のログのみ残す。
+            console.warn('[useCanvasDrawing] split: curve が解除されました', { blockId: block.id });
+          }
 
           const newBlocks = pageData.textBlocks.filter((b) => b.id !== block.id);
           newBlocks.splice(i, 0, b1, b2);

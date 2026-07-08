@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { isAnyModalOpen } from '../components/ui/Modal';
 
 interface ShortcutActions {
   undo: () => void;
@@ -44,6 +45,10 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // モーダル表示中は背後ドキュメントへのグローバルショートカットを無効化する。
+      // Modal 自身は Esc/Tab しか捕捉しないため、ここで止めないと undo/redo 等が
+      // 背後へ素通りしてしまう。
+      if (isAnyModalOpen()) return;
       const ac = actionsRef.current;
       const target = e.target instanceof HTMLElement ? e.target : null;
       const tag = target?.tagName;
@@ -92,6 +97,13 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // モーダル表示中は背後ドキュメントへのグローバルショートカットを無効化する。
+      // Delete / Ctrl+C・V / Ctrl+B・X のモード切替 / Ctrl+S 保存等、Modal が
+      // 自前で処理しないキーはすべて背後の編集対象へ届いてしまうため、モーダルが
+      // 1枚でも開いている間はここで一律に無効化する (Ctrl+S を止めることで
+      // diffPreviewRequest 側のゾンビ Promise 対策とも矛盾しない: プレビュー表示中に
+      // 2回目の保存要求自体が発生しなくなる)。
+      if (isAnyModalOpen()) return;
       const ac = actionsRef.current;
       const target = e.target instanceof HTMLElement ? e.target : null;
       const tag = target?.tagName;

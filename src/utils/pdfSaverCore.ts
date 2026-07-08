@@ -689,6 +689,88 @@ export function remapBboxForRotation(
 }
 
 // ---------------------------------------------------------------------------
+// remapCurveForRotation
+// ---------------------------------------------------------------------------
+
+/**
+ * H-2 (bug-hunt round3 Wave2): remapBboxForRotation と同じ座標変換規約で
+ * CurveDefinition (arc / polyline) を「originalRotation フレーム」から
+ * 「finalRotation フレーム」へリマップする。
+ *
+ * 背景:
+ *   remapBboxForRotation は bbox をリマップするが、curve は捕捉フレームのまま
+ *   verbatim でメタに書かれていた (#186 の描画は curve が axis-aligned bbox とは
+ *   独立した viewport 座標を持つため、bbox だけリマップしても curve は取り残される)。
+ *   その結果、回転を合成した保存では curve テキストが誤位置に焼かれる。
+ *
+ * 変換規約 (remapBboxForRotation と同一の point-level 変換):
+ *   delta = normalizeRotation(finalRotation - originalRotation)
+ *   vw0/vh0 = getViewportSize(originalRotation, pageW, pageH)
+ *
+ *   delta=0:   恒等
+ *   delta=90:  (px, py) -> (vh0 - py, px)
+ *   delta=180: (px, py) -> (vw0 - px, vh0 - py)
+ *   delta=270: (px, py) -> (py, vw0 - px)
+ *
+ *   上式は remapBboxForRotation の 4 隅変換から逆算した点変換 (bbox の
+ *   x/y/width/height 式は、この点変換を bbox の 4 隅へ適用して min/max を
+ *   取ったものと数学的に同値)。
+ *
+ *   arc の角度 (startAngle/endAngle) は、上記点変換の回転成分に対応する
+ *   delta 相当の弧度 (deltaRad = delta * π/180) を単純加算するだけで正しく
+ *   変換される (回転変換は距離・角度差を保存するため、center を移してから
+ *   角度をオフセットすれば十分)。radius は不変。
+ *
+ * @param curve  originalRotation フレームの CurveDefinition
+ * @param originalRotation  保存前の /Rotate (0..270)
+ * @param finalRotation     保存後の /Rotate (0..270)
+ * @param pageW  PDF user-space width (page.getSize().width)
+ * @param pageH  PDF user-space height (page.getSize().height)
+ */
+export function remapCurveForRotation(
+  curve: CurveDefinition,
+  originalRotation: number,
+  finalRotation: number,
+  pageW: number,
+  pageH: number,
+): CurveDefinition {
+  const delta = normalizeRotation(finalRotation - originalRotation);
+  if (delta === 0) return curve;
+
+  const { vw: vw0, vh: vh0 } = getViewportSize(originalRotation, pageW, pageH);
+
+  const remapPoint = (px: number, py: number): { x: number; y: number } => {
+    switch (delta) {
+      case 90:
+        return { x: vh0 - py, y: px };
+      case 180:
+        return { x: vw0 - px, y: vh0 - py };
+      case 270:
+        return { x: py, y: vw0 - px };
+      default:
+        return { x: px, y: py };
+    }
+  };
+
+  if (curve.type === 'arc') {
+    const deltaRad = (delta * Math.PI) / 180;
+    const center = remapPoint(curve.center.x, curve.center.y);
+    return {
+      type: 'arc',
+      center,
+      radius: curve.radius,
+      startAngle: curve.startAngle + deltaRad,
+      endAngle: curve.endAngle + deltaRad,
+    };
+  }
+
+  return {
+    type: 'polyline',
+    points: curve.points.map((p) => remapPoint(p.x, p.y)),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // asPageIndex
 // ---------------------------------------------------------------------------
 
@@ -1450,7 +1532,11 @@ export async function buildPdfDocumentCore(
     // userRotation が undefined のページは finalRotation===originalRotation となり
     // remapBboxForRotation(delta=0) が恒等 (bbox そのまま) を返す。
     const finalRotationForMeta = normalizeRotation(page.getRotation?.().angle ?? 0);
-    bboxMeta[String(pageIndex)] = sortedBlocks.map(b => {
+    // B-3 (bug-hunt round3): メタは描画ループより前に一括構築される。個別ブロックの描画が
+    // 例外で失敗した場合、そのエントリを描画ループ後に取り除く (failedBlockIndices 参照)。
+    // pageMetaEntries は bboxMeta[pageIndex] と同一配列参照のため、フィルタして再代入すれば
+    // 反映される。
+    const pageMetaEntries = sortedBlocks.map(b => {
       const remappedBbox = remapBboxForRotation(b.bbox, originalRotation, finalRotationForMeta, pageW, pageH);
       const entry: Record<string, unknown> = {
         bbox: remappedBbox,
@@ -1458,13 +1544,17 @@ export async function buildPdfDocumentCore(
         order: b.order,
         text: b.text,
       };
-      // issue #186: 湾曲ベースラインが定義されていれば JSON に同梱
-      if (b.curve) entry.curve = b.curve;
+      // issue #186: 湾曲ベースラインが定義されていれば JSON に同梱。
+      // H-2 (bug-hunt round3 Wave2): bbox と同じ originalRotation→finalRotation の
+      // フレーム変換を curve にも適用する。verbatim で書くと回転合成時に curve だけ
+      // 捕捉フレームに取り残され、再オープン後に curve テキストが誤位置に焼かれる。
+      if (b.curve) entry.curve = remapCurveForRotation(b.curve, originalRotation, finalRotationForMeta, pageW, pageH);
       // #192 / PCT-047: confidence を永続化する。再オープン後も低信頼ハイライトが機能するよう、
       // undefined でない場合のみキーを書き込む（後方互換: 欠如時は undefined 扱いのまま）。
       if (b.confidence !== undefined) entry.confidence = b.confidence;
       return entry;
     });
+    bboxMeta[String(pageIndex)] = pageMetaEntries;
     metaChanged = true;
 
     // #71: bbox は OCR / 既存テキスト経由いずれも viewport 空間 (rotated screen, y-down)。
@@ -1497,8 +1587,13 @@ export async function buildPdfDocumentCore(
     const pageFontKeys = new Map<PDFFont, PDFName>();
     setPageFontWithStableKey(page, customFont, pageFontKeys);
 
+    // B-3 (bug-hunt round3): 描画に失敗したブロックの index を集め、ループ後に
+    // pageMetaEntries (= bboxMeta[pageIndex]) から取り除く。
+    const failedBlockIndices = new Set<number>();
+
     // Now draw the NEW text blocks onto the cleaned page
-    for (const block of sortedBlocks) {
+    for (let blockIdx = 0; blockIdx < sortedBlocks.length; blockIdx++) {
+      const block = sortedBlocks[blockIdx];
       if (!block.text) continue;
 
       try {
@@ -1685,8 +1780,20 @@ export async function buildPdfDocumentCore(
           }
         }
       } catch(e) {
+        // B-3 (bug-hunt round3): drawText/encodeText 等の例外で描画されなかったブロックは、
+        // bboxMeta には既に text が書き込み済み (描画ループより前に一括構築) のため、この
+        // まま何もしないと「メタにはテキストがあるのに実 PDF の text layer には存在しない」
+        // 乖離が生まれる (再オープン時に選択・検索できないテキストが「ある」ように見える)。
+        // skippedChars と同じ警告経路に計上してユーザーへ可視化しつつ、failedBlockIndices に
+        // 記録してループ後に該当エントリを bboxMeta から除外する。
+        failedBlockIndices.add(blockIdx);
+        recordSkippedTextChar(skippedChars, 'block-render-error', block.text.slice(0, 20), pageIndex);
         console.warn(`[buildPdfDocumentCore] Page ${pageIndex} block error:`, e);
       }
+    }
+
+    if (failedBlockIndices.size > 0) {
+      bboxMeta[String(pageIndex)] = pageMetaEntries.filter((_, idx) => !failedBlockIndices.has(idx));
     }
   }
 
@@ -1696,6 +1803,12 @@ export async function buildPdfDocumentCore(
   const dirtyPageIndexSet = new Set(pageEntriesToWrite.map(([pi]) => pi));
   for (let pi = 0; pi < pdfPageCount; pi++) {
     if (dirtyPageIndexSet.has(pi)) continue;
+    // R2-2 (bug-hunt round2): dirty ページ処理ループ (1420行付近) と同様、非dirtyページ
+    // 1件あたりの sweep (inflate + 状態機械走査 + deflate) 処理時間を worker 殻の
+    // heartbeat 猶予 (PREVIOUS_SAVE_TIMEOUT_MS) と比較させたい。1000ページ級では
+    // このループ全体が5秒を超えうるため、ページ粒度で生存通知しないと round1 M-1 と
+    // 同種の heartbeat 空白が残る（健全な worker が stale 判定で誤 terminate されうる）。
+    onProgress?.();
     const page = pdfDoc.getPage(pi);
     sweepNonDirtyPage(
       page.node as unknown as {
@@ -1745,6 +1858,10 @@ export async function buildPdfDocumentCore(
   // /Root 起点 BFS で到達不能な indirect object を掃く（issue #96）。
   // pdf-lib は context 内の全 indirect object を書き出すため、ここで GC
   // しないと過去保存の孤児ストリームが累積して PDF が膨れ続ける。
+  // R2-2 (bug-hunt round2): BFS 走査は同期処理で、indirect object 数の多い（=ページ数の
+  // 多い）PDF では所要時間が伸びる。開始直前に生存通知しておく（ページループ後の
+  // heartbeat 空白を埋める。sweep 内部は分割できないため区間の開始時点のみ）。
+  onProgress?.();
   const sweepResult = sweepUnreachableObjects(pdfDoc);
   if (sweepResult.dropped > 0) {
     console.log(
@@ -1754,6 +1871,9 @@ export async function buildPdfDocumentCore(
   // sweep が 1 件も dropped を出していなければ indirect 番号に gap は発生しないので
   // compact (全 indirect object の再走査+再 assign) を丸ごとスキップできる。
   if (sweepResult.dropped > 0) {
+    // R2-2 (bug-hunt round2): compact も全 indirect object を再走査する同期処理。
+    // 実行される場合のみ、開始直前にもう一度生存通知する。
+    onProgress?.();
     compactIndirectObjectNumbers(pdfDoc);
   }
 

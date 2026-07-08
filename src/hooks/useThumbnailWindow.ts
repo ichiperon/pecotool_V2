@@ -5,6 +5,17 @@ import { getAllWindows } from '@tauri-apps/api/window';
 import { usePecoStore, selectDocument, selectCurrentPageIndex } from '../store/pecoStore';
 import { useInfraStore, selectDocumentEpoch } from '../store/infraStore';
 import { logUnlessTauriWindowNotFound } from '../utils/tauriWindowErrors';
+import type { PecoDocument } from '../types';
+
+interface FileOpenedPayload {
+  filePath: string;
+  documentEpoch: number;
+  currentPageIndex: number;
+  totalPages: number;
+  dirtyPages: number[];
+  pageOrder: number[];
+  rotations: number[];
+}
 
 export function useThumbnailWindow() {
   const [isThumbnailOpen, setIsThumbnailOpen] = useState(false);
@@ -13,25 +24,61 @@ export function useThumbnailWindow() {
   const openDocumentEpoch = document ? documentEpoch : 0;
   const currentPageIndex = usePecoStore(selectCurrentPageIndex);
   const pageOrderSerialized = usePecoStore((s) => s.pageOrder.join(','));
-  // dirty ページ一覧をシリアライズしたプリミティブのみ購読する。
+  // R22狩りWave4 (C-10): document.pages の Map 参照が変わらない限り再シリアライズ
+  // しないメモ化キャッシュ。store 更新のたびに全ページ走査+join していた
+  // O(N) コストを、実際に pages が変わった時だけに限定する。この codebase では
+  // ページ更新は常に `new Map(oldPages)` の不変更新パターンを取るため
+  // (pecoStore.ts 全体で一貫)、Map 参照の同一性は「中身が変わっていない」こと
+  // の十分な判定条件になる。
+  const dirtyCacheRef = useRef<{ pages: PecoDocument['pages'] | null; serialized: string }>({
+    pages: null,
+    serialized: '',
+  });
+  // dirty ページ一覧をシリアライズしたプリミティブのみを購読する。
   // document 全体を購読すると textBlocks 等 dirty に無関係なフィールド更新でも
   // effect が再実行されて Tauri IPC が走るため (issue #35)。
   const dirtyPagesSerialized = usePecoStore((s) => {
     const doc = s.document;
-    if (!doc) return '';
+    const pagesMap = doc?.pages ?? null;
+    const cache = dirtyCacheRef.current;
+    if (cache.pages === pagesMap) return cache.serialized;
+    if (!pagesMap) {
+      cache.pages = null;
+      cache.serialized = '';
+      return '';
+    }
     const parts: number[] = [];
-    doc.pages.forEach((page, idx) => { if (page.isDirty) parts.push(idx); });
-    return parts.join(',');
+    pagesMap.forEach((page, idx) => { if (page.isDirty) parts.push(idx); });
+    const serialized = parts.join(',');
+    cache.pages = pagesMap;
+    cache.serialized = serialized;
+    return serialized;
   });
   // issue #431 (FB-6): 回転状態をシリアライズしたプリミティブのみ購読する。
   // dirtyPagesSerialized と同じ設計 (issue #35) — document 全体購読を避け、
   // rotation が変化したときだけ effect を再実行する。
+  // R22狩りWave4 (C-10): dirtyCacheRef と同様、pages Map 参照が同一なら
+  // 再シリアライズをスキップする。
+  const rotationsCacheRef = useRef<{ pages: PecoDocument['pages'] | null; serialized: string }>({
+    pages: null,
+    serialized: '',
+  });
   const rotationsSerialized = usePecoStore((s) => {
     const doc = s.document;
-    if (!doc) return '';
+    const pagesMap = doc?.pages ?? null;
+    const cache = rotationsCacheRef.current;
+    if (cache.pages === pagesMap) return cache.serialized;
+    if (!pagesMap) {
+      cache.pages = null;
+      cache.serialized = '';
+      return '';
+    }
     const parts: number[] = [];
-    doc.pages.forEach((page, idx) => { parts[idx] = page.rotation ?? 0; });
-    return parts.join(',');
+    pagesMap.forEach((page, idx) => { parts[idx] = page.rotation ?? 0; });
+    const serialized = parts.join(',');
+    cache.pages = pagesMap;
+    cache.serialized = serialized;
+    return serialized;
   });
   // Dirty なページインデックス一覧を追跡
   const prevDirtyRef = useRef<string>('');
@@ -40,6 +87,20 @@ export function useThumbnailWindow() {
   const prevRotationsRef = useRef<string>('');
   // rotationsSerialized (pages Map の displayIndex キー順) の直近値。effect の再実行判定用。
   const prevRotationsSourceRef = useRef<string>('');
+  // R22狩りWave4 (C-9): 直近で実際に emit した thumbnail:file-opened の
+  // (filePath, documentEpoch) 複合キー。窓マウント時の request-state 応答と
+  // doc-open 由来の effect emit が近接して両方走ると、同じ内容の
+  // thumbnail:file-opened が2連発し、別窓側で LOAD_PDF が二重に走ってしまう。
+  // 空文字を sentinel にすると dirty ゼロの正規シリアライズ ('') と衝突する
+  // ため (C-7 で指摘済みの罠)、filePath+epoch の複合キー (NUL区切り) を使う。
+  // emit 直後にマイクロタスクでキーを解除することで、真に近接した二重発火
+  // だけを吸収し、後から改めて来る正当な request-state 応答まではブロック
+  // しない。
+  const lastFileOpenedKeyRef = useRef<string | null>(null);
+  // R22狩りWave4 (C-4軽減): 別窓が非表示中に doc-open 由来の file-opened を
+  // 保留したかどうかのフラグ。窓が再表示された時 (show 時 or request-state
+  // 受信時) に最新状態を1回だけ flush する。
+  const pendingFileOpenedRef = useRef(false);
 
   const getDirtyPages = useCallback((): number[] => {
     const doc = usePecoStore.getState().document;
@@ -94,6 +155,66 @@ export function useThumbnailWindow() {
     }
   }, []);
 
+  // 別窓が現在可視かどうかを判定する。窓がまだ生成されていない場合や
+  // isVisible() の呼び出しに失敗した場合は安全側 (emit する = 可視扱い) に
+  // フォールバックする。窓未生成のケースは同期的に true を返し、既存の
+  // (窓を一度も生成しない) 呼び出し元では非同期ギャップを生じさせない。
+  const checkThumbnailWindowVisible = useCallback((): true | Promise<boolean> => {
+    const win = thumbWinRef.current;
+    if (!win) return true;
+    return win.isVisible().catch(() => true);
+  }, []);
+
+  // 同一 (filePath, documentEpoch) に対する thumbnail:file-opened の近接
+  // 二重発火を1回に畳んで emit する。
+  const emitFileOpenedDeduped = useCallback((payload: FileOpenedPayload) => {
+    const key = `${payload.filePath}\u0000${payload.documentEpoch}`;
+    if (lastFileOpenedKeyRef.current === key) return;
+    lastFileOpenedKeyRef.current = key;
+    Promise.resolve().then(() => {
+      if (lastFileOpenedKeyRef.current === key) {
+        lastFileOpenedKeyRef.current = null;
+      }
+    });
+    emit('thumbnail:file-opened', payload).catch(logUnlessTauriWindowNotFound);
+  }, []);
+
+  // 別窓が非表示中なら emit を保留し、再表示時に flush する。
+  const emitFileOpenedOrDefer = useCallback((payload: FileOpenedPayload) => {
+    const visibleResult = checkThumbnailWindowVisible();
+    if (visibleResult === true) {
+      pendingFileOpenedRef.current = false;
+      emitFileOpenedDeduped(payload);
+      return;
+    }
+    visibleResult.then((visible) => {
+      if (!visible) {
+        pendingFileOpenedRef.current = true;
+        return;
+      }
+      pendingFileOpenedRef.current = false;
+      emitFileOpenedDeduped(payload);
+    });
+  }, [checkThumbnailWindowVisible, emitFileOpenedDeduped]);
+
+  // store の最新状態から thumbnail:file-opened payload を組み立てる。
+  // request-state 応答・非表示解除時の flush など、現在の store state を
+  // その場で読み直す必要がある呼び出し元向け。
+  const buildFileOpenedPayload = useCallback((): FileOpenedPayload | null => {
+    const doc = usePecoStore.getState().document;
+    if (!doc) return null;
+    const { currentPageIndex: page, pageOrder } = usePecoStore.getState();
+    return {
+      filePath: doc.filePath,
+      documentEpoch: useInfraStore.getState().documentEpoch,
+      currentPageIndex: page,
+      totalPages: doc.totalPages,
+      dirtyPages: getDirtyPages(),
+      pageOrder,
+      rotations: getRotations(pageOrder),
+    };
+  }, [getDirtyPages, getRotations]);
+
   const toggleThumbnailWindow = useCallback(async () => {
     try {
       const win = await initThumbnailWindow();
@@ -105,30 +226,31 @@ export function useThumbnailWindow() {
           await win.show();
           await win.setFocus();
           setIsThumbnailOpen(true);
+          // 非表示中に保留していた file-opened があれば、再表示時に最新状態を
+          // 1回だけ flush する。
+          if (pendingFileOpenedRef.current) {
+            pendingFileOpenedRef.current = false;
+            const payload = buildFileOpenedPayload();
+            if (payload) emitFileOpenedDeduped(payload);
+          }
         }
       }
     } catch (e) {
       logUnlessTauriWindowNotFound(e);
     }
-  }, [isThumbnailOpen, initThumbnailWindow]);
+  }, [isThumbnailOpen, initThumbnailWindow, buildFileOpenedPayload, emitFileOpenedDeduped]);
 
   // --- サムネイル窓からの状態要求に応答 ---
   useEffect(() => {
     const setup = async () => {
       const u1 = await listen('thumbnail:request-state', () => {
-        const doc = usePecoStore.getState().document;
-        const { currentPageIndex: page, pageOrder } = usePecoStore.getState();
-        if (doc) {
-          emit('thumbnail:file-opened', {
-            filePath: doc.filePath,
-            documentEpoch: useInfraStore.getState().documentEpoch,
-            currentPageIndex: page,
-            totalPages: doc.totalPages,
-            dirtyPages: getDirtyPages(),
-            pageOrder,
-            rotations: getRotations(pageOrder),
-          }).catch(logUnlessTauriWindowNotFound);
+        const payload = buildFileOpenedPayload();
+        if (payload) {
+          emitFileOpenedDeduped(payload);
         }
+        // 窓から明示的に状態要求が来た = 窓は最新状態を受け取れる状態にある。
+        // 保留中フラグがあればここで解消する。
+        pendingFileOpenedRef.current = false;
       });
       const u2 = await listen('thumbnail:hidden', () => {
         setIsThumbnailOpen(false);
@@ -138,7 +260,7 @@ export function useThumbnailWindow() {
     let unlisten: (() => void) | undefined;
     const p = setup().then(fn => { unlisten = fn; }).catch(logUnlessTauriWindowNotFound);
     return () => { p.then(() => unlisten?.()); };
-  }, [getDirtyPages, getRotations]);
+  }, [buildFileOpenedPayload, emitFileOpenedDeduped]);
 
   // --- ページ選択をサムネイル窓から受け取る ---
   useEffect(() => {
@@ -154,7 +276,7 @@ export function useThumbnailWindow() {
     if (document) {
       const pageOrder = usePecoStore.getState().pageOrder;
       const rotations = getRotations(pageOrder);
-      emit('thumbnail:file-opened', {
+      const payload: FileOpenedPayload = {
         filePath: document.filePath,
         documentEpoch,
         currentPageIndex,
@@ -162,15 +284,18 @@ export function useThumbnailWindow() {
         dirtyPages: getDirtyPages(),
         pageOrder,
         rotations,
-      }).catch(logUnlessTauriWindowNotFound);
+      };
       prevPageOrderRef.current = pageOrder.join(',');
       prevRotationsRef.current = rotations.join(',');
       prevRotationsSourceRef.current = rotationsSerialized;
+      // 非表示の別窓には即時 emit せず、再表示時まで保留する (R22狩りWave4 C-4軽減)。
+      emitFileOpenedOrDefer(payload);
     } else {
       emit('thumbnail:file-closed').catch(logUnlessTauriWindowNotFound);
       prevPageOrderRef.current = '';
       prevRotationsRef.current = '';
       prevRotationsSourceRef.current = '';
+      pendingFileOpenedRef.current = false;
     }
     prevDirtyRef.current = '';
   }, [document?.filePath, openDocumentEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
