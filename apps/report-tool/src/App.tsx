@@ -50,7 +50,7 @@ const App: FC = () => {
           unlisten = un;
         }
       } catch {
-        // Tauri ランタイム外（ブラウザ・テスト環境）では何もしない
+        // Tauri ランタイム外（ブラウザ・テスト環境）や登録失敗時も含め no-op
       }
     })();
     return () => {

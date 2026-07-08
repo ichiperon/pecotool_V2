@@ -48,6 +48,9 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] })
     .filter((p) => !excludedPages.has(p))
     .sort((a, b) => a - b);
 
+  // 意図して除外したページは「OCR失敗」警告の対象から外す（除外＝出力しない宣言済み）
+  const visibleFailedPages = failedPages.filter((p) => !excludedPages.has(p));
+
   // 出力前ゲート用: 未確認の要確認セル（低信頼・空）の残数
   const reviewCounts = useMemo(
     () => countReviewTargets(listReviewTargets(cells, confidences, template.fields, excludedPages)),
@@ -68,6 +71,12 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] })
         "OCR 結果がありません。ヘッダーと空の行だけの CSV を出力しますか？"
       );
       if (!ok) return;
+    } else if (pageNumbers.length === 0) {
+      // cells はあるが全ページ除外 → ヘッダーのみになる。無警告出力を防ぐ
+      const ok = window.confirm(
+        "すべてのページが除外されています。ヘッダーのみの CSV を出力しますか？"
+      );
+      if (!ok) return;
     }
 
     setStatus("saving");
@@ -76,7 +85,10 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] })
     try {
       const csv = buildTemplateCsv(template, cells, opts, {
         fileName: pdfFilePath ? basenameOf(pdfFilePath) : "",
-        pageNumbers: pageNumbers.length > 0 ? pageNumbers : [1],
+        // フォールバック [1] は「OCR 未実行（cells 空）」のときだけ。cells があるのに
+        // pageNumbers が空＝全ページ除外なので、[1] に落とすと除外したページ1の
+        // データが出てしまう（レビューHIGH: 保存の正しさ違反）
+        pageNumbers: pageNumbers.length > 0 ? pageNumbers : cells.size === 0 ? [1] : [],
       });
       const data = encodeCsvUtf8Bom(csv);
 
@@ -179,9 +191,9 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] })
           ⚠ 低信頼セルが {reviewCounts.lowConfidence} 件未確認です。確認ステップで見直してからの出力を推奨します
         </p>
       )}
-      {failedPages.length > 0 && (
+      {visibleFailedPages.length > 0 && (
         <p className="csv-export__gate csv-export__gate--alert" role="alert">
-          ページ {failedPages.join(", ")} は OCR 失敗のため CSV に行が含まれません（行とページの対応がずれます）
+          ページ {visibleFailedPages.join(", ")} は OCR 失敗のため CSV に行が含まれません（行とページの対応がずれます）
         </p>
       )}
 

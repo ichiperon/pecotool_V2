@@ -377,3 +377,51 @@ describe("CsvExportButton – 出力前ゲート", () => {
     confirmSpy.mockRestore();
   });
 });
+
+describe("CsvExportButton – 全ページ除外時のフォールバック（レビューHIGH回帰）", () => {
+  it("cellsがあるのに全ページ除外なら、除外したページ1のデータをCSVに出さない", async () => {
+    addField("金額");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([[id, "秘匿値999"]])]]]),
+      excludedPages: new Set([1]),
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let savedCsv = "";
+    const onSave = vi.fn().mockImplementation(async (_d: Uint8Array, csv: string) => {
+      savedCsv = csv;
+    });
+    render(<CsvExportButton onSave={onSave} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    // 確認ダイアログ（全ページ除外）を経由し、除外データは出力されない
+    expect(confirmSpy).toHaveBeenCalledWith(
+      "すべてのページが除外されています。ヘッダーのみの CSV を出力しますか？"
+    );
+    expect(savedCsv).not.toContain("秘匿値999");
+    confirmSpy.mockRestore();
+  });
+
+  it("全ページ除外の確認でキャンセルすると出力しない", () => {
+    addField("金額");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([[id, "v"]])]]]),
+      excludedPages: new Set([1]),
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const onSave = vi.fn();
+    render(<CsvExportButton onSave={onSave} />);
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    expect(onSave).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("除外したページはfailedPages警告の対象から外れる", () => {
+    addField("金額");
+    useReportStore.setState({ excludedPages: new Set([3]) });
+    render(<CsvExportButton failedPages={[3]} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});

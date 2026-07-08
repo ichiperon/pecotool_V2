@@ -401,6 +401,8 @@ export function useReportOcr(): UseReportOcrReturn {
 
         // 除外ページ（白紙・送付状等）は OCR をスキップする。matrix に載らないため
         // CSV にも出ない。failed/mismatch の判定対象にもしない。
+        // excludedPages は rotation と同様、実行開始時のスナップショット
+        //（実行中のトグルはその回に反映しない。CSV 側フィルタが最終防衛線）。
         if (excludedPages.has(pageNumber)) {
           setProgress({ done: pageIndex + 1, total: numPages });
           continue;
@@ -514,7 +516,8 @@ export function useReportOcr(): UseReportOcrReturn {
 
     if (!filePath) return;
     if (template.fields.length === 0) return;
-    // 除外ページは再OCR対象外（UI 側でもボタンは出ない想定の防御）
+    // 除外ページは再OCR対象外。UI 側のボタンは disabled になるが（ConfirmPdfPane）、
+    // ここでも防御して silent な上書きを防ぐ
     if (useReportStore.getState().excludedPages.has(pageNum)) return;
 
     // 全ページ OCR と同じ epoch を共有してキャンセルを相互に動作させる

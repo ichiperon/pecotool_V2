@@ -77,6 +77,7 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
   const currentOffset = pageOffsets.get(currentPage) ?? { dx: 0, dy: 0 };
   const hasOffset = currentOffset.dx !== 0 || currentOffset.dy !== 0;
   const isReocrRunning = reocrTarget === currentPage;
+  const isCurrentPageExcluded = useReportStore((s) => s.excludedPages.has(currentPage));
 
   // pdfDoc を filePath から自動ロード（ConfirmPdfPane は独自に pdfDoc を管理する）
   // PdfViewer とは別の pdfDoc インスタンス（表示専用）
@@ -454,7 +455,8 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
           type="button"
           className={`confirm-pdf-pane__reocr-btn${hasOffset && !isReocrRunning ? " confirm-pdf-pane__reocr-btn--needs-reocr" : ""}`}
           onClick={handleReocrClick}
-          disabled={isReocrRunning}
+          disabled={isReocrRunning || isCurrentPageExcluded}
+          title={isCurrentPageExcluded ? "除外中のページは再OCRできません" : undefined}
           aria-label={`${currentPage}ページ目を再OCR`}
         >
           {isReocrRunning ? "再OCR中..." : "このページを再OCR"}
