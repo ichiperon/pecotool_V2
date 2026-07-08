@@ -67,6 +67,34 @@ describe("CsvPreviewTable: 手修正バッジ", () => {
     expect(cell.className).toContain("csv-preview__td--edited");
   });
 
+  it("ツールバーの元に戻す/やり直すボタンが履歴の有無で活性化し、クリックで機能する", () => {
+    const id = setup();
+    render(<CsvPreviewTable />);
+    const undoBtn = screen.getByRole("button", { name: "元に戻す" });
+    const redoBtn = screen.getByRole("button", { name: "やり直す" });
+    // 初期状態: 履歴なし → 両方 disabled
+    expect(undoBtn).toBeDisabled();
+    expect(redoBtn).toBeDisabled();
+
+    act(() => {
+      useReportStore.getState().setCellValue(1, id, "200");
+    });
+    expect(undoBtn).not.toBeDisabled();
+    expect(redoBtn).toBeDisabled();
+
+    act(() => {
+      undoBtn.click();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get(id)).toBe("100");
+    expect(undoBtn).toBeDisabled();
+    expect(redoBtn).not.toBeDisabled();
+
+    act(() => {
+      redoBtn.click();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get(id)).toBe("200");
+  });
+
   it("undo するとバッジが消える", () => {
     const id = setup();
     render(<CsvPreviewTable />);

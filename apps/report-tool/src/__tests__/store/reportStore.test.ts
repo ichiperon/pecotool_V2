@@ -187,6 +187,14 @@ describe("clearTemplate", () => {
     const { fields } = useReportStore.getState().template;
     expect(fields[0].name).toBe("欄 1");
   });
+
+  it("cells もクリアされる（孤児 fieldId の値が残留しない）", () => {
+    useReportStore.getState().addField(SAMPLE_RECT, "A");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.setState({ cells: new Map([[1, [new Map([[id, "値"]])]]]) });
+    useReportStore.getState().clearTemplate();
+    expect(useReportStore.getState().cells.size).toBe(0);
+  });
 });
 
 // MA-1: PDF差し替え時に cells/confidences/pageOffsets のみ初期化し、

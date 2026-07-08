@@ -944,6 +944,57 @@ button {
   pointer-events: none;
 }
 
+/* ツールバーの Undo/Redo ボタン群 */
+.csv-preview__undo-group {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 0.5rem;
+}
+
+.csv-preview__undo-btn {
+  min-width: 26px;
+  padding: 1px 6px;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  background: #fff;
+  color: #2d3748;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.csv-preview__undo-btn:hover:not(:disabled) {
+  background: #ebf8ff;
+  border-color: #4299e1;
+}
+
+.csv-preview__undo-btn:disabled {
+  color: #cbd5e0;
+  cursor: default;
+}
+
+/* Undo/Redo キー操作のフィードバックチップ（App 直下・常設 live region）
+   表示は opacity トグルのみ（DOM 常設で aria-live の確実な発火を優先） */
+.undo-notice {
+  position: fixed;
+  bottom: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 14px;
+  border-radius: 14px;
+  background: rgba(45, 55, 72, 0.92);
+  color: #fff;
+  font-size: 0.8rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+  z-index: 1000;
+}
+
+.undo-notice--visible {
+  opacity: 1;
+}
+
 /* 明細欄セル */
 .csv-preview__td--lineitem {
   white-space: pre-wrap;

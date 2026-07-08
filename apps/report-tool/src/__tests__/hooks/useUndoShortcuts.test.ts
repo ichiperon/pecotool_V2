@@ -143,6 +143,45 @@ describe("useUndoShortcuts: 基本操作", () => {
   });
 });
 
+describe("useUndoShortcuts: onAction フィードバック", () => {
+  it("undo 成功で ('undo', true) が呼ばれる", () => {
+    const calls: [string, boolean][] = [];
+    renderHook(() => useUndoShortcuts(true, (t, a) => calls.push([t, a])));
+    pressKey("z", { ctrlKey: true });
+    expect(calls).toEqual([["undo", true]]);
+  });
+
+  it("履歴が空のときは ('undo', false)（空振りの可視化）", () => {
+    useReportStore.setState({ past: [], future: [] });
+    const calls: [string, boolean][] = [];
+    renderHook(() => useUndoShortcuts(true, (t, a) => calls.push([t, a])));
+    pressKey("z", { ctrlKey: true });
+    expect(calls).toEqual([["undo", false]]);
+  });
+
+  it("redo 側も applied を正しく報告する", () => {
+    const calls: [string, boolean][] = [];
+    renderHook(() => useUndoShortcuts(true, (t, a) => calls.push([t, a])));
+    pressKey("y", { ctrlKey: true }); // future 空 → 空振り
+    pressKey("z", { ctrlKey: true }); // undo 成功
+    pressKey("y", { ctrlKey: true }); // redo 成功
+    expect(calls).toEqual([
+      ["redo", false],
+      ["undo", true],
+      ["redo", true],
+    ]);
+  });
+
+  it("ガードで発火しなかったキー入力では onAction が呼ばれない", () => {
+    const calls: [string, boolean][] = [];
+    renderHook(() => useUndoShortcuts(true, (t, a) => calls.push([t, a])));
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    pressKey("z", { ctrlKey: true, target: input });
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("useUndoShortcuts: ガード", () => {
   it("input フォーカス中はネイティブ undo を優先して発火しない", () => {
     renderHook(() => useUndoShortcuts());

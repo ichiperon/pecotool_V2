@@ -377,11 +377,13 @@ export const useReportStore = create<ReportState>((set) => ({
   },
 
   clearTemplate: () => {
+    // cells も含めて全消去する。旧実装は cells だけ残す非対称で、
+    // 孤児 fieldId の値が無効なまま残留していた（レビュー指摘の既存問題）。
+    // selectedFieldId も replaceTemplateFields と同じ理由（孤児選択防止）でクリアする。
     set({
       template: { fields: [] },
-      pageOffsets: new Map(),
-      confidences: new Map(),
-      edited: new Map(),
+      selectedFieldId: null,
+      ...clearedExtractedDataPatch(),
       ...historyClearPatch(),
     });
   },
@@ -625,20 +627,27 @@ export const useReportStore = create<ReportState>((set) => ({
     set((state) => {
       const prevRows = getPageRows(state.cells, pageNum);
       const nextRows = [...prevRows];
-      const insertIdx = afterRowIndex + 1;
+      // splice の負 index は配列長基準で解決されるため、cells/confidences/edited の
+      // 長さが異なるとリマップがずれる。0 でクランプして3配列の挿入位置を揃える。
+      const insertIdx = Math.max(0, afterRowIndex + 1);
       nextRows.splice(insertIdx, 0, new Map<string, string>());
       const nextCells = new Map(state.cells);
       nextCells.set(pageNum, nextRows);
 
-      // 段構造が変わるのでそのページの confidences を丸ごと削除する（アライン保証のため）
+      // confidences は挿入位置に空 Map を差し込んで段 index を揃える（リマップ）。
+      // 旧実装のページ丸ごと破棄は、触っていないセルの低信頼ハイライトまで消す
+      // 情報損失だった（レビュー指摘）。挿入位置が配列長を超える場合、既存の
+      // 信頼度はすべて挿入位置より手前にありシフト不要（範囲外の段は「情報なし」）。
       let nextConfidences = state.confidences;
-      if (state.confidences.has(pageNum)) {
+      const prevConfRows = state.confidences.get(pageNum);
+      if (prevConfRows && insertIdx <= prevConfRows.length) {
+        const confRows = [...prevConfRows];
+        confRows.splice(insertIdx, 0, new Map<string, number>());
         nextConfidences = new Map(state.confidences);
-        nextConfidences.delete(pageNum);
+        nextConfidences.set(pageNum, confRows);
       }
 
-      // edited は段 index を正確にリマップできる（挿入位置に空 Set を差し込むだけ）ので
-      // confidences と違い丸ごと破棄せずフラグを保持する
+      // edited も同じリマップ（挿入位置に空 Set を差し込む）
       let nextEdited = state.edited;
       const prevEditedRows = state.edited.get(pageNum);
       if (prevEditedRows && insertIdx <= prevEditedRows.length) {
@@ -662,20 +671,23 @@ export const useReportStore = create<ReportState>((set) => ({
       // 最後の 1 段は削除しない
       if (prevRows.length <= 1) return {};
       // 範囲外 index は no-op。素通しすると filter は何も除去しないのに
-      // confidences のページ破棄と履歴 push だけが実行され、幻の undo 段が生まれる。
+      // 履歴 push だけが実行され、幻の undo 段が生まれる。
       if (rowIndex < 0 || rowIndex >= prevRows.length) return {};
       const nextRows = prevRows.filter((_, i) => i !== rowIndex);
       const nextCells = new Map(state.cells);
       nextCells.set(pageNum, nextRows);
 
-      // 段構造が変わるのでそのページの confidences を丸ごと削除する（アライン保証のため）
+      // confidences は削除段の index を落としてリマップ（insertRowAt と対称）。
+      // 残る段の信頼度ハイライトを保持する。
       let nextConfidences = state.confidences;
-      if (state.confidences.has(pageNum)) {
+      const prevConfRows = state.confidences.get(pageNum);
+      if (prevConfRows && rowIndex < prevConfRows.length) {
+        const confRows = prevConfRows.filter((_, i) => i !== rowIndex);
         nextConfidences = new Map(state.confidences);
-        nextConfidences.delete(pageNum);
+        nextConfidences.set(pageNum, confRows);
       }
 
-      // edited は削除段の index を落としてリマップ（insertRowAt と対称）
+      // edited も同じリマップ
       let nextEdited = state.edited;
       const prevEditedRows = state.edited.get(pageNum);
       if (prevEditedRows && rowIndex < prevEditedRows.length) {
@@ -720,11 +732,18 @@ export const useReportStore = create<ReportState>((set) => ({
       const nextCells = new Map(state.cells);
       nextCells.set(pageNum, nextRows);
 
-      // 段構造が変わるのでそのページの confidences を丸ごと削除する（アライン保証のため）
+      // confidences リマップ: 分割した欄は値が変わるので現段から信頼度を落とし、
+      // 同段の他欄は保持。挿入位置に空 Map を差し込んで段 index を揃える。
       let nextConfidences = state.confidences;
-      if (state.confidences.has(pageNum)) {
+      const prevConfRows = state.confidences.get(pageNum);
+      if (prevConfRows && rowIndex < prevConfRows.length) {
+        const confRows = [...prevConfRows];
+        const curConf = new Map(confRows[rowIndex]);
+        curConf.delete(fieldId);
+        confRows[rowIndex] = curConf;
+        confRows.splice(rowIndex + 1, 0, new Map<string, number>());
         nextConfidences = new Map(state.confidences);
-        nextConfidences.delete(pageNum);
+        nextConfidences.set(pageNum, confRows);
       }
 
       // 分割は人の再構成操作: 現段・新段の両断片に手修正フラグを立て、
@@ -775,11 +794,19 @@ export const useReportStore = create<ReportState>((set) => ({
       const nextCells = new Map(state.cells);
       nextCells.set(pageNum, nextRows);
 
-      // 段構造が変わるのでそのページの confidences を丸ごと削除する（アライン保証のため）
+      // confidences リマップ: splitCellToNextRow と同方針（分割欄の信頼度は落とし
+      // 他欄は保持・新段分の空 Map をブロック挿入）
       let nextConfidences = state.confidences;
-      if (state.confidences.has(pageNum)) {
+      const prevConfRows = state.confidences.get(pageNum);
+      if (prevConfRows && rowIndex < prevConfRows.length) {
+        const confRows = [...prevConfRows];
+        const curConf = new Map(confRows[rowIndex]);
+        curConf.delete(fieldId);
+        confRows[rowIndex] = curConf;
+        const newConfMaps = segments.slice(1).map(() => new Map<string, number>());
+        confRows.splice(rowIndex + 1, 0, ...newConfMaps);
         nextConfidences = new Map(state.confidences);
-        nextConfidences.delete(pageNum);
+        nextConfidences.set(pageNum, confRows);
       }
 
       // 一括分割も人の再構成操作: 全断片（現段＋新段すべて）に手修正フラグ

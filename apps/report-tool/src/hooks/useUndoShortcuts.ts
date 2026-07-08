@@ -1,5 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useReportStore } from "../store/reportStore";
+
+export type UndoActionType = "undo" | "redo";
 
 /**
  * エディタ操作（セル編集・削除・移動・段操作・オフセット調整）の Undo/Redo
@@ -31,8 +33,21 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
  * @param enabled false のときはリスナーを登録しない。
  *   undo 対象（セル・オフセット）が見える画面でのみ有効化することで、
  *   別ステップ表示中の Ctrl+Z が「見えないデータを無言で巻き戻す」遠隔作用を防ぐ。
+ * @param onAction ショートカット発火時のフィードバック用コールバック。
+ *   applied=false は履歴が空で何も起きなかった（空振り）ことを示す。
+ *   キーボード操作は視覚変化が画面外で起きうるため、呼び出し側で
+ *   トースト・aria-live 等の可視/可聴フィードバックを出すのに使う。
  */
-export function useUndoShortcuts(enabled: boolean = true): void {
+export function useUndoShortcuts(
+  enabled: boolean = true,
+  onAction?: (type: UndoActionType, applied: boolean) => void
+): void {
+  // 最新のコールバックを ref 経由で参照し、リスナーの再登録を避ける
+  const onActionRef = useRef(onAction);
+  useEffect(() => {
+    onActionRef.current = onAction;
+  });
+
   useEffect(() => {
     if (!enabled) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -49,9 +64,13 @@ export function useUndoShortcuts(enabled: boolean = true): void {
       e.preventDefault();
       const store = useReportStore.getState();
       if (isUndo) {
+        const applied = store.past.length > 0;
         store.undo();
+        onActionRef.current?.("undo", applied);
       } else {
+        const applied = store.future.length > 0;
         store.redo();
+        onActionRef.current?.("redo", applied);
       }
     };
 

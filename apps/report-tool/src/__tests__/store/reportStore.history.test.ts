@@ -150,7 +150,9 @@ describe("undo/redo: 段操作と confidences の整合", () => {
 
     useReportStore.getState().removeRowAt(1, 1);
     expect(useReportStore.getState().cells.get(1)).toHaveLength(1);
-    expect(useReportStore.getState().confidences.has(1)).toBe(false);
+    // confidences は削除段だけ落ちてリマップされる（残段の信頼度は保持）
+    expect(useReportStore.getState().confidences.get(1)).toHaveLength(1);
+    expect(useReportStore.getState().confidences.get(1)?.[0]?.get(idA)).toBe(0.9);
 
     useReportStore.getState().undo();
     expect(useReportStore.getState().cells.get(1)).toHaveLength(2);
@@ -319,7 +321,12 @@ describe("undo/redo: 往復・複数ページ・復元の深掘り", () => {
 
     useReportStore.getState().insertRowAt(1, 0);
     expect(useReportStore.getState().cells.get(1)).toHaveLength(3);
-    expect(useReportStore.getState().confidences.has(1)).toBe(false); // 段構造変更で破棄
+    // confidences は挿入位置に空 Map が差し込まれてリマップされる
+    const confAfter = useReportStore.getState().confidences.get(1);
+    expect(confAfter).toHaveLength(3);
+    expect(confAfter?.[0]?.get(id)).toBe(0.9);
+    expect(confAfter?.[1]?.size).toBe(0);
+    expect(confAfter?.[2]?.get(id)).toBe(0.4);
 
     useReportStore.getState().undo();
     expect(useReportStore.getState().cells.get(1)).toHaveLength(2);

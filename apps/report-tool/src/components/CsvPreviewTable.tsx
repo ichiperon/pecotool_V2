@@ -72,6 +72,11 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   const removeRowAt = useReportStore((s) => s.removeRowAt);
   const splitCellToNextRow = useReportStore((s) => s.splitCellToNextRow);
   const splitCellByNewlines = useReportStore((s) => s.splitCellByNewlines);
+  const undo = useReportStore((s) => s.undo);
+  const redo = useReportStore((s) => s.redo);
+  // primitive セレクタで購読し、履歴の中身ではなく有無の変化だけで再レンダーする
+  const canUndo = useReportStore((s) => s.past.length > 0);
+  const canRedo = useReportStore((s) => s.future.length > 0);
   const setCurrentPage = usePdfStore((s) => s.setCurrentPage);
 
   const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
@@ -665,6 +670,36 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
         <span className="csv-preview__info">
           {pageNumbers.length} ページ / {fields.length} 欄
         </span>
+        <div className="csv-preview__undo-group" role="group" aria-label="編集履歴">
+          <button
+            type="button"
+            className="csv-preview__undo-btn"
+            onClick={() => {
+              undo();
+              announce("元に戻しました");
+            }}
+            disabled={!canUndo}
+            title="元に戻す (Ctrl+Z)"
+            aria-label="元に戻す"
+            aria-keyshortcuts="Control+Z"
+          >
+            ↶
+          </button>
+          <button
+            type="button"
+            className="csv-preview__undo-btn"
+            onClick={() => {
+              redo();
+              announce("やり直しました");
+            }}
+            disabled={!canRedo}
+            title="やり直す (Ctrl+Y)"
+            aria-label="やり直す"
+            aria-keyshortcuts="Control+Y Control+Shift+Z"
+          >
+            ↷
+          </button>
+        </div>
         {import.meta.env.DEV && (
           <button type="button" className="csv-preview__sample-btn" onClick={injectSampleData}>
             サンプル再挿入（開発用）

@@ -10,7 +10,13 @@ import ThumbnailPanel from "./components/ThumbnailPanel";
 import ConfirmLayout from "./components/ConfirmLayout";
 import { useReportStore } from "./store/reportStore";
 import { useReportOcr } from "./hooks/useReportOcr";
-import { useUndoShortcuts } from "./hooks/useUndoShortcuts";
+import { useUndoShortcuts, type UndoActionType } from "./hooks/useUndoShortcuts";
+
+/**
+ * ゼロ幅スペース。同一テキストの連続セットでも aria-live の再アナウンスを
+ * 保証するためのトグル文字（CsvPreviewTable と同じパターン）。
+ */
+const ZWSP = "​";
 
 const STEP_LABELS: Record<StepNumber, string> = {
   1: "欄を定義",
@@ -28,10 +34,39 @@ const App: FC = () => {
   // OCR フックを App 上位で呼び出し（全ステップ共通・ConfirmLayout に渡す）
   const ocrHook = useReportOcr();
 
+  // Undo/Redo のキー操作フィードバック（チップ表示 + aria-live）。
+  // キーボード undo は視覚変化がスクロール外で起きうるため、何が起きたかを明示する。
+  const [undoNotice, setUndoNotice] = useState("");
+  const undoNoticeTimerRef = useRef<number | null>(null);
+  const undoNoticeToggleRef = useRef(false);
+  const handleUndoAction = (type: UndoActionType, applied: boolean) => {
+    const text =
+      type === "undo"
+        ? applied
+          ? "元に戻しました"
+          : "これ以上戻せる操作はありません"
+        : applied
+          ? "やり直しました"
+          : "やり直せる操作はありません";
+    undoNoticeToggleRef.current = !undoNoticeToggleRef.current;
+    setUndoNotice(undoNoticeToggleRef.current ? `${text}${ZWSP}` : text);
+    if (undoNoticeTimerRef.current !== null) {
+      window.clearTimeout(undoNoticeTimerRef.current);
+    }
+    undoNoticeTimerRef.current = window.setTimeout(() => setUndoNotice(""), 2000);
+  };
+  useEffect(() => {
+    return () => {
+      if (undoNoticeTimerRef.current !== null) {
+        window.clearTimeout(undoNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
   // エディタ操作の Undo/Redo（Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z）。
   // undo 対象（セル編集・オフセット調整）が見えるステップ③でのみ有効化する —
   // 他ステップで効かせると「見えない画面のデータが無言で巻き戻る」遠隔作用になる。
-  useUndoShortcuts(currentStep === 3);
+  useUndoShortcuts(currentStep === 3, handleUndoAction);
 
   // OCR 完了（cells が空→非空に変わった）を検知して自動ステップ③へ
   const prevCellsSizeRef = useRef(cells.size);
@@ -175,6 +210,14 @@ const App: FC = () => {
           </aside>
         </main>
       )}
+
+      {/* Undo/Redo フィードバックチップ（常設 live region・内容トグルで表示） */}
+      <div
+        className={`undo-notice${undoNotice ? " undo-notice--visible" : ""}`}
+        role="status"
+      >
+        {undoNotice}
+      </div>
 
       {/* フッタ: ステータスバー */}
       <footer className="app__footer" aria-label="ステータスバー">
