@@ -3,6 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import { useReportOcr } from "../../hooks/useReportOcr";
 import { useReportStore } from "../../store/reportStore";
 import { usePdfStore } from "../../store/pdfStore";
+import { buildTemplateCsv } from "../../logic/templateCsv";
 
 // ===== モック: @tauri-apps/api/core =====
 vi.mock("@tauri-apps/api/core", () => ({
@@ -662,5 +663,258 @@ describe("useReportOcr: runOcr の confidences 投入", () => {
     const conf = useReportStore.getState().confidences;
     // confMap.size === 0 なので matrix に格納されない
     expect(conf.size).toBe(0);
+  });
+});
+
+describe("useReportOcr: 明細欄の複数段抽出", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  function ocrResponse(blocks: Array<{ text: string; x: number; y: number; confidence?: number }>) {
+    return JSON.stringify({
+      status: "ok",
+      blocks: blocks.map((b) => ({
+        text: b.text,
+        bbox: { x: b.x, y: b.y, width: 40, height: 15 },
+        confidence: b.confidence,
+      })),
+    });
+  }
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 1,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("固定欄＋明細欄(品名3段) → 明細欄が3段に分割され、固定欄はrows[0]のみに入る", async () => {
+    // fields の処理順は template.fields の定義順（日付 → 品名 → 合計）と一致する
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "date", name: "日付", color: "#000", rect: { x: 10, y: 10, width: 100, height: 20 } },
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 40, width: 100, height: 100 },
+            isLineItem: true,
+          },
+          { id: "total", name: "合計", color: "#000", rect: { x: 10, y: 150, width: 100, height: 20 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () => ocrResponse([{ text: "2026-07-08", x: 0, y: 0, confidence: 0.9 }]))
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "商品A", x: 0, y: 0, confidence: 0.9 },
+          { text: "商品B", x: 0, y: 30, confidence: 0.8 },
+          { text: "商品C", x: 0, y: 60, confidence: 0.7 },
+        ])
+      )
+      .mockImplementationOnce(async () => ocrResponse([{ text: "1000", x: 0, y: 0, confidence: 0.95 }]));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(3);
+    expect(rows?.[0]?.get("date")).toBe("2026-07-08");
+    expect(rows?.[0]?.get("name")).toBe("商品A");
+    expect(rows?.[0]?.get("total")).toBe("1000");
+    expect(rows?.[1]?.get("name")).toBe("商品B");
+    expect(rows?.[1]?.has("date")).toBe(false);
+    expect(rows?.[1]?.has("total")).toBe(false);
+    expect(rows?.[2]?.get("name")).toBe("商品C");
+
+    // confidence は段では分割せず、欄クロップ全体の最小値（decideCellConfidence）を
+    // 各段に複製する。品名欄は 0.9/0.8/0.7 の最小値 0.7 が全段に入る。
+    const confRows = useReportStore.getState().confidences.get(1);
+    expect(confRows).toHaveLength(3);
+    expect(confRows?.[0]?.get("date")).toBe(0.9);
+    expect(confRows?.[0]?.get("name")).toBe(0.7);
+    expect(confRows?.[1]?.get("name")).toBe(0.7);
+    expect(confRows?.[2]?.get("name")).toBe(0.7);
+  });
+
+  it("CSV出力で3データ行になり、固定欄は複製・品名だけ段ごとに異なる（templateCsv 経由の統合テスト）", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "date", name: "日付", color: "#000", rect: { x: 10, y: 10, width: 100, height: 20 } },
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 40, width: 100, height: 100 },
+            isLineItem: true,
+          },
+          { id: "total", name: "合計", color: "#000", rect: { x: 10, y: 150, width: 100, height: 20 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () => ocrResponse([{ text: "2026-07-08", x: 0, y: 0 }]))
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "商品A", x: 0, y: 0 },
+          { text: "商品B", x: 0, y: 30 },
+          { text: "商品C", x: 0, y: 60 },
+        ])
+      )
+      .mockImplementationOnce(async () => ocrResponse([{ text: "1000", x: 0, y: 0 }]));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const { template, cells } = useReportStore.getState();
+    const csv = buildTemplateCsv(
+      template,
+      cells,
+      { includeFileName: false, includePageNumber: false, emptyValue: "", normalizeNumbers: false },
+      { pageNumbers: [1] }
+    );
+    const lines = csv.split("\r\n");
+
+    expect(lines).toHaveLength(4); // header + 3 data rows
+    expect(lines[1]).toBe("2026-07-08,商品A,1000");
+    expect(lines[2]).toBe("2026-07-08,商品B,1000");
+    expect(lines[3]).toBe("2026-07-08,商品C,1000");
+  });
+
+  it("代表明細欄(品名3段)より単価が少ない(2段)場合、単価の3段目は空にそろえられる", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 10, width: 100, height: 100 },
+            isLineItem: true,
+          },
+          {
+            id: "price",
+            name: "単価",
+            color: "#000",
+            rect: { x: 120, y: 10, width: 100, height: 100 },
+            isLineItem: true,
+          },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "商品A", x: 0, y: 0 },
+          { text: "商品B", x: 0, y: 30 },
+          { text: "商品C", x: 0, y: 60 },
+        ])
+      )
+      .mockImplementationOnce(async () =>
+        ocrResponse([
+          { text: "100", x: 0, y: 0 },
+          { text: "200", x: 0, y: 30 },
+        ])
+      );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(3);
+    expect(rows?.[0]?.get("price")).toBe("100");
+    expect(rows?.[1]?.get("price")).toBe("200");
+    expect(rows?.[2]?.get("price")).toBe("");
+  });
+
+  it("isLineItem 欄が1つも無いテンプレは従来どおり1段のみ（回帰なし）", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "date", name: "日付", color: "#000", rect: { x: 10, y: 10, width: 100, height: 20 } },
+          { id: "total", name: "合計", color: "#000", rect: { x: 10, y: 40, width: 100, height: 20 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+    });
+
+    invokeStub
+      .mockImplementationOnce(async () => ocrResponse([{ text: "2026-07-08", x: 0, y: 0 }]))
+      .mockImplementationOnce(async () => ocrResponse([{ text: "1000", x: 0, y: 0 }]));
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0]?.get("date")).toBe("2026-07-08");
+    expect(rows?.[0]?.get("total")).toBe("1000");
+  });
+
+  it("単一ページ再OCR（runOcrForPage）でも明細欄が複数段に分割される（両経路の対称性）", async () => {
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "name",
+            name: "品名",
+            color: "#000",
+            rect: { x: 10, y: 10, width: 100, height: 100 },
+            isLineItem: true,
+          },
+        ],
+      },
+      cells: new Map([[1, [new Map([["name", "旧品名"]])]]]),
+      confidences: new Map(),
+      pageOffsets: new Map(),
+    });
+
+    invokeStub.mockImplementationOnce(async () =>
+      ocrResponse([
+        { text: "新品A", x: 0, y: 0 },
+        { text: "新品B", x: 0, y: 30 },
+      ])
+    );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcrForPage(1);
+    });
+
+    const rows = useReportStore.getState().cells.get(1);
+    expect(rows).toHaveLength(2);
+    expect(rows?.[0]?.get("name")).toBe("新品A");
+    expect(rows?.[1]?.get("name")).toBe("新品B");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decideCellValue, decideCellConfidence } from "../../logic/cellValue";
+import { decideCellValue, decideCellConfidence, clusterBlocksToRows } from "../../logic/cellValue";
 import type { ReportBlock } from "../../types/report";
 
 function makeBlock(
@@ -111,6 +111,80 @@ describe("decideCellValue", () => {
     // threshold=25 → y 差 20 <= 25 → 同行 → x 昇順（左が x=0 なので左が先）
     const r2 = decideCellValue(blocks, { lineThreshold: 25 });
     expect(r2).toBe("左右");
+  });
+});
+
+describe("clusterBlocksToRows", () => {
+  it("y座標が3クラスタに分かれるブロック群 → 3段の文字列配列を返す", () => {
+    // 品名が縦に3つ並ぶ crop を想定（y座標が離れた3クラスタ）
+    const blocks = [
+      makeBlock("商品A", 0, 0),
+      makeBlock("商品B", 0, 30),
+      makeBlock("商品C", 0, 60),
+    ];
+    const result = clusterBlocksToRows(blocks);
+    expect(result).toEqual(["商品A", "商品B", "商品C"]);
+  });
+
+  it("y近接2ブロック（同一行折返し）→ 閾値内で同一段に束ねる", () => {
+    // lineThreshold(既定8) 以内の y 差 → 同一段として decideCellValue で連結
+    const blocks = [
+      makeBlock("折返し前半", 0, 0),
+      makeBlock("折返し後半", 150, 3),
+    ];
+    const result = clusterBlocksToRows(blocks);
+    expect(result).toEqual(["折返し前半折返し後半"]);
+  });
+
+  it("1件のみ → 1段の配列を返す", () => {
+    const result = clusterBlocksToRows([makeBlock("単一", 0, 0)]);
+    expect(result).toEqual(["単一"]);
+  });
+
+  it("空配列 → 空配列を返す", () => {
+    expect(clusterBlocksToRows([])).toEqual([]);
+  });
+
+  it("空文字・空白のみのブロックは除外してからクラスタリングする", () => {
+    const blocks = [
+      makeBlock("", 0, 0),
+      makeBlock("　", 0, 30),
+      makeBlock("有効値", 0, 60),
+    ];
+    expect(clusterBlocksToRows(blocks)).toEqual(["有効値"]);
+  });
+
+  it("全件空白 → 空配列を返す", () => {
+    const blocks = [makeBlock("", 0, 0), makeBlock("   ", 0, 30)];
+    expect(clusterBlocksToRows(blocks)).toEqual([]);
+  });
+
+  it("同一段内は x 昇順で連結される（decideCellValue に委譲）", () => {
+    const blocks = [
+      makeBlock("右", 200, 0),
+      makeBlock("左", 0, 2),
+    ];
+    expect(clusterBlocksToRows(blocks)).toEqual(["左右"]);
+  });
+
+  it("lineThreshold をカスタム指定できる（段の分かれ方が変わる）", () => {
+    const blocks = [
+      makeBlock("A", 0, 0),
+      makeBlock("B", 0, 20),
+    ];
+    // threshold=5 → y差20 > 5 → 別段
+    expect(clusterBlocksToRows(blocks, { lineThreshold: 5 })).toEqual(["A", "B"]);
+    // threshold=25 → y差20 <= 25 → 同段
+    expect(clusterBlocksToRows(blocks, { lineThreshold: 25 })).toEqual(["A" + "B"]);
+  });
+
+  it("joiner オプションが各段の連結に反映される", () => {
+    const blocks = [
+      makeBlock("A", 0, 0),
+      makeBlock("B", 100, 0),
+      makeBlock("C", 0, 60),
+    ];
+    expect(clusterBlocksToRows(blocks, { joiner: " " })).toEqual(["A B", "C"]);
   });
 });
 

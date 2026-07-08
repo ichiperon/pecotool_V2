@@ -5,10 +5,10 @@ import type { ConfidenceMatrix } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 import { parseOcrResponse } from "../lib/ocrAdapter";
 import { computeCropRect, cropCanvasToPng, renderPageOffscreen } from "../lib/ocrCrop";
-import { decideCellValue, decideCellConfidence } from "../logic/cellValue";
+import { decideCellValue, decideCellConfidence, clusterBlocksToRows } from "../logic/cellValue";
 import { effectiveRectForPage } from "../logic/pageOffset";
 import { ZERO_OFFSET } from "../types/report";
-import type { CellMatrix, PageOffset, ReportRow } from "../types/report";
+import type { CellMatrix, PageOffset, ReportField, ReportRow } from "../types/report";
 
 /** OCR の描画スケール。値が大きいほど高精度だがメモリ消費が増える。 */
 const REPORT_OCR_RENDER_SCALE = 3.0;
@@ -36,26 +36,140 @@ export interface UseReportOcrReturn {
   runOcrForPage: (pageNum: number) => Promise<void>;
 }
 
-/** runOcrSinglePage の戻り値: セル値と信頼度の両 Map をまとめる。 */
+/** runOcrSinglePage の戻り値: セル値と信頼度の両段配列をまとめる。 */
 interface OcrSinglePageResult {
-  fieldMap: ReportRow;
-  confMap: Map<string, number>;
+  rows: ReportRow[];
+  confRows: Array<Map<string, number>>;
 }
 
 /**
- * 単一ページの OCR を実行し、fieldId → セル値 と fieldId → confidence の Map を返す内部ヘルパー。
+ * 明細欄（isLineItem）の値配列を代表欄の段数 rowCount にそろえる。
+ *
+ * - 過不足なし: そのまま返す
+ * - 不足: 末尾を空文字で埋める
+ * - 超過: rowCount-1 段目までそのまま採用し、あふれた分は最終段へ改行(\n)で連結する
+ *   （黙って切り捨てると OCR 結果を失うため、視認・復元可能な形で残す）
+ *
+ * @param values   その欄の段ごとの値配列（clusterBlocksToRows の戻り値）
+ * @param rowCount 代表明細欄の段数（そろえたい段数）
+ */
+function alignValuesToRowCount(values: string[], rowCount: number): string[] {
+  if (values.length <= rowCount) {
+    return [...values, ...Array(rowCount - values.length).fill("")];
+  }
+  const head = values.slice(0, rowCount - 1);
+  const overflow = values.slice(rowCount - 1).join("\n");
+  return [...head, overflow];
+}
+
+/**
+ * 欄ごとの値配列（valuesByField）から段配列（ReportRow[]）を組み立てる。
+ *
+ * 段数の基準: 「代表明細欄＝最初の isLineItem 欄」の段数 N に全列をそろえる。
+ * - 固定欄（isLineItem=false）: rows[0] にのみ値を集約する。rows[1..] は当該欄を
+ *   持たない（templateCsv は固定欄を常に rows[0] から読むため無関係、UI は
+ *   〃表示で対応する）。
+ * - 明細欄（isLineItem=true）: alignValuesToRowCount で N 段にそろえて各段に格納する。
+ * - isLineItem 欄が 1 つも無い場合は従来どおり 1 段のみを返す（回帰なし）。
+ *
+ * @param fields         欄定義の配列（template.fields の順序）
+ * @param valuesByField  fieldId → 段ごとの値配列
+ */
+function buildRowsFromFieldValues(
+  fields: ReportField[],
+  valuesByField: Map<string, string[]>
+): ReportRow[] {
+  const lineItemFields = fields.filter((f) => f.isLineItem === true);
+
+  if (lineItemFields.length === 0) {
+    // 明細欄なし: 従来どおり 1 段（バイト等価の回帰ゼロ経路）
+    const row: ReportRow = new Map<string, string>();
+    for (const field of fields) {
+      row.set(field.id, valuesByField.get(field.id)?.[0] ?? "");
+    }
+    return [row];
+  }
+
+  // 代表明細欄 = 最初の isLineItem 欄。その段数 N（最低 1）に全列をそろえる。
+  const representativeId = lineItemFields[0].id;
+  const representativeValues = valuesByField.get(representativeId) ?? [];
+  const rowCount = Math.max(1, representativeValues.length);
+
+  const rows: ReportRow[] = Array.from({ length: rowCount }, () => new Map<string, string>());
+
+  for (const field of fields) {
+    const values = valuesByField.get(field.id) ?? [];
+
+    if (field.isLineItem !== true) {
+      // 固定欄: rows[0] にのみ集約する
+      rows[0].set(field.id, values[0] ?? "");
+      continue;
+    }
+
+    const aligned = alignValuesToRowCount(values, rowCount);
+    aligned.forEach((value, i) => {
+      rows[i].set(field.id, value);
+    });
+  }
+
+  return rows;
+}
+
+/**
+ * 欄ごとの confidence（decideCellConfidence の結果、欄クロップ全体の最小値）から
+ * 段配列（confRows）を組み立てる。confidence は段ごとに再計算せず、欄単位の値を
+ * 対象段全てへ複製する（rows の構造と対称: 固定欄は rows[0] のみ、明細欄は
+ * 全 rowCount 段）。
+ *
+ * @param fields       欄定義の配列
+ * @param confByField  fieldId → confidence（undefined は未設定＝confMap に入れない）
+ * @param rowCount     buildRowsFromFieldValues が返した rows.length
+ */
+function buildConfRowsFromFieldConfidence(
+  fields: ReportField[],
+  confByField: Map<string, number>,
+  rowCount: number
+): Array<Map<string, number>> {
+  const confRows: Array<Map<string, number>> = Array.from(
+    { length: rowCount },
+    () => new Map<string, number>()
+  );
+
+  for (const field of fields) {
+    const conf = confByField.get(field.id);
+    if (conf === undefined) continue;
+
+    if (field.isLineItem !== true) {
+      confRows[0].set(field.id, conf);
+      continue;
+    }
+
+    for (let i = 0; i < rowCount; i++) {
+      confRows[i].set(field.id, conf);
+    }
+  }
+
+  return confRows;
+}
+
+/**
+ * 単一ページの OCR を実行し、段配列（ReportRow[]）と信頼度段配列を返す内部ヘルパー。
+ *
+ * isLineItem=true の欄は clusterBlocksToRows で複数段に分割し、代表明細欄（最初の
+ * isLineItem 欄）の段数にそろえる。isLineItem=false の欄は従来どおり 1 値に集約し
+ * rows[0] にのみ格納する。
  *
  * @param pdfDoc      pdfjs ドキュメントオブジェクト
  * @param pageNumber  対象ページ番号 (1 始まり)
  * @param fields      欄定義の配列
  * @param offset      ページ補正オフセット
  * @param isCancelled キャンセル判定コールバック
- * @returns           セル値と信頼度の Map のペア、キャンセル時は null
+ * @returns           段配列と信頼度段配列のペア、キャンセル時は null
  */
 async function runOcrSinglePage(
   pdfDoc: Awaited<ReturnType<typeof import("pdfjs-dist").getDocument>["promise"]>,
   pageNumber: number,
-  fields: ReturnType<typeof useReportStore.getState>["template"]["fields"],
+  fields: ReportField[],
   offset: PageOffset,
   isCancelled: () => boolean
 ): Promise<OcrSinglePageResult | null> {
@@ -66,8 +180,10 @@ async function runOcrSinglePage(
     canvas = rendered.canvas;
     const pageWidth = rendered.pageWidth;
 
-    const fieldMap: ReportRow = new Map<string, string>();
-    const confMap: Map<string, number> = new Map<string, number>();
+    // フィールドごとの段別値配列（固定欄は要素数1、明細欄はクラスタ数分）と
+    // 欄単位の confidence を集める。段配列への組み立ては全欄処理後にまとめて行う。
+    const valuesByField = new Map<string, string[]>();
+    const confByField = new Map<string, number>();
 
     for (const field of fields) {
       if (isCancelled()) return null;
@@ -82,7 +198,7 @@ async function runOcrSinglePage(
       );
 
       if (crop.width <= 0 || crop.height <= 0) {
-        fieldMap.set(field.id, "");
+        valuesByField.set(field.id, field.isLineItem === true ? [] : [""]);
         continue;
       }
 
@@ -108,7 +224,7 @@ async function runOcrSinglePage(
           `[ReportOCR] invoke エラー (page=${pageNumber}, field=${field.id}):`,
           e
         );
-        fieldMap.set(field.id, "");
+        valuesByField.set(field.id, field.isLineItem === true ? [] : [""]);
         continue;
       }
 
@@ -120,22 +236,29 @@ async function runOcrSinglePage(
           `[ReportOCR] OCR レスポンスパースエラー (page=${pageNumber}, field=${field.id}):`,
           e
         );
-        fieldMap.set(field.id, "");
+        valuesByField.set(field.id, field.isLineItem === true ? [] : [""]);
         continue;
       }
 
       // クロップ＝この欄の領域なので、認識ブロックは全てこの欄に属する。
-      // 座標再割り当てを挟まず decideCellValue で直接セル値を決める。
-      fieldMap.set(field.id, decideCellValue(blocks));
+      // 座標再割り当てを挟まず decideCellValue / clusterBlocksToRows で直接値を決める。
+      if (field.isLineItem === true) {
+        valuesByField.set(field.id, clusterBlocksToRows(blocks));
+      } else {
+        valuesByField.set(field.id, [decideCellValue(blocks)]);
+      }
 
-      // confidence: ブロック群の最小値を欄単位で記録する
+      // confidence: ブロック群の最小値を欄単位で記録する（段では分割しない）
       const conf = decideCellConfidence(blocks);
       if (conf !== undefined) {
-        confMap.set(field.id, conf);
+        confByField.set(field.id, conf);
       }
     }
 
-    return { fieldMap, confMap };
+    const rows = buildRowsFromFieldValues(fields, valuesByField);
+    const confRows = buildConfRowsFromFieldConfidence(fields, confByField, rows.length);
+
+    return { rows, confRows };
   } finally {
     if (canvas) {
       canvas.width = 0;
@@ -223,14 +346,12 @@ export function useReportOcr(): UseReportOcrReturn {
 
           if (result === null) break; // キャンセル
 
-          const { fieldMap, confMap } = result;
-          if (fieldMap.size > 0) {
-            // 新形: ReportRow[] (1段配列) として格納
-            matrix.set(pageNumber, [fieldMap]);
+          const { rows, confRows } = result;
+          if (rows.length > 0 && rows.some((r) => r.size > 0)) {
+            matrix.set(pageNumber, rows);
           }
-          if (confMap.size > 0) {
-            // confidence も 1 段配列として並走格納
-            confMatrix.set(pageNumber, [confMap]);
+          if (confRows.some((m) => m.size > 0)) {
+            confMatrix.set(pageNumber, confRows);
           }
         } catch (e) {
           console.error(`[ReportOCR] ページ ${pageNumber} 処理エラー:`, e);
@@ -305,11 +426,11 @@ export function useReportOcr(): UseReportOcrReturn {
         );
 
         if (result !== null && !isCancelled()) {
-          const { fieldMap, confMap } = result;
-          // 全置換せず対象ページのみ部分更新する（新形: [fieldMap] で 1 段配列）
-          setCellsForPage(pageNum, [fieldMap]);
+          const { rows, confRows } = result;
+          // 全置換せず対象ページのみ部分更新する（複数段対応: rows.length 段）
+          setCellsForPage(pageNum, rows);
           // setCellsForPage が confidences をクリアするので後から setConfidencesForPage を呼ぶ
-          setConfidencesForPage(pageNum, [confMap]);
+          setConfidencesForPage(pageNum, confRows);
         }
       } finally {
         pdfDoc.destroy().catch(() => {});
