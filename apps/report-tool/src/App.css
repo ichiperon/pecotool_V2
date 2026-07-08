@@ -926,6 +926,24 @@ button {
   color: #92400e;
 }
 
+/* 手修正済みセル（人が編集・削除・移動・分割で触った印）
+   値の視認を邪魔しない薄いバッジ（左上の小さな✎）＋左端のアクセント線。
+   低信頼(--low-confidence)と重なった場合も背景は琥珀のまま、
+   アクセント線と✎で「人が触れた」ことが分かる。 */
+.csv-preview__td--edited {
+  box-shadow: inset 2px 0 0 #2b6cb0;
+}
+
+.csv-preview__edited-mark {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  font-size: 9px;
+  line-height: 1.2;
+  color: #2b6cb0;
+  pointer-events: none;
+}
+
 /* 明細欄セル */
 .csv-preview__td--lineitem {
   white-space: pre-wrap;

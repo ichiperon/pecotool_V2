@@ -63,6 +63,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   const fields = useReportStore((s) => s.template.fields);
   const cells = useReportStore((s) => s.cells);
   const confidences = useReportStore((s) => s.confidences);
+  const edited = useReportStore((s) => s.edited);
   const setCells = useReportStore((s) => s.setCells);
   const setCellValue = useReportStore((s) => s.setCellValue);
   const clearCellValue = useReportStore((s) => s.clearCellValue);
@@ -801,6 +802,12 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
                         !isDittoCell &&
                         !isEmpty;
 
+                      // 手修正フラグ: 人が編集・削除・移動・分割で触ったセルの印
+                      // （〃セルは対象外。空セルには表示する — 人が意図して空にした証跡）
+                      const isEdited =
+                        edited.get(pageNum)?.[rowIndex]?.has(field.id) === true &&
+                        !isDittoCell;
+
                       // isFocused: roving tabindex 判定
                       const isFocused =
                         focusPos?.pageNum === pageNum &&
@@ -824,6 +831,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
                             isDittoCell ? "csv-preview__td--ditto" : "",
                             isLineItem ? "csv-preview__td--lineitem" : "",
                             isLowConfidence ? "csv-preview__td--low-confidence" : "",
+                            isEdited ? "csv-preview__td--edited" : "",
                           ]
                             .filter(Boolean)
                             .join(" ")}
@@ -831,7 +839,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
                           aria-label={
                             isDittoCell
                               ? `${pageNum}ページ目 段${rowIndex + 1} ${field.name} 同上`
-                              : `${pageNum}ページ目 段${rowIndex + 1} ${field.name} ${isEmpty ? "空" : value}${isLowConfidence ? "。信頼度低・要確認" : ""}${isDittoCell ? "" : "。Delete キーで削除"}`
+                              : `${pageNum}ページ目 段${rowIndex + 1} ${field.name} ${isEmpty ? "空" : value}${isLowConfidence ? "。信頼度低・要確認" : ""}${isEdited ? "。手修正済み" : ""}${isDittoCell ? "" : "。Delete キーで削除"}`
                           }
                           {...(isDimmedPage ? { "aria-disabled": "true" } : {})}
                           {...(isDittoCell ? { "aria-readonly": "true" } : {})}
@@ -900,6 +908,15 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
                             )
                           ) : (
                             <>
+                              {isEdited && (
+                                <span
+                                  className="csv-preview__edited-mark"
+                                  title="手修正済み"
+                                  aria-hidden="true"
+                                >
+                                  ✎
+                                </span>
+                              )}
                               {isEmpty ? (
                                 <span className="csv-preview__empty-mark">(空)</span>
                               ) : (

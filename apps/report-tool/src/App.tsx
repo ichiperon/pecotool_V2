@@ -10,6 +10,7 @@ import ThumbnailPanel from "./components/ThumbnailPanel";
 import ConfirmLayout from "./components/ConfirmLayout";
 import { useReportStore } from "./store/reportStore";
 import { useReportOcr } from "./hooks/useReportOcr";
+import { useUndoShortcuts } from "./hooks/useUndoShortcuts";
 
 const STEP_LABELS: Record<StepNumber, string> = {
   1: "欄を定義",
@@ -26,6 +27,11 @@ const App: FC = () => {
 
   // OCR フックを App 上位で呼び出し（全ステップ共通・ConfirmLayout に渡す）
   const ocrHook = useReportOcr();
+
+  // エディタ操作の Undo/Redo（Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z）。
+  // undo 対象（セル編集・オフセット調整）が見えるステップ③でのみ有効化する —
+  // 他ステップで効かせると「見えない画面のデータが無言で巻き戻る」遠隔作用になる。
+  useUndoShortcuts(currentStep === 3);
 
   // OCR 完了（cells が空→非空に変わった）を検知して自動ステップ③へ
   const prevCellsSizeRef = useRef(cells.size);

@@ -119,22 +119,19 @@ describe("clearCellValue", () => {
     expect(useReportStore.getState().cells).toBe(prevCells);
   });
 
-  it("行はあるが該当fieldIdが無いセルのclearCellValueは空文字をセットし新参照を返す", () => {
-    // cells: page1 に f1=100 のみ。f99 は未設定（undefined）
+  it("行はあるが該当fieldIdが無い（undefined）セルの clearCellValue は no-op", () => {
+    // cells: page1 に f1=100 のみ。f99 は未設定（undefined）。
+    // undefined も表示上は同じ「(空)」なので、書き込みを許すと見た目が変わらないのに
+    // 手修正バッジと undo 履歴だけが積まれる — レビュー指摘（MINOR）で no-op に統一。
     setupCells1([[1, [["f1", "100"]]]]);
     const prevCells = useReportStore.getState().cells;
-    const prevRow = prevCells.get(1)![0];
-    // clearCellValue(1, "f99") → f99 は未設定なので get() = undefined ≠ "" → no-op にならない
+    const prevPast = useReportStore.getState().past;
     useReportStore.getState().clearCellValue(1, "f99");
-    const nextCells = useReportStore.getState().cells;
-    // cells は新参照になる
-    expect(nextCells).not.toBe(prevCells);
-    // row も新参照になる
-    expect(nextCells.get(1)![0]).not.toBe(prevRow);
-    // f99 に空文字がセットされる
-    expect(nextCells.get(1)![0].get("f99")).toBe("");
+    // no-op: cells も履歴も参照ごと変わらない
+    expect(useReportStore.getState().cells).toBe(prevCells);
+    expect(useReportStore.getState().past).toBe(prevPast);
     // f1 の値は変わらない
-    expect(nextCells.get(1)![0].get("f1")).toBe("100");
+    expect(prevCells.get(1)![0].get("f1")).toBe("100");
   });
 });
 
