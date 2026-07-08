@@ -918,3 +918,211 @@ describe("useReportOcr: 明細欄の複数段抽出", () => {
     expect(rows?.[1]?.get("name")).toBe("新品B");
   });
 });
+
+describe("useReportOcr: レイアウト混在検出（layoutMismatchPages）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+  let renderStub: ReturnType<typeof vi.fn>;
+
+  /** ページ番号→寸法のマップで renderPageOffscreen を差し替える */
+  function setRenderDims(dimsByPage: Record<number, { w: number; h: number }>) {
+    renderStub.mockImplementation(async (_doc: unknown, pageNumber: number) => {
+      const d = dimsByPage[pageNumber] ?? { w: 595, h: 842 };
+      return {
+        canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+        pageWidth: d.w,
+        pageHeight: d.h,
+      };
+    });
+  }
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+    invokeStub.mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [
+          { text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 },
+        ],
+      })
+    );
+
+    const ocrCrop = await import("../../lib/ocrCrop");
+    renderStub = vi.mocked(ocrCrop.renderPageOffscreen);
+
+    useReportStore.setState({
+      template: {
+        fields: [
+          {
+            id: "field-1",
+            name: "欄1",
+            color: "#7cb9e8",
+            rect: { x: 10, y: 10, width: 100, height: 50 },
+          },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(async () => {
+    // ページ別 mockImplementation を既定実装へ戻して他 describe への汚染を防ぐ
+    renderStub.mockImplementation(async () => ({
+      canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+      pageWidth: 595,
+      pageHeight: 842,
+    }));
+    vi.clearAllMocks();
+  });
+
+  it("先頭ページと寸法が異なるページ（横向き混在）が layoutMismatchPages に積まれる", async () => {
+    // ページ2だけ A4 横向き（width/height が入れ替わる）
+    setRenderDims({ 2: { w: 842, h: 595 } });
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.layoutMismatchPages).toEqual([2]);
+  });
+
+  it("全ページ同一寸法なら layoutMismatchPages は空", async () => {
+    setRenderDims({});
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([]);
+  });
+
+  it("1pt 以下の浮動小数の端数は混在扱いしない（許容誤差）", async () => {
+    setRenderDims({ 2: { w: 595.5, h: 842.4 } });
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([]);
+  });
+
+  it("複数ページの混在は昇順で全件積まれる", async () => {
+    setRenderDims({ 2: { w: 842, h: 595 }, 3: { w: 1190, h: 842 } });
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([2, 3]);
+  });
+
+  it("再実行で前回の混在警告がクリアされる", async () => {
+    setRenderDims({ 2: { w: 842, h: 595 } });
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([2]);
+
+    // 全ページ同一寸法に差し替えて再実行 → クリア
+    setRenderDims({});
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(result.current.layoutMismatchPages).toEqual([]);
+  });
+});
+
+describe("useReportOcr: レイアウト混在検出 × 処理エラーの相互作用", () => {
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    vi.mocked(tauriCore.invoke).mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [{ text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+      })
+    );
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(async () => {
+    const ocrCrop = await import("../../lib/ocrCrop");
+    vi.mocked(ocrCrop.renderPageOffscreen).mockImplementation(async () => ({
+      canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+      pageWidth: 595,
+      pageHeight: 842,
+    }));
+    vi.clearAllMocks();
+  });
+
+  it("ページ1が処理エラーのとき基準は次の成功ページになり、失敗ページは混在判定されない", async () => {
+    const ocrCrop = await import("../../lib/ocrCrop");
+    vi.mocked(ocrCrop.renderPageOffscreen).mockImplementation(
+      async (_doc: unknown, pageNumber: number) => {
+        // ページ1: render 失敗（failedPages 行き・寸法が取れないので基準/混在の判定外）
+        if (pageNumber === 1) throw new Error("render失敗");
+        // ページ2: A4 縦（最初の成功ページ＝基準）／ページ3: A4 横（基準と不一致）
+        const d = pageNumber === 3 ? { w: 842, h: 595 } : { w: 595, h: 842 };
+        return {
+          canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+          pageWidth: d.w,
+          pageHeight: d.h,
+        };
+      }
+    );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.failedPages).toEqual([1]);
+    expect(result.current.layoutBasePage).toBe(2);
+    expect(result.current.layoutMismatchPages).toEqual([3]);
+  });
+
+  it("混在ありの正常実行では layoutBasePage=1 が公開される", async () => {
+    const ocrCrop = await import("../../lib/ocrCrop");
+    vi.mocked(ocrCrop.renderPageOffscreen).mockImplementation(
+      async (_doc: unknown, pageNumber: number) => {
+        const d = pageNumber === 2 ? { w: 842, h: 595 } : { w: 595, h: 842 };
+        return {
+          canvas: { width: 1785, height: 2526, getContext: vi.fn() } as unknown as HTMLCanvasElement,
+          pageWidth: d.w,
+          pageHeight: d.h,
+        };
+      }
+    );
+
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.layoutBasePage).toBe(1);
+    expect(result.current.layoutMismatchPages).toEqual([2]);
+  });
+});

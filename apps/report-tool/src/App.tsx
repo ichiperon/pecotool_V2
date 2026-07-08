@@ -11,12 +11,7 @@ import ConfirmLayout from "./components/ConfirmLayout";
 import { useReportStore } from "./store/reportStore";
 import { useReportOcr } from "./hooks/useReportOcr";
 import { useUndoShortcuts, type UndoActionType } from "./hooks/useUndoShortcuts";
-
-/**
- * ゼロ幅スペース。同一テキストの連続セットでも aria-live の再アナウンスを
- * 保証するためのトグル文字（CsvPreviewTable と同じパターン）。
- */
-const ZWSP = "​";
+import { makeAnnouncement } from "./lib/announce";
 
 const STEP_LABELS: Record<StepNumber, string> = {
   1: "欄を定義",
@@ -49,7 +44,7 @@ const App: FC = () => {
           ? "やり直しました"
           : "やり直せる操作はありません";
     undoNoticeToggleRef.current = !undoNoticeToggleRef.current;
-    setUndoNotice(undoNoticeToggleRef.current ? `${text}${ZWSP}` : text);
+    setUndoNotice(makeAnnouncement(text, undoNoticeToggleRef.current));
     if (undoNoticeTimerRef.current !== null) {
       window.clearTimeout(undoNoticeTimerRef.current);
     }

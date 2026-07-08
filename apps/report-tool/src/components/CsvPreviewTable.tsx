@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useReportStore } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
+import { makeAnnouncement } from "../lib/announce";
 
 /** フォーカス位置（段対応） */
 interface FocusPos {
@@ -27,18 +28,6 @@ interface DragRefState {
   startY: number;
   /** 移動量が閾値を超えたらドラッグ開始と判定 */
   started: boolean;
-}
-
-/**
- * ゼロ幅スペース (U+200B)。不可視かつスクリーンリーダーも無視するため表示に影響しない。
- * aria-live の再アナウンスを保証するため、同一テキストでも DOM の textContent を変化させる
- * トグル文字として使う。
- */
-// eslint-disable-next-line no-irregular-whitespace
-const ZWSP = "​";
-
-function makeAnnouncement(text: string, toggle: boolean): string {
-  return toggle ? `${text}${ZWSP}` : text;
 }
 
 /** ドラッグ開始と判定するポインター移動量の閾値 (px) */

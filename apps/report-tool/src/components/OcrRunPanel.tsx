@@ -31,7 +31,8 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
   const cells = useReportStore((s) => s.cells);
   const filePath = usePdfStore((s) => s.filePath);
   const numPages = usePdfStore((s) => s.numPages);
-  const { isRunning, progress, failedPages, runOcr, cancelOcr } = ocrHook;
+  const { isRunning, progress, failedPages, layoutMismatchPages, layoutBasePage, runOcr, cancelOcr } =
+    ocrHook;
 
   const canRun = !isRunning && !!filePath && numPages > 0 && fields.length > 0;
   const progressPct =
@@ -109,6 +110,16 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
       {!isRunning && failedPages.length > 0 && (
         <p className="ocr-run-panel__failed" role="alert">
           ページ {failedPages.join(", ")} の処理に失敗しました（該当ページのデータは抽出されていません）
+        </p>
+      )}
+
+      {/* 用紙サイズ・向き混在の警告（欄テンプレは全ページ同一レイアウト前提）。
+          基準は「最初に処理成功したページ」— ページ1が処理エラーのときは1でないため、
+          番号を明示する（「先頭ページ」と書くと基準がずれたとき嘘になる）。 */}
+      {!isRunning && layoutMismatchPages.length > 0 && layoutBasePage !== null && (
+        <p className="ocr-run-panel__mismatch" role="note">
+          ページ {layoutMismatchPages.join(", ")} は基準ページ（{layoutBasePage}
+          ページ目）と用紙サイズ・向きが異なります。欄の位置が内容とずれている可能性があるため、確認ステップで該当ページの値を確認してください
         </p>
       )}
 

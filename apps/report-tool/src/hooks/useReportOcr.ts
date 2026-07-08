@@ -30,17 +30,38 @@ export interface UseReportOcrReturn {
   reocrTarget: number | null;
   /** 直近の全ページ OCR で処理エラーになったページ番号（昇順）。エラーなし・未実行時は空配列。 */
   failedPages: number[];
+  /**
+   * 直近の全ページ OCR で、基準ページ（最初に処理成功したページ）と scale=1 の
+   * ページ寸法が異なったページ番号（昇順）。用紙サイズ・向きの混在 PDF では
+   * 欄テンプレートが内容とずれて空振りしうるため、警告表示に使う（計画書 §7.2 の
+   * 「rotation 混在は MVP 対象外＝警告」の実装）。混在なし・未実行時は空配列。
+   */
+  layoutMismatchPages: number[];
+  /**
+   * レイアウト混在判定の基準ページ番号（最初に処理成功したページ。通常は 1 だが、
+   * ページ 1 が処理エラーのときはずれる）。未実行・全ページ失敗時は null。
+   * 警告文言で「どのページと比べて違うのか」を正確に示すために公開する。
+   */
+  layoutBasePage: number | null;
   runOcr: () => Promise<void>;
   cancelOcr: () => void;
   /** 指定ページのみを再 OCR して setCellsForPage で部分更新する。 */
   runOcrForPage: (pageNum: number) => Promise<void>;
 }
 
-/** runOcrSinglePage の戻り値: セル値と信頼度の両段配列をまとめる。 */
+/** runOcrSinglePage の戻り値: セル値・信頼度の両段配列と scale=1 ページ寸法。 */
 interface OcrSinglePageResult {
   rows: ReportRow[];
   confRows: Array<Map<string, number>>;
+  pageWidth: number;
+  pageHeight: number;
 }
+
+/**
+ * ページ寸法の一致判定の許容誤差 (pt)。同一用紙でも浮動小数の端数が出ることが
+ * あるため、1pt 未満の差は同一レイアウトとみなす。
+ */
+const PAGE_DIMENSION_TOLERANCE = 1;
 
 /**
  * 明細欄（isLineItem）の値配列を代表欄の段数 rowCount にそろえる。
@@ -258,7 +279,7 @@ async function runOcrSinglePage(
     const rows = buildRowsFromFieldValues(fields, valuesByField);
     const confRows = buildConfRowsFromFieldConfidence(fields, confByField, rows.length);
 
-    return { rows, confRows };
+    return { rows, confRows, pageWidth, pageHeight: rendered.pageHeight };
   } finally {
     if (canvas) {
       canvas.width = 0;
@@ -287,6 +308,8 @@ export function useReportOcr(): UseReportOcrReturn {
   const [progress, setProgress] = useState<ReportOcrProgress | null>(null);
   const [reocrTarget, setReocrTarget] = useState<number | null>(null);
   const [failedPages, setFailedPages] = useState<number[]>([]);
+  const [layoutMismatchPages, setLayoutMismatchPages] = useState<number[]>([]);
+  const [layoutBasePage, setLayoutBasePage] = useState<number | null>(null);
 
   // キャンセル制御: epoch が変わったらループを中断する
   const epochRef = useRef(0);
@@ -306,10 +329,15 @@ export function useReportOcr(): UseReportOcrReturn {
     setIsRunning(true);
     setProgress({ done: 0, total: numPages });
     setFailedPages([]);
+    setLayoutMismatchPages([]);
+    setLayoutBasePage(null);
 
     const matrix: CellMatrix = new Map();
     const confMatrix: ConfidenceMatrix = new Map();
     const failed: number[] = [];
+    const mismatched: number[] = [];
+    // レイアウト混在検出の基準（最初に処理成功したページの scale=1 寸法とページ番号）
+    let baseDims: { width: number; height: number; pageNumber: number } | null = null;
 
     const isCancelled = () =>
       cancelledRef.current || epochRef.current !== currentEpoch;
@@ -346,7 +374,19 @@ export function useReportOcr(): UseReportOcrReturn {
 
           if (result === null) break; // キャンセル
 
-          const { rows, confRows } = result;
+          const { rows, confRows, pageWidth, pageHeight } = result;
+
+          // 用紙サイズ・向きの混在検出: 基準ページと寸法が異なるページは
+          // 欄テンプレートが内容とずれて空振りしうるため警告対象に積む（§7.2）
+          if (baseDims === null) {
+            baseDims = { width: pageWidth, height: pageHeight, pageNumber };
+          } else if (
+            Math.abs(pageWidth - baseDims.width) > PAGE_DIMENSION_TOLERANCE ||
+            Math.abs(pageHeight - baseDims.height) > PAGE_DIMENSION_TOLERANCE
+          ) {
+            mismatched.push(pageNumber);
+          }
+
           if (rows.length > 0 && rows.some((r) => r.size > 0)) {
             matrix.set(pageNumber, rows);
           }
@@ -378,6 +418,8 @@ export function useReportOcr(): UseReportOcrReturn {
         setConfidences(confMatrix);
         setProgress(null);
         setFailedPages(failed);
+        setLayoutMismatchPages(mismatched);
+        setLayoutBasePage(baseDims?.pageNumber ?? null);
       } else {
         setProgress(null);
       }
@@ -443,5 +485,15 @@ export function useReportOcr(): UseReportOcrReturn {
     }
   }, []);
 
-  return { isRunning, progress, reocrTarget, failedPages, runOcr, cancelOcr, runOcrForPage };
+  return {
+    isRunning,
+    progress,
+    reocrTarget,
+    failedPages,
+    layoutMismatchPages,
+    layoutBasePage,
+    runOcr,
+    cancelOcr,
+    runOcrForPage,
+  };
 }

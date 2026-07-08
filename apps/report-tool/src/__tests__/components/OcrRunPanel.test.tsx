@@ -11,6 +11,8 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     progress: null,
     reocrTarget: null,
     failedPages: [],
+    layoutMismatchPages: [],
+    layoutBasePage: null,
     runOcr: vi.fn(),
     cancelOcr: vi.fn(),
     runOcrForPage: vi.fn().mockResolvedValue(undefined),
@@ -154,5 +156,54 @@ describe("OcrRunPanel – failedPages 表示", () => {
     render(<OcrRunPanel ocrHook={ocrHook} />);
 
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("OcrRunPanel – layoutMismatchPages（用紙サイズ・向き混在の警告）", () => {
+  it("混在ページがあるとページ番号・基準ページ入りの警告（role=note）を表示する", () => {
+    const ocrHook = makeOcrHook({ layoutMismatchPages: [2, 5], layoutBasePage: 1 });
+    render(<OcrRunPanel ocrHook={ocrHook} />);
+
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent(/ページ 2, 5/);
+    expect(note).toHaveTextContent(/基準ページ（1ページ目）/);
+    expect(note).toHaveTextContent(/用紙サイズ・向きが異なります/);
+  });
+
+  it("基準ページが1でない場合（ページ1処理エラー時）も正しい番号で表示する", () => {
+    const ocrHook = makeOcrHook({
+      failedPages: [1],
+      layoutMismatchPages: [3],
+      layoutBasePage: 2,
+    });
+    render(<OcrRunPanel ocrHook={ocrHook} />);
+    expect(screen.getByRole("note")).toHaveTextContent(/基準ページ（2ページ目）/);
+  });
+
+  it("混在なし（空配列）のとき警告を表示しない", () => {
+    render(<OcrRunPanel ocrHook={makeOcrHook()} />);
+    expect(screen.queryByText(/用紙サイズ・向き/)).not.toBeInTheDocument();
+  });
+
+  it("OCR 実行中は混在警告を表示しない（前回実行の古い結果を隠す）", () => {
+    const ocrHook = makeOcrHook({
+      isRunning: true,
+      progress: { done: 1, total: 2 },
+      layoutMismatchPages: [2],
+      layoutBasePage: 1,
+    });
+    render(<OcrRunPanel ocrHook={ocrHook} />);
+    expect(screen.queryByText(/用紙サイズ・向き/)).not.toBeInTheDocument();
+  });
+
+  it("failedPages と layoutMismatchPages は同時に両方表示できる", () => {
+    const ocrHook = makeOcrHook({
+      failedPages: [3],
+      layoutMismatchPages: [2],
+      layoutBasePage: 1,
+    });
+    render(<OcrRunPanel ocrHook={ocrHook} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/ページ 3/);
+    expect(screen.getByRole("note")).toHaveTextContent(/ページ 2/);
   });
 });
