@@ -37,17 +37,21 @@ const CsvExportButton: FC<CsvExportButtonProps> = ({ onSave, failedPages = [] })
   const template = useReportStore((s) => s.template);
   const cells = useReportStore((s) => s.cells);
   const confidences = useReportStore((s) => s.confidences);
+  const excludedPages = useReportStore((s) => s.excludedPages);
   const pdfFilePath = usePdfStore((s) => s.filePath);
   const [opts, setOpts] = useState<CsvOptions>(DEFAULT_OPTIONS);
   const [status, setStatus] = useState<"idle" | "saving" | "done" | "error" | "unavailable">("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
 
-  const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
+  // 除外ページは CSV に出さない（OCR後に除外された場合も cells に残っているため必ずフィルタ）
+  const pageNumbers = Array.from(cells.keys())
+    .filter((p) => !excludedPages.has(p))
+    .sort((a, b) => a - b);
 
   // 出力前ゲート用: 未確認の要確認セル（低信頼・空）の残数
   const reviewCounts = useMemo(
-    () => countReviewTargets(listReviewTargets(cells, confidences, template.fields)),
-    [cells, confidences, template.fields]
+    () => countReviewTargets(listReviewTargets(cells, confidences, template.fields, excludedPages)),
+    [cells, confidences, template.fields, excludedPages]
   );
 
   const handleExport = async () => {

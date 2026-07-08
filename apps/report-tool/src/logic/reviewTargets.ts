@@ -32,12 +32,15 @@ export interface ReviewTarget {
 export function listReviewTargets(
   cells: CellMatrix,
   confidences: ConfidenceMatrix,
-  fields: ReportField[]
+  fields: ReportField[],
+  // 除外ページ（CSV 非出力）は確認対象からも外す
+  excludedPages: ReadonlySet<number> = new Set()
 ): ReviewTarget[] {
   const targets: ReviewTarget[] = [];
   const pageNumbers = Array.from(cells.keys()).sort((a, b) => a - b);
 
   for (const pageNum of pageNumbers) {
+    if (excludedPages.has(pageNum)) continue;
     const rows = cells.get(pageNum) ?? [];
     const confRows = confidences.get(pageNum);
 

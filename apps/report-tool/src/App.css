@@ -1038,6 +1038,46 @@ button {
   border-color: #4299e1;
 }
 
+/* 除外ページの行（CSV 非出力・OCR 対象外） */
+.csv-preview__row--excluded {
+  opacity: 0.45;
+}
+
+.csv-preview__excluded-pill {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  color: #718096;
+  background: #edf2f7;
+  border: 1px solid #cbd5e0;
+  white-space: nowrap;
+}
+
+/* サムネイルの除外トグル */
+.thumbnail-panel__item--excluded .thumbnail-panel__img {
+  opacity: 0.35;
+}
+
+.thumbnail-panel__exclude-btn {
+  display: block;
+  width: 100%;
+  margin-top: 2px;
+  padding: 1px 4px;
+  font-size: 0.68rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  background: #fff;
+  color: #4a5568;
+  cursor: pointer;
+}
+
+.thumbnail-panel__exclude-btn--on {
+  background: #edf2f7;
+  color: #718096;
+  border-style: dashed;
+}
+
 /* 明細欄セル */
 .csv-preview__td--lineitem {
   white-space: pre-wrap;

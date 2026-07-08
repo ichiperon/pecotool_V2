@@ -59,6 +59,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
   const cells = useReportStore((s) => s.cells);
   const confidences = useReportStore((s) => s.confidences);
   const edited = useReportStore((s) => s.edited);
+  const excludedPages = useReportStore((s) => s.excludedPages);
   const setCells = useReportStore((s) => s.setCells);
   const setCellValue = useReportStore((s) => s.setCellValue);
   const clearCellValue = useReportStore((s) => s.clearCellValue);
@@ -145,8 +146,8 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
 
   // 要確認セル（低信頼・空）のドキュメント順リストと件数（ナビ・サマリチップ用）
   const reviewTargets = useMemo(
-    () => listReviewTargets(cells, confidences, fields),
-    [cells, confidences, fields]
+    () => listReviewTargets(cells, confidences, fields, excludedPages),
+    [cells, confidences, fields, excludedPages]
   );
   const reviewCounts = useMemo(() => countReviewTargets(reviewTargets), [reviewTargets]);
 
@@ -825,6 +826,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
             {pageNumbers.map((pageNum) => {
               const pageRows = cells.get(pageNum) ?? [new Map<string, string>()];
               const isDimmedPage = dragSource !== null && dragSource.pageNum !== pageNum;
+              const isExcludedPage = excludedPages.has(pageNum);
               const isCurrentPage = activePage != null && activePage === pageNum;
               const isReocrLoading = reocrTarget != null && reocrTarget === pageNum;
 
@@ -845,6 +847,7 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
                     role="row"
                     className={[
                       isDimmedPage ? "csv-preview__row--dimmed" : "",
+                      isExcludedPage ? "csv-preview__row--excluded" : "",
                       isCurrentPage && isFirstRow ? "csv-preview__row--current" : "",
                       isReocrLoading ? "csv-preview__row--reocr-loading" : "",
                       !isFirstRow ? "csv-preview__row--continuation" : "",
@@ -863,9 +866,14 @@ const CsvPreviewTable: FC<CsvPreviewTableProps> = ({ activePage, reocrTarget }) 
                       <td
                         className="csv-preview__td csv-preview__td--page"
                         role="rowheader"
-                        aria-label={`${pageNum}ページ目`}
+                        aria-label={`${pageNum}ページ目${isExcludedPage ? "（除外中・CSVに出力されません）" : ""}`}
                       >
                         {pageNum}
+                        {isExcludedPage && (
+                          <span className="csv-preview__excluded-pill" aria-hidden="true">
+                            除外
+                          </span>
+                        )}
                       </td>
                     ) : (
                       <td

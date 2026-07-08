@@ -91,6 +91,12 @@ interface ReportState {
    * 既定 (0,0) のページはキーを持たない疎保持（Map に不在 = ZERO_OFFSET）。
    */
   pageOffsets: Map<number, PageOffset>;
+  /**
+   * OCR・CSV から除外するページ番号の集合（白紙・送付状等の対象外ページ）。
+   * PDF 個体の属性なので PDF 差し替え（resetExtractedData）でクリアし、
+   * テンプレ置換では保持する。undo 対象外（スナップショットに含めない）。
+   */
+  excludedPages: Set<number>;
 
   // actions
   /**
@@ -156,6 +162,8 @@ interface ReportState {
   nudgePageOffset: (pageNum: number, ddx: number, ddy: number) => void;
   /** 指定ページのオフセットを削除して既定 (0, 0) に戻す。 */
   clearPageOffset: (pageNum: number) => void;
+  /** 指定ページの除外状態をトグルする（白紙・対象外ページを OCR/CSV から外す）。 */
+  togglePageExclusion: (pageNum: number) => void;
   /**
    * 指定ページの cells 行を新しい ReportRow[] で全置換する。
    * 他ページの cells は保持される。
@@ -319,6 +327,7 @@ export const useReportStore = create<ReportState>((set) => ({
   mode: "idle",
   selectedFieldId: null,
   pageOffsets: new Map(),
+  excludedPages: new Set(),
 
   setConfidences: (matrix) => {
     // OCR 取り込み系＝ロード境界。境界前のスナップショット復元を防ぐため履歴を捨てる。
@@ -403,7 +412,12 @@ export const useReportStore = create<ReportState>((set) => ({
   },
 
   resetExtractedData: () => {
-    set({ ...clearedExtractedDataPatch(), ...historyClearPatch() });
+    set({
+      ...clearedExtractedDataPatch(),
+      ...historyClearPatch(),
+      // 除外設定は PDF 個体の属性なので差し替え時にクリアする
+      excludedPages: new Set(),
+    });
   },
 
   replaceTemplateFields: (fields) => {
@@ -602,6 +616,18 @@ export const useReportStore = create<ReportState>((set) => ({
       const next = new Map(state.pageOffsets);
       next.delete(pageNum);
       return withHistory(state, { pageOffsets: next });
+    });
+  },
+
+  togglePageExclusion: (pageNum) => {
+    set((state) => {
+      const next = new Set(state.excludedPages);
+      if (next.has(pageNum)) {
+        next.delete(pageNum);
+      } else {
+        next.add(pageNum);
+      }
+      return { excludedPages: next };
     });
   },
 

@@ -29,6 +29,36 @@ const App: FC = () => {
   // OCR フックを App 上位で呼び出し（全ステップ共通・ConfirmLayout に渡す）
   const ocrHook = useReportOcr();
 
+  // 作業消失対策（第一段）: 抽出データ（OCR結果・手編集）はメモリのみで永続化されない。
+  // 未保存データがある状態のウィンドウクローズに確認を挟む（本格的なセッション保存は別issue）。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const un = await getCurrentWindow().onCloseRequested((event) => {
+          if (useReportStore.getState().cells.size === 0) return;
+          const ok = window.confirm(
+            "OCR 結果と手修正はアプリを閉じると失われます（CSV 出力がまだなら先に出力してください）。閉じますか？"
+          );
+          if (!ok) event.preventDefault();
+        });
+        if (disposed) {
+          un();
+        } else {
+          unlisten = un;
+        }
+      } catch {
+        // Tauri ランタイム外（ブラウザ・テスト環境）では何もしない
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   // Undo/Redo のキー操作フィードバック（チップ表示 + aria-live）。
   // キーボード undo は視覚変化がスクロール外で起きうるため、何が起きたかを明示する。
   const [undoNotice, setUndoNotice] = useState("");

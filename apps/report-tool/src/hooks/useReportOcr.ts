@@ -346,7 +346,8 @@ export function useReportOcr(): UseReportOcrReturn {
   const cancelledRef = useRef(false);
 
   const runOcr = useCallback(async () => {
-    const { template, setCells, setConfidences, pageOffsets } = useReportStore.getState();
+    const { template, setCells, setConfidences, pageOffsets, excludedPages } =
+      useReportStore.getState();
     // rotation は実行開始時に1回だけ読む（実行中に変わっても途中から混ざらない）
     const { filePath, numPages, rotation } = usePdfStore.getState();
 
@@ -397,6 +398,14 @@ export function useReportOcr(): UseReportOcrReturn {
         if (isCancelled()) break;
 
         const pageNumber = pageIndex + 1;
+
+        // 除外ページ（白紙・送付状等）は OCR をスキップする。matrix に載らないため
+        // CSV にも出ない。failed/mismatch の判定対象にもしない。
+        if (excludedPages.has(pageNumber)) {
+          setProgress({ done: pageIndex + 1, total: numPages });
+          continue;
+        }
+
         const offset = pageOffsets.get(pageNumber) ?? ZERO_OFFSET;
 
         try {
@@ -505,6 +514,8 @@ export function useReportOcr(): UseReportOcrReturn {
 
     if (!filePath) return;
     if (template.fields.length === 0) return;
+    // 除外ページは再OCR対象外（UI 側でもボタンは出ない想定の防御）
+    if (useReportStore.getState().excludedPages.has(pageNum)) return;
 
     // 全ページ OCR と同じ epoch を共有してキャンセルを相互に動作させる
     const currentEpoch = ++epochRef.current;

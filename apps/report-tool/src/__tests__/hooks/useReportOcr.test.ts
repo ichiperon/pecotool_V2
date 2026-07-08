@@ -1360,3 +1360,59 @@ describe("useReportOcr: 再OCR × 警告の整合（レビュー指摘 MAJOR-1/-
     expect(result.current.failedPages).toEqual([2]); // 消えていない
   });
 });
+
+describe("useReportOcr: ページ除外との連携", () => {
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    vi.mocked(tauriCore.invoke).mockResolvedValue(
+      JSON.stringify({
+        status: "ok",
+        blocks: [{ text: "値", bbox: { x: 5, y: 5, width: 40, height: 15 }, confidence: 0.9 }],
+      })
+    );
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      pageOffsets: new Map(),
+      excludedPages: new Set([2]),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 3,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    useReportStore.setState({ excludedPages: new Set() });
+  });
+
+  it("除外ページは OCR がスキップされ cells にも failed にも載らない", async () => {
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    const cells = useReportStore.getState().cells;
+    expect(cells.has(1)).toBe(true);
+    expect(cells.has(2)).toBe(false); // スキップ
+    expect(cells.has(3)).toBe(true);
+    expect(result.current.failedPages).toEqual([]);
+  });
+
+  it("除外ページへの runOcrForPage は no-op（cells を変えない）", async () => {
+    const { result } = renderHook(() => useReportOcr());
+    await act(async () => {
+      await result.current.runOcrForPage(2);
+    });
+    expect(useReportStore.getState().cells.has(2)).toBe(false);
+    expect(result.current.isRunning).toBe(false);
+  });
+});
