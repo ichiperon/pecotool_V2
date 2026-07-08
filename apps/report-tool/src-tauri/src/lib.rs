@@ -649,6 +649,95 @@ async fn delete_template(app: tauri::AppHandle, id: String) -> Result<(), String
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 作業セッション永続化 (save_session / load_session / clear_session)
+//
+// 保存先: app_data_dir()/session/current.json（単一スロット）
+// テンプレートと同じ「temp 書込 → atomic rename」で torn write を防ぐ。
+// JSON の中身（スキーマ・バージョン）は TS 側 sessionCodec が管理し、
+// Rust は生文字列の入出力のみを担う（テンプレートと同じ責務分割）。
+//
+// IPC 契約:
+//   save_session(json: String) -> Result<(), String>
+//   load_session() -> Result<String, String>   … 無ければ Err（TS 側で「なし」として扱う）
+//   clear_session() -> Result<(), String>      … 無くても Ok（冪等）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// app_data_dir()/session を解決する（作成は保存時の create_dir_all に委ねる）。
+fn resolve_session_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    let mut dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("アプリデータディレクトリの解決に失敗しました: {e}"))?;
+    dir.push("session");
+    Ok(dir)
+}
+
+fn session_file_path(session_dir: &Path) -> PathBuf {
+    session_dir.join("current.json")
+}
+
+fn session_temp_file_path(session_dir: &Path) -> PathBuf {
+    session_dir.join("current.json.tmp")
+}
+
+/// セッションを保存する。temp 書込 → atomic rename（save_template_to_dir と同方針）。
+fn save_session_to_dir(session_dir: &Path, json: &str) -> Result<(), String> {
+    std::fs::create_dir_all(session_dir)
+        .map_err(|e| format!("セッションディレクトリの作成に失敗しました: {e}"))?;
+
+    let temp_path = session_temp_file_path(session_dir);
+    let final_path = session_file_path(session_dir);
+
+    std::fs::write(&temp_path, json.as_bytes())
+        .map_err(|e| format!("セッションの一時保存に失敗しました: {e}"))?;
+
+    let result = atomic_replace_file(&temp_path, &final_path);
+    if result.is_err() {
+        if let Err(cleanup_err) = std::fs::remove_file(&temp_path) {
+            eprintln!(
+                "[session] failed to remove temp file after write error: {} ({cleanup_err})",
+                temp_path.display()
+            );
+        }
+    }
+    result
+}
+
+fn load_session_from_dir(session_dir: &Path) -> Result<String, String> {
+    let path = session_file_path(session_dir);
+    std::fs::read_to_string(&path).map_err(|e| format!("セッションの読み込みに失敗しました: {e}"))
+}
+
+/// セッションを削除する。存在しない場合も Ok（冪等）。
+fn clear_session_in_dir(session_dir: &Path) -> Result<(), String> {
+    let path = session_file_path(session_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("セッションの削除に失敗しました: {e}")),
+    }
+}
+
+#[tauri::command]
+async fn save_session(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let dir = resolve_session_dir(&app)?;
+    save_session_to_dir(&dir, &json)
+}
+
+#[tauri::command]
+async fn load_session(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = resolve_session_dir(&app)?;
+    load_session_from_dir(&dir)
+}
+
+#[tauri::command]
+async fn clear_session(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = resolve_session_dir(&app)?;
+    clear_session_in_dir(&dir)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // greet (スケルトンから引き継ぎ)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -675,7 +764,10 @@ pub fn run() {
             save_template,
             list_templates,
             load_template,
-            delete_template
+            delete_template,
+            save_session,
+            load_session,
+            clear_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1168,6 +1260,48 @@ mod tests {
         let list = list_templates_from_dir(&dir).unwrap();
         assert!(list.is_empty(), ".json.tmp は一覧に含めてはいけない");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── セッション永続化 ──────────────────────────────────────────────
+
+    fn temp_session_dir(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("peco-session-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn session_save_load_roundtrip() {
+        let dir = temp_session_dir("roundtrip");
+        save_session_to_dir(&dir, r#"{"version":1}"#).unwrap();
+        let loaded = load_session_from_dir(&dir).unwrap();
+        assert_eq!(loaded, r#"{"version":1}"#);
+        // 上書き保存で置き換わる
+        save_session_to_dir(&dir, r#"{"version":2}"#).unwrap();
+        assert_eq!(load_session_from_dir(&dir).unwrap(), r#"{"version":2}"#);
+        // temp ファイルが残っていない
+        assert!(!session_temp_file_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_load_without_file_is_err() {
+        let dir = temp_session_dir("missing");
+        assert!(load_session_from_dir(&dir).is_err());
+    }
+
+    #[test]
+    fn session_clear_is_idempotent() {
+        let dir = temp_session_dir("clear");
+        // 無い状態で clear → Ok
+        clear_session_in_dir(&dir).unwrap();
+        save_session_to_dir(&dir, "{}").unwrap();
+        clear_session_in_dir(&dir).unwrap();
+        assert!(load_session_from_dir(&dir).is_err());
+        // 二重 clear も Ok
+        clear_session_in_dir(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

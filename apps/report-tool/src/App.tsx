@@ -11,6 +11,7 @@ import ConfirmLayout from "./components/ConfirmLayout";
 import { useReportStore } from "./store/reportStore";
 import { useReportOcr } from "./hooks/useReportOcr";
 import { useUndoShortcuts, type UndoActionType } from "./hooks/useUndoShortcuts";
+import { useSessionPersistence } from "./hooks/useSessionPersistence";
 import { makeAnnouncement } from "./lib/announce";
 
 const STEP_LABELS: Record<StepNumber, string> = {
@@ -29,8 +30,12 @@ const App: FC = () => {
   // OCR フックを App 上位で呼び出し（全ステップ共通・ConfirmLayout に渡す）
   const ocrHook = useReportOcr();
 
-  // 作業消失対策（第一段）: 抽出データ（OCR結果・手編集）はメモリのみで永続化されない。
-  // 未保存データがある状態のウィンドウクローズに確認を挟む（本格的なセッション保存は別issue）。
+  // 作業セッションの自動保存＋「前回の続きから再開」
+  useSessionPersistence();
+
+  // 終了確認: 自動保存があるため通常は復元可能だが、保存はデバウンス（2秒）遅延が
+  // あり、Tauri 外や保存失敗の可能性もあるため、抽出データありのクローズには
+  // 引き続き確認を挟む（安全側の二重防御）。
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
@@ -40,7 +45,7 @@ const App: FC = () => {
         const un = await getCurrentWindow().onCloseRequested((event) => {
           if (useReportStore.getState().cells.size === 0) return;
           const ok = window.confirm(
-            "OCR 結果と手修正はアプリを閉じると失われます（CSV 出力がまだなら先に出力してください）。閉じますか？"
+            "作業内容は自動保存されており、同じ PDF を開き直すと再開できます。アプリを閉じますか？"
           );
           if (!ok) event.preventDefault();
         });
