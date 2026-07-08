@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, type FC } from "react";
 import "./App.css";
 import StepBar, { type StepNumber } from "./components/StepBar";
 import FieldListPanel from "./components/FieldListPanel";
+import TemplateLibraryPanel from "./components/TemplateLibraryPanel";
 import CsvExportButton from "./components/CsvExportButton";
 import PdfViewer from "./components/PdfViewer";
 import OcrRunPanel from "./components/OcrRunPanel";
@@ -107,6 +108,7 @@ const App: FC = () => {
                   <p className="step-panel__hint">
                     PDF を開き、欄をドラッグして定義してください
                   </p>
+                  <TemplateLibraryPanel />
                   <FieldListPanel />
                 </div>
               )}

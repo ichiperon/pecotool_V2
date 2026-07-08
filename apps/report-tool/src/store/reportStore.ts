@@ -72,6 +72,12 @@ interface ReportState {
    * template（欄定義）は差し替え後の新PDFでも再利用するため保持する。
    */
   resetExtractedData: () => void;
+  /**
+   * 欄テンプレートライブラリからの読み込み等、template を丸ごと置き換える。
+   * 旧 fieldId に紐づく cells / confidences / pageOffsets / selectedFieldId を同一 set() 内で
+   * 原子的に破棄する（孤児セル・孤児選択が CSV/プレビューに残るのを防ぐ）。
+   */
+  replaceTemplateFields: (fields: ReportField[]) => void;
   setCells: (matrix: CellMatrix) => void;
   setMode: (mode: EditorMode) => void;
   selectField: (id: string | null) => void;
@@ -161,6 +167,15 @@ function getRow(rows: ReportRow[], rowIndex: number): ReportRow {
   return rows[rowIndex] ?? new Map<string, string>();
 }
 
+/**
+ * PDF固有の抽出データ（cells/confidences/pageOffsets）を空にする差分オブジェクトを生成する。
+ * resetExtractedData / replaceTemplateFields が共有する（破棄ロジックの重複回避）。
+ * 呼び出しごとに新しい Map インスタンスを返す。
+ */
+function clearedExtractedDataPatch(): Pick<ReportState, "cells" | "confidences" | "pageOffsets"> {
+  return { cells: new Map(), confidences: new Map(), pageOffsets: new Map() };
+}
+
 export const useReportStore = create<ReportState>((set) => ({
   template: { fields: [] },
   cells: new Map(),
@@ -243,7 +258,18 @@ export const useReportStore = create<ReportState>((set) => ({
   },
 
   resetExtractedData: () => {
-    set({ cells: new Map(), confidences: new Map(), pageOffsets: new Map() });
+    set(clearedExtractedDataPatch());
+  },
+
+  replaceTemplateFields: (fields) => {
+    set({
+      template: { fields },
+      // 差し替え前に選択していた欄idは新テンプレートに存在しない可能性が高い。
+      // removeField が選択中idの欄を消す際に selectedFieldId をクリアするのと対称に、
+      // ここでも孤児選択（存在しないidが選択されたまま）を防ぐ。
+      selectedFieldId: null,
+      ...clearedExtractedDataPatch(),
+    });
   },
 
   setCells: (matrix) => {
