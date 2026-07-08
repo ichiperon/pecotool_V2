@@ -27,6 +27,7 @@ beforeEach(() => {
     template: { fields: [] },
     cells: new Map(),
     confidences: new Map(),
+    excludedPages: new Set(),
     mode: "idle",
     selectedFieldId: null,
   });
@@ -423,5 +424,53 @@ describe("CsvExportButton – 全ページ除外時のフォールバック（�
     useReportStore.setState({ excludedPages: new Set([3]) });
     render(<CsvExportButton failedPages={[3]} />);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("CsvExportButton – 逆順出力（UXレビュー⑩）", () => {
+  it("チェックONでデータ行がページ降順になる", async () => {
+    addField("金額");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.getState().setCells(
+      new Map([
+        [1, [new Map([[id, "P1"]])]],
+        [2, [new Map([[id, "P2"]])]],
+        [3, [new Map([[id, "P3"]])]],
+      ])
+    );
+
+    let capturedCsv = "";
+    const onSave = vi.fn().mockImplementation(async (_d: Uint8Array, csv: string) => {
+      capturedCsv = csv;
+    });
+    render(<CsvExportButton onSave={onSave} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /ページを逆順で出力/ }));
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+
+    const rows = capturedCsv.trim().split("\r\n").slice(1); // ヘッダ除く
+    const order = rows.map((r) => r.match(/P\d/)?.[0]);
+    expect(order).toEqual(["P3", "P2", "P1"]);
+  });
+
+  it("チェックOFF（既定）は昇順のまま", async () => {
+    addField("金額");
+    const id = useReportStore.getState().template.fields[0].id;
+    useReportStore.getState().setCells(
+      new Map([
+        [2, [new Map([[id, "P2"]])]],
+        [1, [new Map([[id, "P1"]])]],
+      ])
+    );
+    let capturedCsv = "";
+    const onSave = vi.fn().mockImplementation(async (_d: Uint8Array, csv: string) => {
+      capturedCsv = csv;
+    });
+    render(<CsvExportButton onSave={onSave} />);
+    fireEvent.click(screen.getByRole("button", { name: "CSV を出力" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const rows = capturedCsv.trim().split("\r\n").slice(1);
+    expect(rows.map((r) => r.match(/P\d/)?.[0])).toEqual(["P1", "P2"]);
   });
 });

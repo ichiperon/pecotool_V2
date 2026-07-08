@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useReportStore } from "../store/reportStore";
-import type { ConfidenceMatrix } from "../store/reportStore";
+import type { ConfidenceMatrix, EditedMatrix } from "../store/reportStore";
 import { usePdfStore } from "../store/pdfStore";
 import { parseOcrResponse } from "../lib/ocrAdapter";
 import { computeCropRect, cropCanvasToPng, renderPageOffscreen } from "../lib/ocrCrop";
@@ -50,6 +50,12 @@ export interface UseReportOcrReturn {
    * true のとき残ページの実行は中断され、既存 cells は上書きされない。
    */
   engineError: boolean;
+  /**
+   * 再OCR時に手修正済みセル（edited フラグ）の値を保持するか（既定 true）。
+   * 50ページ手直しした後の「欄を1本足して再実行」で全修正が消える事故を防ぐ。
+   */
+  preserveEdited: boolean;
+  setPreserveEdited: (value: boolean) => void;
   runOcr: () => Promise<void>;
   cancelOcr: () => void;
   /** 指定ページのみを再 OCR して setCellsForPage で部分更新する。 */
@@ -182,6 +188,48 @@ function buildConfRowsFromFieldConfidence(
   }
 
   return confRows;
+}
+
+/**
+ * 手修正保持: 新しい OCR 結果（matrix/confMatrix・コミット前の作業用オブジェクト）へ、
+ * 前回の手修正セル値を書き戻す。保持したセルの confidence は落とし（値は人が保証）、
+ * 保持できた edited フラグの集合を返す（コミット後に store へ再設定する）。
+ *
+ * 段構造が変わった場合の制限: 新結果に同じ rowIndex が存在するセルだけ保持する
+ * （段数が減った末尾の手修正は保持先が無いため失われる）。
+ */
+function applyEditedPreservation(
+  matrix: CellMatrix,
+  confMatrix: ConfidenceMatrix,
+  prevCells: CellMatrix,
+  prevEdited: EditedMatrix
+): EditedMatrix {
+  const preserved: EditedMatrix = new Map();
+
+  for (const [pageNum, editedRows] of prevEdited) {
+    const newRows = matrix.get(pageNum);
+    if (!newRows) continue; // 失敗・除外・消滅ページは保持先なし
+
+    editedRows.forEach((fieldIds, rowIndex) => {
+      if (fieldIds.size === 0 || rowIndex >= newRows.length) return;
+      for (const fieldId of fieldIds) {
+        const prevValue = prevCells.get(pageNum)?.[rowIndex]?.get(fieldId);
+        if (prevValue === undefined) continue;
+        newRows[rowIndex].set(fieldId, prevValue);
+        confMatrix.get(pageNum)?.[rowIndex]?.delete(fieldId);
+
+        let pageRows = preserved.get(pageNum);
+        if (!pageRows) {
+          pageRows = [];
+          preserved.set(pageNum, pageRows);
+        }
+        while (pageRows.length <= rowIndex) pageRows.push(new Set<string>());
+        pageRows[rowIndex].add(fieldId);
+      }
+    });
+  }
+
+  return preserved;
 }
 
 /**
@@ -340,14 +388,28 @@ export function useReportOcr(): UseReportOcrReturn {
   const [layoutMismatchPages, setLayoutMismatchPages] = useState<number[]>([]);
   const [layoutBasePage, setLayoutBasePage] = useState<number | null>(null);
   const [engineError, setEngineError] = useState(false);
+  const [preserveEdited, setPreserveEditedState] = useState(true);
+  // runOcr/runOcrForPage は useCallback([]) のため state を閉じ込めない。ref 経由で読む
+  const preserveEditedRef = useRef(true);
+  const setPreserveEdited = useCallback((value: boolean) => {
+    preserveEditedRef.current = value;
+    setPreserveEditedState(value);
+  }, []);
 
   // キャンセル制御: epoch が変わったらループを中断する
   const epochRef = useRef(0);
   const cancelledRef = useRef(false);
 
   const runOcr = useCallback(async () => {
-    const { template, setCells, setConfidences, pageOffsets, excludedPages } =
-      useReportStore.getState();
+    const {
+      template,
+      setCells,
+      setConfidences,
+      pageOffsets,
+      excludedPages,
+      cells: prevCells,
+      edited: prevEdited,
+    } = useReportStore.getState();
     // rotation は実行開始時に1回だけ読む（実行中に変わっても途中から混ざらない）
     const { filePath, numPages, rotation } = usePdfStore.getState();
 
@@ -489,9 +551,17 @@ export function useReportOcr(): UseReportOcrReturn {
         !loadFailed &&
         !engineDead
       ) {
+        // 手修正保持: コミット前の作業用 matrix/confMatrix に前回の手修正値を書き戻す
+        const preservedEdited = preserveEditedRef.current
+          ? applyEditedPreservation(matrix, confMatrix, prevCells, prevEdited)
+          : new Map();
         setCells(matrix);
         // setCells が confidences をクリアするので後から setConfidences を呼ぶ
         setConfidences(confMatrix);
+        // setCells は edited もクリアするため、保持できたフラグを再設定する
+        if (preservedEdited.size > 0) {
+          useReportStore.setState({ edited: preservedEdited });
+        }
         setProgress(null);
         setFailedPages(failed);
         setLayoutMismatchPages(mismatched);
@@ -513,6 +583,7 @@ export function useReportOcr(): UseReportOcrReturn {
   const runOcrForPage = useCallback(async (pageNum: number) => {
     const { template, pageOffsets, setCellsForPage, setConfidencesForPage } = useReportStore.getState();
     const { filePath, rotation } = usePdfStore.getState();
+    const { cells: prevCellsForPage, edited: prevEditedForPage } = useReportStore.getState();
 
     if (!filePath) return;
     if (template.fields.length === 0) return;
@@ -563,10 +634,33 @@ export function useReportOcr(): UseReportOcrReturn {
             );
           }
 
+          // 手修正保持（対象ページのみ）: 単一ページの Matrix に見立てて共通ヘルパーを使う
+          let preservedForPage: EditedMatrix = new Map();
+          if (preserveEditedRef.current) {
+            const pageMatrix: CellMatrix = new Map([[pageNum, rows]]);
+            const pageConf: ConfidenceMatrix = new Map([[pageNum, confRows]]);
+            const prevEditedOnlyPage: EditedMatrix = new Map();
+            const prevRows = prevEditedForPage.get(pageNum);
+            if (prevRows) prevEditedOnlyPage.set(pageNum, prevRows);
+            preservedForPage = applyEditedPreservation(
+              pageMatrix,
+              pageConf,
+              prevCellsForPage,
+              prevEditedOnlyPage
+            );
+          }
+
           // 全置換せず対象ページのみ部分更新する（複数段対応: rows.length 段）
           setCellsForPage(pageNum, rows);
           // setCellsForPage が confidences をクリアするので後から setConfidencesForPage を呼ぶ
           setConfidencesForPage(pageNum, confRows);
+          // setCellsForPage は対象ページの edited をクリアするため、保持分を再設定
+          const preservedRows = preservedForPage.get(pageNum);
+          if (preservedRows && preservedRows.length > 0) {
+            const nextEdited = new Map(useReportStore.getState().edited);
+            nextEdited.set(pageNum, preservedRows);
+            useReportStore.setState({ edited: nextEdited });
+          }
           // 再OCRが成功したページは「OCR失敗」警告から外す。残すとステップ③の
           // バナーと出力前ゲートが事実と逆の警告を出し続ける（レビュー指摘 MAJOR-1）。
           setFailedPages((prev) => prev.filter((p) => p !== pageNum));
@@ -594,6 +688,8 @@ export function useReportOcr(): UseReportOcrReturn {
     layoutMismatchPages,
     layoutBasePage,
     engineError,
+    preserveEdited,
+    setPreserveEdited,
     runOcr,
     cancelOcr,
     runOcrForPage,

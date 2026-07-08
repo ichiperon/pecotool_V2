@@ -11,6 +11,7 @@ import ConfirmLayout from "./components/ConfirmLayout";
 import { useReportStore } from "./store/reportStore";
 import { useReportOcr } from "./hooks/useReportOcr";
 import { useUndoShortcuts, type UndoActionType } from "./hooks/useUndoShortcuts";
+import { useSessionPersistence } from "./hooks/useSessionPersistence";
 import { makeAnnouncement } from "./lib/announce";
 
 const STEP_LABELS: Record<StepNumber, string> = {
@@ -29,20 +30,33 @@ const App: FC = () => {
   // OCR フックを App 上位で呼び出し（全ステップ共通・ConfirmLayout に渡す）
   const ocrHook = useReportOcr();
 
-  // 作業消失対策（第一段）: 抽出データ（OCR結果・手編集）はメモリのみで永続化されない。
-  // 未保存データがある状態のウィンドウクローズに確認を挟む（本格的なセッション保存は別issue）。
+  // 作業セッションの自動保存＋「前回の続きから再開」
+  const { flushNow } = useSessionPersistence();
+
+  // 終了確認: 自動保存はデバウンス（2秒）遅延があるため、クローズ時は
+  // 必ず即時フラッシュしてから確認を出す（OCR 完了直後 2 秒以内のクローズで
+  // 「保存済み」と嘘をつく穴を封じる — レビューHIGH対応）。
+  // 常に preventDefault → フラッシュ → 確認 → OK なら destroy の順
+  //（confirm 応答を待つ間にウィンドウが閉じるのを防ぐ）。
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
     (async () => {
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const un = await getCurrentWindow().onCloseRequested((event) => {
-          if (useReportStore.getState().cells.size === 0) return;
-          const ok = window.confirm(
-            "OCR 結果と手修正はアプリを閉じると失われます（CSV 出力がまだなら先に出力してください）。閉じますか？"
-          );
-          if (!ok) event.preventDefault();
+        const win = getCurrentWindow();
+        const un = await win.onCloseRequested((event) => {
+          if (useReportStore.getState().cells.size === 0) return; // そのまま閉じる
+          event.preventDefault();
+          void (async () => {
+            const saved = await flushNow();
+            const message = saved
+              ? "作業内容を保存しました。同じ PDF を開き直すと続きから再開できます。アプリを閉じますか？"
+              : "作業内容を保存できませんでした。閉じると OCR 結果と手修正は失われます。それでも閉じますか？";
+            if (window.confirm(message)) {
+              await win.destroy();
+            }
+          })();
         });
         if (disposed) {
           un();
@@ -57,7 +71,7 @@ const App: FC = () => {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [flushNow]);
 
   // Undo/Redo のキー操作フィードバック（チップ表示 + aria-live）。
   // キーボード undo は視覚変化がスクロール外で起きうるため、何が起きたかを明示する。

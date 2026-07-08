@@ -22,10 +22,13 @@ use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 //        %LOCALAPPDATA%\PecoReportTool\PecoReportTool.exe
 //      ※ 帳票ツールの exe 名は tauri.conf.json の mainBinaryName で PecoReportTool.exe に
 //        統一済み（未指定だと crate 名由来の report-tool.exe になる）。
-const MAIN_APP_REL: &str = "Peco.exe";
-const REPORT_APP_REL: &str = "report-tool/PecoReportTool.exe";
-const MAIN_APP_INSTALLED: &str = "Peco/Peco.exe";
-const REPORT_APP_INSTALLED: &str = "PecoReportTool/PecoReportTool.exe";
+// 本体 exe は複数候補を順に探す: 本体の実バイナリ名は crate 名由来の tauri-app.exe
+// （2026-07-08 の NSIS 実測。計画書の Peco.exe 前提は誤りだった）。将来
+// mainBinaryName で Peco.exe に統一される可能性もあるため両方を候補にする。
+const MAIN_APP_REL_CANDIDATES: &[&str] = &["Peco.exe", "tauri-app.exe"];
+const REPORT_APP_REL_CANDIDATES: &[&str] = &["report-tool/PecoReportTool.exe"];
+const MAIN_APP_INSTALLED_CANDIDATES: &[&str] = &["Peco/Peco.exe", "Peco/tauri-app.exe"];
+const REPORT_APP_INSTALLED_CANDIDATES: &[&str] = &["PecoReportTool/PecoReportTool.exe"];
 
 /// 起動直後の Ctrl キー押下状態を返す。GetAsyncKeyState の最上位ビットが押下を表す。
 fn ctrl_held() -> bool {
@@ -39,24 +42,35 @@ fn ctrl_held() -> bool {
 /// どちらにも実在しない場合は隣接パスを返し、spawn 失敗時の MessageBox で
 /// パス込みのエラーが可視化される（無反応事故の防止は main 側の既存機構）。
 fn resolve_target(base_dir: &PathBuf, local_app_data: Option<PathBuf>, ctrl: bool) -> PathBuf {
-    let portable = base_dir.join(if ctrl { REPORT_APP_REL } else { MAIN_APP_REL });
-    if portable.is_file() {
-        return portable;
+    let rel_candidates = if ctrl {
+        REPORT_APP_REL_CANDIDATES
+    } else {
+        MAIN_APP_REL_CANDIDATES
+    };
+    for rel in rel_candidates {
+        let portable = base_dir.join(rel);
+        if portable.is_file() {
+            return portable;
+        }
     }
     // PCT-199 AQ-5 の不変条件「相対パスを Command::new に渡さない」を env 由来経路でも守る:
     // LOCALAPPDATA が空文字/相対パスだと join 結果が相対になり、is_file() の CWD 基準判定を
     // すり抜けて相対パス起動（binary planting の表層）が復活する。絶対パスのみ受け付ける。
     if let Some(lad) = local_app_data.filter(|p| p.is_absolute()) {
-        let installed = lad.join(if ctrl {
-            REPORT_APP_INSTALLED
+        let installed_candidates = if ctrl {
+            REPORT_APP_INSTALLED_CANDIDATES
         } else {
-            MAIN_APP_INSTALLED
-        });
-        if installed.is_file() {
-            return installed;
+            MAIN_APP_INSTALLED_CANDIDATES
+        };
+        for rel in installed_candidates {
+            let installed = lad.join(rel);
+            if installed.is_file() {
+                return installed;
+            }
         }
     }
-    portable
+    // どこにも実在しない場合は先頭候補の隣接パスを返す（spawn 失敗の MessageBox で可視化）
+    base_dir.join(rel_candidates[0])
 }
 
 /// PCT-199 AQ-5: `std::env::current_exe()` の結果から起動先解決の起点ディレクトリを求める。
@@ -192,6 +206,30 @@ mod tests {
         let lad = temp_dir("missing-lad");
         let p = resolve_target(&base, Some(lad), false);
         assert_eq!(p, base.join("Peco.exe"));
+    }
+
+    // R5追補（2026-07-08 実測）: 本体の実バイナリは crate 名由来の tauri-app.exe。
+    // Peco.exe が無く tauri-app.exe だけがある既定インストールでも解決できること。
+    #[test]
+    fn falls_back_to_tauri_app_exe_in_default_install() {
+        let base = temp_dir("tauriapp-base"); // 隣接なし
+        let lad = temp_dir("tauriapp-lad");
+        touch(&lad.join("Peco").join("tauri-app.exe"));
+
+        let p = resolve_target(&base, Some(lad.clone()), false);
+        assert_eq!(p, lad.join("Peco").join("tauri-app.exe"));
+    }
+
+    // 両方あるときは Peco.exe（第一候補）を優先する
+    #[test]
+    fn prefers_peco_exe_over_tauri_app_exe() {
+        let base = temp_dir("prefer-base");
+        let lad = temp_dir("prefer-lad");
+        touch(&lad.join("Peco").join("Peco.exe"));
+        touch(&lad.join("Peco").join("tauri-app.exe"));
+
+        let p = resolve_target(&base, Some(lad.clone()), false);
+        assert_eq!(p, lad.join("Peco").join("Peco.exe"));
     }
 
     // PCT-199 AQ-5 同型回帰: LOCALAPPDATA が空文字（var_os は unset=None だが空値=Some("")）

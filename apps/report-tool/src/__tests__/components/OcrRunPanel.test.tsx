@@ -14,6 +14,8 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     layoutMismatchPages: [],
     layoutBasePage: null,
     engineError: false,
+    preserveEdited: true,
+    setPreserveEdited: vi.fn(),
     runOcr: vi.fn(),
     cancelOcr: vi.fn(),
     runOcrForPage: vi.fn().mockResolvedValue(undefined),
