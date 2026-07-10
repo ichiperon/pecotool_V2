@@ -143,6 +143,11 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
             return;
           }
           const loaded = await store.load();
+          // レビュー差し戻し (#459・マリン指摘): store.load() の await 中に
+          // effect がアンマウントされていたら、以降の confirm ダイアログ表示まで
+          // 進めない。この disposed チェックが無いと、アンマウント後に「前回の
+          // 続きから再開しますか？」の確認ダイアログだけが遅れて出てしまう。
+          if (disposed) return;
           if (!loaded.ok) return;
           const decoded = deserializeSession(loaded.json);
           if (!decoded.ok) return;

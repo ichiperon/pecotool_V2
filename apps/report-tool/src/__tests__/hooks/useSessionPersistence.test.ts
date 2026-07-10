@@ -517,6 +517,36 @@ describe("useSessionPersistence: 復元", () => {
     expect(window.confirm).not.toHaveBeenCalled();
     expect(useReportStore.getState().cells.size).toBe(0);
   });
+
+  it("session load中にコンポーネントがアンマウントされたら復元confirmを出さない（レビュー差し戻し・#459追い修正）", async () => {
+    const json = savedSessionFor("/docs/a.pdf");
+    const { storage, resolveLoad } = makeDeferredLoadStorage(json);
+    const { unmount } = renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(storage.load).toHaveBeenCalledTimes(1);
+
+    // load 完了 (Tauri invoke 相当の非同期処理) を待っている間に画面遷移等で
+    // コンポーネントがアンマウントされるケース。
+    unmount();
+
+    act(() => {
+      resolveLoad();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    // disposed ガードが無いと、アンマウント後に「前回の続きから再開しますか？」の
+    // confirm ダイアログだけ遅れて出てしまう（UX 漏れ）。
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(useReportStore.getState().cells.size).toBe(0);
+  });
 });
 
 describe("useSessionPersistence: flushNow（クローズ前フラッシュ・レビューHIGH回帰）", () => {
