@@ -9,13 +9,27 @@ import type { ConfidenceMatrix, EditedMatrix } from "../store/reportStore";
  * Map/Set は JSON にできないためエントリ配列へ相互変換する。
  * スキーマは version を持ち、未知バージョン・構造不正は ok:false で拒否する
  * （壊れたセッションで起動が死ぬより「復元なし」に倒す）。
+ *
+ * v2 (#446 / #447): pdfFingerprint（PDF バイト列の SHA-256）と diagnostics
+ * （OCR 失敗ページ等の警告状態）を追加した。v1 セッションは ok:false で拒否する
+ * （壊れたセッションより復元なしに倒す既存方針どおり。v1 セッションは一度だけ
+ * 復元不可になるが、誤復元＝データ汚染より安全）。
  */
 
-export const SESSION_SCHEMA_VERSION = 1;
+export const SESSION_SCHEMA_VERSION = 2;
+
+/** OCR 診断状態（失敗ページ・レイアウト混在）。reportStore の undo 対象外スライスと対応。 */
+export interface SessionDiagnostics {
+  failedPages: number[];
+  layoutMismatchPages: number[];
+  layoutBasePage: number | null;
+}
 
 /** 保存側入力: 現在の store 状態のうち復元に必要な一式 */
 export interface SessionInput {
   pdfPath: string;
+  /** PDF バイト列の SHA-256（16進文字列）。パスだけでは区別できない「中身が違う同名PDF」の判定に使う。 */
+  pdfFingerprint: string;
   savedAt: string; // ISO 8601
   rotation: number;
   fields: ReportField[];
@@ -24,11 +38,13 @@ export interface SessionInput {
   edited: EditedMatrix;
   pageOffsets: Map<number, PageOffset>;
   excludedPages: Set<number>;
+  diagnostics: SessionDiagnostics;
 }
 
 /** 復元側出力: store へ流し込める形（Map/Set 再構築済み） */
 export interface DecodedSession {
   pdfPath: string;
+  pdfFingerprint: string;
   savedAt: string;
   rotation: number;
   fields: ReportField[];
@@ -37,6 +53,7 @@ export interface DecodedSession {
   edited: EditedMatrix;
   pageOffsets: Map<number, PageOffset>;
   excludedPages: Set<number>;
+  diagnostics: SessionDiagnostics;
 }
 
 export type DecodeResult =
@@ -48,6 +65,7 @@ export function serializeSession(input: SessionInput): string {
     version: SESSION_SCHEMA_VERSION,
     savedAt: input.savedAt,
     pdfPath: input.pdfPath,
+    pdfFingerprint: input.pdfFingerprint,
     rotation: input.rotation,
     fields: input.fields,
     cells: Array.from(input.cells.entries()).map(([page, rows]) => [
@@ -64,7 +82,33 @@ export function serializeSession(input: SessionInput): string {
     ]),
     pageOffsets: Array.from(input.pageOffsets.entries()),
     excludedPages: Array.from(input.excludedPages.values()),
+    diagnostics: {
+      failedPages: input.diagnostics.failedPages,
+      layoutMismatchPages: input.diagnostics.layoutMismatchPages,
+      layoutBasePage: input.diagnostics.layoutBasePage,
+    },
   });
+}
+
+/** ページ番号として妥当な値か（1始まりの整数）。レビューLOW: number 型だけでなく値域も締める。 */
+function isValidPageNumber(p: unknown): p is number {
+  return typeof p === "number" && Number.isInteger(p) && p >= 1;
+}
+
+/** diagnostics フィールドの値レベル検証。number[] / number[] / number|null の形を確認する。 */
+function isValidDiagnostics(value: unknown): value is SessionDiagnostics {
+  if (typeof value !== "object" || value === null) return false;
+  const d = value as Record<string, unknown>;
+  if (!Array.isArray(d.failedPages) || !d.failedPages.every(isValidPageNumber)) {
+    return false;
+  }
+  if (!Array.isArray(d.layoutMismatchPages) || !d.layoutMismatchPages.every(isValidPageNumber)) {
+    return false;
+  }
+  if (d.layoutBasePage !== null && !isValidPageNumber(d.layoutBasePage)) {
+    return false;
+  }
+  return true;
 }
 
 export function deserializeSession(json: string): DecodeResult {
@@ -83,6 +127,9 @@ export function deserializeSession(json: string): DecodeResult {
   }
   if (typeof obj.pdfPath !== "string" || obj.pdfPath === "") {
     return { ok: false, reason: "pdfPath がありません" };
+  }
+  if (typeof obj.pdfFingerprint !== "string" || obj.pdfFingerprint === "") {
+    return { ok: false, reason: "pdfFingerprint がありません" };
   }
   if (typeof obj.savedAt !== "string") {
     return { ok: false, reason: "savedAt がありません" };
@@ -111,6 +158,9 @@ export function deserializeSession(json: string): DecodeResult {
     ) {
       return { ok: false, reason: "fields の要素が不正です" };
     }
+  }
+  if (!isValidDiagnostics(obj.diagnostics)) {
+    return { ok: false, reason: "diagnostics が不正です" };
   }
 
   try {
@@ -144,11 +194,13 @@ export function deserializeSession(json: string): DecodeResult {
     );
     const pageOffsets = new Map(obj.pageOffsets as Array<[number, PageOffset]>);
     const excludedPages = new Set(obj.excludedPages as number[]);
+    const diagnostics = obj.diagnostics as SessionDiagnostics;
 
     return {
       ok: true,
       session: {
         pdfPath: obj.pdfPath,
+        pdfFingerprint: obj.pdfFingerprint,
         savedAt: obj.savedAt,
         rotation: obj.rotation,
         fields: obj.fields as ReportField[],
@@ -157,6 +209,7 @@ export function deserializeSession(json: string): DecodeResult {
         edited,
         pageOffsets,
         excludedPages,
+        diagnostics,
       },
     };
   } catch {

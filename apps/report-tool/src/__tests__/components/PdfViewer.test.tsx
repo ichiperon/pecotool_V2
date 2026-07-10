@@ -420,19 +420,25 @@ describe("PdfViewer: MA-1 — PDF差し替え時の抽出データリセット",
     expect(state.template.fields).toHaveLength(1);
   });
 
-  it("同一パスを再オープンしても cells / confidences / pageOffsets は消えない", async () => {
+  it("同一パス・同一内容を再オープンしても cells / confidences / pageOffsets は消えない", async () => {
     const { open } = await getDialogMock();
     const { readFile } = await getFsMock();
     const pdfjs = await getPdfjsMock();
+    const { computePdfFingerprint } = await import("../../lib/pdfFingerprint");
 
-    usePdfStore.getState().setPdf("/pdf-A.pdf", 2);
+    // #446: 同一内容と判定させるため、初期状態の fingerprint を
+    // 再オープン時に読み込む bytes から計算した値に揃えておく
+    // （setPdf を直接呼ぶテストセットアップは PdfViewer の実読込を経由しないため）。
+    const bytes = new Uint8Array([1, 1, 1]);
+    const fingerprint = await computePdfFingerprint(bytes);
+    usePdfStore.getState().setPdf("/pdf-A.pdf", 2, fingerprint);
 
     const proxyA2 = makeMockProxy(2);
     vi.mocked(pdfjs.getDocument).mockReturnValue({
       promise: Promise.resolve(proxyA2),
     } as unknown as ReturnType<typeof pdfjs.getDocument>);
     vi.mocked(open).mockResolvedValue("/pdf-A.pdf" as Awaited<ReturnType<typeof open>>);
-    vi.mocked(readFile).mockResolvedValue(new Uint8Array([1, 1, 1]));
+    vi.mocked(readFile).mockResolvedValue(bytes);
 
     render(<PdfViewer />);
     fireEvent.click(screen.getByRole("button", { name: "PDF を開く" }));
@@ -445,5 +451,82 @@ describe("PdfViewer: MA-1 — PDF差し替え時の抽出データリセット",
     expect(state.cells.size).toBe(1);
     expect(state.confidences.size).toBe(1);
     expect(state.pageOffsets.size).toBe(1);
+  });
+
+  it("同一パスでも中身（フィンガープリント）が変わっていれば cells / confidences / pageOffsets がリセットされる", async () => {
+    const { open } = await getDialogMock();
+    const { readFile } = await getFsMock();
+    const pdfjs = await getPdfjsMock();
+
+    // 初期 fingerprint は再オープン時の bytes とは異なる値にしておく（内容変更を模す）
+    usePdfStore.getState().setPdf("/pdf-A.pdf", 2, "old-fingerprint-does-not-match");
+
+    const proxyA2 = makeMockProxy(2);
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(proxyA2),
+    } as unknown as ReturnType<typeof pdfjs.getDocument>);
+    vi.mocked(open).mockResolvedValue("/pdf-A.pdf" as Awaited<ReturnType<typeof open>>);
+    vi.mocked(readFile).mockResolvedValue(new Uint8Array([2, 2, 2]));
+
+    render(<PdfViewer />);
+    fireEvent.click(screen.getByRole("button", { name: "PDF を開く" }));
+
+    await waitFor(() => {
+      expect(pdfjs.getDocument).toHaveBeenCalled();
+    });
+
+    const state = useReportStore.getState();
+    expect(state.cells.size).toBe(0);
+    expect(state.confidences.size).toBe(0);
+    expect(state.pageOffsets.size).toBe(0);
+    // template（欄定義）は中身が変わっても保持される（パス差し替えと同じ扱い）
+    expect(state.template.fields).toHaveLength(1);
+  });
+});
+
+// レビューMEDIUM（#446 残存穴）: 再マウント時の自動再読込（handleOpenPdf を経由しない
+// filePath ベースの再読込）でも、ディスク上で外部差し替えされた PDF を無警告で
+// 表示し続けないことを検証する。
+describe("PdfViewer: 再マウント自動再読込の fingerprint 照合", () => {
+  it("fingerprint が一致すれば通常どおり getDocument して描画する", async () => {
+    const { readFile } = await getFsMock();
+    const pdfjs = await getPdfjsMock();
+    const { computePdfFingerprint } = await import("../../lib/pdfFingerprint");
+
+    const bytes = new Uint8Array([1, 2, 3]);
+    const fingerprint = await computePdfFingerprint(bytes);
+    // filePath は既にセット済み・pdfDoc(ローカルstate)だけ失われている再マウント状況を再現
+    usePdfStore.getState().setPdf("/pdf-A.pdf", 2, fingerprint);
+
+    const proxy = makeMockProxy(2);
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(proxy),
+    } as unknown as ReturnType<typeof pdfjs.getDocument>);
+    vi.mocked(readFile).mockResolvedValue(bytes);
+
+    render(<PdfViewer />);
+
+    await waitFor(() => {
+      expect(pdfjs.getDocument).toHaveBeenCalled();
+    });
+    expect(usePdfStore.getState().error).toBeNull();
+  });
+
+  it("fingerprint が不一致（外部で差し替え）なら getDocument せずエラー表示に倒す", async () => {
+    const { readFile } = await getFsMock();
+    const pdfjs = await getPdfjsMock();
+
+    // store の pdfFingerprint は前回オープン時のもの。readFile が返す bytes から
+    // 計算される値とは一致しない（＝ファイルが外部で差し替えられた想定）。
+    usePdfStore.getState().setPdf("/pdf-A.pdf", 2, "stale-fingerprint-from-before");
+    vi.mocked(readFile).mockResolvedValue(new Uint8Array([9, 9, 9]));
+
+    render(<PdfViewer />);
+
+    await waitFor(() => {
+      expect(usePdfStore.getState().error).not.toBeNull();
+    });
+    expect(usePdfStore.getState().error).toContain("外部で更新されています");
+    expect(pdfjs.getDocument).not.toHaveBeenCalled();
   });
 });

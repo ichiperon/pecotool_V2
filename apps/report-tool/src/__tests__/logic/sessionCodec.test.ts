@@ -9,6 +9,7 @@ import type { SessionInput } from "../../logic/sessionCodec";
 function sampleInput(): SessionInput {
   return {
     pdfPath: "C:\docs\請求書.pdf",
+    pdfFingerprint: "abc123def456",
     savedAt: "2026-07-08T05:00:00.000Z",
     rotation: 90,
     fields: [
@@ -23,6 +24,11 @@ function sampleInput(): SessionInput {
     edited: new Map([[1, [new Set(["f1"]), new Set<string>()]]]),
     pageOffsets: new Map([[3, { dx: 2, dy: -1 }]]),
     excludedPages: new Set([2]),
+    diagnostics: {
+      failedPages: [4, 7],
+      layoutMismatchPages: [5],
+      layoutBasePage: 1,
+    },
   };
 }
 
@@ -34,6 +40,7 @@ describe("sessionCodec: 往復", () => {
     if (!result.ok) return;
     const s = result.session;
     expect(s.pdfPath).toBe(input.pdfPath);
+    expect(s.pdfFingerprint).toBe(input.pdfFingerprint);
     expect(s.savedAt).toBe(input.savedAt);
     expect(s.rotation).toBe(90);
     expect(s.fields).toEqual(input.fields);
@@ -45,6 +52,7 @@ describe("sessionCodec: 往復", () => {
     expect(s.edited.get(1)?.[1]?.size).toBe(0);
     expect(s.pageOffsets.get(3)).toEqual({ dx: 2, dy: -1 });
     expect(s.excludedPages.has(2)).toBe(true);
+    expect(s.diagnostics).toEqual(input.diagnostics);
   });
 
   it("空の作業状態も往復できる", () => {
@@ -57,12 +65,93 @@ describe("sessionCodec: 往復", () => {
       excludedPages: new Set(),
       fields: [],
       rotation: 0,
+      diagnostics: { failedPages: [], layoutMismatchPages: [], layoutBasePage: null },
     };
     const r = deserializeSession(serializeSession(input));
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.session.cells.size).toBe(0);
     expect(r.session.excludedPages.size).toBe(0);
+    expect(r.session.diagnostics).toEqual({
+      failedPages: [],
+      layoutMismatchPages: [],
+      layoutBasePage: null,
+    });
+  });
+});
+
+describe("sessionCodec: v2 スキーマ（#446 fingerprint / #447 diagnostics）", () => {
+  it("v1（SESSION_SCHEMA_VERSION より前）は ok:false で拒否する（誤復元よりデータ保護を優先）", () => {
+    const json = serializeSession(sampleInput()).replace(
+      `"version":${SESSION_SCHEMA_VERSION}`,
+      '"version":1'
+    );
+    const r = deserializeSession(json);
+    expect(r.ok).toBe(false);
+  });
+
+  it("pdfFingerprint 欠落は ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    delete obj.pdfFingerprint;
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("pdfFingerprint が空文字は ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.pdfFingerprint = "";
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("diagnostics 欠落は ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    delete obj.diagnostics;
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("diagnostics.failedPages が number[] でない場合は ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.diagnostics.failedPages = ["2", "3"];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("diagnostics.layoutBasePage が number でも null でもない場合は ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.diagnostics.layoutBasePage = "1";
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("diagnostics.layoutBasePage=null は許容される", () => {
+    const input: SessionInput = {
+      ...sampleInput(),
+      diagnostics: { failedPages: [], layoutMismatchPages: [], layoutBasePage: null },
+    };
+    const r = deserializeSession(serializeSession(input));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.session.diagnostics.layoutBasePage).toBeNull();
+  });
+
+  // レビューLOW: ページ番号は 1 始まりの整数のみ許容する（number 型チェックだけでは
+  // 0・負数・小数が素通りしていた）。
+  it("diagnostics.failedPages に 0 以下や小数が混入していたら ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.diagnostics.failedPages = [0];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+
+    obj.diagnostics.failedPages = [-1];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+
+    obj.diagnostics.failedPages = [1.5];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("diagnostics.layoutBasePage が 0 以下や小数なら ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.diagnostics.layoutBasePage = 0;
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+
+    obj.diagnostics.layoutBasePage = 2.5;
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
   });
 });
 

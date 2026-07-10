@@ -384,9 +384,14 @@ export function useReportOcr(): UseReportOcrReturn {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState<ReportOcrProgress | null>(null);
   const [reocrTarget, setReocrTarget] = useState<number | null>(null);
-  const [failedPages, setFailedPages] = useState<number[]>([]);
-  const [layoutMismatchPages, setLayoutMismatchPages] = useState<number[]>([]);
-  const [layoutBasePage, setLayoutBasePage] = useState<number | null>(null);
+  // failedPages/layoutMismatchPages/layoutBasePage は #447 (PCT-211) で reportStore へ
+  // 移した。以前はここの useState だったため、セッション復元で store 側の cells 等が
+  // 復元されても診断状態だけ空のまま残り、CSV から失敗ページが無言欠落していた。
+  // 読み取りは reactive selector（再描画のため）、書き込みは各処理内で
+  // useReportStore.getState() から取得する（既存の setCells 等と同じパターン）。
+  const failedPages = useReportStore((s) => s.failedPages);
+  const layoutMismatchPages = useReportStore((s) => s.layoutMismatchPages);
+  const layoutBasePage = useReportStore((s) => s.layoutBasePage);
   const [engineError, setEngineError] = useState(false);
   const [preserveEdited, setPreserveEditedState] = useState(true);
   // runOcr/runOcrForPage は useCallback([]) のため state を閉じ込めない。ref 経由で読む
@@ -409,6 +414,9 @@ export function useReportOcr(): UseReportOcrReturn {
       excludedPages,
       cells: prevCells,
       edited: prevEdited,
+      setFailedPages,
+      setLayoutMismatchPages,
+      setLayoutBasePage,
     } = useReportStore.getState();
     // rotation は実行開始時に1回だけ読む（実行中に変わっても途中から混ざらない）
     const { filePath, numPages, rotation } = usePdfStore.getState();
@@ -581,7 +589,8 @@ export function useReportOcr(): UseReportOcrReturn {
   }, []);
 
   const runOcrForPage = useCallback(async (pageNum: number) => {
-    const { template, pageOffsets, setCellsForPage, setConfidencesForPage } = useReportStore.getState();
+    const { template, pageOffsets, setCellsForPage, setConfidencesForPage, setFailedPages } =
+      useReportStore.getState();
     const { filePath, rotation } = usePdfStore.getState();
     const { cells: prevCellsForPage, edited: prevEditedForPage } = useReportStore.getState();
 

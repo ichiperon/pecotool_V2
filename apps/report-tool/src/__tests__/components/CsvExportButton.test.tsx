@@ -337,6 +337,24 @@ describe("CsvExportButton – 出力前ゲート", () => {
     );
   });
 
+  // #447 (PCT-211): failedPages は useReportOcr のローカル state だった頃、
+  // セッション復元後に空へ戻ってしまい、この警告ゲートが無言で消えていた。
+  // reportStore へ移した後は、復元で store に書き戻された failedPages を
+  // App.tsx が ocrHook.failedPages 経由でそのまま渡すため、同じ警告が出ることを
+  // ここで確認する（store 側の復元検証は
+  // __tests__/hooks/useSessionPersistence.test.ts の「復元」describe が担当）。
+  it("セッション復元で store に書き戻された failedPages でも同じ警告ゲートが働く", () => {
+    addField("金額");
+    // useSessionPersistence.offerRestore が行うのと同じ形の書き戻しを模す
+    useReportStore.setState({ failedPages: [2, 5] });
+
+    render(<CsvExportButton failedPages={useReportStore.getState().failedPages} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /ページ 2, 5 は OCR 失敗のため CSV に行が含まれません/
+    );
+  });
+
   it("cells が空のとき出力前に確認ダイアログを出し、キャンセルで出力しない", () => {
     addField("金額");
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);

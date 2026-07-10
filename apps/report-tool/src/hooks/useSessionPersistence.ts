@@ -40,10 +40,13 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
     const saveNow = async (): Promise<boolean> => {
       const rs = useReportStore.getState();
       const ps = usePdfStore.getState();
-      // 抽出データが無い状態は保存しない（reset 直後に有効なセッションを潰さない）
-      if (!ps.filePath || rs.cells.size === 0) return false;
+      // 抽出データが無い状態は保存しない（reset 直後に有効なセッションを潰さない）。
+      // pdfFingerprint 未確定（PDF 未読込 or 読込途中）でも保存しない
+      // （#446: fingerprint 無しのセッションは v2 スキーマで復元不可能になるため）。
+      if (!ps.filePath || !ps.pdfFingerprint || rs.cells.size === 0) return false;
       const json = serializeSession({
         pdfPath: ps.filePath,
+        pdfFingerprint: ps.pdfFingerprint,
         savedAt: new Date().toISOString(),
         rotation: ps.rotation,
         fields: rs.template.fields,
@@ -52,31 +55,76 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
         edited: rs.edited,
         pageOffsets: rs.pageOffsets,
         excludedPages: rs.excludedPages,
+        diagnostics: {
+          failedPages: rs.failedPages,
+          layoutMismatchPages: rs.layoutMismatchPages,
+          layoutBasePage: rs.layoutBasePage,
+        },
       });
       const result = await store.save(json);
       return result.ok;
     };
 
-    // クローズ前フラッシュ: 保留中のデバウンスを破棄して即時保存する
+    // single-flight + 1件コアレス: デバウンス発火中の save と flushNow の save が
+    // 並走すると、Rust 側は temp を一意名で分離していても最終 rename 先
+    // （current.json）は単一スロットのため、後勝ちの内容が読めなくなる懸念がある
+    // （#450 frontend）。実行中の save があれば新規呼び出しは追い打ちフラグだけ
+    // 立てて既存の実行に相乗りし、完了後に最新 state でもう1回だけ実行する。
+    let inFlight: Promise<boolean> | null = null;
+    let pendingRerun = false;
+
+    const runSingleFlight = (): Promise<boolean> => {
+      if (inFlight) {
+        pendingRerun = true;
+        return inFlight;
+      }
+      const run = (async (): Promise<boolean> => {
+        let result = await saveNow();
+        while (pendingRerun) {
+          pendingRerun = false;
+          result = await saveNow();
+        }
+        return result;
+      })();
+      inFlight = run;
+      void run.finally(() => {
+        if (inFlight === run) inFlight = null;
+      });
+      return run;
+    };
+
+    // クローズ前フラッシュ: 保留中のデバウンスを破棄し、実行中の save があれば
+    // 完了を待ってから、最新 state で最終保存を実行する（並走させない）。
     flushRef.current = async () => {
       if (timer !== null) {
         window.clearTimeout(timer);
         timer = null;
       }
-      return saveNow();
+      while (inFlight) {
+        await inFlight.catch(() => {});
+      }
+      return runSingleFlight();
     };
 
     const schedule = () => {
       if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = null;
-        void saveNow();
+        void runSingleFlight();
       }, SESSION_AUTOSAVE_DEBOUNCE_MS);
     };
 
     /**
      * 復元オファー。PDF open 直後は同 tick で resetExtractedData が走るため、
      * setTimeout(0) で 1 tick 譲ってから「作業が空か」を判定する。
+     *
+     * fingerprint 比較について（#446）: PdfViewer.handleOpenPdf は bytes から
+     * フィンガープリントを計算し終えてから setPdf を呼ぶ（filePath と同一の
+     * set() で pdfFingerprint も同時に確定する）。そのため、この offerRestore が
+     * 呼ばれる時点（pdfStore.filePath の変化を検知した後）では
+     * usePdfStore.getState().pdfFingerprint は既に確定済みであり、
+     * 「fingerprint 未確定のまま比較してしまう」競合は設計上発生しない
+     * （setPdf 呼び出し自体が fingerprint 確定後まで待たされるため）。
      */
     const offerRestore = (openedPath: string) => {
       window.setTimeout(() => {
@@ -90,7 +138,10 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
           if (!decoded.ok) return;
           const s = decoded.session;
           if (s.pdfPath !== openedPath) return; // 別 PDF のセッションは適用しない
-          if (usePdfStore.getState().filePath !== openedPath) return; // その後に差し替わった
+          const currentPdfState = usePdfStore.getState();
+          if (currentPdfState.filePath !== openedPath) return; // その後に差し替わった
+          // パスが同じでも中身が変わっていれば別ファイル扱い（誤復元防止）
+          if (s.pdfFingerprint !== currentPdfState.pdfFingerprint) return;
 
           const savedLabel = new Date(s.savedAt).toLocaleString();
           const ok = window.confirm(
@@ -105,6 +156,9 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
             edited: s.edited,
             pageOffsets: s.pageOffsets,
             excludedPages: s.excludedPages,
+            failedPages: s.diagnostics.failedPages,
+            layoutMismatchPages: s.diagnostics.layoutMismatchPages,
+            layoutBasePage: s.diagnostics.layoutBasePage,
             selectedFieldId: null,
             past: [],
             future: [],
