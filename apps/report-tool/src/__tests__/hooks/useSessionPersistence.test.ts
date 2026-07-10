@@ -189,6 +189,82 @@ describe("useSessionPersistence: 自動保存", () => {
     });
     expect(storage.save).not.toHaveBeenCalled();
   });
+
+  it("保存 JSON に store の OCR 診断状態と pdfFingerprint が入る（#446 #447 保存側の配線）", async () => {
+    // 復元系テストは serializeSession を直接使って JSON を作るため、
+    // saveNow が store の failedPages 等を diagnostics へ詰める配線は
+    // ここで保存側から縛る（詰め忘れて空配列を書いても復元テストは通ってしまう）。
+    const storage = makeStorage();
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "1000"]])]]]));
+      useReportStore.getState().setFailedPages([4, 7]);
+      useReportStore.getState().setLayoutMismatchPages([2]);
+      useReportStore.getState().setLayoutBasePage(1);
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_AUTOSAVE_DEBOUNCE_MS + 10);
+    });
+
+    expect(storage.saved.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(storage.saved[storage.saved.length - 1]);
+    expect(parsed.pdfFingerprint).toBe(FAKE_FINGERPRINT);
+    expect(parsed.diagnostics).toEqual({
+      failedPages: [4, 7],
+      layoutMismatchPages: [2],
+      layoutBasePage: 1,
+    });
+  });
+
+  it("pdfFingerprint 未確定（setPdf に fingerprint なし）の間は cells があっても保存しない（#446）", async () => {
+    const storage = makeStorage();
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      // fingerprint を渡さない setPdf（読込途中・旧経路を模す）。
+      // fingerprint なしで保存されたセッションは v2 スキーマで復元不可能になるため、
+      // saveNow はこの状態では保存をスキップしなければならない。
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "1000"]])]]]));
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_AUTOSAVE_DEBOUNCE_MS + 10);
+    });
+    expect(storage.save).not.toHaveBeenCalled();
+  });
+
+  it("pdfFingerprint 未確定なら flushNow も保存せず false を返す（#446）", async () => {
+    const storage = makeStorage();
+    const { result } = renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "1000"]])]]]));
+    });
+
+    let flushed: boolean | undefined;
+    await act(async () => {
+      flushed = await result.current.flushNow();
+    });
+    expect(flushed).toBe(false);
+    expect(storage.save).not.toHaveBeenCalled();
+  });
 });
 
 describe("useSessionPersistence: 復元", () => {
@@ -223,6 +299,31 @@ describe("useSessionPersistence: 復元", () => {
     expect(rs.failedPages).toEqual([3]);
     expect(rs.layoutMismatchPages).toEqual([]);
     expect(rs.layoutBasePage).toBeNull();
+  });
+
+  it("layoutMismatchPages / layoutBasePage も非空・非 null の値で復元される（#447）", async () => {
+    // 既定の savedSessionFor は layoutMismatchPages=[] / layoutBasePage=null のため、
+    // 「初期値と同じ値の復元」では復元漏れを検出できない。非空値で縛る。
+    const json = savedSessionFor("/docs/a.pdf", FAKE_FINGERPRINT, {
+      failedPages: [3, 8],
+      layoutMismatchPages: [5],
+      layoutBasePage: 2,
+    });
+    const storage = makeStorage(json);
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    expect(window.confirm).toHaveBeenCalled();
+    const rs = useReportStore.getState();
+    expect(rs.failedPages).toEqual([3, 8]);
+    expect(rs.layoutMismatchPages).toEqual([5]);
+    expect(rs.layoutBasePage).toBe(2);
   });
 
   it("同じパスでも fingerprint が異なれば復元を提案しない（#446: 中身が変わったPDFの誤復元防止）", async () => {
