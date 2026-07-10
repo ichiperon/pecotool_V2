@@ -3,6 +3,7 @@ import { ask } from '@tauri-apps/plugin-dialog';
 import { getAllWindows, getCurrentWindow } from '@tauri-apps/api/window';
 import { usePecoStore } from '../store/pecoStore';
 import { perf } from '../utils/perfLogger';
+import { isTauriRuntime } from '../utils/isTauriRuntime';
 
 // 指定ミリ秒でタイムアウトする Promise.race ヘルパ。
 // タイムアウト時は fallback 値で解決する (reject しない)。
@@ -41,6 +42,10 @@ interface UseTauriCloseGuardOptions {
 export function useTauriCloseGuard(options: UseTauriCloseGuardOptions = {}) {
   const { isSavingRef, isBackingUpRef } = options;
   useEffect(() => {
+    // issue #442 (PCT-206): ブラウザ単体起動 (npm run dev をブラウザで開く場合) では
+    // Tauri ランタイムが存在せず getCurrentWindow() が同期的に例外を投げる。
+    // ErrorBoundary に落ちて起動不能になるため、Tauri 環境でなければ何もしない。
+    if (!isTauriRuntime()) return;
     if (window.location.hash === '#preview') return;
     const currentWindow = getCurrentWindow();
     let disposed = false;
