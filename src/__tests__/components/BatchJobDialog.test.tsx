@@ -5,6 +5,7 @@ import React from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, fireEvent, cleanup } from '@testing-library/react';
 import { BatchJobDialog } from '../../components/BatchJobDialog';
+import { isAnyModalOpen } from '../../components/ui/Modal';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn().mockResolvedValue(null),
@@ -74,5 +75,43 @@ describe('BatchJobDialog header close (X) button guard (#442)', () => {
     const closeButton = getByTitle('閉じる');
     fireEvent.click(closeButton);
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe('BatchJobDialog common Modal contract (#454)', () => {
+  it('共通Modalとして登録され、Escで閉じる', () => {
+    const onClose = vi.fn();
+    const { getByRole, unmount } = render(
+      <BatchJobDialog {...defaultProps} onClose={onClose} />,
+    );
+
+    const dialog = getByRole('dialog', { name: 'フォルダ一括バッチ処理' });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(isAnyModalOpen()).toBe(true);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(isAnyModalOpen()).toBe(false);
+  });
+
+  it('Tabをダイアログ内に閉じ込め、閉じた後は元のフォーカスへ戻す', () => {
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    const { getByRole, getAllByRole, getByTitle, unmount } = render(
+      <BatchJobDialog {...defaultProps} />,
+    );
+    const dialog = getByRole('dialog', { name: 'フォルダ一括バッチ処理' });
+    const closeButton = getByTitle('閉じる');
+    const lastSelect = getAllByRole('combobox').at(-1)!;
+
+    lastSelect.focus();
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(document.activeElement).toBe(closeButton);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
   });
 });

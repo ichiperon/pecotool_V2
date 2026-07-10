@@ -9,8 +9,9 @@
  *  - The listener is cleaned up on unmount
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { renderHook, cleanup } from '@testing-library/react';
+import { render, renderHook, cleanup } from '@testing-library/react';
 import { useEffect } from 'react';
+import { isAnyModalOpen, Modal } from '../../components/ui/Modal';
 
 afterEach(() => cleanup());
 
@@ -20,10 +21,10 @@ afterEach(() => cleanup());
 function useF5ReloadShortcut(handleReload: () => void) {
   useEffect(() => {
     const handleF5 = (e: KeyboardEvent) => {
-      if (e.key === 'F5') {
-        e.preventDefault();
-        handleReload();
-      }
+      if (e.key !== 'F5') return;
+      e.preventDefault();
+      if (isAnyModalOpen()) return;
+      handleReload();
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
@@ -71,6 +72,29 @@ describe('Issue #38: F5 routes through handleReload (isSaving guard)', () => {
     pressF5();
 
     expect(handleReload).not.toHaveBeenCalled();
+  });
+
+  it('#454: 共通Modal表示中はF5を握りつぶし、閉じた後に再び有効化する', () => {
+    const handleReload = vi.fn();
+    renderHook(() => useF5ReloadShortcut(handleReload));
+    const modal = render(
+      <Modal
+        onClose={() => {}}
+        ariaLabel="テストモーダル"
+        backdropClassName="backdrop"
+        dialogClassName="dialog"
+      >
+        内容
+      </Modal>,
+    );
+
+    const blocked = pressF5();
+    expect(blocked.defaultPrevented).toBe(true);
+    expect(handleReload).not.toHaveBeenCalled();
+
+    modal.unmount();
+    pressF5();
+    expect(handleReload).toHaveBeenCalledTimes(1);
   });
 });
 

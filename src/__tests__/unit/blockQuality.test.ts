@@ -7,7 +7,7 @@
  *   - getProblematicBlockIds
  *   - getProblematicReason
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   BB_OVERLAP_RATIO,
   isEmptyBlock,
@@ -171,6 +171,50 @@ describe('findOverlappingBlockIds', () => {
     expect(result.has('b2')).toBe(true);
     expect(result.has('b3')).toBe(false);
   });
+
+  it('#455: sparse pages do not perform an all-pairs overlap scan', () => {
+    const blocks = Array.from({ length: 2_000 }, (_, index) =>
+      makeBlock(`b${index}`, 'text', index * 20, 0, 10, 10));
+    const maxSpy = vi.spyOn(Math, 'max');
+
+    expect(findOverlappingBlockIds(blocks)).toEqual(new Set());
+    expect(maxSpy.mock.calls.length).toBeLessThan(20);
+    maxSpy.mockRestore();
+  });
+
+  it('#455: spatial candidates produce the same IDs as an exhaustive scan', () => {
+    const blocks = Array.from({ length: 120 }, (_, index) =>
+      makeBlock(
+        `b${index}`,
+        'text',
+        (index * 37) % 300,
+        (index * 53) % 500,
+        20 + (index % 5) * 10,
+        12 + (index % 4) * 8,
+      ));
+    const expected = new Set<string>();
+    for (let i = 0; i < blocks.length; i++) {
+      for (let j = i + 1; j < blocks.length; j++) {
+        const a = blocks[i];
+        const b = blocks[j];
+        const iw = Math.min(a.bbox.x + a.bbox.width, b.bbox.x + b.bbox.width)
+          - Math.max(a.bbox.x, b.bbox.x);
+        const ih = Math.min(a.bbox.y + a.bbox.height, b.bbox.y + b.bbox.height)
+          - Math.max(a.bbox.y, b.bbox.y);
+        if (iw <= 0 || ih <= 0) continue;
+        const minArea = Math.min(
+          a.bbox.width * a.bbox.height,
+          b.bbox.width * b.bbox.height,
+        );
+        if ((iw * ih) / minArea >= BB_OVERLAP_RATIO) {
+          expected.add(a.id);
+          expected.add(b.id);
+        }
+      }
+    }
+
+    expect(findOverlappingBlockIds(blocks)).toEqual(expected);
+  });
 });
 
 // ── getProblematicBlockIds ─────────────────────────────────────────────────
@@ -214,6 +258,16 @@ describe('getProblematicBlockIds', () => {
     ];
     const result = getProblematicBlockIds(blocks);
     expect(result.size).toBe(0);
+  });
+
+  it('#455: reuses one result for the same textBlocks revision', () => {
+    const blocks = [
+      makeBlock('b1', 'hello', 0, 0, 100, 100),
+      makeBlock('b2', 'world', 0, 0, 100, 100),
+    ];
+
+    expect(getProblematicBlockIds(blocks)).toBe(getProblematicBlockIds(blocks));
+    expect(getProblematicBlockIds([...blocks])).not.toBe(getProblematicBlockIds(blocks));
   });
 });
 

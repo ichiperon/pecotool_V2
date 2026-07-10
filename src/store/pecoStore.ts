@@ -383,8 +383,9 @@ interface PecoState {
    * いても一切変更しない (isDirty も rotation/bbox も維持する)。
    * orderMatched===false のとき (保存中に pageOrder が savedPageSnapshots 取得時点と
    * 食い違った) は、idx 対応そのものが信用できないため rotation/bbox のクリア・
-   * リベースを丸ごとスキップする (isDirty のクリアは参照一致ページに限り従来どおり行う)。
-   * 両方とも省略時は false 扱い (従来どおり)。
+   * リベースと isDirty のクリアを丸ごとスキップし、旧 bytes cache を使う次回保存へ
+   * 全保存対象を持ち越す。bytePreserved の省略時は false、orderMatched の省略時は
+   * 一致扱い (従来どおり)。
    */
   resetDirty: (savedPageSnapshots?: Map<number, PageData>, bytePreserved?: boolean, orderMatched?: boolean) => void;
 
@@ -1172,17 +1173,12 @@ export const usePecoStore = create<PecoState>((set, get) => ({
       // ユーザーの pending rotation を永久に失う (MEDIUM: 既存の #367 実装から潜在していた
       // 不整合)。
       //
-      // よって orderMatched===false のときは rotation/bbox に一切触れず、isDirty の
-      // クリアだけ ref match ページに限って行う (このページの内容自体は保存済みバイトに
-      // 正しく書かれているため isDirty を落として問題ない)。
-      if (orderMatched === false) {
-        for (const [idx, savedPage] of savedPageSnapshots.entries()) {
-          const livePage = newPages.get(idx);
-          if (livePage === savedPage && livePage.isDirty) {
-            newPages.set(idx, { ...livePage, isDirty: false });
-          }
-        }
-      } else {
+      // #458: orderMatched===false のとき originalBytesCache は保存前バイトを温存する。
+      // この状態で参照一致ページを clean にすると、次回保存は古い bytes を基準にしながら
+      // そのページを再描画対象から外すため、今回保存した OCR 編集を巻き戻してしまう。
+      // rotation/bbox だけでなく dirty も一切収束させず、次回保存で現在の pageOrder と
+      // 編集内容を同じ bytes へまとめて焼き込めるよう全保存対象を pending のまま残す。
+      if (orderMatched !== false) {
         for (const [idx, savedPage] of savedPageSnapshots.entries()) {
           const livePage = newPages.get(idx);
           if (!livePage) continue;

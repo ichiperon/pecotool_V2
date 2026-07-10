@@ -504,11 +504,49 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static OCR_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_PREVIEW_TEMP_PATHS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// PCT-116: temp 直書きの上限サイズ。raw IPC body をそのまま書くため、Webview 侵害時に
 /// 巨大 body の連投で temp ディスクを圧迫されないよう上限を設ける。業務 PDF / OCR 画像の
 /// 現実的上限を踏まえ 500MB とする（正規 UI の経路では到達しない）。
 const MAX_TEMP_WRITE_BYTES: usize = 500 * 1024 * 1024;
+
+/// 外部ビューアがファイルをロックして削除できない場合でも、一時 PDF がプロセス存続中に
+/// 無制限に増えないよう追跡数を制限する。通常は次回プレビュー前の掃除で 0 件へ戻る。
+const MAX_ACTIVE_PREVIEW_TEMP_FILES: usize = 3;
+
+fn cleanup_preview_temp_paths(paths: &mut Vec<std::path::PathBuf>) {
+    paths.retain(|path| match std::fs::remove_file(path) {
+        Ok(()) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            eprintln!(
+                "[preview-cleanup] failed to remove preview temp file: {} ({e})",
+                path.display()
+            );
+            true
+        }
+    });
+}
+
+fn prepare_preview_temp_slot(paths: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+    cleanup_preview_temp_paths(paths);
+    if paths.len() >= MAX_ACTIVE_PREVIEW_TEMP_FILES {
+        return Err(format!(
+            "[open_pdf_preview] {} preview temp files are still in use; close the PDF viewer and retry",
+            paths.len()
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_tracked_preview_temp_files() {
+    let mut paths = ACTIVE_PREVIEW_TEMP_PATHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cleanup_preview_temp_paths(&mut paths);
+}
 
 /// PCT-199 AQ-4: ファイル名 `{prefix}_{pid}_{nanos}_{counter}.{ext}` から PID 部分を抽出する。
 /// prefix が `peco_ocr_preview` / `peco_ocr` のいずれであっても、拡張子を除いた `_` 区切りの
@@ -646,6 +684,13 @@ async fn open_pdf_preview(
         ));
     }
 
+    // #461: 前回までの preview を先に best-effort で掃除する。ビューアのロック等で
+    // 削除できないパスは追跡を継続し、上限到達時は新規作成を止めて容量増加を抑える。
+    let mut tracked_paths = ACTIVE_PREVIEW_TEMP_PATHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prepare_preview_temp_slot(&mut tracked_paths)?;
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -657,12 +702,26 @@ async fn open_pdf_preview(
         nanos,
         counter,
     ));
-    std::fs::write(&path, &bytes).map_err(|e| format!("preview write failed: {}", e))?;
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        // 部分書き込みが残った場合も追跡対象に含める。削除できれば即時回収する。
+        if let Err(cleanup_err) = std::fs::remove_file(&path) {
+            if cleanup_err.kind() != std::io::ErrorKind::NotFound {
+                tracked_paths.push(path);
+            }
+        }
+        return Err(format!("preview write failed: {}", e));
+    }
 
     let path_str = path.to_string_lossy().to_string();
-    app.opener()
-        .open_path(path_str.clone(), None::<&str>)
-        .map_err(|e| format!("open_path failed: {}", e))?;
+    if let Err(e) = app.opener().open_path(path_str.clone(), None::<&str>) {
+        // 起動失敗時も書き出した temp を回収する。削除不能なら終了時 cleanup の対象として
+        // 追跡し続ける。
+        if std::fs::remove_file(&path).is_err() {
+            tracked_paths.push(path);
+        }
+        return Err(format!("open_path failed: {}", e));
+    }
+    tracked_paths.push(path);
     Ok(path_str)
 }
 
@@ -2332,6 +2391,44 @@ mod tests {
         assert_eq!(extract_pid_from_temp_filename(stem), None);
     }
 
+    // ── #461: preview temp lifecycle ────────────────────────────────────
+
+    #[test]
+    fn prepare_preview_temp_slot_removes_previous_preview_files() {
+        let dir = make_replace_test_dir("preview_lifecycle_cleanup");
+        let first = dir.join("peco_ocr_preview_1_1_0.pdf");
+        let second = dir.join("peco_ocr_preview_1_2_1.pdf");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let mut tracked = vec![first.clone(), second.clone()];
+
+        prepare_preview_temp_slot(&mut tracked).expect("old previews should be cleaned");
+
+        assert!(tracked.is_empty());
+        assert!(!first.exists());
+        assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prepare_preview_temp_slot_caps_files_that_cannot_be_removed() {
+        let dir = make_replace_test_dir("preview_lifecycle_cap");
+        let mut tracked = Vec::new();
+        // remove_file はディレクトリに対して失敗するので、外部ビューアが PDF をロックして
+        // cleanup できない状況をプラットフォーム非依存で模擬できる。
+        for index in 0..MAX_ACTIVE_PREVIEW_TEMP_FILES {
+            let locked = dir.join(format!("peco_ocr_preview_locked_{index}.pdf"));
+            std::fs::create_dir(&locked).unwrap();
+            tracked.push(locked);
+        }
+
+        let err = prepare_preview_temp_slot(&mut tracked).unwrap_err();
+
+        assert!(err.contains("still in use"), "got: {err}");
+        assert_eq!(tracked.len(), MAX_ACTIVE_PREVIEW_TEMP_FILES);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn is_process_alive_returns_true_for_current_process() {
         // 自プロセス自身は必ず生存している
@@ -2466,7 +2563,7 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -2506,6 +2603,14 @@ pub fn run() {
             backup::clear_backup,
             backup::load_backup,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            // #461: 正常終了時にも、このプロセスが生成して追跡中の preview temp を
+            // best-effort で回収する。削除不能分は既存の次回起動 cleanup が引き継ぐ。
+            cleanup_tracked_preview_temp_files();
+        }
+    });
 }

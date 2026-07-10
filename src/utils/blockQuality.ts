@@ -23,6 +23,23 @@ import type { TextBlock } from '../types';
  */
 export const BB_OVERLAP_RATIO = 0.5;
 
+const MIN_Y_CELL_SIZE = 16;
+const MAX_BUCKETS_PER_BLOCK = 256;
+
+interface IndexedBlock {
+  block: TextBlock;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  area: number;
+}
+
+// A textBlocks array is the page-quality revision in the store: every page edit
+// replaces the array. PdfCanvas and OcrEditor can therefore share the same
+// calculation without introducing another store subscription or revision state.
+const problematicIdsByRevision = new WeakMap<TextBlock[], Set<string>>();
+
 /** Returns true when the block has no readable text content. */
 export function isEmptyBlock(block: TextBlock): boolean {
   return block.text.trim() === '';
@@ -43,33 +60,71 @@ export function isEmptyBlock(block: TextBlock): boolean {
 export function findOverlappingBlockIds(blocks: TextBlock[]): Set<string> {
   const result = new Set<string>();
 
-  for (let i = 0; i < blocks.length; i++) {
-    for (let j = i + 1; j < blocks.length; j++) {
-      const a = blocks[i];
-      const b = blocks[j];
+  const indexed: IndexedBlock[] = [];
+  const heights: number[] = [];
+  for (const block of blocks) {
+    const { x, y, width, height } = block.bbox;
+    if (width <= 0 || height <= 0) continue;
+    const area = width * height;
+    indexed.push({ block, left: x, right: x + width, top: y, bottom: y + height, area });
+    heights.push(height);
+  }
+  if (indexed.length < 2) return result;
 
-      const aArea = a.bbox.width * a.bbox.height;
-      const bArea = b.bbox.width * b.bbox.height;
+  indexed.sort((a, b) => a.left - b.left || a.right - b.right);
+  heights.sort((a, b) => a - b);
+  const cellSize = Math.max(MIN_Y_CELL_SIZE, heights[Math.floor(heights.length / 2)]);
+  const buckets = new Map<number, IndexedBlock[]>();
+  const largeBlocks: IndexedBlock[] = [];
+  const seenBlocks: IndexedBlock[] = [];
 
-      // Skip degenerate (zero-area) boxes.
-      if (aArea <= 0 || bArea <= 0) continue;
+  for (const current of indexed) {
+    const firstCell = Math.floor(current.top / cellSize);
+    const lastCell = Math.floor(current.bottom / cellSize);
+    const bucketCount = lastCell - firstCell + 1;
+    const candidates = new Set<IndexedBlock>();
 
-      // Compute intersection rectangle.
-      const ix = Math.max(a.bbox.x, b.bbox.x);
-      const iy = Math.max(a.bbox.y, b.bbox.y);
-      const iw = Math.min(a.bbox.x + a.bbox.width,  b.bbox.x + b.bbox.width)  - ix;
-      const ih = Math.min(a.bbox.y + a.bbox.height, b.bbox.y + b.bbox.height) - iy;
-
-      if (iw <= 0 || ih <= 0) continue; // No intersection.
-
-      const intersectionArea = iw * ih;
-      const minArea = Math.min(aArea, bArea);
-
-      if (intersectionArea / minArea >= BB_OVERLAP_RATIO) {
-        result.add(a.id);
-        result.add(b.id);
+    if (bucketCount > MAX_BUCKETS_PER_BLOCK) {
+      // Very tall boxes are uncommon. Avoid creating an unbounded number of
+      // buckets while preserving exact results by comparing them with the
+      // x-active prefix.
+      for (const candidate of seenBlocks) {
+        if (candidate.right > current.left) candidates.add(candidate);
+      }
+    } else {
+      for (let cell = firstCell; cell <= lastCell; cell++) {
+        const bucket = buckets.get(cell);
+        if (!bucket) continue;
+        const active = bucket.filter((candidate) => candidate.right > current.left);
+        if (active.length === 0) buckets.delete(cell);
+        else buckets.set(cell, active);
+        for (const candidate of active) candidates.add(candidate);
+      }
+      for (const candidate of largeBlocks) {
+        if (candidate.right > current.left) candidates.add(candidate);
       }
     }
+
+    for (const candidate of candidates) {
+      const iw = Math.min(candidate.right, current.right) - current.left;
+      const ih = Math.min(candidate.bottom, current.bottom) - Math.max(candidate.top, current.top);
+      if (iw <= 0 || ih <= 0) continue;
+      if ((iw * ih) / Math.min(candidate.area, current.area) >= BB_OVERLAP_RATIO) {
+        result.add(candidate.block.id);
+        result.add(current.block.id);
+      }
+    }
+
+    if (bucketCount > MAX_BUCKETS_PER_BLOCK) {
+      largeBlocks.push(current);
+    } else {
+      for (let cell = firstCell; cell <= lastCell; cell++) {
+        const bucket = buckets.get(cell);
+        if (bucket) bucket.push(current);
+        else buckets.set(cell, [current]);
+      }
+    }
+    seenBlocks.push(current);
   }
 
   return result;
@@ -87,6 +142,9 @@ export function findOverlappingBlockIds(blocks: TextBlock[]): Set<string> {
  * @returns A Set of block IDs that are considered problematic.
  */
 export function getProblematicBlockIds(blocks: TextBlock[]): Set<string> {
+  const cached = problematicIdsByRevision.get(blocks);
+  if (cached) return cached;
+
   const overlapping = findOverlappingBlockIds(blocks);
   const result = new Set<string>(overlapping);
 
@@ -96,6 +154,7 @@ export function getProblematicBlockIds(blocks: TextBlock[]): Set<string> {
     }
   }
 
+  problematicIdsByRevision.set(blocks, result);
   return result;
 }
 

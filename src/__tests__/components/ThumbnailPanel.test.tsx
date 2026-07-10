@@ -911,6 +911,44 @@ describe('PCT-123 系回帰観点: 削除確認ダイアログの分岐と displ
 });
 
 describe('ThumbnailPanel: 矢印キーによるページ選択状態の境界', () => {
+  it('#457: Alt+上下矢印で現在ページを並び替え、live regionへ通知する', () => {
+    const fake = makeFullPanelFake();
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake, { currentPageIndex: 1 });
+    const scrollContent = container.querySelector('.scroll-content') as HTMLElement;
+
+    expect(scrollContent.getAttribute('aria-keyshortcuts')).toBe('Alt+ArrowUp Alt+ArrowDown');
+    fireEvent.keyDown(scrollContent, { key: 'ArrowDown', altKey: true });
+
+    expect(fake.onMovePage).toHaveBeenCalledWith(1, 2);
+    expect(fake.onSelectPage).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="status"]')?.textContent)
+      .toContain('ページ 2 を 3 ページ目へ移動しました');
+  });
+
+  it('#457: 非同期move中のAlt+Arrow連打を抑止し、完了後はロックを解除する', async () => {
+    const fake = makeFullPanelFake();
+    let finishMove!: () => void;
+    fake.onMovePage.mockReturnValue(new Promise<void>((resolve) => { finishMove = resolve; }));
+    const doc = buildDocument([0, 0, 0]);
+    const { container } = renderPanel(doc, fake, { currentPageIndex: 1 });
+    const scrollContent = container.querySelector('.scroll-content') as HTMLElement;
+
+    fireEvent.keyDown(scrollContent, { key: 'ArrowDown', altKey: true });
+    fireEvent.keyDown(scrollContent, { key: 'ArrowDown', altKey: true });
+    fireEvent.keyDown(scrollContent, { key: 'ArrowDown', altKey: true });
+
+    expect(fake.onMovePage).toHaveBeenCalledTimes(1);
+    expect(fake.onMovePage).toHaveBeenCalledWith(1, 2);
+    await act(async () => {
+      finishMove();
+      await Promise.resolve();
+    });
+
+    fireEvent.keyDown(scrollContent, { key: 'ArrowDown', altKey: true });
+    expect(fake.onMovePage).toHaveBeenCalledTimes(2);
+  });
+
   it('ArrowDown/ArrowRight で currentPageIndex+1 を選択する（末尾では選択しない）', () => {
     const fake = makeFullPanelFake();
     const doc = buildDocument([0, 0, 0]);

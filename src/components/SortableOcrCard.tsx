@@ -22,6 +22,7 @@ export const SortableOcrCard = memo(forwardRef<OcrCardHandle, SortableOcrCardPro
     attributes,
     listeners,
     setNodeRef,
+    setActivatorNodeRef,
     transform,
     transition,
     isDragging
@@ -36,12 +37,14 @@ export const SortableOcrCard = memo(forwardRef<OcrCardHandle, SortableOcrCardPro
   };
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes}>
+    <div ref={setNodeRef} style={style}>
       <OcrCard
         ref={ref}
         block={block}
         pageIndex={pageIndex}
+        dragAttributes={attributes}
         dragListeners={listeners}
+        dragActivatorRef={setActivatorNodeRef}
         onNavigate={onNavigate}
         onExtendSelection={onExtendSelection}
         onSelect={onSelect}

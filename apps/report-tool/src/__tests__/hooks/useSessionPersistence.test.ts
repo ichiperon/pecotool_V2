@@ -30,6 +30,27 @@ function makeStorage(loadJson?: string): SessionFileStorage & { saved: string[] 
   };
 }
 
+function makeDeferredLoadStorage(json: string): {
+  storage: SessionFileStorage;
+  resolveLoad: () => void;
+} {
+  let resolveLoad!: (result: { ok: true; json: string }) => void;
+  const storage: SessionFileStorage = {
+    save: vi.fn().mockResolvedValue({ ok: true }),
+    load: vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveLoad = resolve;
+        })
+    ),
+    clear: vi.fn().mockResolvedValue({ ok: true }),
+  };
+  return {
+    storage,
+    resolveLoad: () => resolveLoad({ ok: true, json }),
+  };
+}
+
 /**
  * save の完了タイミングをテストから手動制御できるストレージモック
  * （single-flight/コアレスの検証用）。
@@ -392,6 +413,109 @@ describe("useSessionPersistence: 復元", () => {
     });
 
     expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("session load中に完了した新OCRを旧sessionで上書きしない（#459）", async () => {
+    const json = savedSessionFor("/docs/a.pdf");
+    const { storage, resolveLoad } = makeDeferredLoadStorage(json);
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(storage.load).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      useReportStore.getState().addField(RECT, "新OCR欄");
+      const id = useReportStore.getState().template.fields[0].id;
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "NEW"]])]]]));
+      resolveLoad();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(window.confirm).not.toHaveBeenCalled();
+    const rs = useReportStore.getState();
+    const id = rs.template.fields[0].id;
+    expect(rs.cells.get(1)?.[0]?.get(id)).toBe("NEW");
+  });
+
+  it("session load中のfield追加を旧sessionで上書きしない（#459）", async () => {
+    const json = savedSessionFor("/docs/a.pdf");
+    const { storage, resolveLoad } = makeDeferredLoadStorage(json);
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    act(() => {
+      useReportStore.getState().addField(RECT, "新規追加欄");
+      resolveLoad();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(useReportStore.getState().template.fields.map((field) => field.name)).toEqual([
+      "新規追加欄",
+    ]);
+  });
+
+  it("session load中にPDFを切り替えると古いload結果を適用しない（#459）", async () => {
+    const json = savedSessionFor("/docs/a.pdf");
+    const { storage, resolveLoad } = makeDeferredLoadStorage(json);
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/b.pdf", 1, "fp-b");
+      resolveLoad();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(useReportStore.getState().cells.size).toBe(0);
+  });
+
+  it("session load中に同一PDFを再読込しても古いload結果を適用しない（#459）", async () => {
+    const json = savedSessionFor("/docs/a.pdf");
+    const { storage, resolveLoad } = makeDeferredLoadStorage(json);
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
+      resolveLoad();
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(useReportStore.getState().cells.size).toBe(0);
   });
 });
 

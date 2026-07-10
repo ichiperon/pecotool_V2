@@ -31,6 +31,11 @@ export interface PdfState {
    * filePath との整合が崩れる瞬間（片方だけ更新された状態）を作らない。
    */
   pdfFingerprint: string | null;
+  /**
+   * setPdf/reset のたびに進む世代番号。同じpath・fingerprintの再読込も区別し、
+   * 非同期処理の古い結果を後から適用しないために使う。
+   */
+  loadGeneration: number;
 
   // actions
   setLoading: (loading: boolean) => void;
@@ -59,13 +64,14 @@ export const usePdfStore = create<PdfState>((set, get) => ({
   fitMode: "width",
   rotation: 0,
   pdfFingerprint: null,
+  loadGeneration: 0,
 
   setLoading: (loading) => set({ isLoading: loading }),
 
   setError: (error) => set({ error, isLoading: false }),
 
   setPdf: (filePath, numPages, fingerprint = null) =>
-    set({
+    set((state) => ({
       filePath,
       numPages,
       currentPage: 1,
@@ -74,7 +80,8 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       // 回転はその PDF 個体（スキャンロット）の性質なので、別 PDF では 0 に戻す
       rotation: 0,
       pdfFingerprint: fingerprint,
-    }),
+      loadGeneration: state.loadGeneration + 1,
+    })),
 
   setCurrentPage: (page) => {
     const { numPages } = get();
@@ -107,7 +114,7 @@ export const usePdfStore = create<PdfState>((set, get) => ({
   },
 
   reset: () =>
-    set({
+    set((state) => ({
       filePath: null,
       numPages: 0,
       currentPage: 1,
@@ -117,5 +124,6 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       fitMode: "width",
       rotation: 0,
       pdfFingerprint: null,
-    }),
+      loadGeneration: state.loadGeneration + 1,
+    })),
 }));

@@ -75,6 +75,7 @@ export const FileTab: React.FC<FileTabProps> = (props) => {
           <RibbonButton
             onClick={() => setShowRecent(!showRecent)}
             title="最近使ったファイル"
+            keepLabelOnCompact
           >
             最近 <ChevronRight size={12} style={{ transform: 'rotate(90deg)' }} />
           </RibbonButton>
@@ -106,6 +107,7 @@ export const FileTab: React.FC<FileTabProps> = (props) => {
             disabled={!props.isFileLoaded}
             onClick={() => props.isFileLoaded && setShowExport(showExport === 'current' ? null : 'current')}
             title="現在のページをエクスポート"
+            keepLabelOnCompact
           >
             現在ページ <ChevronRight size={12} style={{ transform: 'rotate(90deg)' }} />
           </RibbonButton>
@@ -129,6 +131,7 @@ export const FileTab: React.FC<FileTabProps> = (props) => {
             disabled={!props.isFileLoaded}
             onClick={() => props.isFileLoaded && setShowExport(showExport === 'all' ? null : 'all')}
             title="全ページをエクスポート"
+            keepLabelOnCompact
           >
             全ページ <ChevronRight size={12} style={{ transform: 'rotate(90deg)' }} />
           </RibbonButton>

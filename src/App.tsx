@@ -44,7 +44,13 @@ import { useBackupManagement } from "./hooks/useBackupManagement";
 import { usePdfViewerState } from "./hooks/usePdfViewerState";
 import { usePageNavigation } from "./hooks/usePageNavigation";
 import { useDialogState } from "./hooks/useDialogState";
-import { useLayoutPanels } from "./hooks/useLayoutPanels";
+import {
+  LEFT_PANEL_MAX_WIDTH,
+  LEFT_PANEL_MIN_WIDTH,
+  RIGHT_PANEL_MAX_WIDTH,
+  RIGHT_PANEL_MIN_WIDTH,
+  useLayoutPanels,
+} from "./hooks/useLayoutPanels";
 import { useViewerPan } from "./hooks/useViewerPan";
 import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
 import { useRecentFiles } from "./hooks/useRecentFiles";
@@ -55,6 +61,7 @@ import { usePageManagement } from "./hooks/usePageManagement";
 import { useStorageQuotaMonitor } from "./hooks/useStorageQuotaMonitor";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 import { StorageHealthBanner } from "./components/StorageHealthBanner";
+import { isAnyModalOpen } from "./components/ui/Modal";
 
 // Components
 import { Ribbon } from "./components/Ribbon/Ribbon";
@@ -137,7 +144,14 @@ function App() {
   const clearOcrAllPages = usePecoStore(s => s.clearOcrAllPages);
 
   // --- 分割された責務（フック群） ---
-  const { leftWidth, rightWidth, startResizeLeft, startResizeRight } = useLayoutPanels();
+  const {
+    leftWidth,
+    rightWidth,
+    startResizeLeft,
+    startResizeRight,
+    handleResizeLeftKeyDown,
+    handleResizeRightKeyDown,
+  } = useLayoutPanels();
   const {
     notification, setNotification, helpMenu, setHelpMenu,
     showSettingsDropdown, setShowSettingsDropdown,
@@ -708,12 +722,12 @@ function App() {
       e.preventDefault();
       // issue #74: バックアップ復元中 / モーダル表示中は F5 を握りつぶす。
       // 復元中の二重 open でデータ消失、モーダル表示中の意図せぬ消去を防ぐ。
-      if (processingBackupPath || helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
+      if (processingBackupPath || isAnyModalOpen()) return;
       handleReload();
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
-  }, [handleReload, processingBackupPath, helpModal, showOcrSettings, showReplace, pendingBackups.length]);
+  }, [handleReload, processingBackupPath]);
 
   useEffect(() => {
     if (!isSaving) return;
@@ -735,6 +749,7 @@ function App() {
       // Ctrl+Shift+P: 有効/無効トグル → 再読込
       if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
         e.preventDefault();
+        if (isAnyModalOpen()) return;
         try {
           const cur = localStorage.getItem('pecoPerf');
           if (cur === '1' || cur === 'verbose') {
@@ -981,7 +996,18 @@ function App() {
           onRotatePages={handleRotatePages}
           onExtractPages={handleExtractPages}
         />
-        <div className="resizer" onMouseDown={startResizeLeft} />
+        <div
+          className="resizer"
+          role="separator"
+          tabIndex={0}
+          aria-label="サムネイルパネルの幅"
+          aria-orientation="vertical"
+          aria-valuemin={LEFT_PANEL_MIN_WIDTH}
+          aria-valuemax={LEFT_PANEL_MAX_WIDTH}
+          aria-valuenow={leftWidth}
+          onMouseDown={startResizeLeft}
+          onKeyDown={handleResizeLeftKeyDown}
+        />
         <section
           ref={viewerRef}
           className={`pdf-viewer-panel ${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : ''}`}
@@ -1068,7 +1094,18 @@ function App() {
             </div>
           )}
         </section>
-        <div className="resizer" onMouseDown={startResizeRight} />
+        <div
+          className="resizer"
+          role="separator"
+          tabIndex={0}
+          aria-label="OCRテキストパネルの幅"
+          aria-orientation="vertical"
+          aria-valuemin={RIGHT_PANEL_MIN_WIDTH}
+          aria-valuemax={RIGHT_PANEL_MAX_WIDTH}
+          aria-valuenow={rightWidth}
+          onMouseDown={startResizeRight}
+          onKeyDown={handleResizeRightKeyDown}
+        />
         <OcrEditor
           width={rightWidth}
           searchInputRef={searchInputRef}

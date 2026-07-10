@@ -1,7 +1,7 @@
 import { useRef, useEffect, useImperativeHandle, forwardRef, memo } from "react";
 import type React from "react";
 import { GripVertical } from "lucide-react";
-import type { DraggableSyntheticListeners } from "@dnd-kit/core";
+import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
 import { TextBlock, WritingMode } from "../types";
 import { usePecoStore } from "../store/pecoStore";
 import { useOcrSettingsStore } from "../store/ocrSettingsStore";
@@ -24,7 +24,9 @@ export const commitActiveOcrCardEdit: () => boolean = _commitActiveOcrCardEdit;
 interface OcrCardProps {
   block: TextBlock;
   pageIndex: number;
+  dragAttributes?: DraggableAttributes;
   dragListeners?: DraggableSyntheticListeners;
+  dragActivatorRef?: React.Ref<HTMLDivElement>;
   onNavigate?: (direction: 'up' | 'down') => void;
   onExtendSelection?: (direction: 'up' | 'down') => void;
   onSelect?: (id: string, ctrl: boolean, shift: boolean) => void;
@@ -37,7 +39,7 @@ interface OcrCardProps {
 }
 
 export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
-  function OcrCard({ block, pageIndex, dragListeners, onNavigate, onExtendSelection, onSelect, problematicIds }, ref) {
+  function OcrCard({ block, pageIndex, dragAttributes, dragListeners, dragActivatorRef, onNavigate, onExtendSelection, onSelect, problematicIds }, ref) {
   // selectedIds全体ではなく、このブロックのisSelectedのみ購読（200回の再レンダリングを防ぐ）
   const isSelected = usePecoStore(state => state.selectedIds.has(block.id));
   // PCT-048: トグル状態のみ購読（confidence threshold は使わない）
@@ -259,7 +261,14 @@ export const OcrCard = memo(forwardRef<OcrCardHandle, OcrCardProps>(
       onContextMenu={handleContextMenu}
     >
       <div className="ocr-card-header">
-        <div {...dragListeners} className="ocr-card-drag-handle" title="ドラッグして並び替え">
+        <div
+          ref={dragActivatorRef}
+          {...dragAttributes}
+          {...dragListeners}
+          className="ocr-card-drag-handle"
+          aria-label={`ブロック ${block.order + 1} を並び替え`}
+          title="ドラッグまたはキーボードで並び替え"
+        >
           <GripVertical size={14} />
         </div>
         <span>#{block.order + 1}</span>

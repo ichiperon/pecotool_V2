@@ -3644,6 +3644,107 @@ describe('useFileOperations H-1 (bug-hunt round2): pageOrderMatchesSnapshot 判�
   });
 });
 
+describe('useFileOperations #458: order 不一致保存後の再保存収束', () => {
+  it('保存済みOCR編集を dirty のまま旧cacheへ再描画し、2回目で cache/pageOrder/dirty が収束する', async () => {
+    const editedPage = {
+      pageIndex: 0,
+      width: 595,
+      height: 842,
+      textBlocks: [{ id: 'edited', text: 'SAVED_EDIT', isDirty: true }],
+      isDirty: true,
+      thumbnail: null,
+    } as unknown as PageData;
+    const page1 = {
+      pageIndex: 1, width: 595, height: 842,
+      textBlocks: [{ id: 'p1', text: 'P1', isDirty: false }],
+      isDirty: false, thumbnail: null,
+    } as unknown as PageData;
+    const page2 = {
+      pageIndex: 2, width: 595, height: 842,
+      textBlocks: [{ id: 'p2', text: 'P2', isDirty: false }],
+      isDirty: false, thumbnail: null,
+    } as unknown as PageData;
+    const filePath = '/order-mismatch/preserve-edit.pdf';
+    usePecoStore.setState({
+      document: {
+        filePath,
+        fileName: 'preserve-edit.pdf',
+        totalPages: 3,
+        metadata: {},
+        pages: new Map([[0, editedPage], [1, page1], [2, page2]]),
+      } as unknown as PecoDocument,
+      pageOrder: [0, 1, 2],
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    const originalBytes = new Uint8Array([1, 2, 3, 4]);
+    const firstSavedBytes = new Uint8Array([5, 6, 7, 8]);
+    const secondSavedBytes = new Uint8Array([9, 10, 11, 12]);
+    __originalBytesCacheForTest.set(filePath, originalBytes);
+    (savePDF as unknown as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(firstSavedBytes)
+      .mockResolvedValueOnce(secondSavedBytes);
+
+    // 1回目のファイル書き込み後に、dirty page 0 は同じ位置・同じ参照のまま、
+    // page 1/2 だけを並べ替える。保存スナップショットとの order 不一致を再現する。
+    let statCallCount = 0;
+    (stat as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      statCallCount += 1;
+      if (statCallCount === 2) {
+        const state = usePecoStore.getState();
+        usePecoStore.setState({
+          document: {
+            ...state.document!,
+            pages: new Map([
+              [0, editedPage],
+              [1, { ...page2, pageIndex: 1 }],
+              [2, { ...page1, pageIndex: 2 }],
+            ]),
+          },
+          pageOrder: [0, 2, 1],
+          undoStack: [{
+            type: 'reorder_pages' as const,
+            beforeOrder: [0, 1, 2],
+            afterOrder: [0, 2, 1],
+          }],
+          isDirty: true,
+        });
+      }
+      return { mtime: new Date('2024-01-01'), size: 4 };
+    });
+
+    const { result } = renderHook(() => useFileOperations(vi.fn()));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const afterConflict = usePecoStore.getState();
+    expect(afterConflict.pageOrder).toEqual([0, 2, 1]);
+    expect(afterConflict.document!.pages.get(0)!.isDirty).toBe(true);
+    expect(afterConflict.isDirty).toBe(true);
+    expect(__originalBytesCacheForTest.get(filePath)).toEqual(originalBytes);
+
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    const secondCall = (savePDF as unknown as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect((secondCall[0] as { bytes: Uint8Array }).bytes).toEqual(originalBytes);
+    expect(secondCall[5]).toEqual([0, 2, 1]);
+    const secondDoc = secondCall[1] as PecoDocument;
+    expect(secondDoc.pages.get(0)!.textBlocks[0].text).toBe('SAVED_EDIT');
+
+    const converged = usePecoStore.getState();
+    expect(__originalBytesCacheForTest.get(filePath)).toEqual(secondSavedBytes);
+    expect(converged.pageOrder).toEqual([0, 1, 2]);
+    expect([...converged.document!.pages.values()].every((page) => !page.isDirty)).toBe(true);
+    expect(converged.isDirty).toBe(false);
+  });
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // bug-hunt round2 Wave1 H-2: bytePreserved=true 時の後処理素通り
 //

@@ -58,6 +58,7 @@ export function OcrEditor({
   const prevSearchHit = useSearchStore(s => s.prevSearchHit);
   const clampSearchHitIndex = useSearchStore(s => s.clampSearchHitIndex);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [reorderAnnouncement, setReorderAnnouncement] = useState('');
 
   // PCT-048: トグル状態を購読して problematicIds の useMemo に含める
   const showLowConfidenceHighlight = useOcrSettingsStore(s => s.showLowConfidenceHighlight);
@@ -158,6 +159,7 @@ export function OcrEditor({
 
       perf.mark('ui.cardReorderMulti', { page: currentPageIndex, count: selected.length });
       updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
+      setReorderAnnouncement(`${selected.length} 個のブロックを ${insertIndex + 1} 番目へ移動しました`);
     } else {
       // 単一ドラッグ（従来通り）
       const oldIndex = blocks.findIndex((b) => b.id === active.id);
@@ -169,6 +171,7 @@ export function OcrEditor({
       }));
       perf.mark('ui.cardReorderSingle', { page: currentPageIndex, from: oldIndex, to: newIndex });
       updatePageData(currentPageIndex, { textBlocks: newBlocks, isDirty: true });
+      setReorderAnnouncement(`ブロックを ${oldIndex + 1} 番目から ${newIndex + 1} 番目へ移動しました`);
     }
   };
 
@@ -497,6 +500,9 @@ export function OcrEditor({
 
   return (
     <aside className="editor-panel" style={{ width: `${width}px` }}>
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {reorderAnnouncement}
+      </div>
       <div className="panel-header">
         <div className="search-container">
           <Search size={14} className="search-icon" />
