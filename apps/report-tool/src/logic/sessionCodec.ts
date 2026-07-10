@@ -90,20 +90,22 @@ export function serializeSession(input: SessionInput): string {
   });
 }
 
+/** ページ番号として妥当な値か（1始まりの整数）。レビューLOW: number 型だけでなく値域も締める。 */
+function isValidPageNumber(p: unknown): p is number {
+  return typeof p === "number" && Number.isInteger(p) && p >= 1;
+}
+
 /** diagnostics フィールドの値レベル検証。number[] / number[] / number|null の形を確認する。 */
 function isValidDiagnostics(value: unknown): value is SessionDiagnostics {
   if (typeof value !== "object" || value === null) return false;
   const d = value as Record<string, unknown>;
-  if (!Array.isArray(d.failedPages) || !d.failedPages.every((p) => typeof p === "number")) {
+  if (!Array.isArray(d.failedPages) || !d.failedPages.every(isValidPageNumber)) {
     return false;
   }
-  if (
-    !Array.isArray(d.layoutMismatchPages) ||
-    !d.layoutMismatchPages.every((p) => typeof p === "number")
-  ) {
+  if (!Array.isArray(d.layoutMismatchPages) || !d.layoutMismatchPages.every(isValidPageNumber)) {
     return false;
   }
-  if (d.layoutBasePage !== null && typeof d.layoutBasePage !== "number") {
+  if (d.layoutBasePage !== null && !isValidPageNumber(d.layoutBasePage)) {
     return false;
   }
   return true;

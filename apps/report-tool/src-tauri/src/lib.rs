@@ -456,11 +456,16 @@ fn save_csv_via_temp(path: &Path, csv: &str, temp_path: &Path) -> Result<(), Str
     if result.is_err() {
         // rename 未到達 or 失敗時は temp を残さない。掃除自体の失敗は握りつぶさず可視化する
         // （save_template_to_dir / save_session_to_dir と同じ考え方）。
+        // ただし File::create 自体が失敗した場合（temp が一度も作られていない）は
+        // remove_file が NotFound を返すのが正常系なので、それは可視化の対象外とする
+        // （レビューLOW: File::create 失敗時に無意味な NotFound ログが出ていた）。
         if let Err(cleanup_err) = std::fs::remove_file(temp_path) {
-            eprintln!(
-                "[csv] failed to remove temp file after write error: {} ({cleanup_err})",
-                temp_path.display()
-            );
+            if cleanup_err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "[csv] failed to remove temp file after write error: {} ({cleanup_err})",
+                    temp_path.display()
+                );
+            }
         }
     }
     result
@@ -644,7 +649,7 @@ fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
     };
     if ok == 0 {
         return Err(format!(
-            "テンプレート atomic replace 失敗: {}",
+            "ファイルの atomic replace に失敗しました: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -653,7 +658,8 @@ fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn atomic_replace_file(temp: &Path, target: &Path) -> Result<(), String> {
-    std::fs::rename(temp, target).map_err(|e| format!("ファイルの atomic rename 失敗: {e}"))
+    std::fs::rename(temp, target)
+        .map_err(|e| format!("ファイルの atomic replace に失敗しました: {e}"))
 }
 
 /// app_data_dir()/templates を解決する。存在しなくてもここでは作らない
@@ -742,7 +748,11 @@ fn session_temp_file_path(session_dir: &Path) -> PathBuf {
     session_dir.join(format!("current.{}.{}.json.tmp", std::process::id(), n))
 }
 
-/// セッションを保存する。temp 書込 → atomic rename（save_template_to_dir と同方針）。
+/// セッションを保存する。temp 書込 → sync_all → atomic rename（save_csv_via_temp と同方針）。
+///
+/// レビューMEDIUM回帰: 以前は std::fs::write のみで sync_all を挟んでおらず、
+/// rename 直後の電源断で current.json が 0 長/部分内容になりうる懸念があった
+/// （save_csv_via_temp と非対称だった）。File::create + write_all + sync_all に揃える。
 fn save_session_to_dir(session_dir: &Path, json: &str) -> Result<(), String> {
     std::fs::create_dir_all(session_dir)
         .map_err(|e| format!("セッションディレクトリの作成に失敗しました: {e}"))?;
@@ -750,10 +760,21 @@ fn save_session_to_dir(session_dir: &Path, json: &str) -> Result<(), String> {
     let temp_path = session_temp_file_path(session_dir);
     let final_path = session_file_path(session_dir);
 
-    std::fs::write(&temp_path, json.as_bytes())
-        .map_err(|e| format!("セッションの一時保存に失敗しました: {e}"))?;
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(&temp_path)
+            .map_err(|e| format!("セッションの一時保存に失敗しました: {e}"))?;
+        file.write_all(json.as_bytes())
+            .map_err(|e| format!("セッションの一時保存に失敗しました: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("セッションの一時保存の同期に失敗しました: {e}"))?;
+        Ok(())
+    })();
 
-    let result = atomic_replace_file(&temp_path, &final_path);
+    let result = match write_result {
+        Ok(()) => atomic_replace_file(&temp_path, &final_path),
+        Err(e) => Err(e),
+    };
+
     if result.is_err() {
         if let Err(cleanup_err) = std::fs::remove_file(&temp_path) {
             eprintln!(

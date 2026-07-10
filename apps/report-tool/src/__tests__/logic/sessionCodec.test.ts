@@ -130,6 +130,29 @@ describe("sessionCodec: v2 スキーマ（#446 fingerprint / #447 diagnostics）
     if (!r.ok) return;
     expect(r.session.diagnostics.layoutBasePage).toBeNull();
   });
+
+  // レビューLOW: ページ番号は 1 始まりの整数のみ許容する（number 型チェックだけでは
+  // 0・負数・小数が素通りしていた）。
+  it("diagnostics.failedPages に 0 以下や小数が混入していたら ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.diagnostics.failedPages = [0];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+
+    obj.diagnostics.failedPages = [-1];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+
+    obj.diagnostics.failedPages = [1.5];
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
+
+  it("diagnostics.layoutBasePage が 0 以下や小数なら ok:false", () => {
+    const obj = JSON.parse(serializeSession(sampleInput()));
+    obj.diagnostics.layoutBasePage = 0;
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+
+    obj.diagnostics.layoutBasePage = 2.5;
+    expect(deserializeSession(JSON.stringify(obj)).ok).toBe(false);
+  });
 });
 
 describe("sessionCodec: 不正入力の拒否", () => {

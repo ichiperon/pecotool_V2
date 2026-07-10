@@ -179,6 +179,23 @@ const PdfViewer: FC = () => {
         const currentGen = ++loadGenRef.current;
         const bytes = await readFile(filePath);
         if (cancelled || loadGenRef.current !== currentGen) return;
+
+        // #446 残存穴（レビューMEDIUM）: 再マウント間にディスク上の同一パス PDF が
+        // 外部で差し替えられている場合、readFile 自体は新しい内容を返すが、
+        // store の pdfFingerprint・cells/confidences 等は差し替え前のまま残る。
+        // ここは setPdf を呼ばない経路（意図的にページ位置等を保つ）なので、
+        // fingerprint が一致する場合のみ描画へ進める。不一致時は setPdfDoc せず
+        // エラー表示に倒し、ユーザーに明示的な「PDF を開く」再実行を促す
+        // （そちらは fingerprint 込みで setPdf され、resetExtractedData も走る）。
+        const fingerprint = await computePdfFingerprint(bytes);
+        if (cancelled || loadGenRef.current !== currentGen) return;
+        if (fingerprint !== usePdfStore.getState().pdfFingerprint) {
+          setError(
+            "この PDF はファイルの外部で更新されています。「PDF を開く」から開き直してください"
+          );
+          return;
+        }
+
         const newDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
         if (cancelled || loadGenRef.current !== currentGen) {
           newDoc.destroy().catch(() => {});
@@ -195,7 +212,7 @@ const PdfViewer: FC = () => {
       cancelled = true;
       autoLoadingRef.current = false;
     };
-  }, [filePath, pdfDoc]);
+  }, [filePath, pdfDoc, setError]);
 
   // canvas に現在ページを描画する
   useEffect(() => {
