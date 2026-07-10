@@ -2010,6 +2010,121 @@ describe('PCT-074: loadPDF await 中に保存が開始された場合の競合�
 });
 
 // ────────────────────────────────────────────────────────────────────────
+// PCT-207 (#443): handleOpen の並行呼び出しに世代管理を導入する。
+// 先発の loadPDF が後発より遅れて解決しても、後発の setDocument を
+// 追い越して上書きしてはいけない。
+// ────────────────────────────────────────────────────────────────────────
+
+describe('PCT-207: handleOpen 並行呼び出しの世代管理', () => {
+  it('A→B の順で呼び出し、B→A の順で完了しても最終文書は B (先発Aは静かに中断する)', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    let resolveA!: (doc: unknown) => void;
+    let resolveB!: (doc: unknown) => void;
+    (loadPDF as unknown as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveA = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveB = resolve; }));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    // A を呼び出す (loadPDF 未解決のまま止まる)
+    const openA = result.current.handleOpen('/pct207/a.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct207/a.pdf'));
+
+    // A が loadPDF を await している間に B を呼び出す (世代が進む)
+    const openB = result.current.handleOpen('/pct207/b.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct207/b.pdf'));
+
+    const docB = {
+      filePath: '/pct207/b.pdf',
+      fileName: 'b.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map(),
+    };
+    const docA = {
+      filePath: '/pct207/a.pdf',
+      fileName: 'a.pdf',
+      totalPages: 1,
+      metadata: {},
+      pages: new Map(),
+    };
+
+    // 完了順を呼び出し順と逆にする: B (後発) を先に完了させる
+    let resultB = false;
+    await act(async () => {
+      resolveB(docB);
+      resultB = await openB;
+    });
+    expect(resultB).toBe(true);
+    expect(usePecoStore.getState().document?.filePath).toBe('/pct207/b.pdf');
+
+    // A (先発) が遅れて完了 → 世代が既に進んでいるので中断し false を返す
+    let resultA = true;
+    await act(async () => {
+      resolveA(docA);
+      resultA = await openA;
+    });
+
+    expect(resultA).toBe(false);
+    // A の遅延完了によって B の document が上書きされていないこと (最終文書は B)
+    expect(usePecoStore.getState().document?.filePath).toBe('/pct207/b.pdf');
+  });
+
+  it('先発Aが後発Bより後に完了しても、Aの完了で読込中フラグを誤って倒さない', async () => {
+    usePecoStore.setState({ document: null, isDirty: false });
+
+    let resolveA!: (doc: unknown) => void;
+    let resolveB!: (doc: unknown) => void;
+    (loadPDF as unknown as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveA = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveB = resolve; }));
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    const openA = result.current.handleOpen('/pct207/a2.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct207/a2.pdf'));
+    const openB = result.current.handleOpen('/pct207/b2.pdf');
+    await waitFor(() => expect(loadPDF).toHaveBeenCalledWith('/pct207/b2.pdf'));
+
+    // B (最新世代) をまだ解決させない。A だけ先に解決させて中断させる。
+    await act(async () => {
+      resolveA({
+        filePath: '/pct207/a2.pdf',
+        fileName: 'a2.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map(),
+      });
+      await openA;
+    });
+
+    // A の finally が isLoadingFileRef を倒していないこと (B がまだロード中) を
+    // handleSave 経由で確認する: 読込中は保存拒否されるはず。
+    let saved = true;
+    await act(async () => {
+      saved = await result.current.handleSave();
+    });
+    expect(saved).toBe(false);
+
+    // B を完了させて後片付け。
+    await act(async () => {
+      resolveB({
+        filePath: '/pct207/b2.pdf',
+        fileName: 'b2.pdf',
+        totalPages: 1,
+        metadata: {},
+        pages: new Map(),
+      });
+      await openB;
+    });
+    expect(usePecoStore.getState().document?.filePath).toBe('/pct207/b2.pdf');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
 // PCT-076 (HUNT-C5): suppressOcrZeroPrompt オプション。
 // バッチジョブの機械的なオープンでは onOpenComplete (App 側で
 // checkAndPromptOcrZero に配線) を発火させない。
@@ -2981,6 +3096,38 @@ describe('useFileOperations saveAllPagesWithOffset ガード・成功・失敗�
     const clearBackupCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'clear_backup');
     expect(clearBackupCalls.length).toBeGreaterThan(0);
     expect(clearBackupCalls[0][1]).toEqual({ filePath: doc.filePath });
+  });
+
+  it('PCT-209 (#445): bytePreserved=true かつ未保存編集ありなら false を返し警告トーストを出す', async () => {
+    makeSingleDirtyPageDoc('/offset-save/undecodable.pdf');
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (
+        _src: unknown, _doc: unknown, _font: unknown, _fallback: unknown,
+        _onSkipped: unknown, _savePageOrder: unknown, _opts: unknown,
+        onBytePreserved: (bp: boolean) => void,
+      ) => {
+        onBytePreserved(true);
+        return new Uint8Array([9, 9, 9, 9]);
+      },
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAllPagesWithOffset();
+    });
+
+    // PCT-209 (#445): handleSave/handleSaveTo と同じ契約。ファイル書き込み自体は
+    // 成功しても編集は反映されていないため成功扱いにしない。
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringContaining('編集内容は保存できませんでした'),
+      true,
+    );
+    // byte-preserve のため isDirty はクリアされない。
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true);
   });
 
   it('savePDFが失敗した場合 false を返しエラートーストを出し isSavingRef をリセットする', async () => {
