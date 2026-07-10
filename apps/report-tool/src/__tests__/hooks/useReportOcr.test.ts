@@ -1510,3 +1510,147 @@ describe("useReportOcr: 手修正保持再OCR（preserveEdited・UXレビュー�
     expect(rs.edited.get(1)?.[0]?.has("field-1")).toBe(true);
   });
 });
+
+describe("useReportOcr: 全ページ実行 × 単一ページ再OCR の排他 / テンプレ変更コミット防御（#448 / PCT-212）", () => {
+  let invokeStub: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const tauriCore = await import("@tauri-apps/api/core");
+    invokeStub = vi.mocked(tauriCore.invoke);
+    useReportStore.setState({
+      template: {
+        fields: [
+          { id: "field-1", name: "欄1", color: "#7cb9e8", rect: { x: 10, y: 10, width: 100, height: 50 } },
+        ],
+      },
+      cells: new Map(),
+      confidences: new Map(),
+      edited: new Map(),
+      pageOffsets: new Map(),
+      excludedPages: new Set(),
+    });
+    usePdfStore.setState({
+      filePath: "/test/sample.pdf",
+      numPages: 2,
+      currentPage: 1,
+      zoom: 100,
+      isLoading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function delayedOkResponse(text: string, delayMs: number) {
+    return () =>
+      new Promise<string>((resolve) =>
+        setTimeout(
+          () =>
+            resolve(
+              JSON.stringify({
+                status: "ok",
+                blocks: [{ text, bbox: { x: 0, y: 0, width: 10, height: 10 }, confidence: 0.9 }],
+              })
+            ),
+          delayMs
+        )
+      );
+  }
+
+  it("全ページ OCR 実行中に runOcrForPage を呼ぶと拒否され、全ページ側の結果は無言破棄されず正常にコミットされる", async () => {
+    // 修正前は epoch を共有していたため、実行中に runOcrForPage が epoch を進めてしまい、
+    // 全ページ側の finally が epoch 不一致でコミットを無言スキップしていた。
+    invokeStub.mockImplementation(delayedOkResponse("全ページ値", 30));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    let runOcrPromise!: Promise<void>;
+    act(() => {
+      runOcrPromise = result.current.runOcr();
+    });
+
+    // 実行中に割り込む単一ページ再OCRは拒否される
+    await act(async () => {
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow(
+        /別の OCR 処理が実行中/
+      );
+    });
+
+    await act(async () => {
+      await runOcrPromise;
+    });
+
+    // 全ページ OCR 自体は最後まで正常完了し、結果がコミットされている
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("全ページ値");
+    expect(useReportStore.getState().cells.get(2)?.[0]?.get("field-1")).toBe("全ページ値");
+    expect(result.current.isRunning).toBe(false);
+  });
+
+  it("単一ページ再OCR実行中に全ページ OCR を呼んでも開始されない（無言スキップ・console.warn）", async () => {
+    invokeStub.mockImplementation(delayedOkResponse("ページ再OCR値", 30));
+    useReportStore.setState({
+      cells: new Map([[1, [new Map([["field-1", "旧値"]])]]]),
+    });
+
+    const { result } = renderHook(() => useReportOcr());
+
+    let reocrPromise!: Promise<void>;
+    act(() => {
+      reocrPromise = result.current.runOcrForPage(1);
+    });
+
+    // 実行中に全ページ OCR を呼んでも何も起きない（cells は変化しない）
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("旧値");
+
+    await act(async () => {
+      await reocrPromise;
+    });
+
+    // 単一ページ再OCR自体は正常完了する
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("ページ再OCR値");
+  });
+
+  it("実行中に欄テンプレートが変更されると完了時のコミットを中止し、templateChangeAbort=true になる（孤児セル防止）", async () => {
+    invokeStub.mockImplementation(delayedOkResponse("値", 30));
+
+    const { result } = renderHook(() => useReportOcr());
+    expect(result.current.templateChangeAbort).toBe(false);
+
+    let runOcrPromise!: Promise<void>;
+    act(() => {
+      runOcrPromise = result.current.runOcr();
+    });
+
+    // 実行中にテンプレートを変更する（欄追加 = 新しい template オブジェクトになる）
+    act(() => {
+      useReportStore.getState().addField({ x: 0, y: 0, width: 10, height: 10 }, "追加欄");
+    });
+
+    await act(async () => {
+      await runOcrPromise;
+    });
+
+    // コミットは中止され、cells は空のまま。テンプレ変更を可視化するフラグが立つ。
+    expect(useReportStore.getState().cells.size).toBe(0);
+    expect(result.current.templateChangeAbort).toBe(true);
+    expect(result.current.isRunning).toBe(false);
+  });
+
+  it("テンプレート変更なしで正常完了した場合は templateChangeAbort=false のまま", async () => {
+    invokeStub.mockImplementation(delayedOkResponse("値", 5));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.templateChangeAbort).toBe(false);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+  });
+});

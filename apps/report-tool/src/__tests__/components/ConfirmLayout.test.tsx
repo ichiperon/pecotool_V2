@@ -7,14 +7,16 @@ import type { UseReportOcrReturn } from "../../hooks/useReportOcr";
 
 // ConfirmPdfPane は pdfjs-dist / Tauri を使うためモック化
 vi.mock("../../components/ConfirmPdfPane", () => ({
-  default: ({ reocrTarget, reocrError, onReocrRetry }: {
+  default: ({ reocrTarget, isRunning, reocrError, onReocrRetry }: {
     runOcrForPage: (p: number) => Promise<void>;
     reocrTarget: number | null;
+    isRunning: boolean;
     reocrError: boolean;
     onReocrRetry: () => void;
   }) => (
     <div data-testid="confirm-pdf-pane">
       <span data-testid="reocr-target">{reocrTarget ?? "null"}</span>
+      <span data-testid="is-running">{String(isRunning)}</span>
       {reocrError && (
         <button type="button" onClick={onReocrRetry}>再試行</button>
       )}
@@ -44,6 +46,7 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     layoutMismatchPages: [],
     layoutBasePage: null,
     engineError: false,
+    templateChangeAbort: false,
     preserveEdited: true,
     setPreserveEdited: vi.fn(),
     runOcr: vi.fn(),
@@ -170,6 +173,19 @@ describe("ConfirmLayout – activePage / reocrTarget の伝搬", () => {
   it("ocrHook.reocrTarget が CsvPreviewTable に渡される", () => {
     render(<ConfirmLayout ocrHook={makeOcrHook({ reocrTarget: 3 })} />);
     expect(screen.getByTestId("reocr-target-right")).toHaveTextContent("3");
+  });
+
+  // #448 / PCT-212: 全ページ OCR 実行中にページ再OCRボタンが押せてしまい、
+  // epoch 共有により全ページ側の結果が無言破棄される事故があった。
+  // ConfirmPdfPane 側でボタンを disable するには isRunning を正しく受け取る必要がある。
+  it("ocrHook.isRunning が ConfirmPdfPane に渡される（再OCRボタンの排他ゲートの前提）", () => {
+    render(<ConfirmLayout ocrHook={makeOcrHook({ isRunning: true })} />);
+    expect(screen.getByTestId("is-running")).toHaveTextContent("true");
+  });
+
+  it("ocrHook.isRunning=false のときも正しく渡される", () => {
+    render(<ConfirmLayout ocrHook={makeOcrHook({ isRunning: false })} />);
+    expect(screen.getByTestId("is-running")).toHaveTextContent("false");
   });
 });
 

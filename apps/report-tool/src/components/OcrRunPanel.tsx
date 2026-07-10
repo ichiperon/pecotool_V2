@@ -38,6 +38,7 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
     layoutMismatchPages,
     layoutBasePage,
     engineError,
+    templateChangeAbort,
     preserveEdited,
     setPreserveEdited,
     runOcr,
@@ -148,6 +149,15 @@ const OcrRunPanel: FC<Props> = ({ ocrHook }) => {
         <p className="ocr-run-panel__failed" role="alert">
           OCR を実行できませんでした。Windows の設定 &gt; 時刻と言語 &gt; 言語と地域 で
           日本語の言語パックが追加されているか確認してください。既存の抽出結果は保持されています
+        </p>
+      )}
+
+      {/* テンプレ変更によるコミット中止（#448 / PCT-212: 通常は移動ゲートで到達しない
+          最終防衛線だが、発生時は理由をはっきり伝える） */}
+      {!isRunning && templateChangeAbort && (
+        <p className="ocr-run-panel__failed" role="alert">
+          OCR 実行中に欄テンプレートが変更されたため、今回の結果は反映しませんでした。
+          テンプレートの変更後、改めて OCR を実行してください
         </p>
       )}
 
