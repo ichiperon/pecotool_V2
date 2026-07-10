@@ -5,7 +5,7 @@ import {
   SESSION_AUTOSAVE_DEBOUNCE_MS,
 } from "../../hooks/useSessionPersistence";
 import { serializeSession } from "../../logic/sessionCodec";
-import type { SessionFileStorage } from "../../lib/sessionFileStorage";
+import type { SessionFileStorage, SessionSaveResult } from "../../lib/sessionFileStorage";
 import { useReportStore } from "../../store/reportStore";
 import { usePdfStore } from "../../store/pdfStore";
 
@@ -26,6 +26,62 @@ function makeStorage(loadJson?: string): SessionFileStorage & { saved: string[] 
       ),
     clear: vi.fn().mockResolvedValue({ ok: true }),
   };
+}
+
+/**
+ * save の完了タイミングをテストから手動制御できるストレージモック
+ * （single-flight/コアレスの検証用）。
+ *
+ * save() は呼ばれた時点では未解決の Promise を返し、resolveNext() で
+ * 呼び出し順に1件ずつ解決する。maxConcurrent は「同時に何本 save が
+ * pending だったか」の最大値（1 を超えたら並走している＝バグ）。
+ */
+function makeControllableStorage(): {
+  storage: SessionFileStorage;
+  saveCalls: string[];
+  pendingCount: () => number;
+  maxConcurrent: () => number;
+  resolveNext: (result?: SessionSaveResult) => void;
+} {
+  const saveCalls: string[] = [];
+  let active = 0;
+  let peak = 0;
+  const resolvers: Array<(r: SessionSaveResult) => void> = [];
+
+  const storage: SessionFileStorage = {
+    save: vi.fn().mockImplementation((json: string) => {
+      saveCalls.push(json);
+      active++;
+      peak = Math.max(peak, active);
+      return new Promise<SessionSaveResult>((resolve) => {
+        resolvers.push((r) => {
+          active--;
+          resolve(r);
+        });
+      });
+    }),
+    load: vi.fn().mockResolvedValue({ ok: false, missing: true }),
+    clear: vi.fn().mockResolvedValue({ ok: true }),
+  };
+
+  return {
+    storage,
+    saveCalls,
+    pendingCount: () => resolvers.length,
+    maxConcurrent: () => peak,
+    resolveNext: (result: SessionSaveResult = { ok: true }) => {
+      const resolver = resolvers.shift();
+      if (!resolver) throw new Error("resolveNext: 解決待ちの save がありません");
+      resolver(result);
+    },
+  };
+}
+
+/** 溜まったマイクロタスクを十分な回数フラッシュする（Promise チェーンの多段 await 用）。 */
+async function flushMicrotasks(times = 20): Promise<void> {
+  for (let i = 0; i < times; i++) {
+    await Promise.resolve();
+  }
 }
 
 /** 復元用の保存済みセッション JSON を作る */
@@ -249,5 +305,150 @@ describe("useSessionPersistence: flushNow（クローズ前フラッシュ・レ
       saved = await result.current.flushNow();
     });
     expect(saved).toBe(false);
+  });
+});
+
+describe("useSessionPersistence: single-flight（#450 frontend・保存の排他/コアレス）", () => {
+  it("save 実行中に schedule が発火しても save は並走しない（実行中は追い打ちフラグのみ）", async () => {
+    const ctl = makeControllableStorage();
+    renderHook(() => useSessionPersistence(ctl.storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "v1"]])]]]));
+    });
+
+    // 1回目のデバウンス発火 → save 開始（未解決のまま保留）
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_AUTOSAVE_DEBOUNCE_MS + 10);
+    });
+    expect(ctl.storage.save).toHaveBeenCalledTimes(1);
+    expect(ctl.pendingCount()).toBe(1);
+
+    // 実行中にさらに編集 → 再度デバウンス発火させる
+    act(() => {
+      useReportStore.getState().setCellValue(1, id, "v2");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_AUTOSAVE_DEBOUNCE_MS + 10);
+    });
+
+    // 実行中の save に追い打ちフラグが立つだけで、新規 save はまだ呼ばれない
+    expect(ctl.storage.save).toHaveBeenCalledTimes(1);
+    expect(ctl.maxConcurrent()).toBe(1);
+
+    // 1本目を解決 → コアレスされた2本目（最新state）が自動的に走る
+    await act(async () => {
+      ctl.resolveNext({ ok: true });
+      await flushMicrotasks();
+    });
+    expect(ctl.storage.save).toHaveBeenCalledTimes(2);
+    expect(ctl.saveCalls[1]).toContain("v2");
+    expect(ctl.maxConcurrent()).toBe(1); // 一度も同時に2本走っていない
+
+    // 後始末
+    await act(async () => {
+      ctl.resolveNext({ ok: true });
+      await flushMicrotasks();
+    });
+  });
+
+  it("flushNow は in-flight 完了を待ってから最新 state で最終保存し true を返す", async () => {
+    const ctl = makeControllableStorage();
+    const { result } = renderHook(() => useSessionPersistence(ctl.storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "旧値"]])]]]));
+    });
+
+    // デバウンス発火 → 1本目の save が実行中（未解決）
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_AUTOSAVE_DEBOUNCE_MS + 10);
+    });
+    expect(ctl.storage.save).toHaveBeenCalledTimes(1);
+
+    // 実行中に state を更新してから flushNow を呼ぶ
+    act(() => {
+      useReportStore.getState().setCellValue(1, id, "最新値");
+    });
+
+    let flushPromise: Promise<boolean> = Promise.resolve(false);
+    act(() => {
+      flushPromise = result.current.flushNow();
+    });
+
+    // flushNow は待機中: 1本目が解決するまで2本目は呼ばれない
+    await flushMicrotasks();
+    expect(ctl.storage.save).toHaveBeenCalledTimes(1);
+
+    // 1本目を解決 → flushNow が待っていた最終 save（最新state）が走る
+    await act(async () => {
+      ctl.resolveNext({ ok: true });
+      await flushMicrotasks();
+    });
+    expect(ctl.storage.save).toHaveBeenCalledTimes(2);
+    expect(ctl.saveCalls[1]).toContain("最新値");
+    expect(ctl.maxConcurrent()).toBe(1);
+
+    let flushed: boolean | undefined;
+    await act(async () => {
+      ctl.resolveNext({ ok: true }); // 2本目（flushNow の最終save）を解決
+      flushed = await flushPromise;
+    });
+    expect(flushed).toBe(true);
+  });
+
+  it("実行中に save 要求が重なっても storage.save は常に1本ずつしか走らない（並走なしの直接検証）", async () => {
+    const ctl = makeControllableStorage();
+    const { result } = renderHook(() => useSessionPersistence(ctl.storage));
+
+    act(() => {
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      useReportStore.getState().addField(RECT, "金額");
+    });
+    const id = useReportStore.getState().template.fields[0].id;
+    act(() => {
+      useReportStore.getState().setCells(new Map([[1, [new Map([[id, "v1"]])]]]));
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_AUTOSAVE_DEBOUNCE_MS + 10);
+    });
+    expect(ctl.storage.save).toHaveBeenCalledTimes(1);
+
+    // 実行中に flushNow を2連打（両方とも同じ in-flight を待つ側に回る）
+    let p1: Promise<boolean> = Promise.resolve(false);
+    let p2: Promise<boolean> = Promise.resolve(false);
+    act(() => {
+      p1 = result.current.flushNow();
+      p2 = result.current.flushNow();
+    });
+    await flushMicrotasks();
+    expect(ctl.maxConcurrent()).toBe(1);
+    expect(ctl.storage.save).toHaveBeenCalledTimes(1); // まだ1本目実行中
+
+    // 保留中の save をすべて解決し切るまで、同時実行数が1を超えないことを確認する
+    await act(async () => {
+      while (ctl.pendingCount() > 0) {
+        ctl.resolveNext({ ok: true });
+        await flushMicrotasks();
+        expect(ctl.maxConcurrent()).toBe(1);
+      }
+    });
+
+    await act(async () => {
+      await Promise.all([p1, p2]);
+    });
+    // 最後まで一度も並走しなかったこと
+    expect(ctl.maxConcurrent()).toBe(1);
   });
 });

@@ -57,20 +57,52 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
       return result.ok;
     };
 
-    // クローズ前フラッシュ: 保留中のデバウンスを破棄して即時保存する
+    // single-flight + 1件コアレス: デバウンス発火中の save と flushNow の save が
+    // 並走すると、Rust 側は temp を一意名で分離していても最終 rename 先
+    // （current.json）は単一スロットのため、後勝ちの内容が読めなくなる懸念がある
+    // （#450 frontend）。実行中の save があれば新規呼び出しは追い打ちフラグだけ
+    // 立てて既存の実行に相乗りし、完了後に最新 state でもう1回だけ実行する。
+    let inFlight: Promise<boolean> | null = null;
+    let pendingRerun = false;
+
+    const runSingleFlight = (): Promise<boolean> => {
+      if (inFlight) {
+        pendingRerun = true;
+        return inFlight;
+      }
+      const run = (async (): Promise<boolean> => {
+        let result = await saveNow();
+        while (pendingRerun) {
+          pendingRerun = false;
+          result = await saveNow();
+        }
+        return result;
+      })();
+      inFlight = run;
+      void run.finally(() => {
+        if (inFlight === run) inFlight = null;
+      });
+      return run;
+    };
+
+    // クローズ前フラッシュ: 保留中のデバウンスを破棄し、実行中の save があれば
+    // 完了を待ってから、最新 state で最終保存を実行する（並走させない）。
     flushRef.current = async () => {
       if (timer !== null) {
         window.clearTimeout(timer);
         timer = null;
       }
-      return saveNow();
+      while (inFlight) {
+        await inFlight.catch(() => {});
+      }
+      return runSingleFlight();
     };
 
     const schedule = () => {
       if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = null;
-        void saveNow();
+        void runSingleFlight();
       }, SESSION_AUTOSAVE_DEBOUNCE_MS);
     };
 
