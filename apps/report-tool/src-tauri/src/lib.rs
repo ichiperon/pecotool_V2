@@ -8,7 +8,9 @@
 //   → BitmapDecoder::CreateAsync(stream) → GetSoftwareBitmapAsync
 // ─────────────────────────────────────────────────────────────────────────────
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── OCR 言語情報 ─────────────────────────────────────────────────────────────
 
@@ -394,14 +396,17 @@ async fn list_ocr_languages() -> Result<Vec<OcrLanguageInfo>, String> {
 // csv_bytes_with_bom / save_csv
 //
 // Excel の文字コード自動判定を UTF-8 に確定させるため、
-// BOM (0xEF 0xBB 0xBF) を先頭に付与してから std::fs::write で直書きする。
+// BOM (0xEF 0xBB 0xBF) を先頭に付与してから一意な temp ファイルへ全量書込みし、
+// atomic_replace_file で最終パスへ置換する（テンプレート/セッション永続化と同方針）。
+// 旧実装は保存先を std::fs::write で直接 truncate しており、書込み途中でクラッシュ・
+// 電源断が起きると CSV が壊れた状態（torn write）で残っていた（#451 / PCT-215）。
 //
 // plugin-fs を経由しないため fs-scope 検証（\\?\ 正規化の罠を含む）に掛からない。
 // 本体の write_pdf_chunk / OCR temp と同じ考え方。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// BOM 付き UTF-8 バイト列を生成する純関数。
-/// save_csv が内部で利用し、単体テストもここに当てる。
+/// save_csv_to_path が内部で利用し、単体テストもここに当てる。
 fn csv_bytes_with_bom(csv: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(3 + csv.len());
     bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
@@ -409,13 +414,63 @@ fn csv_bytes_with_bom(csv: &str) -> Vec<u8> {
     bytes
 }
 
-/// ユーザーが保存ダイアログで選んだパスへ CSV を BOM 付き UTF-8 で直書きする。
-/// plugin-fs を経由せず std::fs::write を使うため fs-scope 検証に掛からない。
+/// 保存の都度、一意な temp ファイル名を生成する（同一ディレクトリ・同一ファイル名接頭辞）。
+/// 固定名だと連打・二重起動などの並行 save が同じ temp を取り合い、書込み中の内容を
+/// 別スレッドが truncate/rename で踏みうる。プロセスID + プロセス内カウンタで
+/// 一意性を確保する（backup.rs write_backup_file_atomically と同じ方針）。
+fn csv_temp_file_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("output.csv");
+    path.with_file_name(format!("{file_name}.{}.{}.tmp", std::process::id(), n))
+}
+
+/// CSV を temp 書込 → sync_all → atomic rename で保存する純関数。
+/// テスト容易性のため #[tauri::command] から切り出している。
+fn save_csv_to_path(path: &Path, csv: &str) -> Result<(), String> {
+    let temp_path = csv_temp_file_path(path);
+    save_csv_via_temp(path, csv, &temp_path)
+}
+
+/// save_csv_to_path の実処理。temp_path を引数化しているのはテストのためだけの都合
+/// （csv_temp_file_path はプロセス内カウンタで一意名を生成するため、失敗系テストが
+/// 「書込み先を事前にディレクトリとして塞ぐ」ために確定パスを必要とする）。
+fn save_csv_via_temp(path: &Path, csv: &str, temp_path: &Path) -> Result<(), String> {
+    let bytes = csv_bytes_with_bom(csv);
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(temp_path)
+            .map_err(|e| format!("CSVの一時保存に失敗しました: {e}"))?;
+        file.write_all(&bytes)
+            .map_err(|e| format!("CSVの一時保存に失敗しました: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("CSVの一時保存の同期に失敗しました: {e}"))?;
+        Ok(())
+    })();
+
+    let result = match write_result {
+        Ok(()) => atomic_replace_file(temp_path, path),
+        Err(e) => Err(e),
+    };
+
+    if result.is_err() {
+        // rename 未到達 or 失敗時は temp を残さない。掃除自体の失敗は握りつぶさず可視化する
+        // （save_template_to_dir / save_session_to_dir と同じ考え方）。
+        if let Err(cleanup_err) = std::fs::remove_file(temp_path) {
+            eprintln!(
+                "[csv] failed to remove temp file after write error: {} ({cleanup_err})",
+                temp_path.display()
+            );
+        }
+    }
+    result
+}
+
+/// ユーザーが保存ダイアログで選んだパスへ CSV を BOM 付き UTF-8 で保存する。
+/// plugin-fs を経由せず std::fs を直接使うため fs-scope 検証に掛からない。
 #[tauri::command]
 async fn save_csv(path: String, csv: String) -> Result<(), String> {
-    let bytes = csv_bytes_with_bom(&csv);
-    std::fs::write(&path, bytes).map_err(|e| format!("CSV保存に失敗しました: {e}"))?;
-    Ok(())
+    save_csv_to_path(Path::new(&path), &csv)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -677,8 +732,14 @@ fn session_file_path(session_dir: &Path) -> PathBuf {
     session_dir.join("current.json")
 }
 
+/// 保存の都度、一意な temp ファイル名を生成する。
+/// 固定名 "current.json.tmp" だと並行 save（デバウンス発火と flushNow の競合等）が
+/// 同じ temp を取り合い、truncate/rename が競合しうる（#450 backend / PCT-214）。
+/// csv_temp_file_path と同じ方針でプロセスID + プロセス内カウンタで一意性を確保する。
 fn session_temp_file_path(session_dir: &Path) -> PathBuf {
-    session_dir.join("current.json.tmp")
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    session_dir.join(format!("current.{}.{}.json.tmp", std::process::id(), n))
 }
 
 /// セッションを保存する。temp 書込 → atomic rename（save_template_to_dir と同方針）。
@@ -1272,6 +1333,20 @@ mod tests {
         dir
     }
 
+    /// 指定ディレクトリ直下に残る *.tmp ファイルを列挙する。
+    /// session_temp_file_path が一意名を返すようになったため（#450 backend）、
+    /// 「特定の1パスが存在しない」ではなく「ディレクトリ全体に tmp が残っていない」で
+    /// 検証する（save_template 系の tmp leftover テストと同じ考え方）。
+    fn list_tmp_leftovers(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("tmp"))
+            .collect()
+    }
+
     #[test]
     fn session_save_load_roundtrip() {
         let dir = temp_session_dir("roundtrip");
@@ -1282,7 +1357,8 @@ mod tests {
         save_session_to_dir(&dir, r#"{"version":2}"#).unwrap();
         assert_eq!(load_session_from_dir(&dir).unwrap(), r#"{"version":2}"#);
         // temp ファイルが残っていない
-        assert!(!session_temp_file_path(&dir).exists());
+        let leftovers = list_tmp_leftovers(&dir);
+        assert!(leftovers.is_empty(), "tmp leftovers: {:?}", leftovers);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1302,6 +1378,139 @@ mod tests {
         assert!(load_session_from_dir(&dir).is_err());
         // 二重 clear も Ok
         clear_session_in_dir(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 連続呼び出しで同じ temp パスを返さないこと（#450 backend の一意性の直接検証）。
+    #[test]
+    fn session_temp_file_path_generates_unique_names() {
+        let dir = temp_session_dir("temp_unique");
+        let a = session_temp_file_path(&dir);
+        let b = session_temp_file_path(&dir);
+        assert_ne!(a, b, "連続呼び出しで同じ temp パスを返してはいけない（並行保存の衝突防止）");
+    }
+
+    /// 2スレッドから同時に save しても、一意 temp 名により互いの temp を壊すことはなく、
+    /// 最終状態は torn write（中途半端な内容の混入）なしでどちらか一方の完全な内容に
+    /// なり、tmp の残骸も残らないこと。
+    ///
+    /// 固定 temp 名時代に起きえた「temp の truncate/rename 競合」は一意名で解消したが、
+    /// 最終 rename 先（session_file_path）自体は単一スロットで共有のため、真に同時の
+    /// MoveFileExW が Windows 側で一時的な ERROR_ACCESS_DENIED になり得点で片側だけ
+    /// リトライなしで失敗することがある（フロント側の single-flight 化 #450 frontend が
+    /// 本来の防止策）。ここでは「壊れない」ことを検証し、「両方成功する」ことまでは
+    /// 求めない。
+    #[test]
+    fn session_save_concurrent_writes_leave_consistent_state_without_tmp_leftovers() {
+        let dir = temp_session_dir("concurrent");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let dir1 = dir.clone();
+        let dir2 = dir.clone();
+        let t1 = std::thread::spawn(move || save_session_to_dir(&dir1, r#"{"who":"a"}"#));
+        let t2 = std::thread::spawn(move || save_session_to_dir(&dir2, r#"{"who":"b"}"#));
+
+        let r1 = t1.join().expect("thread1 panicked");
+        let r2 = t2.join().expect("thread2 panicked");
+        assert!(
+            r1.is_ok() || r2.is_ok(),
+            "both concurrent saves failed: r1={:?} r2={:?}",
+            r1,
+            r2
+        );
+
+        // 最終状態は torn write なしで「a」「b」いずれかの完全な内容でなければならない
+        let loaded = load_session_from_dir(&dir).unwrap();
+        assert!(
+            loaded == r#"{"who":"a"}"# || loaded == r#"{"who":"b"}"#,
+            "unexpected (possibly torn) content: {loaded}"
+        );
+
+        // 成功・失敗いずれのスレッドも自分の一意 temp を後始末するため残骸はない
+        let leftovers = list_tmp_leftovers(&dir);
+        assert!(leftovers.is_empty(), "tmp leftovers: {:?}", leftovers);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── CSV 永続化 (save_csv_to_path / csv_temp_file_path) ─────────────────
+
+    fn temp_csv_dir(name: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut dir = std::env::temp_dir();
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        dir.push(format!("report_tool_csv_test_{}_{}_{}", std::process::id(), name, n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("csv_dir 作成失敗");
+        dir
+    }
+
+    /// 新規保存の内容が BOM + 本文と一致すること。
+    #[test]
+    fn save_csv_to_path_new_file_matches_bom_and_body() {
+        let dir = temp_csv_dir("new");
+        let path = dir.join("report.csv");
+        save_csv_to_path(&path, "a,b\n1,2").unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "先頭3バイトがBOMでなければならない");
+        assert_eq!(&bytes[3..], b"a,b\n1,2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 既存ファイルへの再保存で内容が置き換わること。
+    #[test]
+    fn save_csv_to_path_overwrite_replaces_content() {
+        let dir = temp_csv_dir("overwrite");
+        let path = dir.join("report.csv");
+        save_csv_to_path(&path, "old-content").unwrap();
+        save_csv_to_path(&path, "new-content").unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[3..], b"new-content");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 保存成功後に temp ファイルが残っていないこと。
+    #[test]
+    fn save_csv_to_path_no_leftover_tmp_after_success() {
+        let dir = temp_csv_dir("no_leftover");
+        let path = dir.join("report.csv");
+        save_csv_to_path(&path, "x").unwrap();
+
+        let leftovers = list_tmp_leftovers(&dir);
+        assert!(leftovers.is_empty(), "tmp leftovers: {:?}", leftovers);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// temp 書込段階で失敗した場合、rename には一切到達せず既存の final ファイルは
+    /// 無傷のまま残ることを確認する（torn write 防止の間接検証）。
+    ///
+    /// csv_temp_file_path はプロセス内カウンタで一意名を生成するため実際に使われる
+    /// temp パスをテストから正確に予測できない。save_csv_via_temp（temp_path 引数化版）
+    /// を直接呼び、事前にディレクトリとして塞いだ確定パスを渡すことで
+    /// std::fs::File::create を確実に失敗させる
+    /// （save_template_failure_before_rename_leaves_existing_file_untouched と同じ
+    /// 「temp パスをディレクトリにして書込みを失敗させる」手法）。
+    #[test]
+    fn save_csv_to_path_failure_before_rename_leaves_existing_file_untouched() {
+        let dir = temp_csv_dir("failure_before_rename");
+        let path = dir.join("report.csv");
+        save_csv_to_path(&path, "original").unwrap();
+
+        let temp_path = dir.join("blocked.csv.tmp");
+        std::fs::create_dir_all(&temp_path).unwrap();
+
+        let err = save_csv_via_temp(&path, "corrupted", &temp_path).unwrap_err();
+        assert!(!err.is_empty());
+
+        // rename まで到達していないため、既存の final ファイルは書き換わっていない
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[3..], b"original");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
