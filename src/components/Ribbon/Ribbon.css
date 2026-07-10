@@ -225,7 +225,7 @@
 
 /* ── Responsive collapse: compact (< 900px) ─────────────────────────── */
 /* Hide button text labels, keep icons; tooltips via title attribute */
-.ribbon--compact .ribbon-btn-label {
+.ribbon--compact .ribbon-btn--has-icon:not(.ribbon-btn--keep-label) .ribbon-btn-label {
   display: none;
 }
 
@@ -235,12 +235,20 @@
 
 /* ── Responsive collapse: icon-only (< 700px) ───────────────────────── */
 /* Also hide group titles; only group separator borders remain */
-.ribbon--icon-only .ribbon-btn-label {
+.ribbon--icon-only .ribbon-btn--has-icon:not(.ribbon-btn--keep-label) .ribbon-btn-label {
   display: none;
 }
 
 .ribbon--icon-only .ribbon-btn {
   padding: 3px 5px;
+}
+
+.ribbon--compact .ribbon-btn--text-only,
+.ribbon--icon-only .ribbon-btn--text-only,
+.ribbon--compact .ribbon-btn--keep-label,
+.ribbon--icon-only .ribbon-btn--keep-label {
+  padding-inline: 4px;
+  font-size: 10px;
 }
 
 .ribbon--icon-only .ribbon-group-title {

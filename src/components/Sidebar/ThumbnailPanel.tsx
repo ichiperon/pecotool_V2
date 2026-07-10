@@ -243,7 +243,7 @@ interface ThumbnailPanelProps {
   onGetIsDirtyPage: (index: number) => boolean;
   // issue #193: ページ操作コールバック
   onDeletePages: (displayIndices: number[]) => void;
-  onMovePage: (fromDisplayIndex: number, toDisplayIndex: number) => void;
+  onMovePage: (fromDisplayIndex: number, toDisplayIndex: number) => void | Promise<void>;
   // issue #207: ページ回転コールバック
   onRotatePages: (pageIndices: number[], delta: 90 | 180 | 270) => void;
   // issue #208: 選択ページを別 PDF として書き出すコールバック
@@ -260,6 +260,9 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(CONTEXT_MENU_INITIAL);
   const [activeDragId, setActiveDragId] = useState<number | null>(null);
+  const [reorderAnnouncement, setReorderAnnouncement] = useState('');
+  const keyboardMoveInFlightRef = useRef(false);
+  const keyboardMoveFromIndexRef = useRef<number | null>(null);
 
   // issue #207: document への最新参照を ref で保持し、stale closure を避ける。
   // itemContent の useCallback deps に document を入れると全アイテムが毎回再生成されるため、
@@ -274,6 +277,14 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
 
   useEffect(() => {
     virtuosoRef.current?.scrollIntoView({ index: currentPageIndex, behavior: 'smooth', done: () => {} });
+  }, [currentPageIndex]);
+
+  useEffect(() => {
+    const fromIndex = keyboardMoveFromIndexRef.current;
+    if (fromIndex !== null && currentPageIndex !== fromIndex) {
+      keyboardMoveInFlightRef.current = false;
+      keyboardMoveFromIndexRef.current = null;
+    }
   }, [currentPageIndex]);
 
   // コンテキストメニューを閉じるグローバルハンドラ
@@ -363,9 +374,45 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
       const fromIndex = active.id as number;
       const toIndex = over.id as number;
       onMovePage(fromIndex, toIndex);
+      setReorderAnnouncement(`ページ ${fromIndex + 1} を ${toIndex + 1} ページ目へ移動しました`);
     },
     [onMovePage],
   );
+
+  const handlePanelKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!document) return;
+    if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      e.preventDefault();
+      if (keyboardMoveInFlightRef.current) return;
+      const targetIndex = e.key === 'ArrowUp'
+        ? currentPageIndex - 1
+        : currentPageIndex + 1;
+      if (targetIndex < 0 || targetIndex >= document.totalPages) return;
+      keyboardMoveInFlightRef.current = true;
+      keyboardMoveFromIndexRef.current = currentPageIndex;
+      const pendingMove = onMovePage(currentPageIndex, targetIndex);
+      setReorderAnnouncement(`ページ ${currentPageIndex + 1} を ${targetIndex + 1} ページ目へ移動しました`);
+      void Promise.resolve(pendingMove).then(
+        () => {
+          keyboardMoveInFlightRef.current = false;
+          keyboardMoveFromIndexRef.current = null;
+        },
+        () => {
+          keyboardMoveInFlightRef.current = false;
+          keyboardMoveFromIndexRef.current = null;
+        },
+      );
+      return;
+    }
+    if (e.altKey) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (currentPageIndex < document.totalPages - 1) onSelectPage(currentPageIndex + 1);
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (currentPageIndex > 0) onSelectPage(currentPageIndex - 1);
+    }
+  }, [currentPageIndex, document, onMovePage, onSelectPage]);
 
   const totalCount = document?.totalPages ?? 0;
   const sortableItems = Array.from({ length: totalCount }, (_, i) => i);
@@ -410,6 +457,12 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
 
   return (
     <aside className="thumbnails-panel" style={panelStyle}>
+      <div className="sr-only" id="thumbnail-reorder-help">
+        Alt キーと上下矢印キーで現在のページを並び替えられます
+      </div>
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {reorderAnnouncement}
+      </div>
       {isOcrRunning && (
         <div className="ocr-processing-overlay">
           <div className="loading-spinner" />
@@ -417,17 +470,13 @@ export const ThumbnailPanel: React.FC<ThumbnailPanelProps> = ({
         </div>
       )}
       <div className="panel-header">サムネイル</div>
-      <div className="scroll-content" tabIndex={0} onKeyDown={(e) => {
-        if (!document) return;
-        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
-          e.preventDefault();
-          if (currentPageIndex < document.totalPages - 1) onSelectPage(currentPageIndex + 1);
-        }
-        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
-          e.preventDefault();
-          if (currentPageIndex > 0) onSelectPage(currentPageIndex - 1);
-        }
-      }}>
+      <div
+        className="scroll-content"
+        tabIndex={0}
+        aria-describedby="thumbnail-reorder-help"
+        aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+        onKeyDown={handlePanelKeyDown}
+      >
         {document ? (
           <DndContext
             sensors={sensors}

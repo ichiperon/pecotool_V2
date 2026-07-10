@@ -504,11 +504,57 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static OCR_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_PREVIEW_TEMP_PATHS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// PCT-116: temp 直書きの上限サイズ。raw IPC body をそのまま書くため、Webview 侵害時に
 /// 巨大 body の連投で temp ディスクを圧迫されないよう上限を設ける。業務 PDF / OCR 画像の
 /// 現実的上限を踏まえ 500MB とする（正規 UI の経路では到達しない）。
 const MAX_TEMP_WRITE_BYTES: usize = 500 * 1024 * 1024;
+
+/// 外部ビューアがファイルをロックして削除できない場合でも、一時 PDF がプロセス存続中に
+/// 無制限に増えないよう追跡数を制限する。通常は次回プレビュー前の掃除で 0 件へ戻る。
+const MAX_ACTIVE_PREVIEW_TEMP_FILES: usize = 3;
+
+fn cleanup_preview_temp_paths(paths: &mut Vec<std::path::PathBuf>) {
+    paths.retain(|path| match std::fs::remove_file(path) {
+        Ok(()) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            eprintln!(
+                "[preview-cleanup] failed to remove preview temp file: {} ({e})",
+                path.display()
+            );
+            true
+        }
+    });
+}
+
+/// レビュー差し戻し (スバル指摘・#461): 追跡上限に達し、かつ削除も失敗した (外部ビューアが
+/// ファイルをロックしたまま等) 場合でも、以前はここでハードエラーを返し新規プレビューの
+/// 作成そのものを失敗させていた。「ビューアを開いたまま補正値を変えて4回目のプレビュー」
+/// のような正常な操作フローがエラーで止まってしまう受入条件からの乖離だったため、
+/// エラーにはせず、削除できなかった最古のエントリを追跡リストから外して続行する。
+/// 外したファイルはディスク上には残るが、削除できないファイルを追跡し続けても意味が
+/// 無く、次回起動時の PID ガード付き cleanup (#430) が生存プロセスの temp を誤って
+/// 消さずに回収する。追跡リストは呼び出し元が新規パスを追加した後も上限を維持する。
+fn prepare_preview_temp_slot(paths: &mut Vec<std::path::PathBuf>) {
+    cleanup_preview_temp_paths(paths);
+    if paths.len() >= MAX_ACTIVE_PREVIEW_TEMP_FILES {
+        let evicted = paths.remove(0);
+        eprintln!(
+            "[open_pdf_preview] preview temp slot at capacity; dropping oldest tracked entry (left on disk, will be reclaimed by startup cleanup): {}",
+            evicted.display()
+        );
+    }
+}
+
+fn cleanup_tracked_preview_temp_files() {
+    let mut paths = ACTIVE_PREVIEW_TEMP_PATHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cleanup_preview_temp_paths(&mut paths);
+}
 
 /// PCT-199 AQ-4: ファイル名 `{prefix}_{pid}_{nanos}_{counter}.{ext}` から PID 部分を抽出する。
 /// prefix が `peco_ocr_preview` / `peco_ocr` のいずれであっても、拡張子を除いた `_` 区切りの
@@ -646,6 +692,15 @@ async fn open_pdf_preview(
         ));
     }
 
+    // #461: 前回までの preview を先に best-effort で掃除する。ビューアのロック等で
+    // 削除できないパスは追跡を継続するが、上限到達時に新規作成をエラーで止めると
+    // 正常な操作フロー (ビューアを開いたまま補正値を変えて再プレビュー) を壊すため、
+    // ハードエラーにはせず最古のエントリを追跡から外して続行する (レビュー差し戻し)。
+    let mut tracked_paths = ACTIVE_PREVIEW_TEMP_PATHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prepare_preview_temp_slot(&mut tracked_paths);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -657,12 +712,26 @@ async fn open_pdf_preview(
         nanos,
         counter,
     ));
-    std::fs::write(&path, &bytes).map_err(|e| format!("preview write failed: {}", e))?;
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        // 部分書き込みが残った場合も追跡対象に含める。削除できれば即時回収する。
+        if let Err(cleanup_err) = std::fs::remove_file(&path) {
+            if cleanup_err.kind() != std::io::ErrorKind::NotFound {
+                tracked_paths.push(path);
+            }
+        }
+        return Err(format!("preview write failed: {}", e));
+    }
 
     let path_str = path.to_string_lossy().to_string();
-    app.opener()
-        .open_path(path_str.clone(), None::<&str>)
-        .map_err(|e| format!("open_path failed: {}", e))?;
+    if let Err(e) = app.opener().open_path(path_str.clone(), None::<&str>) {
+        // 起動失敗時も書き出した temp を回収する。削除不能なら終了時 cleanup の対象として
+        // 追跡し続ける。
+        if std::fs::remove_file(&path).is_err() {
+            tracked_paths.push(path);
+        }
+        return Err(format!("open_path failed: {}", e));
+    }
+    tracked_paths.push(path);
     Ok(path_str)
 }
 
@@ -2332,6 +2401,55 @@ mod tests {
         assert_eq!(extract_pid_from_temp_filename(stem), None);
     }
 
+    // ── #461: preview temp lifecycle ────────────────────────────────────
+
+    #[test]
+    fn prepare_preview_temp_slot_removes_previous_preview_files() {
+        let dir = make_replace_test_dir("preview_lifecycle_cleanup");
+        let first = dir.join("peco_ocr_preview_1_1_0.pdf");
+        let second = dir.join("peco_ocr_preview_1_2_1.pdf");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let mut tracked = vec![first.clone(), second.clone()];
+
+        prepare_preview_temp_slot(&mut tracked);
+
+        assert!(tracked.is_empty());
+        assert!(!first.exists());
+        assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// レビュー差し戻し (スバル指摘・#461): 追跡上限に達し、かつ削除も失敗する
+    /// (外部ビューアがロックしたまま等) 場合、以前はハードエラーで新規プレビュー作成
+    /// 自体を失敗させていた。修正後はエラーにせず、削除できなかった最古のエントリを
+    /// 追跡リストから外して続行する (プレビュー自体は成功する)。
+    #[test]
+    fn prepare_preview_temp_slot_evicts_oldest_instead_of_hard_error_when_files_cannot_be_removed() {
+        let dir = make_replace_test_dir("preview_lifecycle_cap");
+        let mut tracked = Vec::new();
+        // remove_file はディレクトリに対して失敗するので、外部ビューアが PDF をロックして
+        // cleanup できない状況をプラットフォーム非依存で模擬できる。
+        for index in 0..MAX_ACTIVE_PREVIEW_TEMP_FILES {
+            let locked = dir.join(format!("peco_ocr_preview_locked_{index}.pdf"));
+            std::fs::create_dir(&locked).unwrap();
+            tracked.push(locked);
+        }
+        let oldest = tracked[0].clone();
+
+        // ハードエラーにならず正常終了すること (戻り値は () で呼び出し自体が成功を表す)。
+        prepare_preview_temp_slot(&mut tracked);
+
+        // 最古のエントリが追跡から外れ、残りは上限未満まで減る
+        // (呼び出し元が新規パスを追加すれば再び上限まで戻る)。
+        assert_eq!(tracked.len(), MAX_ACTIVE_PREVIEW_TEMP_FILES - 1);
+        assert!(!tracked.contains(&oldest), "oldest tracked entry should be evicted");
+        // 外したファイルは削除できていないためディスク上には残る
+        // (#430 の起動時 PID ガード付き cleanup が後で回収する)。
+        assert!(oldest.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn is_process_alive_returns_true_for_current_process() {
         // 自プロセス自身は必ず生存している
@@ -2466,7 +2584,7 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -2506,6 +2624,14 @@ pub fn run() {
             backup::clear_backup,
             backup::load_backup,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            // #461: 正常終了時にも、このプロセスが生成して追跡中の preview temp を
+            // best-effort で回収する。削除不能分は既存の次回起動 cleanup が引き継ぐ。
+            cleanup_tracked_preview_temp_files();
+        }
+    });
 }

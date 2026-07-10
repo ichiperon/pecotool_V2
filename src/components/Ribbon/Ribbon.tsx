@@ -9,6 +9,7 @@ import { HelpTab } from './tabs/HelpTab';
 import './Ribbon.css';
 import type { PageData } from '../../types';
 import type { TextExportFormat } from '../../utils/textExport';
+import { isAnyModalOpen } from '../ui/Modal';
 
 type TabKey = 'file' | 'edit' | 'ocr' | 'view' | 'settings' | 'help';
 
@@ -127,6 +128,7 @@ export const Ribbon: React.FC<RibbonProps> = (props) => {
       const tab = keyMap[e.key.toLowerCase()];
       if (tab) {
         e.preventDefault();
+        if (isAnyModalOpen()) return;
         setActiveTab(tab);
       }
     };

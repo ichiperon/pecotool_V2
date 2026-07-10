@@ -1,22 +1,27 @@
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest'
 import { Ribbon } from '../../components/Ribbon/Ribbon'
 import type { PageData } from '../../types'
 import { useOcrSettingsStore } from '../../store/ocrSettingsStore'
+import { Modal } from '../../components/ui/Modal'
 
-// jsdom does not implement ResizeObserver; provide a no-op stub
+let resizeObserverCallback: ResizeObserverCallback
+
+// jsdom does not implement ResizeObserver; retain the callback so responsive
+// boundary behavior can be exercised without a browser viewport.
 beforeAll(() => {
-  if (typeof window.ResizeObserver === 'undefined') {
-    window.ResizeObserver = class ResizeObserver {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
+  window.ResizeObserver = class ResizeObserver {
+    constructor(callback: ResizeObserverCallback) {
+      resizeObserverCallback = callback
     }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   }
 })
 
 vi.mock('lucide-react', () => {
-  const s = (name: string) => (props: any) => <span data-icon={name} {...props} />
+  const s = (name: string) => (props: any) => <svg data-icon={name} {...props} />
   return {
     RotateCcw: s('RotateCcw'),
     RotateCw: s('RotateCw'),
@@ -321,6 +326,24 @@ describe('Ribbon', () => {
     expect(fileTab.classList.contains('ribbon-tab--active')).toBe(true)
   })
 
+  it('#454: 共通Modal表示中はAltアクセラレーターで背面タブを切り替えない', () => {
+    renderRibbon()
+    render(
+      <Modal
+        onClose={() => {}}
+        ariaLabel="テストモーダル"
+        backdropClassName="backdrop"
+        dialogClassName="dialog"
+      >
+        内容
+      </Modal>,
+    )
+
+    fireEvent.keyDown(window, { key: 'e', altKey: true })
+    expect(screen.getByText('ファイル').closest('button')!.classList.contains('ribbon-tab--active')).toBe(true)
+    expect(screen.getByText('編集').closest('button')!.classList.contains('ribbon-tab--active')).toBe(false)
+  })
+
   // ── 表示タブ: 要確認マークトグル (#192 → PCT-048/#299 でリネーム) ─────────
   it('C-RB-30: 表示タブ: 要確認マークボタンをクリックすると store state が反転する', () => {
     // store を初期状態 (showLowConfidenceHighlight=true) にリセット
@@ -341,5 +364,85 @@ describe('Ribbon', () => {
     // 再クリックで ON に戻る
     fireEvent.click(btn)
     expect(useOcrSettingsStore.getState().showLowConfidenceHighlight).toBe(true)
+  })
+
+  it('#456: 全ボタンの表示ラベルを ribbon-btn-label DOM に正規化する', () => {
+    const { container } = renderRibbon()
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('.ribbon-btn'))
+
+    expect(buttons.length).toBeGreaterThan(0)
+    for (const button of buttons) {
+      expect(button.querySelector('.ribbon-btn-label')).not.toBeNull()
+      expect(button.getAttribute('aria-label')).toBe(button.getAttribute('title'))
+    }
+  })
+
+  it('#456: 700px/900px の境界で compact class を正しく切り替える', () => {
+    const { container } = renderRibbon()
+    const ribbon = container.querySelector('.ribbon')!
+    const resize = (width: number) => {
+      act(() => {
+        resizeObserverCallback([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver)
+      })
+    }
+
+    resize(900)
+    expect(ribbon.className).toBe('ribbon')
+    resize(899)
+    expect(ribbon.classList.contains('ribbon--compact')).toBe(true)
+    resize(700)
+    expect(ribbon.classList.contains('ribbon--compact')).toBe(true)
+    expect(ribbon.classList.contains('ribbon--icon-only')).toBe(false)
+    resize(699)
+    expect(ribbon.classList.contains('ribbon--icon-only')).toBe(true)
+  })
+
+  it('#456: text-onlyボタンはcompact/icon-onlyでも唯一の表示ラベルを維持する', () => {
+    const { container } = renderRibbon()
+    const ribbon = container.querySelector('.ribbon')!
+    const textOnlyButton = screen.getByTitle('別名で保存 (Ctrl+Shift+S)')
+    const textOnlyLabel = textOnlyButton.querySelector('.ribbon-btn-label') as HTMLElement
+    const iconButton = screen.getByTitle('最近使ったファイル')
+    const iconLabel = iconButton.querySelector('.ribbon-btn-label') as HTMLElement
+    const resize = (width: number) => {
+      act(() => {
+        resizeObserverCallback([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver)
+      })
+    }
+
+    expect(textOnlyButton.classList.contains('ribbon-btn--text-only')).toBe(true)
+    expect(iconButton.classList.contains('ribbon-btn--has-icon')).toBe(true)
+    expect(iconButton.classList.contains('ribbon-btn--keep-label')).toBe(true)
+    resize(899)
+    expect(ribbon.classList.contains('ribbon--compact')).toBe(true)
+    expect(window.getComputedStyle(textOnlyLabel).display).not.toBe('none')
+    expect(textOnlyLabel.textContent).toBe('別名保存')
+    expect(iconLabel.textContent?.trim()).toBe('最近')
+    resize(699)
+    expect(ribbon.classList.contains('ribbon--icon-only')).toBe(true)
+    expect(window.getComputedStyle(textOnlyLabel).display).not.toBe('none')
+    expect(textOnlyLabel.textContent).toBe('別名保存')
+  })
+
+  it('#456: 装飾Chevronだけのドロップダウンは縮小時も固有ラベルで区別できる', () => {
+    const { container } = renderRibbon()
+    const buttons = [
+      screen.getByTitle('最近使ったファイル'),
+      screen.getByTitle('現在のページをエクスポート'),
+      screen.getByTitle('全ページをエクスポート'),
+    ]
+    const resize = (width: number) => {
+      act(() => {
+        resizeObserverCallback([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver)
+      })
+    }
+
+    for (const button of buttons) {
+      expect(button.classList.contains('ribbon-btn--keep-label')).toBe(true)
+    }
+    resize(699)
+    expect(container.querySelector('.ribbon')!.classList.contains('ribbon--icon-only')).toBe(true)
+    expect(buttons.map((button) => button.querySelector('.ribbon-btn-label')?.textContent?.trim()))
+      .toEqual(['最近', '現在ページ', '全ページ'])
   })
 })

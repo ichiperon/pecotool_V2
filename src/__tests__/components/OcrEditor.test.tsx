@@ -6,6 +6,10 @@ import { usePecoStore } from '../../store/pecoStore'
 import { useSearchStore } from '../../store/searchStore'
 import type { TextBlock, PageData, PecoDocument } from '../../types'
 
+const sortableMocks = vi.hoisted(() => ({
+  setActivatorNodeRef: vi.fn(),
+}))
+
 vi.mock('../../utils/pdfLoader', () => ({
   saveTemporaryPageDataBatch: vi.fn(),
   clearTemporaryChanges: vi.fn(),
@@ -44,9 +48,10 @@ vi.mock('@dnd-kit/sortable', () => ({
     return next
   },
   useSortable: vi.fn().mockReturnValue({
-    attributes: {},
+    attributes: { role: 'button', tabIndex: 0, 'data-sortable-activator': 'true' },
     listeners: {},
     setNodeRef: vi.fn(),
+    setActivatorNodeRef: sortableMocks.setActivatorNodeRef,
     transform: null,
     transition: null,
     isDragging: false,
@@ -204,6 +209,7 @@ function expectSelectedIds(expected: string[]) {
 afterEach(() => cleanup())
 
 beforeEach(() => {
+  sortableMocks.setActivatorNodeRef.mockClear()
   ;(globalThis as any).__virtuosoScrollIntoViewCalls = []
   // 既定は「全件描画」モード。仮想化テストのみ各 it 内で window サイズをセットする。
   ;(globalThis as any).__virtuosoWindowSize = null
@@ -223,6 +229,36 @@ beforeEach(() => {
 // ── テスト ────────────────────────────────────────────────────
 
 describe('OcrEditor', () => {
+  describe('#457: keyboard sortable activator', () => {
+    it('DnD attributes と activator ref をドラッグハンドルへ配線する', () => {
+      const { container } = setup([makeBlock('b1', 'text', 0)])
+      const handle = container.querySelector('.ocr-card-drag-handle') as HTMLElement
+
+      expect(handle.getAttribute('role')).toBe('button')
+      expect(handle.getAttribute('tabindex')).toBe('0')
+      expect(handle.getAttribute('data-sortable-activator')).toBe('true')
+      expect(handle.getAttribute('aria-label')).toBe('ブロック 1 を並び替え')
+      expect(sortableMocks.setActivatorNodeRef).toHaveBeenCalledWith(handle)
+      expect(handle.parentElement?.parentElement?.getAttribute('data-sortable-activator')).toBeNull()
+    })
+
+    it('並び替え完了を live region へ通知する', () => {
+      setup([
+        makeBlock('b1', 'first', 0),
+        makeBlock('b2', 'second', 1),
+      ])
+
+      act(() => {
+        ;(globalThis as any).__lastDndOnDragEnd({
+          active: { id: 'b1' },
+          over: { id: 'b2' },
+        })
+      })
+
+      expect(screen.getByRole('status').textContent).toContain('1 番目から 2 番目へ移動しました')
+    })
+  })
+
   describe('C-OE-01: 検索フィルター', () => {
     it('"cherry" 入力 → "cherry" を含むカードのみ表示', async () => {
       const user = userEvent.setup()

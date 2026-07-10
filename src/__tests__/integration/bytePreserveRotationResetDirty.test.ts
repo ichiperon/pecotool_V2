@@ -328,7 +328,9 @@ describe('HIGH/MEDIUM (bug-hunt round1 最終ゲート・マリン指摘): order
     expect(after.textBlocks[0].bbox).toEqual(block.bbox);
     expect(after.width).toBe(PAGE_W);
     expect(after.height).toBe(PAGE_H);
-    // このページの内容自体は保存済みバイトに正しく書かれているため isDirty は下ろせる。
-    expect(after.isDirty).toBe(false);
+    // #458: order 不一致時は originalBytesCache が保存前 bytes のままなので、ここで
+    // clean にすると次回保存の再描画対象から漏れ、今回の編集が巻き戻る。dirty を維持する。
+    expect(after.isDirty).toBe(true);
+    expect(usePecoStore.getState().isDirty).toBe(true);
   });
 });

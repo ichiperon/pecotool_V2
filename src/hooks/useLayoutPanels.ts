@@ -1,4 +1,12 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+
+export const LEFT_PANEL_MIN_WIDTH = 150;
+export const LEFT_PANEL_MAX_WIDTH = 400;
+export const RIGHT_PANEL_MIN_WIDTH = 200;
+export const RIGHT_PANEL_MAX_WIDTH = 800;
+const KEYBOARD_RESIZE_STEP = 10;
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 // 左右サイドパネルの幅と、マウスドラッグによるリサイズ処理
 export function useLayoutPanels() {
@@ -19,7 +27,7 @@ export function useLayoutPanels() {
     const startX = e.clientX;
     const startWidth = leftWidth;
     const onMouseMove = (moveEvent: MouseEvent) =>
-      setLeftWidth(Math.max(150, Math.min(400, startWidth + (moveEvent.clientX - startX))));
+      setLeftWidth(clamp(startWidth + (moveEvent.clientX - startX), LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_MAX_WIDTH));
     const onMouseUp = () => detachActiveListeners();
     activeListenersRef.current = { move: onMouseMove, up: onMouseUp };
     window.addEventListener('mousemove', onMouseMove);
@@ -31,7 +39,7 @@ export function useLayoutPanels() {
     const startX = e.clientX;
     const startWidth = rightWidth;
     const onMouseMove = (moveEvent: MouseEvent) =>
-      setRightWidth(Math.max(200, Math.min(800, startWidth - (moveEvent.clientX - startX))));
+      setRightWidth(clamp(startWidth - (moveEvent.clientX - startX), RIGHT_PANEL_MIN_WIDTH, RIGHT_PANEL_MAX_WIDTH));
     const onMouseUp = () => detachActiveListeners();
     activeListenersRef.current = { move: onMouseMove, up: onMouseUp };
     window.addEventListener('mousemove', onMouseMove);
@@ -43,5 +51,35 @@ export function useLayoutPanels() {
     return () => detachActiveListeners();
   }, []);
 
-  return { leftWidth, rightWidth, startResizeLeft, startResizeRight };
+  const handleResizeLeftKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const delta = e.key === 'ArrowLeft' ? -KEYBOARD_RESIZE_STEP : KEYBOARD_RESIZE_STEP;
+      setLeftWidth((width) => clamp(width + delta, LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_MAX_WIDTH));
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      setLeftWidth(e.key === 'Home' ? LEFT_PANEL_MIN_WIDTH : LEFT_PANEL_MAX_WIDTH);
+    }
+  }, []);
+
+  const handleResizeRightKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      // The right panel grows when its separator moves left.
+      const delta = e.key === 'ArrowLeft' ? KEYBOARD_RESIZE_STEP : -KEYBOARD_RESIZE_STEP;
+      setRightWidth((width) => clamp(width + delta, RIGHT_PANEL_MIN_WIDTH, RIGHT_PANEL_MAX_WIDTH));
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      setRightWidth(e.key === 'Home' ? RIGHT_PANEL_MIN_WIDTH : RIGHT_PANEL_MAX_WIDTH);
+    }
+  }, []);
+
+  return {
+    leftWidth,
+    rightWidth,
+    startResizeLeft,
+    startResizeRight,
+    handleResizeLeftKeyDown,
+    handleResizeRightKeyDown,
+  };
 }

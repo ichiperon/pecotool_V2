@@ -13,10 +13,40 @@
 #   （バージョンは tauri.conf.json から自動取得）
 
 $ErrorActionPreference = 'Stop'
+
+function Get-VersionReleaseForResume([string]$Tag, [string]$Repository) {
+    $json = gh release view $Tag --repo $Repository --json isPrerelease,assets 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return $json | ConvertFrom-Json
+}
+
+function Assert-VersionReleaseForResume(
+    [object]$Release,
+    [bool]$ExpectedPrerelease,
+    [string[]]$ExpectedAssetNames
+) {
+    if ([bool]$Release.isPrerelease -ne $ExpectedPrerelease) {
+        throw "既存version releaseのprerelease属性が不一致です"
+    }
+    $actualNames = @($Release.assets | ForEach-Object { $_.name } | Sort-Object)
+    $expectedNames = @($ExpectedAssetNames | Sort-Object)
+    if (@(Compare-Object $expectedNames $actualNames).Count -ne 0) {
+        throw "既存version releaseの資産が不一致です: expected=$($expectedNames -join ',') actual=$($actualNames -join ',')"
+    }
+    foreach ($asset in $Release.assets) {
+        if ($asset.state -ne 'uploaded' -or [long]$asset.size -le 0) {
+            throw "既存version releaseに未完了または空の資産があります: $($asset.name)"
+        }
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $DIST_REPO = 'abroadcrew02-spec/pecotool-releases'
+$CHANNEL_TAG = 'pecotool-updater'
+$CHANNEL_ASSET = 'latest.json'
+$CHANNEL_URL = "https://github.com/$DIST_REPO/releases/download/$CHANNEL_TAG/$CHANNEL_ASSET"
 
 # --- 1. 前提チェック -------------------------------------------------------
 $keyCandidates = @("$HOME\.tauri\pecotool_v2.key", (Join-Path $repoRoot 'keys\pecotool_v2.key'))
@@ -32,6 +62,10 @@ if ($LASTEXITCODE -ne 0) { Write-Error 'gh CLI が未認証です (gh auth login
 $conf = Get-Content (Join-Path $repoRoot 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
 $version = $conf.version
 if (-not $version) { Write-Error 'tauri.conf.json から version を取得できません' }
+$configuredEndpoint = $conf.plugins.updater.endpoints | Select-Object -First 1
+if ($configuredEndpoint -ne $CHANNEL_URL) {
+    Write-Error "updater endpoint と配布チャネルが不一致です: config=$configuredEndpoint expected=$CHANNEL_URL"
+}
 Write-Host "[1/7] バージョン: $version"
 
 # --- 2. 依存関係インストール -------------------------------------------------
@@ -79,13 +113,73 @@ $latest | ConvertTo-Json -Depth 5 | Set-Content $latestPath -Encoding UTF8
 Write-Host "[5/7] latest.json 生成: $latestPath"
 
 # --- 6. GitHub Release 公開 (配布リポジトリ) -------------------------------
-Write-Host "[6/7] $DIST_REPO に Release v$version を公開..."
-gh release create "v$version" `
-    --repo $DIST_REPO `
-    --title "Peco v$version" `
-    --notes "Peco v$version — 更新内容はアプリ配布元の案内を参照してください。" `
-    $setupExe.FullName $sigFile.FullName $latestPath
-if ($LASTEXITCODE -ne 0) { Write-Error 'gh release create が失敗しました' }
+$versionTag = "v$version"
+$expectedAssets = @($setupExe.Name, $sigFile.Name, $CHANNEL_ASSET)
+$existingVersionRelease = Get-VersionReleaseForResume $versionTag $DIST_REPO
+if ($existingVersionRelease) {
+    Assert-VersionReleaseForResume $existingVersionRelease $false $expectedAssets
+    # 前回version release作成後にchannel更新だけ失敗したケース。再buildしたローカル
+    # 成果物ではなく、公開済み3資産を再取得して同一manifestから安全に再開する。
+    gh release download $versionTag `
+        --repo $DIST_REPO `
+        --dir $bundleDir `
+        --clobber `
+        --pattern $setupExe.Name `
+        --pattern $sigFile.Name `
+        --pattern $CHANNEL_ASSET
+    if ($LASTEXITCODE -ne 0) { Write-Error '既存version release資産の取得に失敗しました' }
+
+    $resumeManifest = Get-Content $latestPath -Raw | ConvertFrom-Json
+    $resumePlatform = $resumeManifest.platforms.'windows-x86_64'
+    $resumeSignature = (Get-Content $sigFile.FullName -Raw).Trim()
+    if ($resumeManifest.version -ne $version -or
+        $resumePlatform.signature -ne $resumeSignature -or
+        $resumePlatform.url -ne $assetUrl) {
+        Write-Error '既存version releaseのmanifest/signature/setup URLが不整合です'
+    }
+    Write-Host "[6/7] 既存 Release $versionTag を検証済み。channel phaseから再開します"
+} else {
+    Write-Host "[6/7] $DIST_REPO に Release $versionTag を公開..."
+    gh release create $versionTag `
+        --repo $DIST_REPO `
+        --title "Peco v$version" `
+        --notes "Peco v$version — 更新内容はアプリ配布元の案内を参照してください。" `
+        $setupExe.FullName $sigFile.FullName $latestPath
+    if ($LASTEXITCODE -ne 0) { Write-Error 'gh release create が失敗しました' }
+}
+
+# repository 全体で1つしかない releases/latest を更新チャネルに使わず、
+# 本体専用の固定tagへmanifestだけをclobber更新する。channel release自体は
+# prereleaseにして、旧版が参照する releases/latest も本体version releaseのまま保つ。
+$channelRelease = $null
+gh release view $CHANNEL_TAG --repo $DIST_REPO --json isPrerelease 2>$null | ForEach-Object {
+    $channelRelease = $_ | ConvertFrom-Json
+}
+if (-not $channelRelease) {
+    gh release create $CHANNEL_TAG `
+        --repo $DIST_REPO `
+        --title 'Peco updater channel' `
+        --notes 'Peco本体専用の固定updater manifest。version releaseとは独立して更新されます。' `
+        --prerelease
+    if ($LASTEXITCODE -ne 0) { Write-Error '本体updater channelの作成に失敗しました' }
+} elseif (-not $channelRelease.isPrerelease) {
+    Write-Error "$CHANNEL_TAG は prerelease である必要があります（releases/latestを奪わないため）"
+}
+gh release upload $CHANNEL_TAG --repo $DIST_REPO --clobber $latestPath
+if ($LASTEXITCODE -ne 0) { Write-Error '本体updater manifestの公開に失敗しました' }
+
+$published = Invoke-RestMethod -Uri "$CHANNEL_URL`?version=$version"
+if ($published.version -ne $version -or
+    -not $published.platforms.'windows-x86_64'.signature -or
+    $published.platforms.'windows-x86_64'.url -ne $assetUrl) {
+    Write-Error "本体updater channelの公開後検証に失敗しました: $CHANNEL_URL"
+}
+
+# 帳票channelが既に存在する運用開始後は、交互リリースのたびに両endpointを検証する。
+gh release view 'report-tool-updater' --repo $DIST_REPO 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    & (Join-Path $PSScriptRoot 'release-channels.test.ps1') -Remote
+}
 
 # --- 7. dist-bin へコピー --------------------------------------------------
 $distBin = Join-Path $repoRoot 'dist-bin'
@@ -99,4 +193,5 @@ Write-Host "[7/7] dist-bin へコピー完了"
 Write-Host ''
 Write-Host "=== リリース完了: v$version ==="
 Write-Host "Release: https://github.com/$DIST_REPO/releases/tag/v$version"
+Write-Host "Updater: $CHANNEL_URL"
 Write-Host "既存ユーザーのアプリは次回起動時に自動で更新を検知します。"

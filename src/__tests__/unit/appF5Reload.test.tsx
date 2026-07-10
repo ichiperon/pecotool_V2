@@ -9,25 +9,35 @@
  *  - The listener is cleaned up on unmount
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { renderHook, cleanup } from '@testing-library/react';
+import { render, renderHook, cleanup } from '@testing-library/react';
 import { useEffect } from 'react';
+import { isAnyModalOpen, Modal } from '../../components/ui/Modal';
 
 afterEach(() => cleanup());
 
 // 検証対象: App.tsx の F5 useEffect と同一仕様の hook。
 // App.tsx 内に inline 定義されているため、契約 (handleReload を呼ぶ) のみを
 // ここで担保する。仕様逸脱した場合、本 hook と App.tsx を同時に修正する。
-function useF5ReloadShortcut(handleReload: () => void) {
+//
+// レビュー差し戻し (#454 追い修正・マリン指摘): App.tsx の 4 ダイアログ
+// (バックアップ復元/OCR設定/ヘルプ/置換) は Suspense+lazy のため、state=true に
+// なった直後〜チャンク読込完了までの間隙は isAnyModalOpen() が false のままになる。
+// legacyModalStateActive はその 4 state (helpModal || showOcrSettings ||
+// showReplace || pendingBackups.length > 0) の OR を表す簡略パラメータ。
+function useF5ReloadShortcut(
+  handleReload: () => void,
+  options: { processingBackupPath?: string | null; legacyModalStateActive?: boolean } = {},
+) {
   useEffect(() => {
     const handleF5 = (e: KeyboardEvent) => {
-      if (e.key === 'F5') {
-        e.preventDefault();
-        handleReload();
-      }
+      if (e.key !== 'F5') return;
+      e.preventDefault();
+      if (options.processingBackupPath || isAnyModalOpen() || options.legacyModalStateActive) return;
+      handleReload();
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
-  }, [handleReload]);
+  }, [handleReload, options.processingBackupPath, options.legacyModalStateActive]);
 }
 
 function pressF5() {
@@ -70,6 +80,43 @@ describe('Issue #38: F5 routes through handleReload (isSaving guard)', () => {
     unmount();
     pressF5();
 
+    expect(handleReload).not.toHaveBeenCalled();
+  });
+
+  it('#454: 共通Modal表示中はF5を握りつぶし、閉じた後に再び有効化する', () => {
+    const handleReload = vi.fn();
+    renderHook(() => useF5ReloadShortcut(handleReload));
+    const modal = render(
+      <Modal
+        onClose={() => {}}
+        ariaLabel="テストモーダル"
+        backdropClassName="backdrop"
+        dialogClassName="dialog"
+      >
+        内容
+      </Modal>,
+    );
+
+    const blocked = pressF5();
+    expect(blocked.defaultPrevented).toBe(true);
+    expect(handleReload).not.toHaveBeenCalled();
+
+    modal.unmount();
+    pressF5();
+    expect(handleReload).toHaveBeenCalledTimes(1);
+  });
+
+  it('#454 追い修正: state=true だが Suspense チャンク読込未完了 (Modal 未マウント) でも F5 はブロックされる', () => {
+    // 4ダイアログは Suspense+lazy のため、state が true になった直後は
+    // isAnyModalOpen() (マウント済み Modal のカウント) がまだ false のことがある。
+    // この間隙で F5 が素通りしないことを、旧 state 条件の OR で確認する。
+    const handleReload = vi.fn();
+    renderHook(() => useF5ReloadShortcut(handleReload, { legacyModalStateActive: true }));
+
+    // isAnyModalOpen() は false (Modal 未マウント) のままだが、legacyModalStateActive
+    // (state 直接参照相当) が true なのでブロックされなければならない。
+    const blocked = pressF5();
+    expect(blocked.defaultPrevented).toBe(true);
     expect(handleReload).not.toHaveBeenCalled();
   });
 });

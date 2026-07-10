@@ -36,6 +36,7 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
     const store = storageRef.current!;
     let timer: number | null = null;
     let disposed = false;
+    let reportRevision = 0;
 
     const saveNow = async (): Promise<boolean> => {
       const rs = useReportStore.getState();
@@ -126,20 +127,42 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
      * 「fingerprint 未確定のまま比較してしまう」競合は設計上発生しない
      * （setPdf 呼び出し自体が fingerprint 確定後まで待たされるため）。
      */
-    const offerRestore = (openedPath: string) => {
+    const offerRestore = (openedPath: string, openedGeneration: number) => {
       window.setTimeout(() => {
         void (async () => {
           if (disposed) return;
           // 既に作業がある（復元不要）なら聞かない
           if (useReportStore.getState().cells.size > 0) return;
+          const startedReportRevision = reportRevision;
+          const startedPdfState = usePdfStore.getState();
+          if (
+            openedGeneration !== startedPdfState.loadGeneration ||
+            startedPdfState.filePath !== openedPath ||
+            !startedPdfState.pdfFingerprint
+          ) {
+            return;
+          }
           const loaded = await store.load();
+          // レビュー差し戻し (#459・マリン指摘): store.load() の await 中に
+          // effect がアンマウントされていたら、以降の confirm ダイアログ表示まで
+          // 進めない。この disposed チェックが無いと、アンマウント後に「前回の
+          // 続きから再開しますか？」の確認ダイアログだけが遅れて出てしまう。
+          if (disposed) return;
           if (!loaded.ok) return;
           const decoded = deserializeSession(loaded.json);
           if (!decoded.ok) return;
           const s = decoded.session;
           if (s.pdfPath !== openedPath) return; // 別 PDF のセッションは適用しない
           const currentPdfState = usePdfStore.getState();
-          if (currentPdfState.filePath !== openedPath) return; // その後に差し替わった
+          if (
+            openedGeneration !== currentPdfState.loadGeneration ||
+            currentPdfState.filePath !== openedPath ||
+            currentPdfState.pdfFingerprint !== startedPdfState.pdfFingerprint ||
+            reportRevision !== startedReportRevision ||
+            useReportStore.getState().cells.size > 0
+          ) {
+            return;
+          }
           // パスが同じでも中身が変わっていれば別ファイル扱い（誤復元防止）
           if (s.pdfFingerprint !== currentPdfState.pdfFingerprint) return;
 
@@ -148,6 +171,20 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
             `この PDF の前回の作業（${savedLabel} 保存）が残っています。続きから再開しますか？\n（いいえ＝新規に始める。保存済みセッションは次の作業で上書きされます）`
           );
           if (!ok) return;
+
+          // confirm 表示中を含め、復元開始後に新しい OCR・編集・PDF 再読込が
+          // 発生していたら旧セッションを適用しない。
+          const applyPdfState = usePdfStore.getState();
+          if (
+            disposed ||
+            openedGeneration !== applyPdfState.loadGeneration ||
+            applyPdfState.filePath !== openedPath ||
+            applyPdfState.pdfFingerprint !== startedPdfState.pdfFingerprint ||
+            reportRevision !== startedReportRevision ||
+            useReportStore.getState().cells.size > 0
+          ) {
+            return;
+          }
 
           useReportStore.setState({
             template: { fields: s.fields },
@@ -169,10 +206,13 @@ export function useSessionPersistence(storage?: SessionFileStorage): {
       }, 0);
     };
 
-    const unsubReport = useReportStore.subscribe(() => schedule());
+    const unsubReport = useReportStore.subscribe(() => {
+      reportRevision++;
+      schedule();
+    });
     const unsubPdf = usePdfStore.subscribe((state, prev) => {
-      if (state.filePath && state.filePath !== prev.filePath) {
-        offerRestore(state.filePath);
+      if (state.filePath && state.loadGeneration !== prev.loadGeneration) {
+        offerRestore(state.filePath, state.loadGeneration);
       }
       // 回転などの変化も保存対象
       schedule();

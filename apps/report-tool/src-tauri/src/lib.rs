@@ -11,6 +11,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tauri_plugin_fs::FsExt;
 
 // ── OCR 言語情報 ─────────────────────────────────────────────────────────────
 
@@ -401,8 +402,8 @@ async fn list_ocr_languages() -> Result<Vec<OcrLanguageInfo>, String> {
 // 旧実装は保存先を std::fs::write で直接 truncate しており、書込み途中でクラッシュ・
 // 電源断が起きると CSV が壊れた状態（torn write）で残っていた（#451 / PCT-215）。
 //
-// plugin-fs を経由しないため fs-scope 検証（\\?\ 正規化の罠を含む）に掛からない。
-// 本体の write_pdf_chunk / OCR temp と同じ考え方。
+// custom command 内で plugin-fs の runtime scope を検証し、保存ダイアログで
+// 選択された CSV 以外へ renderer から直接書き込めないようにする。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// BOM 付き UTF-8 バイト列を生成する純関数。
@@ -423,6 +424,68 @@ fn csv_temp_file_path(path: &Path) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("output.csv");
     path.with_file_name(format!("{file_name}.{}.{}.tmp", std::process::id(), n))
+}
+
+/// renderer から受け取った保存先を正規化し、CSV 保存に使えるパスか検証する。
+/// `is_allowed` は本番では plugin-dialog が追加した runtime fs scope を参照する。
+fn validate_csv_save_path<F>(path: &Path, is_allowed: F) -> Result<PathBuf, String>
+where
+    F: Fn(&Path) -> bool,
+{
+    if !path.is_absolute() {
+        return Err("CSV保存先は絶対パスで指定してください".to_string());
+    }
+
+    let is_csv = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("csv"))
+        .unwrap_or(false);
+    if !is_csv {
+        return Err("CSV保存先の拡張子は .csv である必要があります".to_string());
+    }
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "CSV保存先のファイル名が不正です".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "CSV保存先の親ディレクトリがありません".to_string())?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("CSV保存先の親ディレクトリを確認できません: {e}"))?;
+    let normalized_target = canonical_parent.join(file_name);
+
+    // 既存ファイル自体が symlink 等なら、その解決先へ意図せず上書きしない。
+    // レビュー差し戻し (いろは指摘・#460): 以前は canonicalize(path) が返す実 casing と
+    // canonical_parent.join(入力ファイル名) の厳密な PathBuf 比較で判定していた。
+    // Windows のファイルシステムは大文字小文字を区別しないため、保存ダイアログで
+    // 手入力したファイル名の casing がディスク上の既存ファイルと異なるだけで
+    // (実体は同一ファイルなのに) 誤って「シンボリックリンク経由」と判定し、
+    // 正当な上書き保存を拒否していた。
+    // symlink_metadata はシンボリックリンクを辿らずに対象そのもののメタデータを返すため、
+    // casing に依存せず symlink かどうかを直接判定できる。存在しないパス (NotFound) は
+    // symlink ではない扱いとする（保存ダイアログ経由の新規保存を妨げないため）。
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("シンボリックリンク経由のCSV保存は許可されていません".to_string());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("CSV保存先を確認できません: {e}"));
+        }
+    }
+
+    if !is_allowed(&normalized_target) {
+        return Err(
+            "CSV保存先が許可されていません。保存ダイアログから選択し直してください"
+                .to_string(),
+        );
+    }
+
+    Ok(normalized_target)
 }
 
 /// CSV を temp 書込 → sync_all → atomic rename で保存する純関数。
@@ -472,10 +535,11 @@ fn save_csv_via_temp(path: &Path, csv: &str, temp_path: &Path) -> Result<(), Str
 }
 
 /// ユーザーが保存ダイアログで選んだパスへ CSV を BOM 付き UTF-8 で保存する。
-/// plugin-fs を経由せず std::fs を直接使うため fs-scope 検証に掛からない。
 #[tauri::command]
-async fn save_csv(path: String, csv: String) -> Result<(), String> {
-    save_csv_to_path(Path::new(&path), &csv)
+async fn save_csv(app: tauri::AppHandle, path: String, csv: String) -> Result<(), String> {
+    let scope = app.fs_scope();
+    let target = validate_csv_save_path(Path::new(&path), |candidate| scope.is_allowed(candidate))?;
+    save_csv_to_path(&target, &csv)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -483,8 +547,8 @@ async fn save_csv(path: String, csv: String) -> Result<(), String> {
 //
 // 保存先: app_data_dir()/templates/<id>.json
 // 書込は <id>.json.tmp に書いてから atomic rename で確定する（torn write 防止）。
-// plugin-fs を経由せず std::fs 直書きのため fs-scope 検証には掛からない
-// （save_csv と同じ考え方）。
+// 保存先は renderer 入力ではなく app_data_dir 配下へ固定されるため、
+// ユーザー選択パスを扱う save_csv のような runtime fs-scope 検証は不要。
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
@@ -1531,6 +1595,78 @@ mod tests {
         // rename まで到達していないため、既存の final ファイルは書き換わっていない
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[3..], b"original");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_csv_save_path_accepts_only_the_scoped_normalized_target() {
+        let dir = temp_csv_dir("validate_allowed");
+        let selected = dir.join("report.csv");
+        let expected = dir.canonicalize().unwrap().join("report.csv");
+
+        let validated = validate_csv_save_path(&selected, |candidate| candidate == expected).unwrap();
+        assert_eq!(validated, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_csv_save_path_rejects_relative_and_non_csv_paths() {
+        let relative = Path::new("report.csv");
+        assert!(validate_csv_save_path(relative, |_| true).is_err());
+
+        let dir = temp_csv_dir("validate_extension");
+        let non_csv = dir.join("settings.json");
+        assert!(validate_csv_save_path(&non_csv, |_| true).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_csv_save_path_rejects_scope_outside_target() {
+        let dir = temp_csv_dir("validate_scope");
+        let target = dir.join("report.csv");
+
+        let err = validate_csv_save_path(&target, |_| false).unwrap_err();
+        assert!(err.contains("許可されていません"));
+        assert!(!target.exists(), "scope拒否時は保存先を作成してはならない");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// レビュー差し戻し (いろは指摘・#460): 既存ファイルを casing 違いのパスで指定しても
+    /// (Windows はファイルシステムが大文字小文字を区別しないため実体は同一ファイル)
+    /// 誤って「シンボリックリンク経由」判定で拒否されないこと。
+    #[test]
+    fn validate_csv_save_path_allows_existing_file_with_different_casing() {
+        let dir = temp_csv_dir("validate_casing");
+        let actual_path = dir.join("report.csv");
+        std::fs::write(&actual_path, "a,b\n1,2").unwrap();
+
+        // 保存ダイアログの手入力等で casing が異なるパスを渡す。
+        let requested_path = dir.join("REPORT.csv");
+        let expected = dir.canonicalize().unwrap().join("REPORT.csv");
+
+        let validated =
+            validate_csv_save_path(&requested_path, |candidate| candidate == expected).unwrap();
+        assert_eq!(validated, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_csv_save_path_rejects_parent_traversal_scope_bypass() {
+        let dir = temp_csv_dir("validate_traversal");
+        let allowed_dir = dir.join("allowed");
+        let outside_dir = dir.join("outside");
+        std::fs::create_dir_all(&allowed_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let allowed_target = allowed_dir.canonicalize().unwrap().join("report.csv");
+        let attempted = allowed_dir.join("..").join("outside").join("report.csv");
+
+        let result = validate_csv_save_path(&attempted, |candidate| candidate == allowed_target);
+        assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

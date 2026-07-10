@@ -14,6 +14,7 @@ import React, { useCallback, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { FolderOpen, Play, X, RefreshCw } from 'lucide-react';
 import type { BatchJob, ExportFormat, SaveMode } from '../hooks/useBatchJob';
+import { Modal, useModalTitleId } from './ui/Modal';
 
 interface BatchJobDialogProps {
   onClose: () => void;
@@ -53,6 +54,7 @@ export const BatchJobDialog: React.FC<BatchJobDialogProps> = ({
   const [exportFormat, setExportFormat] = useState<ExportFormat>('txt');
   const [saveMode, setSaveMode] = useState<SaveMode>('overwrite');
   const [isStarting, setIsStarting] = useState(false);
+  const titleId = useModalTitleId();
 
   const handleBrowseFolder = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -92,21 +94,16 @@ export const BatchJobDialog: React.FC<BatchJobDialogProps> = ({
   const isFinished = currentJob?.finishedAt !== undefined;
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="フォルダ一括バッチ処理"
-      className="batch-job-dialog-backdrop"
-      // PCT-056: バッチ実行中はバックドロップクリックでダイアログを閉じない
-      onClick={(e) => { if (e.target === e.currentTarget && !isRunning) onClose(); }}
+    <Modal
+      onClose={onClose}
+      titleId={titleId}
+      backdropClassName="batch-job-dialog-backdrop"
+      dialogClassName="batch-job-dialog-panel"
+      disableClose={isRunning}
     >
-      <div
-        className="batch-job-dialog-panel"
-        onClick={(e) => e.stopPropagation()}
-      >
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+          <h2 id={titleId} style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
             フォルダ一括バッチ処理
           </h2>
           <button
@@ -416,7 +413,6 @@ export const BatchJobDialog: React.FC<BatchJobDialogProps> = ({
             )}
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 };

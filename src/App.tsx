@@ -44,7 +44,13 @@ import { useBackupManagement } from "./hooks/useBackupManagement";
 import { usePdfViewerState } from "./hooks/usePdfViewerState";
 import { usePageNavigation } from "./hooks/usePageNavigation";
 import { useDialogState } from "./hooks/useDialogState";
-import { useLayoutPanels } from "./hooks/useLayoutPanels";
+import {
+  LEFT_PANEL_MAX_WIDTH,
+  LEFT_PANEL_MIN_WIDTH,
+  RIGHT_PANEL_MAX_WIDTH,
+  RIGHT_PANEL_MIN_WIDTH,
+  useLayoutPanels,
+} from "./hooks/useLayoutPanels";
 import { useViewerPan } from "./hooks/useViewerPan";
 import { useTauriCloseGuard } from "./hooks/useTauriCloseGuard";
 import { useRecentFiles } from "./hooks/useRecentFiles";
@@ -55,6 +61,7 @@ import { usePageManagement } from "./hooks/usePageManagement";
 import { useStorageQuotaMonitor } from "./hooks/useStorageQuotaMonitor";
 import { ThumbnailPanel } from "./components/Sidebar/ThumbnailPanel";
 import { StorageHealthBanner } from "./components/StorageHealthBanner";
+import { isAnyModalOpen } from "./components/ui/Modal";
 
 // Components
 import { Ribbon } from "./components/Ribbon/Ribbon";
@@ -137,7 +144,14 @@ function App() {
   const clearOcrAllPages = usePecoStore(s => s.clearOcrAllPages);
 
   // --- 分割された責務（フック群） ---
-  const { leftWidth, rightWidth, startResizeLeft, startResizeRight } = useLayoutPanels();
+  const {
+    leftWidth,
+    rightWidth,
+    startResizeLeft,
+    startResizeRight,
+    handleResizeLeftKeyDown,
+    handleResizeRightKeyDown,
+  } = useLayoutPanels();
   const {
     notification, setNotification, helpMenu, setHelpMenu,
     showSettingsDropdown, setShowSettingsDropdown,
@@ -708,12 +722,24 @@ function App() {
       e.preventDefault();
       // issue #74: バックアップ復元中 / モーダル表示中は F5 を握りつぶす。
       // 復元中の二重 open でデータ消失、モーダル表示中の意図せぬ消去を防ぐ。
-      if (processingBackupPath || helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
+      // レビュー差し戻し (マリン指摘): 4ダイアログ (バックアップ復元/OCR設定/ヘルプ/置換)
+      // は Suspense+lazy のため、state=true になった直後〜チャンク読込完了までの間隙は
+      // isAnyModalOpen() (マウント済み Modal のカウント) が false のままになる。この間隙で
+      // F5 が素通りすると #74 のデータ消失防壁が弱化するため、旧来の state 直接参照も
+      // OR で残す (ベルト&サスペンダー)。
+      if (
+        processingBackupPath ||
+        isAnyModalOpen() ||
+        helpModal ||
+        showOcrSettings ||
+        showReplace ||
+        pendingBackups.length > 0
+      ) return;
       handleReload();
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
-  }, [handleReload, processingBackupPath, helpModal, showOcrSettings, showReplace, pendingBackups.length]);
+  }, [handleReload, processingBackupPath, helpModal, showOcrSettings, showReplace, pendingBackups]);
 
   useEffect(() => {
     if (!isSaving) return;
@@ -735,6 +761,7 @@ function App() {
       // Ctrl+Shift+P: 有効/無効トグル → 再読込
       if (e.ctrlKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
         e.preventDefault();
+        if (isAnyModalOpen()) return;
         try {
           const cur = localStorage.getItem('pecoPerf');
           if (cur === '1' || cur === 'verbose') {
@@ -981,7 +1008,18 @@ function App() {
           onRotatePages={handleRotatePages}
           onExtractPages={handleExtractPages}
         />
-        <div className="resizer" onMouseDown={startResizeLeft} />
+        <div
+          className="resizer"
+          role="separator"
+          tabIndex={0}
+          aria-label="サムネイルパネルの幅"
+          aria-orientation="vertical"
+          aria-valuemin={LEFT_PANEL_MIN_WIDTH}
+          aria-valuemax={LEFT_PANEL_MAX_WIDTH}
+          aria-valuenow={leftWidth}
+          onMouseDown={startResizeLeft}
+          onKeyDown={handleResizeLeftKeyDown}
+        />
         <section
           ref={viewerRef}
           className={`pdf-viewer-panel ${isSpacePressed ? (isPanning ? 'grabbing' : 'grab') : ''}`}
@@ -992,7 +1030,9 @@ function App() {
             onContextMenu={(e) => {
               e.preventDefault();
               // Issue #45: モーダル/ダイアログ表示中は背後に HelpMenu を重ねて開かない
-              if (helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
+              // レビュー差し戻し: F5 ガードと同様、Suspense+lazy のマウント間隙を
+              // isAnyModalOpen() で追加カバーし、旧 state 条件と一貫させる。
+              if (helpModal || showOcrSettings || showReplace || pendingBackups.length > 0 || isAnyModalOpen()) return;
               setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
             }}
           >
@@ -1068,7 +1108,18 @@ function App() {
             </div>
           )}
         </section>
-        <div className="resizer" onMouseDown={startResizeRight} />
+        <div
+          className="resizer"
+          role="separator"
+          tabIndex={0}
+          aria-label="OCRテキストパネルの幅"
+          aria-orientation="vertical"
+          aria-valuemin={RIGHT_PANEL_MIN_WIDTH}
+          aria-valuemax={RIGHT_PANEL_MAX_WIDTH}
+          aria-valuenow={rightWidth}
+          onMouseDown={startResizeRight}
+          onKeyDown={handleResizeRightKeyDown}
+        />
         <OcrEditor
           width={rightWidth}
           searchInputRef={searchInputRef}

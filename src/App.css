@@ -314,8 +314,13 @@ body, #root {
   transition: background-color 0.2s;
   z-index: 5;
 }
-.resizer:hover, .resizer:active {
+.resizer:hover, .resizer:active, .resizer:focus-visible {
   background-color: var(--accent-color);
+}
+
+.resizer:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -1px;
 }
 
 .pdf-viewer-panel {
