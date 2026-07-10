@@ -150,6 +150,17 @@ Assert-True ($mainScript.Contains("'release-channels.test.ps1') -Remote")) '本�
 Assert-True ($reportScript.Contains("'release-channels.test.ps1') -Remote")) '帳票release後の両channel smoke testがありません'
 Assert-True (-not $mainEndpoint.Contains('/releases/latest/')) '本体endpointにreleases/latestを使用できません'
 
+# #462: 本体version release (gh release create $versionTag) がprereleaseだと、GitHubの
+# repository全体で1つしかない releases/latest が本体version releaseを指さなくなり、
+# 固定updater channel導入前にリリースされた旧クライアントの互換 (releases/latest 依存)
+# が壊れる。version release作成呼び出しに --prerelease が含まれないことを静的検証する。
+$versionReleaseCreateStart = $mainScript.IndexOf('gh release create $versionTag')
+Assert-True ($versionReleaseCreateStart -ge 0) '本体version releaseのgh release create呼び出しが見つかりません'
+$versionReleaseCreateEnd = $mainScript.IndexOf('gh release create $CHANNEL_TAG', $versionReleaseCreateStart)
+Assert-True ($versionReleaseCreateEnd -gt $versionReleaseCreateStart) '本体updater channelのgh release create呼び出しが見つかりません'
+$versionReleaseCreateBlock = $mainScript.Substring($versionReleaseCreateStart, $versionReleaseCreateEnd - $versionReleaseCreateStart)
+Assert-True (-not $versionReleaseCreateBlock.Contains('--prerelease')) '本体version release(gh release create $versionTag)がprereleaseを含んでいます。releases/latestが本体を指さなくなり、旧クライアントのlegacy endpoint互換が壊れます'
+
 foreach ($script in @($mainScript, $reportScript)) {
     Assert-True ($script.Contains('Get-VersionReleaseForResume')) '既存version releaseのresume判定がありません'
     Assert-True ($script.Contains('Assert-VersionReleaseForResume')) '既存version releaseの属性・資産検証がありません'
@@ -185,6 +196,16 @@ if ($Remote) {
     Assert-True ([bool]$report.version) '帳票manifestにversionがありません'
     Assert-True ([bool]$reportPlatform.signature) '帳票manifestにsignatureがありません'
     Assert-True ($reportPlatform.url.Contains('/releases/download/report-v')) '帳票manifestが帳票version releaseを参照していません'
+
+    # #462: 固定updater channel導入前の旧クライアントは repository 全体の
+    # releases/latest を参照し続ける。この生命線 (legacy endpoint) が生きているか、
+    # 固定channelと同じversionを返すかを追加でスモーク検証する。
+    $legacyUrl = "https://github.com/$distRepo/releases/latest/download/$mainAsset"
+    $legacyResponse = Invoke-WebRequest -Uri "$legacyUrl`?smoke=$cacheBust" -UseBasicParsing
+    Assert-True ($legacyResponse.StatusCode -eq 200) "legacy releases/latest endpointがHTTP 200を返しませんでした: $legacyUrl"
+    $legacy = $legacyResponse.Content | ConvertFrom-Json
+    Assert-True ([bool]$legacy.version) 'legacy releases/latest endpointのmanifestにversionがありません'
+    Assert-True ($legacy.version -eq $main.version) "legacy releases/latest endpointのversionが固定channelと不整合です (legacy=$($legacy.version), channel=$($main.version))"
 }
 
 Write-Host 'release channel verification passed'
