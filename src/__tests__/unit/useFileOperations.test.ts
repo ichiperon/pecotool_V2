@@ -3743,6 +3743,94 @@ describe('useFileOperations #458: order 不一致保存後の再保存収束', (
     expect([...converged.document!.pages.values()].every((page) => !page.isDirty)).toBe(true);
     expect(converged.isDirty).toBe(false);
   });
+
+  /**
+   * レビュー差し戻し (スバル指摘): 上記テストは dirty ページが保存中ずっと
+   * document.pages (メモリ) に残るケースのみを検証していた。実際には MAX_CACHED_PAGES
+   * を超える大型 PDF で dirty ページが LRU パージにより document.pages から削除され、
+   * IDB (tempDirtyPages) にのみ存在する状態になりうる。このページは
+   * savedPageSnapshots に載らない (document.pages.get(idx) が undefined になるため)。
+   *
+   * 修正前は order 不一致時でも dirtyOnlyPages 由来の全 pageId を無条件に
+   * remapTemporaryPageEntries の破棄対象 (dirtySet) へ渡していたため、このページの
+   * IDB エントリが削除され、メモリにも IDB にも編集が残らずサイレントに巻き戻っていた。
+   */
+  it('order 不一致保存時、LRUパージ済み(document.pagesに存在しない)dirtyページのIDBエントリは破棄されない', async () => {
+    const page0 = {
+      pageIndex: 0, width: 595, height: 842,
+      textBlocks: [{ id: 'p0', text: 'P0', isDirty: false }],
+      isDirty: false, thumbnail: null,
+    } as unknown as PageData;
+    // page 1 は LRU パージ済み: document.pages には存在せず、IDB (tempDirtyPages) にのみ
+    // dirty な状態で残っている想定。
+    const purgedPage1 = {
+      pageIndex: 1, width: 595, height: 842,
+      textBlocks: [{ id: 'p1', text: 'PURGED_EDIT', isDirty: true }],
+      isDirty: true, thumbnail: null,
+    } as unknown as PageData;
+    const page2 = {
+      pageIndex: 2, width: 595, height: 842,
+      textBlocks: [{ id: 'p2', text: 'P2', isDirty: false }],
+      isDirty: false, thumbnail: null,
+    } as unknown as PageData;
+    const filePath = '/order-mismatch/lru-purged.pdf';
+
+    usePecoStore.setState({
+      document: {
+        filePath,
+        fileName: 'lru-purged.pdf',
+        totalPages: 3,
+        metadata: {},
+        // page 1 が意図的に欠落 (LRU パージ済み)
+        pages: new Map([[0, page0], [2, page2]]),
+      } as unknown as PecoDocument,
+      pageOrder: [0, 1, 2],
+      currentPageIndex: 0,
+      isDirty: true,
+      undoStack: [],
+      redoStack: [],
+      lastSavedActionIndex: 0,
+    });
+    __originalBytesCacheForTest.set(filePath, new Uint8Array([1, 2, 3, 4]));
+
+    // LRU パージされた page 1 の内容は IDB (tempDirtyPages) からのみ回収される。
+    (getAllTemporaryPageData as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([['src:1', purgedPage1]]),
+    );
+
+    // ファイル書き込み完了直後 (writeFingerprint 読み取り) のタイミングで並べ替えを
+    // 発生させ、保存スナップショットとの order 不一致を再現する (上のテストと同じ手法)。
+    let statCallCount = 0;
+    (stat as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      statCallCount += 1;
+      if (statCallCount === 2) {
+        usePecoStore.setState({
+          pageOrder: [0, 2, 1],
+          undoStack: [{
+            type: 'reorder_pages' as const,
+            beforeOrder: [0, 1, 2],
+            afterOrder: [0, 2, 1],
+          }],
+        });
+      }
+      return { mtime: new Date('2024-01-01'), size: 4 };
+    });
+
+    const { result } = renderHook(() => useFileOperations(vi.fn()));
+    await act(async () => {
+      await result.current.handleSave();
+    });
+
+    // 核心の検証: order 不一致時は remapTemporaryPageEntries に渡す dirtyPageIds が
+    // 空でなければならない。空でなければ LRU パージ済み page 1 の IDB エントリが
+    // 破棄され、次回保存でその編集が失われる。
+    expect(remapTemporaryPageEntries).toHaveBeenCalledWith(
+      filePath,
+      [0, 1, 2],
+      expect.any(Array),
+      [],
+    );
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────

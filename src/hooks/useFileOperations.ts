@@ -1029,7 +1029,20 @@ export function useFileOperations(
       const normalizedPageOrder = normalizeActive
         ? usePecoStore.getState().pageOrder
         : savePageOrder;
-      const dirtyPageIds = [...dirtyOnlyPages.keys()].map((di) => resolvePageId(savePageOrder, di));
+      // #458 追い修正: pageOrderMatchesSnapshot=false のとき、dirtyOnlyPages に含まれる
+      // ページの一部は「LRU パージで document.pages から既に削除され、IDB (tempDirtyPages)
+      // にのみ存在する」ケースがありうる。そのページは savedPageSnapshots にも載らない
+      // (787-790 の document.pages.get(idx) が undefined になるため)。
+      // ここで dirtySet に含めて remap に「破棄対象」として渡すと、IDB エントリが無条件
+      // 削除される。in-memory 側は orderMatched===false のとき resetDirty が dirty を
+      // 収束させない (pecoStore.ts の orderMatched 分岐) のに対し、IDB 側だけ先行して
+      // 破棄されると、そのページの編集はメモリにも IDB にも存在しなくなり、
+      // 次回保存で温存済みの旧 originalBytesCache を基準に再構築されてサイレントに
+      // 巻き戻る。in-memory 側のガードと対称に、IDB dirty 破棄も pageOrderMatchesSnapshot
+      // が true のときだけ行う。
+      const dirtyPageIds = pageOrderMatchesSnapshot
+        ? [...dirtyOnlyPages.keys()].map((di) => resolvePageId(savePageOrder, di))
+        : [];
       trackPendingIdbWork(
         remapTemporaryPageEntries(sourceFilePath, savePageOrder, normalizedPageOrder, dirtyPageIds)
           .catch((e) => { console.warn('[save] remapTemporaryPageEntries failed (ignored):', e); })
