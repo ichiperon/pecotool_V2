@@ -1654,6 +1654,74 @@ describe("useReportOcr: 全ページ実行 × 単一ページ再OCR の排他 / 
     expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
   });
 
+  // るしあレビュー HIGH-1（#448/PCT-212 追い修正）: 全ページ OCR 実行中に「PDF を開く」が
+  // 非ゲートだと、resetExtractedData() は cells のみ初期化し template には触れないため
+  // templateChangeAbort をすり抜け、旧 PDF の OCR 結果が新 PDF の状態へコミットされる。
+  it("実行中に filePath が差し替えられると完了時のコミットを中止し、pdfChangeAbort=true になる", async () => {
+    invokeStub.mockImplementation(delayedOkResponse("値", 30));
+
+    const { result } = renderHook(() => useReportOcr());
+    expect(result.current.pdfChangeAbort).toBe(false);
+
+    let runOcrPromise!: Promise<void>;
+    act(() => {
+      runOcrPromise = result.current.runOcr();
+    });
+
+    // 実行中に別の PDF を開く（filePath が変わる = PdfViewer の「PDF を開く」相当）
+    act(() => {
+      usePdfStore.getState().setPdf("/other.pdf", 5);
+    });
+
+    await act(async () => {
+      await runOcrPromise;
+    });
+
+    // コミットは中止され、cells は空のまま（旧 PDF の結果が新 PDF の状態へ汚染されない）
+    expect(useReportStore.getState().cells.size).toBe(0);
+    expect(result.current.pdfChangeAbort).toBe(true);
+    expect(result.current.isRunning).toBe(false);
+  });
+
+  it("実行中に filePath は同じまま pdfFingerprint だけ変わってもコミットを中止する（同名で差し替えられたPDFの誤コミット防止）", async () => {
+    invokeStub.mockImplementation(delayedOkResponse("値", 30));
+    act(() => {
+      usePdfStore.setState({ pdfFingerprint: "baseline-fingerprint" });
+    });
+
+    const { result } = renderHook(() => useReportOcr());
+
+    let runOcrPromise!: Promise<void>;
+    act(() => {
+      runOcrPromise = result.current.runOcr();
+    });
+
+    // filePath は同じだが中身（fingerprint）だけ変わったケース（#446/PCT-210 と同じ判定基準）
+    act(() => {
+      usePdfStore.setState({ pdfFingerprint: "changed-fingerprint" });
+    });
+
+    await act(async () => {
+      await runOcrPromise;
+    });
+
+    expect(useReportStore.getState().cells.size).toBe(0);
+    expect(result.current.pdfChangeAbort).toBe(true);
+  });
+
+  it("PDF差し替えなしで正常完了した場合は pdfChangeAbort=false のまま", async () => {
+    invokeStub.mockImplementation(delayedOkResponse("値", 5));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+
+    expect(result.current.pdfChangeAbort).toBe(false);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
+  });
+
   it("全ページ OCR 実行中に runOcr を再呼び出ししても二重実行されない（同方向の排他）", async () => {
     // #448 の排他は「全ページ×再OCR」の相互方向だけでなく、runOcr 自身の
     // 二度押し（実行ボタン連打等）にも効く必要がある。二重実行を許すと後発が

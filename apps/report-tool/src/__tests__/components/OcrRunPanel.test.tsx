@@ -15,6 +15,7 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     layoutBasePage: null,
     engineError: false,
     templateChangeAbort: false,
+    pdfChangeAbort: false,
     preserveEdited: true,
     setPreserveEdited: vi.fn(),
     runOcr: vi.fn(),

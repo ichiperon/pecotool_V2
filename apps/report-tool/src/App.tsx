@@ -189,7 +189,7 @@ const App: FC = () => {
 
           {/* 中央: PDFビューア */}
           <section className="app__pane app__pane--center" aria-label="PDF ビューア">
-            <PdfViewer />
+            <PdfViewer isRunning={isOcrRunning} />
           </section>
 
           {/* 右: ステップパネル */}

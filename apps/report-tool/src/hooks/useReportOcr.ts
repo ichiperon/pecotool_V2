@@ -61,6 +61,17 @@ export interface UseReportOcrReturn {
    */
   templateChangeAbort: boolean;
   /**
+   * 全ページ OCR の実行中に PDF が差し替えられ（別ファイルを開く／回転で暗黙に
+   * template も変わるが、PDF 差し替え自体は resetExtractedData() が cells のみ
+   * 初期化し template には触れないため templateChangeAbort をすり抜ける）、
+   * 完了時点の結果コミットを中止したかどうか（#448 / PCT-212 の追い修正）。
+   * filePath または pdfFingerprint が開始時と異なっていれば、旧 PDF の OCR 結果が
+   * 新 PDF の状態へコミットされ current.json に汚染が固定される事故を防ぐため中止する。
+   * UI 側は「PDF を開く」ボタンを isRunning 中は disable するが、これはその防御を
+   * すり抜けた場合の最終防衛線。次回の runOcr 開始時に false へリセットされる。
+   */
+  pdfChangeAbort: boolean;
+  /**
    * 再OCR時に手修正済みセル（edited フラグ）の値を保持するか（既定 true）。
    * 50ページ手直しした後の「欄を1本足して再実行」で全修正が消える事故を防ぐ。
    */
@@ -404,6 +415,7 @@ export function useReportOcr(): UseReportOcrReturn {
   const layoutBasePage = useReportStore((s) => s.layoutBasePage);
   const [engineError, setEngineError] = useState(false);
   const [templateChangeAbort, setTemplateChangeAbort] = useState(false);
+  const [pdfChangeAbort, setPdfChangeAbort] = useState(false);
   const [preserveEdited, setPreserveEditedState] = useState(true);
   // runOcr/runOcrForPage は useCallback([]) のため state を閉じ込めない。ref 経由で読む
   const preserveEditedRef = useRef(true);
@@ -447,7 +459,7 @@ export function useReportOcr(): UseReportOcrReturn {
       setLayoutBasePage,
     } = useReportStore.getState();
     // rotation は実行開始時に1回だけ読む（実行中に変わっても途中から混ざらない）
-    const { filePath, numPages, rotation } = usePdfStore.getState();
+    const { filePath, numPages, rotation, pdfFingerprint } = usePdfStore.getState();
 
     if (!filePath || numPages === 0) return;
     if (template.fields.length === 0) return;
@@ -456,6 +468,13 @@ export function useReportOcr(): UseReportOcrReturn {
     // template を差し替えるアクション（addField/replaceTemplateFields 等）は
     // 必ず新しい template オブジェクトを set するため、参照比較で検知できる。
     const templateAtStart = template;
+    // 完了時に PDF が差し替えられていないかを比較するための開始時スナップショット。
+    // resetExtractedData() は cells のみ初期化し template には触れないため、
+    // 実行中に別 PDF（または同名で中身が変わった PDF）を開いても templateChangeAbort
+    // をすり抜けてしまう。filePath と pdfFingerprint の両方を比較することで
+    // 「同じパスだが中身が違う PDF」（#446/PCT-210 と同じ判定基準）も検知する。
+    const filePathAtStart = filePath;
+    const fingerprintAtStart = pdfFingerprint;
 
     // 新しい実行 epoch を発行
     const currentEpoch = ++epochRef.current;
@@ -466,6 +485,7 @@ export function useReportOcr(): UseReportOcrReturn {
     setProgress({ done: 0, total: numPages });
     setEngineError(false);
     setTemplateChangeAbort(false);
+    setPdfChangeAbort(false);
     // failedPages / layoutMismatchPages / layoutBasePage はここでリセットしない:
     // エンジン死亡等で中断した場合は cells が保持されるため、対応する警告も
     // 保持しないと「データは古いのに警告だけ消える」非対称になる（レビュー指摘）。
@@ -592,13 +612,21 @@ export function useReportOcr(): UseReportOcrReturn {
       // 実行中に欄テンプレートが変更されたか（#448 / PCT-212）。UI 側のステップゲートが
       // 通常は到達を防ぐため、これは防御をすり抜けた場合の最終防衛線。
       const templateChanged = useReportStore.getState().template !== templateAtStart;
+      // 実行中に PDF が差し替えられたか（#448 / PCT-212 の追い修正）。filePath 変更
+      // （別 PDF を開く）だけでなく、同一パスで中身が変わった場合（pdfFingerprint 変更）
+      // も検知する。resetExtractedData() は template に触れないため templateChanged
+      // だけでは検知できない。
+      const pdfState = usePdfStore.getState();
+      const pdfChanged =
+        pdfState.filePath !== filePathAtStart || pdfState.pdfFingerprint !== fingerprintAtStart;
 
       if (
         !cancelledRef.current &&
         epochRef.current === currentEpoch &&
         !loadFailed &&
         !engineDead &&
-        !templateChanged
+        !templateChanged &&
+        !pdfChanged
       ) {
         // 手修正保持: コミット前の作業用 matrix/confMatrix に前回の手修正値を書き戻す
         const preservedEdited = preserveEditedRef.current
@@ -624,6 +652,10 @@ export function useReportOcr(): UseReportOcrReturn {
         // テンプレ変更によるコミット中止も同様に可視化する（cells は書き換えない）
         if (templateChanged && !cancelledRef.current && epochRef.current === currentEpoch) {
           setTemplateChangeAbort(true);
+        }
+        // PDF 差し替えによるコミット中止も同様に可視化する（cells は書き換えない）
+        if (pdfChanged && !cancelledRef.current && epochRef.current === currentEpoch) {
+          setPdfChangeAbort(true);
         }
       }
     }
@@ -755,6 +787,7 @@ export function useReportOcr(): UseReportOcrReturn {
     layoutBasePage,
     engineError,
     templateChangeAbort,
+    pdfChangeAbort,
     preserveEdited,
     setPreserveEdited,
     runOcr,
