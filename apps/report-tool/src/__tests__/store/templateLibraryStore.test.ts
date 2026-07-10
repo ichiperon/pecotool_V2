@@ -256,6 +256,67 @@ describe("load", () => {
       // 遅れて届いた A（古いクリック）は反映されず B のまま
       expect(useReportStore.getState().template.fields).toEqual(FIELDS_B);
     });
+
+    it("追い越された読込が resolve しても status が loading のまま残らない（B→A の順に resolve）", async () => {
+      // 世代破棄の return は store 状態に一切触らないため、最新読込（B）の完了で
+      // status は成功時の idle に収束し、その後 stale A が届いても
+      // loading / error に巻き戻らないことを縛る。
+      const jsonA = serializeTemplate(FIELDS_A, "テンプレA", "2026-01-01T00:00:00.000Z", { id: "a" });
+      const jsonB = serializeTemplate(FIELDS_B, "テンプレB", "2026-01-01T00:00:00.000Z", { id: "b" });
+
+      let resolveA: (v: { ok: true; value: string }) => void = () => {};
+      let resolveB: (v: { ok: true; value: string }) => void = () => {};
+      vi.mocked(templateStorage.loadTemplate).mockImplementation((id: string) => {
+        if (id === "a") return new Promise((resolve) => { resolveA = resolve; });
+        if (id === "b") return new Promise((resolve) => { resolveB = resolve; });
+        throw new Error(`unexpected id: ${id}`);
+      });
+
+      const pA = useTemplateLibraryStore.getState().load("a");
+      const pB = useTemplateLibraryStore.getState().load("b");
+      expect(useTemplateLibraryStore.getState().status).toBe("loading");
+
+      resolveB({ ok: true, value: jsonB });
+      await pB;
+      expect(useTemplateLibraryStore.getState().status).toBe("idle");
+      expect(useTemplateLibraryStore.getState().error).toBeNull();
+
+      // stale A の遅延到着後も status/error は汚れない
+      resolveA({ ok: true, value: jsonA });
+      await pA;
+      expect(useTemplateLibraryStore.getState().status).toBe("idle");
+      expect(useTemplateLibraryStore.getState().error).toBeNull();
+    });
+
+    it("追い越された読込が先に resolve した場合、進行中の読込がある間は loading を維持し完了で idle に収束する", async () => {
+      // stale 側（A）が先に resolve しても store には触らず、B が in-flight の間は
+      // loading のまま（誤って idle/error に倒さない）。B の完了で idle へ収束する。
+      const jsonA = serializeTemplate(FIELDS_A, "テンプレA", "2026-01-01T00:00:00.000Z", { id: "a" });
+      const jsonB = serializeTemplate(FIELDS_B, "テンプレB", "2026-01-01T00:00:00.000Z", { id: "b" });
+
+      let resolveA: (v: { ok: true; value: string }) => void = () => {};
+      let resolveB: (v: { ok: true; value: string }) => void = () => {};
+      vi.mocked(templateStorage.loadTemplate).mockImplementation((id: string) => {
+        if (id === "a") return new Promise((resolve) => { resolveA = resolve; });
+        if (id === "b") return new Promise((resolve) => { resolveB = resolve; });
+        throw new Error(`unexpected id: ${id}`);
+      });
+
+      const pA = useTemplateLibraryStore.getState().load("a");
+      const pB = useTemplateLibraryStore.getState().load("b");
+
+      resolveA({ ok: true, value: jsonA });
+      await pA;
+      // stale A は store に触らないため、B の読込中表示（loading）が保たれる
+      expect(useTemplateLibraryStore.getState().status).toBe("loading");
+      expect(useTemplateLibraryStore.getState().error).toBeNull();
+
+      resolveB({ ok: true, value: jsonB });
+      await pB;
+      expect(useTemplateLibraryStore.getState().status).toBe("idle");
+      expect(useTemplateLibraryStore.getState().error).toBeNull();
+      expect(useReportStore.getState().template.fields).toEqual(FIELDS_B);
+    });
   });
 });
 

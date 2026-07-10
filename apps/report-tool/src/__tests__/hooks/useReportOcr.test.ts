@@ -1653,4 +1653,132 @@ describe("useReportOcr: 全ページ実行 × 単一ページ再OCR の排他 / 
     expect(result.current.templateChangeAbort).toBe(false);
     expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("値");
   });
+
+  it("全ページ OCR 実行中に runOcr を再呼び出ししても二重実行されない（同方向の排他）", async () => {
+    // #448 の排他は「全ページ×再OCR」の相互方向だけでなく、runOcr 自身の
+    // 二度押し（実行ボタン連打等）にも効く必要がある。二重実行を許すと後発が
+    // epoch を進め、先発の結果が無言破棄される（相互方向と同じ構図）。
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    invokeStub.mockImplementation(delayedOkResponse("初回値", 30));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    let firstRun!: Promise<void>;
+    act(() => {
+      firstRun = result.current.runOcr();
+    });
+
+    // 実行中の再呼び出しは開始されず即復帰する
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("別の OCR 実行が進行中")
+    );
+
+    await act(async () => {
+      await firstRun;
+    });
+
+    // invoke は 1 回分（2ページ × 1欄 = 2回）だけ。初回の結果がコミットされている
+    expect(invokeStub).toHaveBeenCalledTimes(2);
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("初回値");
+    expect(result.current.isRunning).toBe(false);
+    warnSpy.mockRestore();
+  });
+
+  it("全ページ OCR の正常完了後は排他が解放され、次の全ページ OCR と単一ページ再OCR を開始できる", async () => {
+    // runOwnerRef の解放漏れがあると 2 回目以降の実行がすべて拒否される
+    // 「永久ロック」になる。正常完了経路の解放を回帰テストとして固定する。
+    invokeStub.mockImplementation(delayedOkResponse("1回目", 5));
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("1回目");
+
+    invokeStub.mockImplementation(delayedOkResponse("2回目", 5));
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("2回目");
+
+    invokeStub.mockImplementation(delayedOkResponse("再OCR値", 5));
+    await act(async () => {
+      await expect(result.current.runOcrForPage(1)).resolves.toBeUndefined();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("再OCR値");
+  });
+
+  it("PDF 読み込み例外で全ページ OCR が失敗しても排他が解放され、次の実行が可能（永久ロック回帰）", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fs = await import("@tauri-apps/plugin-fs");
+    vi.mocked(fs.readFile).mockRejectedValueOnce(new Error("read failed"));
+    invokeStub.mockImplementation(delayedOkResponse("回復後", 5));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    // 読み込み失敗のため何もコミットされない
+    expect(useReportStore.getState().cells.size).toBe(0);
+    expect(result.current.isRunning).toBe(false);
+
+    // 排他が解放されているため、2 回目はそのまま実行できる
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("回復後");
+    errorSpy.mockRestore();
+  });
+
+  it("単一ページ再OCRが renderPageOffscreen 例外で失敗しても排他が解放され、再試行できる（永久ロック回帰）", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ocrCrop = await import("../../lib/ocrCrop");
+    vi.mocked(ocrCrop.renderPageOffscreen).mockRejectedValueOnce(new Error("render failed"));
+    invokeStub.mockImplementation(delayedOkResponse("再試行成功", 5));
+
+    const { result } = renderHook(() => useReportOcr());
+
+    await act(async () => {
+      await expect(result.current.runOcrForPage(1)).rejects.toThrow("render failed");
+    });
+    expect(result.current.isRunning).toBe(false);
+
+    // 例外経路（finally）でも runOwnerRef が解放され、再試行はそのまま開始できる
+    await act(async () => {
+      await expect(result.current.runOcrForPage(1)).resolves.toBeUndefined();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("再試行成功");
+    errorSpy.mockRestore();
+  });
+
+  it("cancelOcr でキャンセルした後も排他が解放され、次の全ページ OCR が実行できる", async () => {
+    invokeStub.mockImplementation(delayedOkResponse("キャンセルされる値", 30));
+    const { result } = renderHook(() => useReportOcr());
+
+    let firstRun!: Promise<void>;
+    act(() => {
+      firstRun = result.current.runOcr();
+    });
+    act(() => {
+      result.current.cancelOcr();
+    });
+    await act(async () => {
+      await firstRun;
+    });
+
+    // キャンセルされたためコミットされない
+    expect(useReportStore.getState().cells.size).toBe(0);
+    expect(result.current.isRunning).toBe(false);
+
+    // キャンセル経路でも排他が解放され、次の実行が正常にコミットされる
+    invokeStub.mockImplementation(delayedOkResponse("再実行値", 5));
+    await act(async () => {
+      await result.current.runOcr();
+    });
+    expect(useReportStore.getState().cells.get(1)?.[0]?.get("field-1")).toBe("再実行値");
+  });
 });
