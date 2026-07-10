@@ -54,10 +54,16 @@ describe('useTauriCloseGuard', () => {
         configurable: true,
       })
     }
+    // issue #442 (PCT-206): 本フックは window.__TAURI_INTERNALS__ の有無で
+    // Tauri ランタイムかどうかを判定する。jsdom には既定で存在しないため、
+    // 既存の「Tauri 環境での挙動」を検証するテスト群のために既定で注入しておく。
+    // 「ランタイム無し」を検証するテストは各 it 内で明示的に削除する。
+    ;(window as any).__TAURI_INTERNALS__ = { metadata: { currentWindow: { label: 'main' } } }
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
+    delete (window as any).__TAURI_INTERNALS__
   })
 
   describe('S-15: ウィンドウクローズ時の pendingIdbSaves 待機', () => {
@@ -232,6 +238,35 @@ describe('useTauriCloseGuard', () => {
       // バックアップ中でなく isDirty=false → confirm なしで destroy が呼ばれる
       expect(m.ask).not.toHaveBeenCalled()
       expect(m.destroyWindow).toHaveBeenCalled()
+    })
+  })
+
+  describe('issue #442 (PCT-206): Web単体起動時のランタイムガード', () => {
+    it('window.__TAURI_INTERNALS__ が無い場合はエラーを投げず no-op になる', async () => {
+      delete (window as any).__TAURI_INTERNALS__
+
+      expect(() => renderHook(() => useTauriCloseGuard())).not.toThrow()
+
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // ランタイム判定で早期 return するため、Tauri window API には一切触れない
+      expect(m.getCurrentWindow).not.toHaveBeenCalled()
+      expect(m.onCloseRequested).not.toHaveBeenCalled()
+    })
+
+    it('window.__TAURI_INTERNALS__ がある場合は従来どおり close handler が登録される', async () => {
+      // beforeEach で既定注入済みだが、意図を明示するため再確認しておく
+      expect('__TAURI_INTERNALS__' in window).toBe(true)
+
+      renderHook(() => useTauriCloseGuard())
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(m.getCurrentWindow).toHaveBeenCalled()
+      expect(m.onCloseRequested).toHaveBeenCalledTimes(1)
     })
   })
 })
