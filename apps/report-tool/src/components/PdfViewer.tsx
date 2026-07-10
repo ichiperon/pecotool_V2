@@ -29,6 +29,21 @@ if (typeof window !== "undefined" && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
 
 const ZOOM_STEP = 25;
 
+interface Props {
+  /**
+   * 全ページ OCR または単一ページ再OCR が実行中かどうか。実行中は「PDF を開く」・
+   * 回転ボタンを disable する（#448 / PCT-212 の追い修正）。
+   * 実行中に PDF を差し替えると resetExtractedData() は cells のみ初期化し
+   * template には触れないため、テンプレ変更検知（templateChangeAbort）をすり抜けて
+   * 旧 PDF の OCR 結果が新 PDF の状態へコミットされてしまう（フィンガープリント
+   * 差分によるコミット防御を useReportOcr 側に追加した上での UI 側ゲート）。
+   * 回転も template を差し替えるため、実行中に押すと templateChangeAbort が発動し
+   * 実行結果が丸ごと破棄される（無言ではないが1クリックで全損するため防ぐ）。
+   * 省略時は false（既存の単体テスト・呼び出し元との互換のため）。
+   */
+  isRunning?: boolean;
+}
+
 /**
  * PdfViewer
  *
@@ -36,7 +51,7 @@ const ZOOM_STEP = 25;
  * 段階3でオーバーレイ層（欄定義矩形）を canvas の上に絶対配置する想定のため、
  * canvas-wrapper div の上に overlay-layer div を配置済み（現時点では空）。
  */
-const PdfViewer: FC = () => {
+const PdfViewer: FC<Props> = ({ isRunning: isOcrRunning = false }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<ReturnType<PDFPageProxy["render"]> | null>(null);
@@ -426,6 +441,8 @@ const PdfViewer: FC = () => {
             type="button"
             className="pdf-viewer__open-btn"
             onClick={handleOpenPdf}
+            disabled={isOcrRunning}
+            title={isOcrRunning ? "OCR 実行中は移動できません" : undefined}
           >
             PDF を開く
           </button>
@@ -455,6 +472,8 @@ const PdfViewer: FC = () => {
             type="button"
             className="pdf-viewer__open-btn"
             onClick={handleOpenPdf}
+            disabled={isOcrRunning}
+            title={isOcrRunning ? "OCR 実行中は移動できません" : undefined}
           >
             別の PDF を開く
           </button>
@@ -471,6 +490,8 @@ const PdfViewer: FC = () => {
           type="button"
           className="pdf-viewer__open-btn pdf-viewer__open-btn--small"
           onClick={handleOpenPdf}
+          disabled={isOcrRunning}
+          title={isOcrRunning ? "OCR 実行中は移動できません" : undefined}
         >
           PDF を開く
         </button>
@@ -538,14 +559,16 @@ const PdfViewer: FC = () => {
         <div className="pdf-viewer__divider" aria-hidden="true" />
 
         {/* 回転（全ページ一括・90°刻み）。スキャンが横向き/逆さの帳票を
-            ツール内で正立させる。表示・サムネ・OCR が同じ回転で描画される */}
+            ツール内で正立させる。表示・サムネ・OCR が同じ回転で描画される。
+            回転は template（欄 rect）を差し替えるため、OCR 実行中に押すと
+            templateChangeAbort が発動し実行結果が丸ごと破棄される（#448/PCT-212）。 */}
         <button
           type="button"
           className="pdf-viewer__zoom-btn"
           onClick={() => handleRotate(-90)}
-          disabled={!pageSize}
+          disabled={!pageSize || isOcrRunning}
           aria-label="左に90度回転"
-          title="左に90度回転（全ページ）"
+          title={isOcrRunning ? "OCR 実行中は移動できません" : "左に90度回転（全ページ）"}
         >
           ⟲
         </button>
@@ -553,9 +576,9 @@ const PdfViewer: FC = () => {
           type="button"
           className="pdf-viewer__zoom-btn"
           onClick={() => handleRotate(90)}
-          disabled={!pageSize}
+          disabled={!pageSize || isOcrRunning}
           aria-label="右に90度回転"
-          title="右に90度回転（全ページ）"
+          title={isOcrRunning ? "OCR 実行中は移動できません" : "右に90度回転（全ページ）"}
         >
           ⟳
         </button>

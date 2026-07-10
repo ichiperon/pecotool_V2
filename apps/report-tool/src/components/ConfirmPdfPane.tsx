@@ -29,6 +29,13 @@ const ZOOM_STEP = 25;
 interface Props {
   runOcrForPage: (pageNum: number) => Promise<void>;
   reocrTarget: number | null;
+  /**
+   * 何らかの OCR 処理（全ページ実行 or 他ページの再OCR）が進行中かどうか。
+   * reocrTarget === currentPage（このページの再OCR中）以外の in-flight も含めて
+   * 再OCRボタンを disable するために使う（#448 / PCT-212: 全ページ OCR 実行中に
+   * ページ再OCRを押すと、epoch 共有により全ページ側の結果が無言破棄される事故の防止）。
+   */
+  isRunning: boolean;
   /** 直前の再OCRが失敗したかどうか（失敗時にインラインエラーを表示） */
   reocrError: boolean;
   onReocrRetry: () => void;
@@ -41,7 +48,13 @@ interface Props {
  * - OffsetAdjustOverlay でオフセット調整オーバーレイを表示
  * - 上部ツールバーに「欄をずらす」トグル・Δバッジ・再OCRボタン
  */
-const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onReocrRetry }) => {
+const ConfirmPdfPane: FC<Props> = ({
+  runOcrForPage,
+  reocrTarget,
+  isRunning: isOcrRunning,
+  reocrError,
+  onReocrRetry,
+}) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<ReturnType<PDFPageProxy["render"]> | null>(null);
@@ -450,13 +463,22 @@ const ConfirmPdfPane: FC<Props> = ({ runOcrForPage, reocrTarget, reocrError, onR
 
         <div className="confirm-pdf-pane__offset-spacer" />
 
-        {/* 再OCRボタン */}
+        {/* 再OCRボタン。isOcrRunning は「このページの再OCR中」だけでなく、全ページ実行や
+            他ページの再OCR進行中も含む。ここを isReocrRunning だけで判定すると、全ページ
+            OCR 実行中でもこのボタンが押せてしまい、epoch 共有により全ページ側の結果が
+            無言破棄される事故があった（#448 / PCT-212）。 */}
         <button
           type="button"
           className={`confirm-pdf-pane__reocr-btn${hasOffset && !isReocrRunning ? " confirm-pdf-pane__reocr-btn--needs-reocr" : ""}`}
           onClick={handleReocrClick}
-          disabled={isReocrRunning || isCurrentPageExcluded}
-          title={isCurrentPageExcluded ? "除外中のページは再OCRできません" : undefined}
+          disabled={isOcrRunning || isCurrentPageExcluded}
+          title={
+            isCurrentPageExcluded
+              ? "除外中のページは再OCRできません"
+              : isOcrRunning && !isReocrRunning
+                ? "他の OCR 処理が実行中です"
+                : undefined
+          }
           aria-label={`${currentPage}ページ目を再OCR`}
         >
           {isReocrRunning ? "再OCR中..." : "このページを再OCR"}

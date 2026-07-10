@@ -51,6 +51,27 @@ export interface UseReportOcrReturn {
    */
   engineError: boolean;
   /**
+   * 全ページ OCR の実行中に欄テンプレートが変更され（テンプレ読込・欄追加削除等）、
+   * 完了時点の結果コミットを中止したかどうか（#448 / PCT-212）。
+   * 実行開始時と完了時で template の参照が変わっていた場合、そのまま cells に
+   * コミットすると新テンプレートに対して旧テンプレート由来の結果が紐づき、
+   * 孤児セル（存在しない fieldId の値）が復活する。UI 側は通常ステップ移動の
+   * ソフトゲートで到達を防ぐが、これはその防御をすり抜けた場合の最終防衛線。
+   * 次回の runOcr 開始時に false へリセットされる。
+   */
+  templateChangeAbort: boolean;
+  /**
+   * 全ページ OCR の実行中に PDF が差し替えられ（別ファイルを開く／回転で暗黙に
+   * template も変わるが、PDF 差し替え自体は resetExtractedData() が cells のみ
+   * 初期化し template には触れないため templateChangeAbort をすり抜ける）、
+   * 完了時点の結果コミットを中止したかどうか（#448 / PCT-212 の追い修正）。
+   * filePath または pdfFingerprint が開始時と異なっていれば、旧 PDF の OCR 結果が
+   * 新 PDF の状態へコミットされ current.json に汚染が固定される事故を防ぐため中止する。
+   * UI 側は「PDF を開く」ボタンを isRunning 中は disable するが、これはその防御を
+   * すり抜けた場合の最終防衛線。次回の runOcr 開始時に false へリセットされる。
+   */
+  pdfChangeAbort: boolean;
+  /**
    * 再OCR時に手修正済みセル（edited フラグ）の値を保持するか（既定 true）。
    * 50ページ手直しした後の「欄を1本足して再実行」で全修正が消える事故を防ぐ。
    */
@@ -393,6 +414,8 @@ export function useReportOcr(): UseReportOcrReturn {
   const layoutMismatchPages = useReportStore((s) => s.layoutMismatchPages);
   const layoutBasePage = useReportStore((s) => s.layoutBasePage);
   const [engineError, setEngineError] = useState(false);
+  const [templateChangeAbort, setTemplateChangeAbort] = useState(false);
+  const [pdfChangeAbort, setPdfChangeAbort] = useState(false);
   const [preserveEdited, setPreserveEditedState] = useState(true);
   // runOcr/runOcrForPage は useCallback([]) のため state を閉じ込めない。ref 経由で読む
   const preserveEditedRef = useRef(true);
@@ -404,8 +427,25 @@ export function useReportOcr(): UseReportOcrReturn {
   // キャンセル制御: epoch が変わったらループを中断する
   const epochRef = useRef(0);
   const cancelledRef = useRef(false);
+  /**
+   * 実行中の OCR 操作の所有者。"all" = 全ページ実行、数値 = 単一ページ再OCR対象ページ。
+   * runOcr / runOcrForPage は cancelOcr を相互に効かせるため epoch を共有しているが、
+   * それだけだと「片方の実行中にもう片方を開始する」操作を防げず、後発側が epoch を
+   * 進めてしまい先発側の finally が epoch 不一致で結果コミットを無言スキップする
+   * （#448 / PCT-212: 全ページ OCR 実行中にページ再OCRを押すと全ページ側の結果が消える）。
+   * 開始時にここを見て二重起動そのものを拒否する。
+   */
+  const runOwnerRef = useRef<"all" | number | null>(null);
 
   const runOcr = useCallback(async () => {
+    // 別の OCR 実行（全ページ or 単一ページ再OCR）が進行中なら開始しない。
+    // UI 側（App のステップゲート・OcrRunPanel の canRun）が通常防ぐが、
+    // ここでも拒否することで epoch 共有起因の無言結果破棄を根本的に防ぐ。
+    if (runOwnerRef.current !== null) {
+      console.warn("[ReportOCR] 別の OCR 実行が進行中のため開始をスキップしました");
+      return;
+    }
+
     const {
       template,
       setCells,
@@ -419,18 +459,33 @@ export function useReportOcr(): UseReportOcrReturn {
       setLayoutBasePage,
     } = useReportStore.getState();
     // rotation は実行開始時に1回だけ読む（実行中に変わっても途中から混ざらない）
-    const { filePath, numPages, rotation } = usePdfStore.getState();
+    const { filePath, numPages, rotation, pdfFingerprint } = usePdfStore.getState();
 
     if (!filePath || numPages === 0) return;
     if (template.fields.length === 0) return;
 
+    // 完了時にテンプレートが変わっていないかを比較するための開始時参照。
+    // template を差し替えるアクション（addField/replaceTemplateFields 等）は
+    // 必ず新しい template オブジェクトを set するため、参照比較で検知できる。
+    const templateAtStart = template;
+    // 完了時に PDF が差し替えられていないかを比較するための開始時スナップショット。
+    // resetExtractedData() は cells のみ初期化し template には触れないため、
+    // 実行中に別 PDF（または同名で中身が変わった PDF）を開いても templateChangeAbort
+    // をすり抜けてしまう。filePath と pdfFingerprint の両方を比較することで
+    // 「同じパスだが中身が違う PDF」（#446/PCT-210 と同じ判定基準）も検知する。
+    const filePathAtStart = filePath;
+    const fingerprintAtStart = pdfFingerprint;
+
     // 新しい実行 epoch を発行
     const currentEpoch = ++epochRef.current;
     cancelledRef.current = false;
+    runOwnerRef.current = "all";
 
     setIsRunning(true);
     setProgress({ done: 0, total: numPages });
     setEngineError(false);
+    setTemplateChangeAbort(false);
+    setPdfChangeAbort(false);
     // failedPages / layoutMismatchPages / layoutBasePage はここでリセットしない:
     // エンジン死亡等で中断した場合は cells が保持されるため、対応する警告も
     // 保持しないと「データは古いのに警告だけ消える」非対称になる（レビュー指摘）。
@@ -552,12 +607,26 @@ export function useReportOcr(): UseReportOcrReturn {
     } finally {
       pdfDoc?.destroy().catch(() => {});
       setIsRunning(false);
+      runOwnerRef.current = null;
+
+      // 実行中に欄テンプレートが変更されたか（#448 / PCT-212）。UI 側のステップゲートが
+      // 通常は到達を防ぐため、これは防御をすり抜けた場合の最終防衛線。
+      const templateChanged = useReportStore.getState().template !== templateAtStart;
+      // 実行中に PDF が差し替えられたか（#448 / PCT-212 の追い修正）。filePath 変更
+      // （別 PDF を開く）だけでなく、同一パスで中身が変わった場合（pdfFingerprint 変更）
+      // も検知する。resetExtractedData() は template に触れないため templateChanged
+      // だけでは検知できない。
+      const pdfState = usePdfStore.getState();
+      const pdfChanged =
+        pdfState.filePath !== filePathAtStart || pdfState.pdfFingerprint !== fingerprintAtStart;
 
       if (
         !cancelledRef.current &&
         epochRef.current === currentEpoch &&
         !loadFailed &&
-        !engineDead
+        !engineDead &&
+        !templateChanged &&
+        !pdfChanged
       ) {
         // 手修正保持: コミット前の作業用 matrix/confMatrix に前回の手修正値を書き戻す
         const preservedEdited = preserveEditedRef.current
@@ -580,6 +649,14 @@ export function useReportOcr(): UseReportOcrReturn {
         if (engineDead && !cancelledRef.current && epochRef.current === currentEpoch) {
           setEngineError(true);
         }
+        // テンプレ変更によるコミット中止も同様に可視化する（cells は書き換えない）
+        if (templateChanged && !cancelledRef.current && epochRef.current === currentEpoch) {
+          setTemplateChangeAbort(true);
+        }
+        // PDF 差し替えによるコミット中止も同様に可視化する（cells は書き換えない）
+        if (pdfChanged && !cancelledRef.current && epochRef.current === currentEpoch) {
+          setPdfChangeAbort(true);
+        }
       }
     }
   }, []);
@@ -589,6 +666,16 @@ export function useReportOcr(): UseReportOcrReturn {
   }, []);
 
   const runOcrForPage = useCallback(async (pageNum: number) => {
+    // 別の OCR 実行（全ページ or 他ページの再OCR）が進行中なら開始しない。
+    // UI 側（ConfirmPdfPane の再OCRボタン disabled）が通常防ぐが、epoch 共有起因の
+    // 無言結果破棄（#448 / PCT-212）を根本的に防ぐため、ここでも拒否する。
+    // 呼び出し元（ConfirmLayout）は catch して再OCRエラー表示に載せるため throw する。
+    if (runOwnerRef.current !== null) {
+      throw new Error(
+        "別の OCR 処理が実行中のため、このページの再 OCR を開始できませんでした"
+      );
+    }
+
     const { template, pageOffsets, setCellsForPage, setConfidencesForPage, setFailedPages } =
       useReportStore.getState();
     const { filePath, rotation } = usePdfStore.getState();
@@ -603,6 +690,7 @@ export function useReportOcr(): UseReportOcrReturn {
     // 全ページ OCR と同じ epoch を共有してキャンセルを相互に動作させる
     const currentEpoch = ++epochRef.current;
     cancelledRef.current = false;
+    runOwnerRef.current = pageNum;
 
     setIsRunning(true);
     setReocrTarget(pageNum);
@@ -686,6 +774,7 @@ export function useReportOcr(): UseReportOcrReturn {
     } finally {
       setIsRunning(false);
       setReocrTarget(null);
+      runOwnerRef.current = null;
     }
   }, []);
 
@@ -697,6 +786,8 @@ export function useReportOcr(): UseReportOcrReturn {
     layoutMismatchPages,
     layoutBasePage,
     engineError,
+    templateChangeAbort,
+    pdfChangeAbort,
     preserveEdited,
     setPreserveEdited,
     runOcr,

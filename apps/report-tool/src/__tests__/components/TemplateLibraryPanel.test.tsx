@@ -238,6 +238,27 @@ describe("TemplateLibraryPanel: 一覧・読込", () => {
     fireEvent.click(screen.getByRole("button", { name: "壊れテンプレ（読み込めません）" }));
     expect(useTemplateLibraryStore.getState().load).not.toHaveBeenCalled();
   });
+
+  // #449 / PCT-213: テンプレ多重クリックで後着の古い読込が適用される事故のUI側防御。
+  // status="loading" 中は一覧ボタンを無効化し、そもそも多重クリックできないようにする。
+  it("status=loading のとき読込ボタンが無効になる（多重クリック防止）", () => {
+    useTemplateLibraryStore.setState({
+      summaries: [summary({ id: "t1", name: "テンプレA" })],
+      status: "loading",
+    });
+    render(<TemplateLibraryPanel />);
+    expect(screen.getByRole("button", { name: "テンプレA を読み込む" })).toBeDisabled();
+  });
+
+  it("status=loading のとき読込ボタンをクリックしても load は呼ばれない", () => {
+    useTemplateLibraryStore.setState({
+      summaries: [summary({ id: "t1", name: "テンプレA" })],
+      status: "loading",
+    });
+    render(<TemplateLibraryPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "テンプレA を読み込む" }));
+    expect(useTemplateLibraryStore.getState().load).not.toHaveBeenCalled();
+  });
 });
 
 describe("TemplateLibraryPanel: 削除", () => {

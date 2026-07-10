@@ -51,6 +51,14 @@ interface TemplateLibraryState {
   rename: (id: string, name: string, savedAt: string) => Promise<RenameResult>;
 }
 
+// 読込世代カウンタ（モジュールスコープのクロージャ変数）。テンプレート一覧を多重クリック
+// すると、後から発行された load() が先に resolve し、先にクリックした（古い意図の）方が
+// 後着で store/reportStore を上書きする事故があった（#449 / PCT-213）。PdfViewer の
+// loadGenRef と同型で、await 復帰時に「自分が最新の呼び出しか」を確認してから
+// 副作用（replaceTemplateFields 等）を適用する。描画に関与しない内部制御値のため
+// state には持たない（余計な再レンダリングを避ける）。
+let loadGen = 0;
+
 export const useTemplateLibraryStore = create<TemplateLibraryState>((set, get) => ({
   summaries: [],
   status: "idle",
@@ -93,8 +101,17 @@ export const useTemplateLibraryStore = create<TemplateLibraryState>((set, get) =
   },
 
   load: async (id) => {
+    // この呼び出しの世代を発行する。await から復帰した時点でこれが最新でなければ
+    // （後から発行された別の load() クリックに追い越されていれば）、副作用を適用せず
+    // 破棄する（#449 / PCT-213: テンプレ多重クリックで後着の古い読込が勝つ事故の防止）。
+    const currentGen = ++loadGen;
     set({ status: "loading", error: null });
     const loadResult = await templateStorage.loadTemplate(id);
+
+    if (currentGen !== loadGen) {
+      return { status: "error", reason: "他のテンプレート読込に追い越されました" };
+    }
+
     if (!loadResult.ok) {
       set({ status: "error", error: loadResult.reason });
       return { status: "error", reason: loadResult.reason };

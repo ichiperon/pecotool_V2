@@ -122,14 +122,25 @@ const App: FC = () => {
 
   const hasFields = fieldCount > 0;
   const hasCells = cells.size > 0;
+  const isOcrRunning = ocrHook.isRunning;
 
-  // 各ステップの有効状態（ソフトゲート）
+  // 各ステップの有効状態（ソフトゲート）。
+  // OCR 実行中（全ページ or 単一ページ再OCR）はステップ1（テンプレ読込）・
+  // ステップ3（セル編集・ページ再OCR）・ステップ4（CSV出力）への移動を止める。
+  // 実行中に触れると、完了時のコミットが古いテンプレ/セルと食い違い、
+  // 孤児セルや手修正の消失が起きる（#448 / PCT-212）。OCR 実行ボタン自体が
+  // 置かれるステップ2は hasFields のみで判定し、進捗表示への到達は妨げない。
   const stepEnabled: Record<StepNumber, boolean> = {
-    1: true,
+    1: !isOcrRunning,
     2: hasFields,
-    3: true,
-    4: hasFields,
+    3: !isOcrRunning,
+    4: hasFields && !isOcrRunning,
   };
+
+  // 無効ステップの title 表示用（理由が isRunning によるものだけ明示する）
+  const stepDisabledTitle: Partial<Record<StepNumber, string>> = isOcrRunning
+    ? { 1: "OCR 実行中は移動できません", 3: "OCR 実行中は移動できません", 4: "OCR 実行中は移動できません" }
+    : {};
 
   // 各ステップの完了状態
   const stepCompleted: Partial<Record<StepNumber, boolean>> = {
@@ -159,6 +170,7 @@ const App: FC = () => {
           stepEnabled={stepEnabled}
           onStepSelect={handleStepSelect}
           stepCompleted={stepCompleted}
+          stepDisabledTitle={stepDisabledTitle}
         />
       </header>
 
@@ -177,7 +189,7 @@ const App: FC = () => {
 
           {/* 中央: PDFビューア */}
           <section className="app__pane app__pane--center" aria-label="PDF ビューア">
-            <PdfViewer />
+            <PdfViewer isRunning={isOcrRunning} />
           </section>
 
           {/* 右: ステップパネル */}
@@ -223,6 +235,7 @@ const App: FC = () => {
                       handleStepSelect((currentStep - 1) as StepNumber)
                     }
                     disabled={!stepEnabled[(currentStep - 1) as StepNumber]}
+                    title={stepDisabledTitle[(currentStep - 1) as StepNumber]}
                   >
                     ◀ 戻る（{STEP_LABELS[(currentStep - 1) as StepNumber]}）
                   </button>
@@ -236,9 +249,10 @@ const App: FC = () => {
                     }
                     disabled={!stepEnabled[(currentStep + 1) as StepNumber]}
                     title={
-                      !stepEnabled[(currentStep + 1) as StepNumber]
+                      stepDisabledTitle[(currentStep + 1) as StepNumber] ??
+                      (!stepEnabled[(currentStep + 1) as StepNumber]
                         ? "先に欄を定義してください"
-                        : undefined
+                        : undefined)
                     }
                   >
                     次へ：{STEP_LABELS[(currentStep + 1) as StepNumber]} ▶

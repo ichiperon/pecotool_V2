@@ -33,7 +33,8 @@ const ConfirmLayout: FC<Props> = ({ ocrHook }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
 
-  const { reocrTarget, runOcrForPage, failedPages, layoutMismatchPages, layoutBasePage } = ocrHook;
+  const { reocrTarget, runOcrForPage, isRunning, failedPages, layoutMismatchPages, layoutBasePage } =
+    ocrHook;
   const currentPage = usePdfStore((s) => s.currentPage);
   const setCurrentPage = usePdfStore((s) => s.setCurrentPage);
   const excludedPages = useReportStore((s) => s.excludedPages);
@@ -140,6 +141,7 @@ const ConfirmLayout: FC<Props> = ({ ocrHook }) => {
         <ConfirmPdfPane
           runOcrForPage={handleReocrForPage}
           reocrTarget={reocrTarget}
+          isRunning={isRunning}
           reocrError={reocrError}
           onReocrRetry={handleReocrRetry}
         />

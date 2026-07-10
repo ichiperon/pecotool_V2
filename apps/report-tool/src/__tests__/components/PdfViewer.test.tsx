@@ -530,3 +530,72 @@ describe("PdfViewer: 再マウント自動再読込の fingerprint 照合", () =
     expect(pdfjs.getDocument).not.toHaveBeenCalled();
   });
 });
+
+// #448 / PCT-212 追い修正（るしあレビュー HIGH-1 / MEDIUM-1）:
+// 全ページ OCR 実行中に「PDF を開く」・回転ボタンが非ゲートだと、
+// resetExtractedData() が template に触れないため templateChangeAbort をすり抜けて
+// 旧 PDF の OCR 結果が新 PDF の状態へコミットされる事故があった。
+// isRunning prop（App から ocrHook.isRunning が渡る）で該当ボタンを disable する。
+describe("PdfViewer: OCR実行中のゲート（#448 / PCT-212 追い修正）", () => {
+  it("isRunning=true のとき未読込状態の「PDF を開く」ボタンが disabled になる", () => {
+    render(<PdfViewer isRunning={true} />);
+    const btn = screen.getByRole("button", { name: "PDF を開く" });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", "OCR 実行中は移動できません");
+  });
+
+  it("isRunning=false（既定）のとき未読込状態の「PDF を開く」ボタンは有効", () => {
+    render(<PdfViewer />);
+    expect(screen.getByRole("button", { name: "PDF を開く" })).toBeEnabled();
+  });
+
+  it("isRunning=true のときエラー状態の「別の PDF を開く」ボタンが disabled になる", () => {
+    usePdfStore.getState().setError("読み込みに失敗しました");
+    render(<PdfViewer isRunning={true} />);
+    expect(screen.getByRole("button", { name: "別の PDF を開く" })).toBeDisabled();
+  });
+
+  it("isRunning=true のとき読込済みツールバーの「PDF を開く」ボタンが disabled になる", () => {
+    usePdfStore.getState().setPdf("/sample.pdf", 5);
+    render(<PdfViewer isRunning={true} />);
+    const btn = screen.getByRole("button", { name: "PDF を開く" });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", "OCR 実行中は移動できません");
+  });
+
+  it("isRunning=false のとき読込済みツールバーの「PDF を開く」ボタンは有効", () => {
+    usePdfStore.getState().setPdf("/sample.pdf", 5);
+    render(<PdfViewer isRunning={false} />);
+    expect(screen.getByRole("button", { name: "PDF を開く" })).toBeEnabled();
+  });
+
+  it("ページ読み込み完了後、isRunning=true に切り替わると回転ボタンが disabled になる", async () => {
+    const { open } = await getDialogMock();
+    const { readFile } = await getFsMock();
+    const pdfjs = await getPdfjsMock();
+
+    const proxy = makeMockProxy(2);
+    vi.mocked(pdfjs.getDocument).mockReturnValue({
+      promise: Promise.resolve(proxy),
+    } as unknown as ReturnType<typeof pdfjs.getDocument>);
+    vi.mocked(open).mockResolvedValue("/rotate-test.pdf" as Awaited<ReturnType<typeof open>>);
+    vi.mocked(readFile).mockResolvedValue(new Uint8Array([1, 2, 3]));
+
+    const { rerender } = render(<PdfViewer isRunning={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "PDF を開く" }));
+
+    // pageSize が確定するまで待つ（この時点では isRunning=false なので回転可）
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "左に90度回転" })).toBeEnabled();
+    });
+
+    // OCR 実行中へ遷移
+    rerender(<PdfViewer isRunning={true} />);
+
+    const rotateLeftBtn = screen.getByRole("button", { name: "左に90度回転" });
+    const rotateRightBtn = screen.getByRole("button", { name: "右に90度回転" });
+    expect(rotateLeftBtn).toBeDisabled();
+    expect(rotateRightBtn).toBeDisabled();
+    expect(rotateLeftBtn).toHaveAttribute("title", "OCR 実行中は移動できません");
+  });
+});

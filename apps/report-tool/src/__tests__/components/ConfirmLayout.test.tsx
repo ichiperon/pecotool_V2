@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import ConfirmLayout from "../../components/ConfirmLayout";
 import { useReportStore } from "../../store/reportStore";
 import { usePdfStore } from "../../store/pdfStore";
@@ -7,14 +7,21 @@ import type { UseReportOcrReturn } from "../../hooks/useReportOcr";
 
 // ConfirmPdfPane は pdfjs-dist / Tauri を使うためモック化
 vi.mock("../../components/ConfirmPdfPane", () => ({
-  default: ({ reocrTarget, reocrError, onReocrRetry }: {
+  default: ({ runOcrForPage, reocrTarget, isRunning, reocrError, onReocrRetry }: {
     runOcrForPage: (p: number) => Promise<void>;
     reocrTarget: number | null;
+    isRunning: boolean;
     reocrError: boolean;
     onReocrRetry: () => void;
   }) => (
     <div data-testid="confirm-pdf-pane">
       <span data-testid="reocr-target">{reocrTarget ?? "null"}</span>
+      <span data-testid="is-running">{String(isRunning)}</span>
+      {/* ConfirmLayout の handleReocrForPage（catch → reocrError）経路をテストから
+          駆動するためのトリガー。実物では再OCRボタンに相当する */}
+      <button type="button" onClick={() => void runOcrForPage(1)}>
+        再OCRトリガー
+      </button>
       {reocrError && (
         <button type="button" onClick={onReocrRetry}>再試行</button>
       )}
@@ -44,6 +51,8 @@ function makeOcrHook(overrides?: Partial<UseReportOcrReturn>): UseReportOcrRetur
     layoutMismatchPages: [],
     layoutBasePage: null,
     engineError: false,
+    templateChangeAbort: false,
+    pdfChangeAbort: false,
     preserveEdited: true,
     setPreserveEdited: vi.fn(),
     runOcr: vi.fn(),
@@ -171,6 +180,19 @@ describe("ConfirmLayout – activePage / reocrTarget の伝搬", () => {
     render(<ConfirmLayout ocrHook={makeOcrHook({ reocrTarget: 3 })} />);
     expect(screen.getByTestId("reocr-target-right")).toHaveTextContent("3");
   });
+
+  // #448 / PCT-212: 全ページ OCR 実行中にページ再OCRボタンが押せてしまい、
+  // epoch 共有により全ページ側の結果が無言破棄される事故があった。
+  // ConfirmPdfPane 側でボタンを disable するには isRunning を正しく受け取る必要がある。
+  it("ocrHook.isRunning が ConfirmPdfPane に渡される（再OCRボタンの排他ゲートの前提）", () => {
+    render(<ConfirmLayout ocrHook={makeOcrHook({ isRunning: true })} />);
+    expect(screen.getByTestId("is-running")).toHaveTextContent("true");
+  });
+
+  it("ocrHook.isRunning=false のときも正しく渡される", () => {
+    render(<ConfirmLayout ocrHook={makeOcrHook({ isRunning: false })} />);
+    expect(screen.getByTestId("is-running")).toHaveTextContent("false");
+  });
 });
 
 describe("ConfirmLayout – OCR警告バナーの持ち込み（ステップ③置き去り修正）", () => {
@@ -209,5 +231,47 @@ describe("ConfirmLayout – OCR警告バナーの持ち込み（ステップ③�
     render(<ConfirmLayout ocrHook={makeOcrHook()} />);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+});
+
+describe("ConfirmLayout – 再OCR拒否エラーの reocrError 伝搬（#448 / PCT-212）", () => {
+  // 全ページ OCR 実行中に runOcrForPage を呼ぶとフックは throw で拒否する。
+  // その throw を ConfirmLayout が catch して reocrError=true（再試行 UI）に
+  // 載せるところまでが #448 の受入基準。握りつぶすと拒否が無反応に見える。
+  it("runOcrForPage が reject すると再試行ボタン（reocrError UI）が表示される", async () => {
+    const ocrHook = makeOcrHook({
+      runOcrForPage: vi
+        .fn()
+        .mockRejectedValue(
+          new Error("別の OCR 処理が実行中のため、このページの再 OCR を開始できませんでした")
+        ),
+    });
+    render(<ConfirmLayout ocrHook={ocrHook} />);
+
+    expect(screen.queryByRole("button", { name: "再試行" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "再OCRトリガー" }));
+
+    expect(await screen.findByRole("button", { name: "再試行" })).toBeInTheDocument();
+    expect(ocrHook.runOcrForPage).toHaveBeenCalledWith(1);
+  });
+
+  it("再試行ボタンで currentPage の再OCRが再実行され、成功するとエラー表示が消える", async () => {
+    usePdfStore.setState({ currentPage: 2 });
+    const runOcrForPage = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("一時的な失敗"))
+      .mockResolvedValueOnce(undefined);
+    render(<ConfirmLayout ocrHook={makeOcrHook({ runOcrForPage })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "再OCRトリガー" }));
+    const retryBtn = await screen.findByRole("button", { name: "再試行" });
+
+    fireEvent.click(retryBtn);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "再試行" })).not.toBeInTheDocument()
+    );
+    // 再試行は表示中のページ（currentPage）を対象にする
+    expect(runOcrForPage).toHaveBeenLastCalledWith(2);
+    expect(runOcrForPage).toHaveBeenCalledTimes(2);
   });
 });

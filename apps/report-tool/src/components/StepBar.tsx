@@ -17,6 +17,8 @@ interface StepBarProps {
   onStepSelect?: (step: StepNumber) => void;
   /** 各ステップの完了状態。省略時は activeStep より小さい番号を完了とみなす。 */
   stepCompleted?: Readonly<Partial<Record<StepNumber, boolean>>>;
+  /** 無効ステップの理由（title 表示用）。省略したステップは title なし。 */
+  stepDisabledTitle?: Readonly<Partial<Record<StepNumber, string>>>;
 }
 
 const StepBar: FC<StepBarProps> = ({
@@ -24,6 +26,7 @@ const StepBar: FC<StepBarProps> = ({
   stepEnabled,
   onStepSelect,
   stepCompleted,
+  stepDisabledTitle,
 }) => {
   return (
     <nav className="step-bar" aria-label="作業ステップ">
@@ -55,7 +58,11 @@ const StepBar: FC<StepBarProps> = ({
           );
 
           return (
-            <li key={num} className={`step-bar__item ${statusClass}`}>
+            <li
+              key={num}
+              className={`step-bar__item ${statusClass}`}
+              title={!isEnabled ? stepDisabledTitle?.[num] : undefined}
+            >
               {index > 0 && (
                 <span className="step-bar__connector" aria-hidden="true" />
               )}
