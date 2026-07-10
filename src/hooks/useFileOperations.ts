@@ -1082,10 +1082,16 @@ export function useFileOperations(
 
   /**
    * Ctrl+S 経路と「フォルダ OCR の自動上書き保存」(#48) の共通エントリ。
-   * - 成功時: true
+   * - 成功時 (ユーザーの編集が実際にファイルへ反映された場合): true
    * - 失敗 / アボート (PDF 未オープン、保存中ロック、_executeSave が null、例外) は false
+   * - PCT-209 (#445): byte-preserve 短絡 (undecodable な既存メタ検出で原本バイトを
+   *   そのまま書き戻す) が発生し、かつ未保存の編集があった場合も false。ファイル書き込み
+   *   自体は成功しているが、ユーザーの編集は一切反映されていないため「成功」と呼べない。
    *
-   * フォルダ OCR ループは false を見て即時中止できる。
+   * フォルダ OCR ループは false を見て即時中止できる（byte-preserve での編集ドロップも
+   * 「本当の失敗」と同様に中止対象に含まれる）。
+   * バッチジョブ (useBatchJob.executeLoop) は false を見てこのファイルを 'error' 扱いにし、
+   * 次のファイルへ処理を継続する。
    */
   const handleSave = async (options?: SaveInvocationOptions): Promise<boolean> => {
     // Ctrl+S が届いていることを可視化するため、開始時に必ずトースト表示。
@@ -1203,7 +1209,13 @@ export function useFileOperations(
         // から、この保存呼び出し自体の実測値 (result.bytePreserved) へ一本化する。
         // 旧実装は両者が食い違いうる (load 時未検出でも今回 byte-preserve した / 逆に
         // フラグが立ったまま別ファイルを開き直さずにいる 等) 二重判定だった。
-        if (result.bytePreserved && hadUnsavedEdits) {
+        // PCT-209 (#445): bytePreserved && hadUnsavedEdits は「ファイル書き込み自体は
+        // 成功したが、ユーザーの編集は一切反映されなかった」状態。呼び出し元 (Ctrl+S の
+        // 場合はトーストで既に警告済みだが、フォルダOCRループ/バッチジョブは戻り値でしか
+        // 判定できない) から見て「保存できた」と呼ぶのは誤りなので、他の失敗パスと同じ
+        // 扱いで false を返す。
+        const editsDropped = result.bytePreserved && hadUnsavedEdits;
+        if (editsDropped) {
           // #392: byte-preserve で原本を返したため編集は反映されていない。明示警告する。
           // 別名保存も同じ byte-preserve で編集を落とすため、別名保存を救済策として案内しない。
           showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
@@ -1216,7 +1228,11 @@ export function useFileOperations(
         });
         // 正常保存後はバックアップファイルを削除する（fire-and-forget、失敗時は警告+リトライ1回）
         void clearBackupWithRetry(document.filePath);
-        return true;
+        // PCT-209 (#445): editsDropped のときは false を返す。フォルダOCRループ
+        // (useOcrEngine.runOcrFolder) はこれを見て「本当の失敗」と同様に即座に中止し、
+        // バッチジョブ (useBatchJob.executeLoop) はこのファイルを 'error' 扱いにして
+        // 次のファイルへ処理を継続する (どちらも既存の !saveOk 分岐がそのまま機能する)。
+        return !editsDropped;
       }
       return false;
     } catch (err) {
@@ -1416,7 +1432,10 @@ export function useFileOperations(
    * OCR 結果 (textBlocks) を含む完全な PDF を書き出すため、
    * _executeSave を直接呼ぶ (saveSidecar のように pdfjs から raw bytes を
    * 取り出す実装とは異なり、OCR レイヤが保持される)。
-   * 成功時 true / 失敗時 false を返す。
+   * 成功時 (編集が実際に targetPath へ反映された場合) true / 失敗時 false を返す。
+   * PCT-209 (#445): byte-preserve 短絡で未保存の編集がドロップされた場合も false
+   * (handleSave と同じ契約。useBatchJob.ts の savePdfAs コールバックはこれを
+   * !saveOk として捕捉し、当該ファイルを 'error' 扱いにして次のファイルへ進む)。
    */
   const handleSaveTo = async (targetPath: string, options?: SaveInvocationOptions): Promise<boolean> => {
     // PCT-138 (#361): handleSave / executeSaveAs と対称のガード。読込中の sidecar 保存は拒否する。
@@ -1435,12 +1454,14 @@ export function useFileOperations(
     commitActiveOcrCardEdit();
     isSavingRef.current = true;
     setIsSaving?.(true);
-    // M-4 (bug-hunt): handleSaveTo はバッチ sidecar 経路（フォルダ OCR 自動保存等）で、
-    // ユーザーが画面を注視している保証が無く、showToast を出しても見落とされうる。
-    // 戻り値の型 (Promise<boolean>) は useBatchJob.ts の savePdfAs コールバック契約
-    // (`(targetPath: string) => Promise<boolean>`) に固定されており、ここを変更すると
-    // バッチジョブ全体に波及するため据え置く。代わりに console.warn で開発者ログに
-    // 可視化する（バッチ実行のログは呼び出し元がまとめて確認できる前提）。
+    // M-4 (bug-hunt) → PCT-209 (#445) で戻り値契約を修正: handleSaveTo はバッチ sidecar
+    // 経路（フォルダ OCR 自動保存等）で、ユーザーが画面を注視している保証が無く、
+    // showToast を出しても見落とされうる。以前は「戻り値の型を変えるとバッチジョブ全体に
+    // 波及するため据え置く」として console.warn のみで true を返していたが、これは
+    // 「編集が反映されていないのに保存成功」を呼び出し元に伝える契約バグだった。
+    // 戻り値の型 (Promise<boolean>) 自体は変えず、byte-preserve で編集がドロップされた
+    // ケースを他の失敗と同じ false に含めることで、useBatchJob.ts 側は無改修のまま
+    // 「このファイルを 'error' 扱いにして次へ進む」既存の !saveOk ハンドリングに自然に乗る。
     const hadUnsavedEdits = usePecoStore.getState().isDirty
       || Array.from(usePecoStore.getState().document?.pages.values() || []).some((p) => p.isDirty);
     try {
@@ -1457,12 +1478,13 @@ export function useFileOperations(
         if (result.hasPostSnapshotChanges) {
           usePecoStore.setState({ isDirty: true });
         }
-        if (result.bytePreserved && hadUnsavedEdits) {
+        const editsDropped = result.bytePreserved && hadUnsavedEdits;
+        if (editsDropped) {
           console.warn(
             `[handleSaveTo] byte-preserve: 読み込み不能なOCRメタを検出したため、編集内容は ${targetPath} へ反映されていません。`,
           );
         }
-        return true;
+        return !editsDropped;
       }
       return false;
     } catch (err) {
@@ -1570,14 +1592,16 @@ export function useFileOperations(
         usePecoStore.setState({ isDirty: true });
       }
       // M-4 (bug-hunt): 判定源を result.bytePreserved (この保存呼び出しの実測値) に一本化。
-      if (result.bytePreserved && hadUnsavedEdits) {
+      // PCT-209 (#445): handleSave と同じ契約修正。editsDropped のときは成功扱いにしない。
+      const editsDropped = result.bytePreserved && hadUnsavedEdits;
+      if (editsDropped) {
         // #392: byte-preserve で編集が反映されていない。成功扱いにしない。
         showToast(UNDECODABLE_SAVE_BLOCKED_MESSAGE, true);
       } else {
         showToast(formatSaveToast('全ページに位置補正を適用して保存しました', result.size, result.skippedChars));
       }
       void clearBackupWithRetry(document.filePath);
-      return true;
+      return !editsDropped;
     } catch (err) {
       console.error('[saveAllPagesWithOffset] failed:', err);
       const msg = err instanceof Error ? err.message : String(err);

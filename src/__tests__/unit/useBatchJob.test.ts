@@ -170,6 +170,49 @@ describe('useBatchJob', () => {
     expect(callbacks.savePdf).toHaveBeenCalledTimes(2);
   });
 
+  // PCT-209 (#445): handleSave が byte-preserve (undecodable な既存メタ検出で編集を
+  // 一切反映しない) のとき false を返すよう修正された。このテストは useBatchJob 側が
+  // その false を「このファイルだけ error にして次のファイルへ処理を継続する」既存の
+  // 挙動 (savePdf の失敗理由に関わらず) で正しく吸収し、フォルダ一括処理全体を
+  // 止めないことを確認する。
+  it('PCT-209 (#445): savePdf が1ファイルだけ false を返しても (byte-preserve 想定) そのファイルを error にして次のファイルの処理を継続する', async () => {
+    const pdfFiles = ['/folder/undecodable.pdf', '/folder/normal.pdf'];
+    vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);
+
+    const savePdf = vi.fn()
+      .mockResolvedValueOnce(false) // 1ファイル目: byte-preserve で編集がドロップされた想定
+      .mockResolvedValueOnce(true); // 2ファイル目: 通常保存
+
+    const callbacks = makeCallbacks({
+      openPdf: vi.fn().mockImplementation(async (path: string) => {
+        setStoreDoc(path);
+        return true;
+      }),
+      savePdf,
+    });
+
+    const { result } = renderHook(() => useBatchJob(callbacks));
+
+    await act(async () => {
+      await result.current.startJob('/folder', {
+        outputDir: '/out',
+        exportFormat: 'none',
+        saveMode: 'overwrite',
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.currentJob?.finishedAt).toBeDefined();
+    });
+
+    const files = result.current.currentJob?.files ?? [];
+    // 1ファイル目は error 扱い (done にはならない) だが、処理は中断されず
+    // 2ファイル目まで到達して done になる (フォルダ一括処理全体は止まらない)。
+    expect(files[0].status).toBe('error');
+    expect(files[1].status).toBe('done');
+    expect(savePdf).toHaveBeenCalledTimes(2);
+  });
+
   it('cancelJob causes the loop to stop mid-run (files remain pending)', async () => {
     const pdfFiles = ['/folder/a.pdf', '/folder/b.pdf', '/folder/c.pdf'];
     vi.mocked(invoke).mockResolvedValueOnce(pdfFiles);

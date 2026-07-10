@@ -3098,6 +3098,38 @@ describe('useFileOperations saveAllPagesWithOffset ガード・成功・失敗�
     expect(clearBackupCalls[0][1]).toEqual({ filePath: doc.filePath });
   });
 
+  it('PCT-209 (#445): bytePreserved=true かつ未保存編集ありなら false を返し警告トーストを出す', async () => {
+    makeSingleDirtyPageDoc('/offset-save/undecodable.pdf');
+    (savePDF as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (
+        _src: unknown, _doc: unknown, _font: unknown, _fallback: unknown,
+        _onSkipped: unknown, _savePageOrder: unknown, _opts: unknown,
+        onBytePreserved: (bp: boolean) => void,
+      ) => {
+        onBytePreserved(true);
+        return new Uint8Array([9, 9, 9, 9]);
+      },
+    );
+
+    const showToast = vi.fn();
+    const { result } = renderHook(() => useFileOperations(showToast));
+
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.saveAllPagesWithOffset();
+    });
+
+    // PCT-209 (#445): handleSave/handleSaveTo と同じ契約。ファイル書き込み自体は
+    // 成功しても編集は反映されていないため成功扱いにしない。
+    expect(ok).toBe(false);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringContaining('編集内容は保存できませんでした'),
+      true,
+    );
+    // byte-preserve のため isDirty はクリアされない。
+    expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true);
+  });
+
   it('savePDFが失敗した場合 false を返しエラートーストを出し isSavingRef をリセットする', async () => {
     makeSingleDirtyPageDoc('/offset-save/save-fail.pdf');
     (savePDF as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('offset save boom'));

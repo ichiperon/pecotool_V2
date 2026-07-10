@@ -872,7 +872,7 @@ describe('M-4: bytePreserved 伝搬 (handleSave/handleSaveTo の警告判定源�
     });
   }
 
-  it('handleSave: bytePreserved=true かつ未保存編集ありなら警告トーストを出し、isDirty をクリアしない', async () => {
+  it('PCT-209 (#445): handleSave: bytePreserved=true かつ未保存編集ありなら警告トーストを出し、isDirty をクリアせず false を返す', async () => {
     const doc = makeSingleDirtyPageDoc('/undecodable.pdf');
     usePecoStore.setState({
       document: doc, originalBytes: new Uint8Array([1, 2, 3]), currentPageIndex: 0, isDirty: true,
@@ -882,7 +882,10 @@ describe('M-4: bytePreserved 伝搬 (handleSave/handleSaveTo の警告判定源�
     const { result } = renderHook(() => useFileOperations(showToast));
 
     const saved = await result.current.handleSave();
-    expect(saved).toBe(true);
+    // PCT-209 (#445): ファイル書き込み自体は成功しても編集が一切反映されていないため、
+    // 呼び出し元 (フォルダOCRループ/バッチジョブ) が「保存できた」と誤認しないよう false。
+    // 旧実装はここで true を返しており、フォルダOCRループが編集消失に気づけなかった。
+    expect(saved).toBe(false);
 
     // #392 の案内文言 (編集内容は保存できませんでした) が出る。
     expect(showToast).toHaveBeenCalledWith(expect.stringContaining('編集内容は保存できませんでした'), true);
@@ -908,7 +911,7 @@ describe('M-4: bytePreserved 伝搬 (handleSave/handleSaveTo の警告判定源�
     expect(usePecoStore.getState().isDirty).toBe(false);
   });
 
-  it('handleSaveTo (バッチ sidecar 経路): bytePreserved=true かつ未保存編集ありなら console.warn で可視化し、戻り値は true のまま', async () => {
+  it('PCT-209 (#445): handleSaveTo (バッチ sidecar 経路): bytePreserved=true かつ未保存編集ありなら console.warn で可視化し、戻り値は false', async () => {
     const doc = makeSingleDirtyPageDoc('/undecodable.pdf');
     usePecoStore.setState({
       document: doc, originalBytes: new Uint8Array([1, 2, 3]), currentPageIndex: 0, isDirty: true,
@@ -920,8 +923,13 @@ describe('M-4: bytePreserved 伝搬 (handleSave/handleSaveTo の警告判定源�
       const { result } = renderHook(() => useFileOperations(showToast));
 
       const ok = await result.current.handleSaveTo('/sidecar-target.pdf');
-      // #243: バッチ経路は byte-preserve でも処理継続のため成功 (true) を返す設計を維持。
-      expect(ok).toBe(true);
+      // PCT-209 (#445): 旧実装は「バッチ経路は byte-preserve でも処理継続のため成功 (true)
+      // を返す設計」だったが、これは編集が反映されていないファイルを 'done' として
+      // useBatchJob のサマリに記録してしまう契約バグだった。false を返すことで
+      // useBatchJob.executeLoop の既存の !saveOk ハンドリングに乗り、このファイルは
+      // 'error' 扱いになる一方、フォルダ処理全体は中断されず次のファイルへ進む
+      // (useBatchJob.test.ts の PCT-209 テストで多ファイル継続を確認)。
+      expect(ok).toBe(false);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('byte-preserve'));
       // P1-1: bytePreserved=true のため resetDirty は isDirty をクリアしない。
       expect(usePecoStore.getState().document!.pages.get(0)!.isDirty).toBe(true);
