@@ -541,3 +541,48 @@ describe('H-3 (bug-hunt round2): 待機中のファイル切替ガード (onIdbW
     }
   });
 });
+
+// ── PCT-208 (#444): 直列キュー内で displayIndex を固定する ───────────
+//
+// enqueuePageOperation は Promise 連結のみの直列キュー。同一ファイル内で
+// move → delete のように連続して operation を発行すると、delete 側の
+// entryEpoch/entryFilePath チェックは「move 適用後」にキャプチャされるため
+// 常に通過してしまい (ファイル自体は変わっていないため)、move で動いた
+// pageOrder に対して呼び出し時点の raw displayIndex をそのまま適用すると
+// 無関係なページを削除してしまう。呼び出し時点で対象ページを pageId として
+// 固定し、実行直前に最新 pageOrder で再解決することでこれを防ぐ。
+
+describe('PCT-208 (#444): 直列キュー内の displayIndex 固定 — 先行 move 適用後も対象ページを正しく指す', () => {
+  it('move(0→3) と同一 tick で発行した delete([1]) は、move 適用後も呼び出し時点の対象ページ (src:1) を削除する', async () => {
+    const doc = makeDoc(4);
+    usePecoStore.setState({
+      document: doc,
+      pageOrder: [0, 1, 2, 3],
+      currentPageIndex: 0,
+    });
+
+    const { result } = renderHook(() => usePageManagement());
+
+    let movePromise: Promise<void> = Promise.resolve();
+    let deletePromise: Promise<void> = Promise.resolve();
+
+    await act(async () => {
+      // 同一 tick (await を挟まず) で move → delete を発行する。
+      // displayIndices=[1] はこの時点の pageOrder=[0,1,2,3] を基準にした値
+      // (= 物理ページ 'src:1')。move はキューの先頭にいるため先に適用される。
+      movePromise = result.current.handleMovePage(0, 3);
+      deletePromise = result.current.handleDeletePages([1]);
+      await Promise.all([movePromise, deletePromise]);
+    });
+
+    const state = usePecoStore.getState();
+    // move(0→3) 適用後の pageOrder は [1,2,3,0] になる。delete は呼び出し時点の
+    // 物理ページ 'src:1' (move 後は位置0) を指し続けるので、そこを削除した
+    // 結果は [2,3,0] になる。
+    // 修正前は raw displayIndex=1 を move 後の pageOrder へそのまま適用し、
+    // 無関係な 'src:2' (呼び出し時点で意図していないページ) を削除していた
+    // (その場合の結果は [1,3,0])。
+    expect(state.pageOrder).toEqual([2, 3, 0]);
+    expect(state.document?.totalPages).toBe(3);
+  });
+});
