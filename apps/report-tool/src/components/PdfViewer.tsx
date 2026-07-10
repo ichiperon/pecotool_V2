@@ -18,6 +18,7 @@ import { computeFitZoom } from "../lib/fitZoom";
 import { usePdfShortcuts } from "../hooks/usePdfShortcuts";
 import { effectiveRotation } from "../logic/rotateTemplate";
 import { usePdfPanZoom } from "../hooks/usePdfPanZoom";
+import { computePdfFingerprint } from "../lib/pdfFingerprint";
 
 // workerSrc の設定（本体 pdfLoader.ts と同じ ?url import パターン）
 // Vite が .mjs を URL として解決する。
@@ -83,6 +84,7 @@ const PdfViewer: FC = () => {
     goToNextPage,
     rotation,
     rotateBy,
+    pdfFingerprint,
   } = usePdfStore();
 
   // ページ番号入力フィールドの一時状態
@@ -126,8 +128,13 @@ const PdfViewer: FC = () => {
       // await 後に別ロードが始まっていたら中断
       if (loadGenRef.current !== currentGen) return;
 
-      const loadingTask = pdfjsLib.getDocument({ data: bytes });
-      const newDoc = await loadingTask.promise;
+      // getDocument とフィンガープリント計算（#446 / PCT-210）を並行して行う。
+      // フィンガープリントは bytes から1回だけ計算し、setPdf で filePath と
+      // 同一の set() へ渡して同期させる（片方だけ更新された瞬間を作らない）。
+      const [newDoc, fingerprint] = await Promise.all([
+        pdfjsLib.getDocument({ data: bytes }).promise,
+        computePdfFingerprint(bytes),
+      ]);
 
       // await 後に別ロードが始まっていたら取得した proxy を破棄して中断
       if (loadGenRef.current !== currentGen) {
@@ -144,11 +151,13 @@ const PdfViewer: FC = () => {
       // MA-1: 別 PDF への差し替え時は前 PDF 固有の抽出データ（cells/confidences/
       // pageOffsets）を初期化する。同一パスの再オープンでは編集内容を消さないよう
       // filePath が変わる場合のみリセットする。template（欄定義）は保持する。
-      if (selectedPath !== filePath) {
+      // #446 / PCT-210: パスが同じでも中身（フィンガープリント）が変わっていれば
+      // 別ファイルとみなしてリセットする（同名で差し替えられた帳票の誤継続防止）。
+      if (selectedPath !== filePath || fingerprint !== pdfFingerprint) {
         resetExtractedData();
       }
 
-      setPdf(selectedPath, newDoc.numPages);
+      setPdf(selectedPath, newDoc.numPages, fingerprint);
     } catch (e) {
       const message =
         e instanceof Error ? e.message : "PDF の読み込みに失敗しました";

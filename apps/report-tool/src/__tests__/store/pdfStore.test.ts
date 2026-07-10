@@ -27,6 +27,26 @@ describe("pdfStore", () => {
     expect(s.error).toBeNull();
   });
 
+  it("初期状態: pdfFingerprint=null", () => {
+    expect(usePdfStore.getState().pdfFingerprint).toBeNull();
+  });
+
+  it("setPdf: fingerprint 省略時は pdfFingerprint が null になる", () => {
+    usePdfStore.getState().setPdf("/test.pdf", 5);
+    expect(usePdfStore.getState().pdfFingerprint).toBeNull();
+  });
+
+  it("setPdf: fingerprint を渡すと pdfFingerprint に反映される", () => {
+    usePdfStore.getState().setPdf("/test.pdf", 5, "abc123");
+    expect(usePdfStore.getState().pdfFingerprint).toBe("abc123");
+  });
+
+  it("reset: pdfFingerprint も null に戻る", () => {
+    usePdfStore.getState().setPdf("/test.pdf", 5, "abc123");
+    usePdfStore.getState().reset();
+    expect(usePdfStore.getState().pdfFingerprint).toBeNull();
+  });
+
   it("setCurrentPage: 1〜numPages の範囲にクランプされる", () => {
     usePdfStore.getState().setPdf("/test.pdf", 5);
     usePdfStore.getState().setCurrentPage(3);

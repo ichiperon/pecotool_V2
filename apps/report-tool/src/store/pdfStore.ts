@@ -24,11 +24,18 @@ export interface PdfState {
    * 経路間で値がズレると欄座標が全ずれするため、コンポーネントはローカルに持たない。
    */
   rotation: 0 | 90 | 180 | 270;
+  /**
+   * 読み込んだ PDF バイト列の SHA-256 フィンガープリント。未計算・未読込時は null。
+   * pdfPath だけでは「同じパスだが中身が違う PDF」を区別できないため、セッション
+   * 復元の同一性判定（#446 / PCT-210）に使う。setPdf と同一の set() で更新し、
+   * filePath との整合が崩れる瞬間（片方だけ更新された状態）を作らない。
+   */
+  pdfFingerprint: string | null;
 
   // actions
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
-  setPdf: (filePath: string, numPages: number) => void;
+  setPdf: (filePath: string, numPages: number, fingerprint?: string | null) => void;
   setCurrentPage: (page: number) => void;
   setZoom: (zoom: number) => void;
   setFitMode: (mode: FitMode) => void;
@@ -51,12 +58,13 @@ export const usePdfStore = create<PdfState>((set, get) => ({
   error: null,
   fitMode: "width",
   rotation: 0,
+  pdfFingerprint: null,
 
   setLoading: (loading) => set({ isLoading: loading }),
 
   setError: (error) => set({ error, isLoading: false }),
 
-  setPdf: (filePath, numPages) =>
+  setPdf: (filePath, numPages, fingerprint = null) =>
     set({
       filePath,
       numPages,
@@ -65,6 +73,7 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       error: null,
       // 回転はその PDF 個体（スキャンロット）の性質なので、別 PDF では 0 に戻す
       rotation: 0,
+      pdfFingerprint: fingerprint,
     }),
 
   setCurrentPage: (page) => {
@@ -107,5 +116,6 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       error: null,
       fitMode: "width",
       rotation: 0,
+      pdfFingerprint: null,
     }),
 }));

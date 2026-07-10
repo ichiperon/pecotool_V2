@@ -97,6 +97,23 @@ interface ReportState {
    * テンプレ置換では保持する。undo 対象外（スナップショットに含めない）。
    */
   excludedPages: Set<number>;
+  /**
+   * 直近の全ページ OCR で処理エラーになったページ番号（昇順）。エラーなし・未実行時は空配列。
+   * 元は useReportOcr のローカル state だったが、セッション復元後に空へリセットされ
+   * CSV から失敗ページが無言欠落する問題（#447 / PCT-211）を防ぐため store へ移した。
+   * undo/redo 対象外（HistorySnapshot に含めない・past/future に積まない）。
+   */
+  failedPages: number[];
+  /**
+   * 用紙サイズ・向きの混在ページ番号（昇順）。failedPages と同じ理由で store 管理。
+   * undo/redo 対象外。
+   */
+  layoutMismatchPages: number[];
+  /**
+   * レイアウト混在判定の基準ページ番号（最初に処理成功したページ）。未実行時は null。
+   * undo/redo 対象外。
+   */
+  layoutBasePage: number | null;
 
   // actions
   /**
@@ -209,6 +226,15 @@ interface ReportState {
    * pdfStore.rotateBy と必ず対で呼ぶこと（先にこちら＝回転前の寸法でリマップ）。
    */
   rotateTemplateSpace: (direction: 90 | -90, pageWidth: number, pageHeight: number) => void;
+  /**
+   * failedPages を置換する。useState の setState と同じく、関数を渡すと
+   * 現在値からの差分更新ができる（useReportOcr の再OCR成功時のフィルタ更新に使用）。
+   */
+  setFailedPages: (pages: number[] | ((prev: number[]) => number[])) => void;
+  /** layoutMismatchPages を置換する。 */
+  setLayoutMismatchPages: (pages: number[]) => void;
+  /** layoutBasePage を置換する。 */
+  setLayoutBasePage: (page: number | null) => void;
 }
 
 /**
@@ -328,6 +354,9 @@ export const useReportStore = create<ReportState>((set) => ({
   selectedFieldId: null,
   pageOffsets: new Map(),
   excludedPages: new Set(),
+  failedPages: [],
+  layoutMismatchPages: [],
+  layoutBasePage: null,
 
   setConfidences: (matrix) => {
     // OCR 取り込み系＝ロード境界。境界前のスナップショット復元を防ぐため履歴を捨てる。
@@ -417,6 +446,12 @@ export const useReportStore = create<ReportState>((set) => ({
       ...historyClearPatch(),
       // 除外設定は PDF 個体の属性なので差し替え時にクリアする
       excludedPages: new Set(),
+      // OCR 診断状態（失敗ページ等）も PDF 個体に紐づく。ここで空へ戻さないと、
+      // 別 PDF に差し替えた後も前 PDF の失敗ページ警告が残ってしまう
+      // （#447 と同根の「診断状態が古いまま残る」問題をロード境界で防ぐ）。
+      failedPages: [],
+      layoutMismatchPages: [],
+      layoutBasePage: null,
     });
   },
 
@@ -923,5 +958,20 @@ export const useReportStore = create<ReportState>((set) => ({
         lastUndoableTag: null,
       };
     });
+  },
+
+  setFailedPages: (pages) => {
+    // undo 対象外の診断状態なので past/future・historyClearPatch には触れない
+    set((state) => ({
+      failedPages: typeof pages === "function" ? pages(state.failedPages) : pages,
+    }));
+  },
+
+  setLayoutMismatchPages: (pages) => {
+    set({ layoutMismatchPages: pages });
+  },
+
+  setLayoutBasePage: (page) => {
+    set({ layoutBasePage: page });
   },
 }));

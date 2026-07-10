@@ -10,6 +10,8 @@ import { useReportStore } from "../../store/reportStore";
 import { usePdfStore } from "../../store/pdfStore";
 
 const RECT = { x: 0, y: 0, width: 100, height: 30 };
+/** テスト全体で使う固定フィンガープリント。実際のハッシュ値である必要はない（文字列一致のみ検証）。 */
+const FAKE_FINGERPRINT = "fp-test-abc123";
 
 function makeStorage(loadJson?: string): SessionFileStorage & { saved: string[] } {
   const saved: string[] = [];
@@ -84,12 +86,27 @@ async function flushMicrotasks(times = 20): Promise<void> {
   }
 }
 
-/** 復元用の保存済みセッション JSON を作る */
-function savedSessionFor(pdfPath: string): string {
+/**
+ * 復元用の保存済みセッション JSON を作る。
+ * fingerprint 省略時は FAKE_FINGERPRINT（setPdf 側の既定と一致させることで
+ * 復元テストが「同一パス・同一内容」の状況を素直に再現できる）。
+ * diagnostics 省略時は failedPages=[3] を含める（#447: 復元後も同じ警告が
+ * 出ることを検証するテストで使う）。
+ */
+function savedSessionFor(
+  pdfPath: string,
+  fingerprint: string = FAKE_FINGERPRINT,
+  diagnostics: { failedPages: number[]; layoutMismatchPages: number[]; layoutBasePage: number | null } = {
+    failedPages: [3],
+    layoutMismatchPages: [],
+    layoutBasePage: null,
+  }
+): string {
   useReportStore.getState().addField(RECT, "金額");
   const id = useReportStore.getState().template.fields[0].id;
   const json = serializeSession({
     pdfPath,
+    pdfFingerprint: fingerprint,
     savedAt: "2026-07-08T05:00:00.000Z",
     rotation: 90,
     fields: useReportStore.getState().template.fields,
@@ -98,6 +115,7 @@ function savedSessionFor(pdfPath: string): string {
     edited: new Map([[1, [new Set([id])]]]),
     pageOffsets: new Map([[1, { dx: 1, dy: 1 }]]),
     excludedPages: new Set([2]),
+    diagnostics,
   });
   // テンプレは復元経路で入るので初期化し直す
   useReportStore.setState({ template: { fields: [] } });
@@ -118,6 +136,11 @@ beforeEach(() => {
     selectedFieldId: null,
     pageOffsets: new Map(),
     excludedPages: new Set(),
+    // #447: failedPages 等は store 化されたため、useState 時代と違い
+    // renderHook をまたいでも自動的には空に戻らない。テスト間の汚染防止のため明示リセット。
+    failedPages: [],
+    layoutMismatchPages: [],
+    layoutBasePage: null,
   });
   usePdfStore.getState().reset();
   vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -134,7 +157,7 @@ describe("useSessionPersistence: 自動保存", () => {
     renderHook(() => useSessionPersistence(storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
       useReportStore.getState().addField(RECT, "金額");
     });
     const id = useReportStore.getState().template.fields[0].id;
@@ -158,7 +181,7 @@ describe("useSessionPersistence: 自動保存", () => {
     renderHook(() => useSessionPersistence(storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
       useReportStore.getState().addField(RECT, "金額");
     });
     await act(async () => {
@@ -175,7 +198,7 @@ describe("useSessionPersistence: 復元", () => {
     renderHook(() => useSessionPersistence(storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10); // offerRestore の setTimeout(0)
@@ -192,6 +215,32 @@ describe("useSessionPersistence: 復元", () => {
     expect(usePdfStore.getState().rotation).toBe(90);
     // undo 履歴は持ち込まない
     expect(rs.past).toHaveLength(0);
+    // #447: OCR 診断状態（失敗ページ等）も復元される
+    // （CsvExportButton の failedPages 警告ゲートは同じ値を props で受け取るため、
+    // ここで store に正しく入ることを検証すれば警告表示側の挙動も担保される。
+    // CsvExportButton 自体の「failedPages があると alert を表示する」検証は
+    // 別ファイル __tests__/components/CsvExportButton.test.tsx で既に持っている）。
+    expect(rs.failedPages).toEqual([3]);
+    expect(rs.layoutMismatchPages).toEqual([]);
+    expect(rs.layoutBasePage).toBeNull();
+  });
+
+  it("同じパスでも fingerprint が異なれば復元を提案しない（#446: 中身が変わったPDFの誤復元防止）", async () => {
+    const json = savedSessionFor("/docs/a.pdf", "old-fingerprint");
+    const storage = makeStorage(json);
+    renderHook(() => useSessionPersistence(storage));
+
+    act(() => {
+      // setPdf に渡す fingerprint は savedSessionFor のものと異なる
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, "new-fingerprint");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(useReportStore.getState().cells.size).toBe(0);
+    expect(useReportStore.getState().failedPages).toEqual([]);
   });
 
   it("別の PDF のセッションは適用しない（確認も出さない）", async () => {
@@ -200,7 +249,7 @@ describe("useSessionPersistence: 復元", () => {
     renderHook(() => useSessionPersistence(storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10);
@@ -217,7 +266,7 @@ describe("useSessionPersistence: 復元", () => {
     renderHook(() => useSessionPersistence(storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10);
@@ -235,7 +284,7 @@ describe("useSessionPersistence: 復元", () => {
       useReportStore.getState().addField(RECT, "既存");
       const id = useReportStore.getState().template.fields[0].id;
       useReportStore.getState().setCells(new Map([[1, [new Map([[id, "作業中"]])]]]));
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10);
@@ -251,7 +300,7 @@ describe("useSessionPersistence: flushNow（クローズ前フラッシュ・レ
     const { result } = renderHook(() => useSessionPersistence(storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
       useReportStore.getState().addField(RECT, "金額");
     });
     const id = useReportStore.getState().template.fields[0].id;
@@ -292,7 +341,7 @@ describe("useSessionPersistence: flushNow（クローズ前フラッシュ・レ
     const { result } = renderHook(() => useSessionPersistence(storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
       useReportStore.getState().addField(RECT, "金額");
     });
     const id = useReportStore.getState().template.fields[0].id;
@@ -314,7 +363,7 @@ describe("useSessionPersistence: single-flight（#450 frontend・保存の排他
     renderHook(() => useSessionPersistence(ctl.storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
       useReportStore.getState().addField(RECT, "金額");
     });
     const id = useReportStore.getState().template.fields[0].id;
@@ -362,7 +411,7 @@ describe("useSessionPersistence: single-flight（#450 frontend・保存の排他
     const { result } = renderHook(() => useSessionPersistence(ctl.storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
       useReportStore.getState().addField(RECT, "金額");
     });
     const id = useReportStore.getState().template.fields[0].id;
@@ -412,7 +461,7 @@ describe("useSessionPersistence: single-flight（#450 frontend・保存の排他
     const { result } = renderHook(() => useSessionPersistence(ctl.storage));
 
     act(() => {
-      usePdfStore.getState().setPdf("/docs/a.pdf", 2);
+      usePdfStore.getState().setPdf("/docs/a.pdf", 2, FAKE_FINGERPRINT);
       useReportStore.getState().addField(RECT, "金額");
     });
     const id = useReportStore.getState().template.fields[0].id;
