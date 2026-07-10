@@ -266,3 +266,33 @@ describe("OcrRunPanel – templateChangeAbort（テンプレ変更によるコ�
     expect(screen.queryByText(/欄テンプレートが変更されたため/)).not.toBeInTheDocument();
   });
 });
+
+describe("OcrRunPanel – pdfChangeAbort（PDF差し替えによるコミット中止）表示（#448 / PCT-212）", () => {
+  // 実行中の PDF 差し替えで完了時コミットが中止されたとき、理由をユーザーに
+  // 可視化する最終防衛線の通知。templateChangeAbort と対称のセット。
+  it("pdfChangeAbort=true のとき理由と再実行の案内を含む alert を表示する", () => {
+    render(<OcrRunPanel ocrHook={makeOcrHook({ pdfChangeAbort: true })} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/OCR 実行中に PDF が差し替えられたため/);
+    expect(alert).toHaveTextContent(/今回の結果は反映しませんでした/);
+    expect(alert).toHaveTextContent(/改めて OCR を実行してください/);
+  });
+
+  it("isRunning 中は pdfChangeAbort を表示しない", () => {
+    render(
+      <OcrRunPanel
+        ocrHook={makeOcrHook({
+          isRunning: true,
+          progress: { done: 0, total: 2 },
+          pdfChangeAbort: true,
+        })}
+      />
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("pdfChangeAbort=false のときは表示しない", () => {
+    render(<OcrRunPanel ocrHook={makeOcrHook()} />);
+    expect(screen.queryByText(/OCR 実行中に PDF が差し替えられたため/)).not.toBeInTheDocument();
+  });
+});
