@@ -722,12 +722,24 @@ function App() {
       e.preventDefault();
       // issue #74: バックアップ復元中 / モーダル表示中は F5 を握りつぶす。
       // 復元中の二重 open でデータ消失、モーダル表示中の意図せぬ消去を防ぐ。
-      if (processingBackupPath || isAnyModalOpen()) return;
+      // レビュー差し戻し (マリン指摘): 4ダイアログ (バックアップ復元/OCR設定/ヘルプ/置換)
+      // は Suspense+lazy のため、state=true になった直後〜チャンク読込完了までの間隙は
+      // isAnyModalOpen() (マウント済み Modal のカウント) が false のままになる。この間隙で
+      // F5 が素通りすると #74 のデータ消失防壁が弱化するため、旧来の state 直接参照も
+      // OR で残す (ベルト&サスペンダー)。
+      if (
+        processingBackupPath ||
+        isAnyModalOpen() ||
+        helpModal ||
+        showOcrSettings ||
+        showReplace ||
+        pendingBackups.length > 0
+      ) return;
       handleReload();
     };
     window.addEventListener('keydown', handleF5);
     return () => window.removeEventListener('keydown', handleF5);
-  }, [handleReload, processingBackupPath]);
+  }, [handleReload, processingBackupPath, helpModal, showOcrSettings, showReplace, pendingBackups]);
 
   useEffect(() => {
     if (!isSaving) return;
@@ -1018,7 +1030,9 @@ function App() {
             onContextMenu={(e) => {
               e.preventDefault();
               // Issue #45: モーダル/ダイアログ表示中は背後に HelpMenu を重ねて開かない
-              if (helpModal || showOcrSettings || showReplace || pendingBackups.length > 0) return;
+              // レビュー差し戻し: F5 ガードと同様、Suspense+lazy のマウント間隙を
+              // isAnyModalOpen() で追加カバーし、旧 state 条件と一貫させる。
+              if (helpModal || showOcrSettings || showReplace || pendingBackups.length > 0 || isAnyModalOpen()) return;
               setHelpMenu({ x: e.clientX, y: e.clientY, visible: true });
             }}
           >
