@@ -189,6 +189,74 @@ describe("load", () => {
     expect(result.status).toBe("error");
     expect(useReportStore.getState().template.fields).toEqual([OLD_FIELD]);
   });
+
+  // #449 / PCT-213: テンプレ多重クリックで後着の古い読込が適用される事故の回帰テスト。
+  // 「先にクリックした方が後で resolve する」ケースでも、最後にクリックした方が勝つこと
+  // （resolve 順ではなくクリック順で最終状態が決まること）を検証する。
+  describe("#449 / PCT-213: 多重クリック時は最後にクリックした読込が勝つ", () => {
+    const FIELDS_A: ReportField[] = [
+      { id: "field-a", name: "A欄", color: "#7cb9e8", rect: SAMPLE_RECT },
+    ];
+    const FIELDS_B: ReportField[] = [
+      { id: "field-b", name: "B欄", color: "#90c8a0", rect: SAMPLE_RECT },
+    ];
+
+    it("先にクリックしたテンプレが後で resolve しても、後からクリックしたテンプレの結果を上書きしない", async () => {
+      const jsonA = serializeTemplate(FIELDS_A, "テンプレA", "2026-01-01T00:00:00.000Z", { id: "a" });
+      const jsonB = serializeTemplate(FIELDS_B, "テンプレB", "2026-01-01T00:00:00.000Z", { id: "b" });
+
+      let resolveA: (v: { ok: true; value: string }) => void = () => {};
+      let resolveB: (v: { ok: true; value: string }) => void = () => {};
+      vi.mocked(templateStorage.loadTemplate).mockImplementation((id: string) => {
+        if (id === "a") return new Promise((resolve) => { resolveA = resolve; });
+        if (id === "b") return new Promise((resolve) => { resolveB = resolve; });
+        throw new Error(`unexpected id: ${id}`);
+      });
+
+      // ユーザーが A → B の順でクリック（B が最後にクリックした＝最新の意図）
+      const pA = useTemplateLibraryStore.getState().load("a");
+      const pB = useTemplateLibraryStore.getState().load("b");
+
+      // resolve 順は逆（A の方が後で resolve する = ネットワーク的にはあり得るケース）
+      resolveB({ ok: true, value: jsonB });
+      const resultB = await pB;
+      resolveA({ ok: true, value: jsonA });
+      const resultA = await pA;
+
+      // 最後にクリックした B が反映される
+      expect(resultB.status).toBe("loaded");
+      expect(useReportStore.getState().template.fields).toEqual(FIELDS_B);
+      // 後から resolve した A（先にクリックした方）は追い越されたとして破棄される
+      expect(resultA.status).toBe("error");
+      expect(useReportStore.getState().template.fields).toEqual(FIELDS_B);
+    });
+
+    it("後にクリックしたテンプレが先に resolve した場合はそのまま反映され、先にクリックした方の遅延到着で上書きされない", async () => {
+      const jsonA = serializeTemplate(FIELDS_A, "テンプレA", "2026-01-01T00:00:00.000Z", { id: "a" });
+      const jsonB = serializeTemplate(FIELDS_B, "テンプレB", "2026-01-01T00:00:00.000Z", { id: "b" });
+
+      let resolveA: (v: { ok: true; value: string }) => void = () => {};
+      let resolveB: (v: { ok: true; value: string }) => void = () => {};
+      vi.mocked(templateStorage.loadTemplate).mockImplementation((id: string) => {
+        if (id === "a") return new Promise((resolve) => { resolveA = resolve; });
+        if (id === "b") return new Promise((resolve) => { resolveB = resolve; });
+        throw new Error(`unexpected id: ${id}`);
+      });
+
+      const pA = useTemplateLibraryStore.getState().load("a");
+      const pB = useTemplateLibraryStore.getState().load("b");
+
+      // resolve 順も同じ（B が先に resolve、想定どおりの通常ケース）
+      resolveB({ ok: true, value: jsonB });
+      await pB;
+      expect(useReportStore.getState().template.fields).toEqual(FIELDS_B);
+
+      resolveA({ ok: true, value: jsonA });
+      await pA;
+      // 遅れて届いた A（古いクリック）は反映されず B のまま
+      expect(useReportStore.getState().template.fields).toEqual(FIELDS_B);
+    });
+  });
 });
 
 describe("remove", () => {

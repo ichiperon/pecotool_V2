@@ -103,7 +103,8 @@ const TemplateLibraryPanel: FC = () => {
   };
 
   const handleLoad = async (summary: TemplateSummary) => {
-    if (!summary.readable) return;
+    // 読込中の多重クリック防止（store 側の世代カウンタと二重の防御・#449 / PCT-213）。
+    if (!summary.readable || status === "loading") return;
     if (cells.size > 0) {
       const ok = window.confirm(
         "現在の抽出データ（OCR結果・手編集）が破棄されます。よろしいですか？"
@@ -250,7 +251,7 @@ const TemplateLibraryPanel: FC = () => {
                   type="button"
                   className="template-library-row__name"
                   onClick={() => void handleLoad(summary)}
-                  disabled={!summary.readable}
+                  disabled={!summary.readable || status === "loading"}
                   aria-label={
                     summary.readable
                       ? `${summary.name} を読み込む`
