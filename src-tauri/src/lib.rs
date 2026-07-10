@@ -530,15 +530,23 @@ fn cleanup_preview_temp_paths(paths: &mut Vec<std::path::PathBuf>) {
     });
 }
 
-fn prepare_preview_temp_slot(paths: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+/// レビュー差し戻し (スバル指摘・#461): 追跡上限に達し、かつ削除も失敗した (外部ビューアが
+/// ファイルをロックしたまま等) 場合でも、以前はここでハードエラーを返し新規プレビューの
+/// 作成そのものを失敗させていた。「ビューアを開いたまま補正値を変えて4回目のプレビュー」
+/// のような正常な操作フローがエラーで止まってしまう受入条件からの乖離だったため、
+/// エラーにはせず、削除できなかった最古のエントリを追跡リストから外して続行する。
+/// 外したファイルはディスク上には残るが、削除できないファイルを追跡し続けても意味が
+/// 無く、次回起動時の PID ガード付き cleanup (#430) が生存プロセスの temp を誤って
+/// 消さずに回収する。追跡リストは呼び出し元が新規パスを追加した後も上限を維持する。
+fn prepare_preview_temp_slot(paths: &mut Vec<std::path::PathBuf>) {
     cleanup_preview_temp_paths(paths);
     if paths.len() >= MAX_ACTIVE_PREVIEW_TEMP_FILES {
-        return Err(format!(
-            "[open_pdf_preview] {} preview temp files are still in use; close the PDF viewer and retry",
-            paths.len()
-        ));
+        let evicted = paths.remove(0);
+        eprintln!(
+            "[open_pdf_preview] preview temp slot at capacity; dropping oldest tracked entry (left on disk, will be reclaimed by startup cleanup): {}",
+            evicted.display()
+        );
     }
-    Ok(())
 }
 
 fn cleanup_tracked_preview_temp_files() {
@@ -685,11 +693,13 @@ async fn open_pdf_preview(
     }
 
     // #461: 前回までの preview を先に best-effort で掃除する。ビューアのロック等で
-    // 削除できないパスは追跡を継続し、上限到達時は新規作成を止めて容量増加を抑える。
+    // 削除できないパスは追跡を継続するが、上限到達時に新規作成をエラーで止めると
+    // 正常な操作フロー (ビューアを開いたまま補正値を変えて再プレビュー) を壊すため、
+    // ハードエラーにはせず最古のエントリを追跡から外して続行する (レビュー差し戻し)。
     let mut tracked_paths = ACTIVE_PREVIEW_TEMP_PATHS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    prepare_preview_temp_slot(&mut tracked_paths)?;
+    prepare_preview_temp_slot(&mut tracked_paths);
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2402,7 +2412,7 @@ mod tests {
         std::fs::write(&second, b"second").unwrap();
         let mut tracked = vec![first.clone(), second.clone()];
 
-        prepare_preview_temp_slot(&mut tracked).expect("old previews should be cleaned");
+        prepare_preview_temp_slot(&mut tracked);
 
         assert!(tracked.is_empty());
         assert!(!first.exists());
@@ -2410,8 +2420,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// レビュー差し戻し (スバル指摘・#461): 追跡上限に達し、かつ削除も失敗する
+    /// (外部ビューアがロックしたまま等) 場合、以前はハードエラーで新規プレビュー作成
+    /// 自体を失敗させていた。修正後はエラーにせず、削除できなかった最古のエントリを
+    /// 追跡リストから外して続行する (プレビュー自体は成功する)。
     #[test]
-    fn prepare_preview_temp_slot_caps_files_that_cannot_be_removed() {
+    fn prepare_preview_temp_slot_evicts_oldest_instead_of_hard_error_when_files_cannot_be_removed() {
         let dir = make_replace_test_dir("preview_lifecycle_cap");
         let mut tracked = Vec::new();
         // remove_file はディレクトリに対して失敗するので、外部ビューアが PDF をロックして
@@ -2421,11 +2435,18 @@ mod tests {
             std::fs::create_dir(&locked).unwrap();
             tracked.push(locked);
         }
+        let oldest = tracked[0].clone();
 
-        let err = prepare_preview_temp_slot(&mut tracked).unwrap_err();
+        // ハードエラーにならず正常終了すること (戻り値は () で呼び出し自体が成功を表す)。
+        prepare_preview_temp_slot(&mut tracked);
 
-        assert!(err.contains("still in use"), "got: {err}");
-        assert_eq!(tracked.len(), MAX_ACTIVE_PREVIEW_TEMP_FILES);
+        // 最古のエントリが追跡から外れ、残りは上限未満まで減る
+        // (呼び出し元が新規パスを追加すれば再び上限まで戻る)。
+        assert_eq!(tracked.len(), MAX_ACTIVE_PREVIEW_TEMP_FILES - 1);
+        assert!(!tracked.contains(&oldest), "oldest tracked entry should be evicted");
+        // 外したファイルは削除できていないためディスク上には残る
+        // (#430 の起動時 PID ガード付き cleanup が後で回収する)。
+        assert!(oldest.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

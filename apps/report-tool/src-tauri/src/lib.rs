@@ -457,12 +457,24 @@ where
     let normalized_target = canonical_parent.join(file_name);
 
     // 既存ファイル自体が symlink 等なら、その解決先へ意図せず上書きしない。
-    if path.exists() {
-        let canonical_target = path
-            .canonicalize()
-            .map_err(|e| format!("CSV保存先を確認できません: {e}"))?;
-        if canonical_target != normalized_target {
-            return Err("シンボリックリンク経由のCSV保存は許可されていません".to_string());
+    // レビュー差し戻し (いろは指摘・#460): 以前は canonicalize(path) が返す実 casing と
+    // canonical_parent.join(入力ファイル名) の厳密な PathBuf 比較で判定していた。
+    // Windows のファイルシステムは大文字小文字を区別しないため、保存ダイアログで
+    // 手入力したファイル名の casing がディスク上の既存ファイルと異なるだけで
+    // (実体は同一ファイルなのに) 誤って「シンボリックリンク経由」と判定し、
+    // 正当な上書き保存を拒否していた。
+    // symlink_metadata はシンボリックリンクを辿らずに対象そのもののメタデータを返すため、
+    // casing に依存せず symlink かどうかを直接判定できる。存在しないパス (NotFound) は
+    // symlink ではない扱いとする（保存ダイアログ経由の新規保存を妨げないため）。
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("シンボリックリンク経由のCSV保存は許可されていません".to_string());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("CSV保存先を確認できません: {e}"));
         }
     }
 
@@ -1619,6 +1631,26 @@ mod tests {
         let err = validate_csv_save_path(&target, |_| false).unwrap_err();
         assert!(err.contains("許可されていません"));
         assert!(!target.exists(), "scope拒否時は保存先を作成してはならない");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// レビュー差し戻し (いろは指摘・#460): 既存ファイルを casing 違いのパスで指定しても
+    /// (Windows はファイルシステムが大文字小文字を区別しないため実体は同一ファイル)
+    /// 誤って「シンボリックリンク経由」判定で拒否されないこと。
+    #[test]
+    fn validate_csv_save_path_allows_existing_file_with_different_casing() {
+        let dir = temp_csv_dir("validate_casing");
+        let actual_path = dir.join("report.csv");
+        std::fs::write(&actual_path, "a,b\n1,2").unwrap();
+
+        // 保存ダイアログの手入力等で casing が異なるパスを渡す。
+        let requested_path = dir.join("REPORT.csv");
+        let expected = dir.canonicalize().unwrap().join("REPORT.csv");
+
+        let validated =
+            validate_csv_save_path(&requested_path, |candidate| candidate == expected).unwrap();
+        assert_eq!(validated, expected);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
