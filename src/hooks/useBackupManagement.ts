@@ -33,14 +33,20 @@ export function useBackupManagement({ showToast, handleOpen, externalIsSavingRef
   );
 
   const handleRestoreBackup = async (backup: PendingBackup) => {
+    // PCT-207: 以前は processingBackupPath チェックの後に loadBackupData を await して
+    // いたため、その await 窓の間に別の復元操作 (連打・別バックアップの選択) が
+    // このガードを素通りして二重進入できた。setPendingRestoration は setDocument 側で
+    // 「次に走った setDocument」が無条件に拾う共有ステートのため、二重進入すると
+    // 復元データが別ファイルに誤って適用され得る。ガードを最初の await より前に置き、
+    // 同期的に再入を閉じる。
     if (processingBackupPath) return;
-    const data = await loadBackupData(backup.file_path);
-    if (!data?.pages) {
-      showToast('バックアップデータの読み込みに失敗しました。', true);
-      return;
-    }
     setProcessingBackupPath(backup.file_path);
     try {
+      const data = await loadBackupData(backup.file_path);
+      if (!data?.pages) {
+        showToast('バックアップデータの読み込みに失敗しました。', true);
+        return;
+      }
       useInfraStore.getState().setPendingRestoration(data.pages);
       const success = await handleOpen(backup.file_path);
       if (!success) {

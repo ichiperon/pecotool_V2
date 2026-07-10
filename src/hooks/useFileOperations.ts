@@ -441,6 +441,11 @@ export function useFileOperations(
   // setIsLoadingFile callback で更新するだけでこの hook からは読めないため、
   // handleSave の「読込中は保存拒否」ガード用に ref でも保持する。
   const isLoadingFileRef = useRef(false);
+  // PCT-207: handleOpen の並行呼び出しを世代管理する。committed generation
+  // (isLoadingFileRef.current = true を立てる直前) でインクリメント・キャプチャし、
+  // 各 await 後にこの ref の現在値と不一致なら「後発の handleOpen に追い越された」と
+  // 判定して中断する。先発が遅れて解決しても後発の結果を上書きしない。
+  const openGenerationRef = useRef(0);
   // executeSaveAs は下で定義されるため、_executeSave / handleSave から参照できるよう
   // ref で間接化する。issue #53: writeFileAtomically が EACCES/EBUSY で失敗したときに
   // showToast の action ボタンから「別名で保存」へフォールバックさせるのに使う。
@@ -507,6 +512,10 @@ export function useFileOperations(
     },
   ): Promise<boolean> => {
     perf.mark('open.start', { explicit: !!explicitPath });
+    // PCT-207: この呼び出しが実際にロードへ踏み込んだ時点でのみ値が入る。
+    // null のままなら世代管理の対象外 (早期リターンのみで完了した呼び出し)。
+    let myOpenGeneration: number | null = null;
+    const isSuperseded = () => myOpenGeneration !== null && openGenerationRef.current !== myOpenGeneration;
     try {
       if (isSavingRef.current) {
         showToast("保存中はPDFを開けません。");
@@ -548,6 +557,10 @@ export function useFileOperations(
           showToast("保存中はPDFを開けません。");
           return false;
         }
+        // PCT-207: ここで「この呼び出しが読み込みを開始する」ことが確定するので
+        // 世代をインクリメント・キャプチャする。以降の await 後、この値が
+        // openGenerationRef.current と一致する間だけ「自分が最新」とみなせる。
+        myOpenGeneration = ++openGenerationRef.current;
         isLoadingFileRef.current = true;
         setIsLoadingFile?.(true);
 
@@ -565,6 +578,12 @@ export function useFileOperations(
           // writeFileAtomically 側。開いたきり保存しないファイルはここでしか拾えない)。
           // fire-and-forget でオープンの成否には影響させない。
           void cleanupStalePdfTempFiles(selected);
+          // PCT-207: loadPDF の await 中に後発の handleOpen が世代を進めていたら、
+          // 自分は追い越された旧世代なので静かに中断する (トーストは後発側が出す)。
+          // 後発の setDocument / isLoadingFileRef を横取りしてはいけない。
+          if (isSuperseded()) {
+            return false;
+          }
           // PCT-074: loadPDF の await 中 (大型 PDF では数秒〜数十秒) に保存が開始
           // されていたら読み込みを中止する。このまま続行すると、直後の
           // clearTemporaryChanges / setDocument が保存処理の IDB 回収 (readIdbDirty)
@@ -587,7 +606,15 @@ export function useFileOperations(
               return false;
             }
           }
+          // PCT-207: waitForPendingIdbSaves / clearTemporaryChanges の await でも
+          // 世代が進み得るので setDocument 直前に再確認する。
+          if (isSuperseded()) {
+            return false;
+          }
           await clearCachedPages(selected);
+          if (isSuperseded()) {
+            return false;
+          }
           // #392: 新しいファイルを開くので undecodable 警告をリセット。直後の
           // usePageNavigation の meta ロードで undecodable なら onUndecodable が立て直す。
           useInfraStore.getState().setBboxMetaUnreadable(false);
@@ -600,8 +627,13 @@ export function useFileOperations(
             onOpenComplete?.(doc);
           }
         } finally {
-          isLoadingFileRef.current = false;
-          setIsLoadingFile?.(false);
+          // PCT-207: 自分が最新世代のときのみ共有フラグを解除する。追い越された
+          // 旧世代がここで false に戻すと、まだ進行中の後発ロードの isLoadingFileRef を
+          // 誤って倒し、handleSave の読込中ガードを素通りさせてしまう。
+          if (!isSuperseded()) {
+            isLoadingFileRef.current = false;
+            setIsLoadingFile?.(false);
+          }
         }
 
         // サムネ初回描画との帯域競合を避けるため、アイドル時間に暖機（保存時は await で再利用）
@@ -634,8 +666,14 @@ export function useFileOperations(
         }
       }
       showToast("ファイルの読み込みに失敗しました。", true);
-      isLoadingFileRef.current = false;
-      setIsLoadingFile?.(false);
+      // PCT-207: この呼び出しが実際に isLoadingFileRef を立てていて (myOpenGeneration !== null)、
+      // かつ自分が最新世代のときのみ共有フラグを解除する。早期リターン (ask()/open() 例外等) で
+      // 一度もロードに踏み込んでいない呼び出しや、追い越された旧世代は他呼び出しの
+      // フラグを誤って倒してはいけない。
+      if (myOpenGeneration !== null && !isSuperseded()) {
+        isLoadingFileRef.current = false;
+        setIsLoadingFile?.(false);
+      }
       return false;
     }
   };
